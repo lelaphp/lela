@@ -171,7 +171,7 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
     xtask.message = "xtask: 11298 lines under the ceiling of 14000".into();
     store.record(std::slice::from_ref(&xtask)).unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "budget"]);
+    let (ok, md, err) = status(&root, &["--section", "budget", "--uncut"]);
     assert!(ok, "{err}");
     let folded = md
         .lines()
@@ -219,6 +219,116 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
     );
     assert!(!md.contains("| ext/pcre@control |"), "{md}");
     assert!(!md.contains("crates not yet created"), "{md}");
+}
+
+/// The sections that grow by a row per crate render the rows a session
+/// acts on and count the settled rest in one line (#1608): a failure, a
+/// skip, a row with no reading, a budget within a tenth of its ceiling and
+/// a phpt subset whose comparison fails are rows; a pass is a count. Fifty
+/// more passing crates are the same section, `--uncut` is every row, and
+/// the JSON is every reading whatever the flag.
+#[test]
+fn the_settled_rows_of_a_section_fold_into_one_line_that_does_not_grow() {
+    let root = scratch("settled");
+    let store = Store::of_workspace(&root);
+    let record = |instrument: &str, scope: &str, status: Status, numbers: &[(&str, i64)]| {
+        let mut r = Reading::new(instrument, scope);
+        r.status = status;
+        for (k, v) in numbers {
+            r.numbers.insert((*k).into(), (*v).into());
+        }
+        r.message = format!("{scope}: {}", status.as_str());
+        store.record(std::slice::from_ref(&r)).unwrap();
+    };
+    let ceiling = |name: &str| {
+        let manifest = Manifest::load(&root).unwrap();
+        i64::try_from(manifest.crate_named(name).unwrap().budget).unwrap()
+    };
+    let spare = ceiling("php_syntax") / 2;
+    let near = ceiling("php_heap") - 1;
+    record("budget", "php_syntax", Status::Pass, &[("lines", spare)]);
+    record("budget", "php_heap", Status::Pass, &[("lines", near)]);
+    record("budget", "php_unit", Status::Fail, &[("lines", 1)]);
+    let (ok, md, err) = status(&root, &["--section", "budget"]);
+    assert!(ok, "{err}");
+    assert!(
+        !md.contains("| php_syntax |"),
+        "a pass with room is counted: {md}"
+    );
+    assert!(
+        md.contains("| php_heap |"),
+        "within a tenth of its ceiling: {md}"
+    );
+    assert!(
+        md.contains("| php_unit |") && md.contains("| php_compile |"),
+        "{md}"
+    );
+    let line = md.lines().last().unwrap();
+    assert!(
+        line.starts_with("1 more crates pass")
+            && line.ends_with("`cargo xtask status --section budget --uncut`."),
+        "{line}"
+    );
+    let (ok, whole, _) = status(&root, &["--section", "budget", "--uncut"]);
+    assert!(
+        ok && whole.contains("| php_syntax |") && !whole.contains("--uncut"),
+        "{whole}"
+    );
+    let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
+    assert!(ok && json.contains("\"php_syntax\""), "{json}");
+
+    record("witness", "ext/broken", Status::Fail, &[("failed", 1)]);
+    record("witness", "ext/missing", Status::Skip, &[]);
+    record("witness", "ext/a0", Status::Pass, &[("passed", 3)]);
+    let (ok, before, _) = status(&root, &["--section", "witness"]);
+    assert!(ok, "{before}");
+    for n in 1..=50 {
+        record(
+            "witness",
+            &format!("ext/a{n}"),
+            Status::Pass,
+            &[("passed", 3)],
+        );
+    }
+    let (ok, after, _) = status(&root, &["--section", "witness"]);
+    assert!(ok);
+    assert_eq!(
+        before.replace("1 more crates", "51 more crates"),
+        after,
+        "fifty passing crates are one number of the line"
+    );
+    assert!(
+        after.contains("| ext/broken |") && after.contains("| ext/missing |"),
+        "{after}"
+    );
+    assert!(!after.contains("| ext/a7 |"), "{after}");
+    let (_, uncut, _) = status(&root, &["--section", "witness", "--uncut"]);
+    assert_eq!(
+        uncut.lines().filter(|l| l.starts_with("| ext/a")).count(),
+        51
+    );
+
+    record("witness", "ext/broken", Status::Pass, &[("passed", 1)]);
+    record("witness", "ext/missing", Status::Pass, &[("passed", 1)]);
+    let (ok, settled, _) = status(&root, &["--section", "witness"]);
+    assert!(ok);
+    assert_eq!(
+        settled, "53 crates pass; every row: `cargo xtask status --section witness --uncut`.\n",
+        "a section with every row settled is the line alone"
+    );
+
+    record("phpt", "ext/date", Status::Pass, &[("passed", 9)]);
+    record("phpt", "ext/date@against", Status::Fail, &[("lost", 1)]);
+    record("phpt", "ext/spl", Status::Pass, &[("passed", 9)]);
+    record("phpt", "ext/spl@against", Status::Pass, &[("held", 9)]);
+    let (ok, md, err) = status(&root, &["--section", "phpt"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| ext/date | pass |") && md.contains("| fail lost=1 |"),
+        "a pass below its target is a row: {md}"
+    );
+    assert!(!md.contains("| ext/spl |"), "{md}");
+    assert!(md.ends_with("1 more subsets pass, none below the target it is held to; every row: `cargo xtask status --section phpt --uncut`.\n"), "{md}");
 }
 
 /// `status` with the two variables of the pin as the test wants them,
@@ -1318,7 +1428,7 @@ fn an_unreadable_reading_file_degrades_only_its_own_row_and_is_named() {
     std::fs::create_dir_all(cut.parent().unwrap()).unwrap();
     std::fs::write(&cut, "instrument = \"unsafe-au").unwrap();
 
-    let (ok, md, err) = status(&root, &["--section", "budget"]);
+    let (ok, md, err) = status(&root, &["--section", "budget", "--uncut"]);
     assert!(ok, "{err}");
     let row = |name: &str| {
         md.lines()
