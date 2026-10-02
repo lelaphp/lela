@@ -128,8 +128,10 @@ impl Engine {
     }
 
     /// [`Engine::serve_capture`] with the request named `name`: what
-    /// `__FILE__`, `$_SERVER['SCRIPT_NAME']`, `$argv[0]` and every
-    /// diagnostic's `in %s` read. The witness lane's linked adapter serves
+    /// `$_SERVER['SCRIPT_NAME']` and `$argv[0]` read, and, expanded
+    /// against the working directory as php opens its primary file,
+    /// what `__FILE__` and every diagnostic's `in %s` read (#1569). The
+    /// witness lane's linked adapter serves
     /// each snippet under the recipe's `script_name` this way, as the
     /// fresh-process adapter runs it as that file (#293), which under the
     /// CLI is `argv` of that one word.
