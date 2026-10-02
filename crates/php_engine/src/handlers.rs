@@ -11447,6 +11447,23 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// bool(false)
 /// <e>a&lt;b</e>
 /// ```
+///
+/// A CV container is read after the value, as php reads `object` after
+/// `GET_OP_DATA_ZVAL_PTR`, so a handler of an undefined value's warning
+/// that replaced the variable is what the write meets.
+///
+/// ```php
+/// class C { public $p; }
+/// set_error_handler(function ($code, $msg) use (&$o) { echo "$msg\n"; $o = 0; });
+/// $o = new C;
+/// try { $o->p = $y; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o);
+/// ```
+/// ```expect
+/// Undefined variable $y
+/// Attempt to assign property "p" on int
+/// int(0)
+/// ```
 pub(crate) fn assign_obj<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -11461,9 +11478,17 @@ pub(crate) fn assign_obj<T: Tier>(
             "InternalError: ZEND_ASSIGN_OBJ with no OP_DATA after it",
         )));
     };
-    let container =
-        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ")?.deref();
+    // A CV is read through its slot after the value, as php reads
+    // `object` after `GET_OP_DATA_ZVAL_PTR`: an undefined value's
+    // handler may have replaced it.
+    let fetch = |req: &mut Request| {
+        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ")
+    };
+    let early = (op.op1_type != OperandKind::Cv)
+        .then(|| fetch(req))
+        .transpose()?;
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+    let container = early.map_or_else(|| fetch(req), Ok)?.deref();
     let mut member = exec::Member::default();
     let written = match (
         member.name(req, frame, code, op),
@@ -12925,18 +12950,24 @@ pub(crate) fn assign_dim<T: Tier>(
     let ran_on = req.pending();
     let written = match container {
         Ok(Container::Array(array)) if op.op2_type == OperandKind::Unused => {
-            let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-            match req.array_append(array.heap(), value) {
-                Ok(true) => {
+            match append_value(req, (frame, code), data, array)
+                .map(|v| (v, req.array_append(array.heap(), v)))
+            {
+                // `assign_dim_error`: the handler freed the table.
+                None => {
+                    write_out(req, frame, code, op, &Value::null());
+                    Ok(())
+                }
+                Some((value, Ok(true))) => {
                     write_out(req, frame, code, op, &value);
                     Ok(())
                 }
-                Ok(false) => Err(crate::api::raising::throw(
+                Some((_, Ok(false))) => Err(crate::api::raising::throw(
                     req,
                     "Error",
                     "Cannot add element to the array as the next element is already occupied",
                 )),
-                Err(thrown) => Err(thrown),
+                Some((_, Err(thrown))) => Err(thrown),
             }
         }
         Ok(Container::Array(array)) => {
@@ -12999,6 +13030,46 @@ pub(crate) fn assign_dim<T: Tier>(
         return threw(req, frame, &thrown);
     }
     Ok(advance_over_data(req, frame, at))
+}
+
+/// The value `$a[] = $v` appends, read as `ZEND_ASSIGN_DIM` reads it
+/// (`Z/Zend/zend_vm_def.h:2674`): an undefined CV's warning is raised
+/// under one more owner of the table, and where the handler it reached
+/// gave up the last other one the table is freed and nothing is
+/// appended, `None`, which is `assign_dim_error`.
+///
+/// ```php
+/// set_error_handler(function ($code, $msg) use (&$a) { echo "$msg\n"; $a = 0; });
+/// $a[] = $y;
+/// var_dump($a);
+/// $b = [[1]];
+/// set_error_handler(function ($code, $msg) use (&$b) { echo "$msg\n"; $b = 0; });
+/// var_dump($b[0][] = $y);
+/// ```
+/// ```expect
+/// Undefined variable $y
+/// int(0)
+/// Undefined variable $y
+/// NULL
+/// ```
+fn append_value(
+    req: &mut Request,
+    (frame, code): (FrameRef, &OpArray),
+    data: Opline,
+    array: PhpArray,
+) -> Option<Value> {
+    if data.op1_type != OperandKind::Cv || req.slot(frame, data.op1).tag() != TypeTag::Undef {
+        return Some(exec::take_operand(
+            req,
+            frame,
+            code,
+            data.op1_type,
+            data.op1,
+        ));
+    }
+    let held = req.take_hold(Value::array(array));
+    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+    (!req.let_go(held).freed()).then_some(value)
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8370`), the opline
@@ -13068,6 +13139,21 @@ struct Compound<'a> {
     op: &'a Opline,
     data: Opline,
     kernel: BinaryKernel,
+    /// The `OP_DATA` is an undefined CV already read, its warning raised
+    /// before the container was looked at, as `ZEND_ASSIGN_OBJ_OP` reads
+    /// the value before it tests the object.
+    read: bool,
+}
+
+impl Compound<'_> {
+    /// `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)`, or the `null` an undefined CV
+    /// read early answered (`zval_undefined_cv`).
+    fn value(self, req: &mut Request, frame: FrameRef, code: &OpArray) -> Value {
+        if self.read {
+            return Value::null();
+        }
+        exec::operand(req, frame, code, self.data.op1_type, self.data.op1)
+    }
 }
 
 /// Where a dimension write under `BP_VAR_RW` lands, what
@@ -13344,7 +13430,12 @@ pub(crate) fn assign_dim_op<T: Tier>(
         )));
     };
     let data = *data;
-    let step = Compound { op, data, kernel };
+    let step = Compound {
+        op,
+        data,
+        kernel,
+        read: false,
+    };
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN_DIM_OP over a constant or a temporary, which php compiles no write over",
@@ -13432,7 +13523,9 @@ fn stepped_entry(
     step: Compound<'_>,
     entry: php_heap::ZvalRef,
 ) -> Result<(), Thrown> {
-    let Compound { op, data, kernel } = step;
+    let Compound {
+        op, data, kernel, ..
+    } = step;
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let raw = exec::value_of(entry.read());
     let held = raw.deref();
@@ -13500,7 +13593,9 @@ fn binary_assign_op_obj_dim(
     step: Compound<'_>,
     object: PhpObject,
 ) -> Result<(), Thrown> {
-    let Compound { op, data, kernel } = step;
+    let Compound {
+        op, data, kernel, ..
+    } = step;
     let dim = object_dim(req, frame, code, op);
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
@@ -13661,6 +13756,49 @@ fn binary_assign_op_obj_dim(
 /// Warning: Undefined variable $u4 in %s on line 3
 /// Attempt to modify property "a" on null
 /// ```
+///
+/// An undefined value is read, and warned of, before the object is
+/// looked at (`Z/Zend/zend_vm_def.h:1026`), so a handler that replaced
+/// the variable is what the operation meets, and php's `Undefined
+/// property` comes after the value's warning.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// set_error_handler(function ($code, $msg) use (&$o) { echo "$msg\n"; $o = 0; });
+/// $o = new C;
+/// try { $o->p += $y; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// restore_error_handler();
+/// $o = new stdClass;
+/// $o->q .= $y;
+/// var_dump($o);
+/// ```
+/// ```expect
+/// Undefined variable $y
+/// Attempt to assign property "p" on int
+///
+/// Warning: Undefined variable $y in %s on line 8
+///
+/// Warning: Undefined property: stdClass::$q in %s on line 8
+/// object(stdClass)#1 (1) {
+///   ["q"]=>
+///   string(0) ""
+/// }
+/// ```
+///
+/// A name read from a CV is read, and warned of, before the value:
+///
+/// ```php
+/// $o = new stdClass;
+/// $o->$n += $y;
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $n in %s on line 3
+///
+/// Warning: Undefined variable $y in %s on line 3
+///
+/// Warning: Undefined property: stdClass::$ in %s on line 3
+/// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -13682,19 +13820,30 @@ pub(crate) fn assign_obj_op<T: Tier>(
         )));
     };
     let data = *data;
-    let step = Compound { op, data, kernel };
+    // The name, and then an undefined CV's warning, before the container
+    // is read, whose handler may have replaced it
+    // (`Z/Zend/zend_vm_def.h:1023-1026`).
+    let mut member = exec::Member::default();
+    let name = member.name(req, frame, code, op);
+    let read =
+        data.op1_type == OperandKind::Cv && req.slot(frame, data.op1).tag() == TypeTag::Undef;
+    if read {
+        exec::operand(req, frame, code, data.op1_type, data.op1);
+    }
+    let step = Compound {
+        op,
+        data,
+        kernel,
+        read,
+    };
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
-    let mut member = exec::Member::default();
-    let written = match (
-        member.name(req, frame, code, op),
-        container.as_object().copied(),
-    ) {
+    let written = match (name, container.as_object().copied()) {
         (Ok(name), Some(object)) => step_property(req, frame, code, step, object, &name)?,
         (Ok(name), None) => {
             // `GET_OP_DATA_ZVAL_PTR(BP_VAR_R)` and `ZVAL_UNDEFINED_OP1`,
             // in php's order, before `zend_throw_non_object_error`.
-            let _value = exec::operand(req, frame, code, data.op1_type, data.op1);
+            let _value = step.value(req, frame, code);
             if op.op1_type == OperandKind::Cv && matches!(container.as_ref(), ValueRef::Undef) {
                 let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
             }
@@ -13742,8 +13891,10 @@ fn withheld_step(
     object: PhpObject,
     name: &[u8],
 ) -> Result<Value, Thrown> {
-    let Compound { op, data, kernel } = step;
-    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let Compound {
+        op, data, kernel, ..
+    } = step;
+    let value = step.value(req, frame, code);
     let table = req.object_handlers(object.heap());
     let computed = match table.read_property(req, object, name, PropertyRead::Warning) {
         Ok(held) => {
@@ -14059,7 +14210,7 @@ fn step_slot(
     let Compound { op, data, .. } = step;
     let computed = precomputed.map_or_else(
         || {
-            let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+            let value = step.value(req, frame, code);
             let computed = slot_step(req, step, object, (slot, typed), &value);
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
             computed
@@ -14203,8 +14354,10 @@ fn served_property_step(
     name: crate::api::values::PhpString,
     back: WriteBack,
 ) -> Result<(), Thrown> {
-    let Compound { op, data, kernel } = step;
-    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let Compound {
+        op, data, kernel, ..
+    } = step;
+    let value = step.value(req, frame, code);
     let table = req.object_handlers(object.heap());
     let held = match table.read_property(req, object, name.as_bytes(), back.read()) {
         Ok(held) => held,
