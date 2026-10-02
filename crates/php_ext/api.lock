@@ -636,6 +636,10 @@ request::Resources
 request::Resources::register_type
 request::Restart
 request::SIGNAL_POST
+request::ScannerFile
+request::ScannerFile::destroy
+request::ScannerFile::load
+request::ScannerFile::open
 request::Siginfo
 request::SocketOptions
 request::StartHandler
