@@ -1,8 +1,8 @@
 //! A fence with a `request fpm` (#1291): the snippet served as a request
 //! of the web by a php-fpm, php-fpm's pin in `[sapi]` for the oracle and
 //! `sapi/fpm`'s `php-fpm-witness` for the engine. The master runs in the
-//! foreground over a pool of one child on a loopback port, under the
-//! recipe's ini as `-d`; the request the fence describes goes to it as
+//! foreground over a pool of one child listening on a Unix socket in the
+//! fence's own scratch tree, under the recipe's ini as `-d`; the request the fence describes goes to it as
 //! `FastCGI` records, its variables the ones [`cgi::request`] makes of a
 //! CGI-shaped test with the web server's own beside them, and what comes
 //! back on `FCGI_STDOUT` and `FCGI_STDERR` is the two streams, held as a
@@ -13,7 +13,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -61,17 +61,23 @@ fn pair(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     out.extend_from_slice(value);
 }
 
-/// A free loopback port, as the kernel hands one out.
-fn free_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0").context("finding a free port")?;
-    Ok(listener.local_addr()?.port())
-}
+/// How long a master has to listen before the fence gives it up.
+const PATIENCE: Duration = Duration::from_secs(10);
+
+/// How many of the log's last lines a master that never listened is
+/// named with.
+const TAIL: usize = 10;
 
 /// A php-fpm master, ended when dropped.
 struct Master(Child);
 
 impl Drop for Master {
     fn drop(&mut self) {
+        // A master that already ended, one that never listened among them,
+        // has nothing left to be sent.
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
         let _ = Command::new("kill")
             .arg("-TERM")
             .arg(self.0.id().to_string())
@@ -123,16 +129,35 @@ pub(crate) fn served_as_fpm(
             None => given.push((name, value)),
         }
     }
-    let port = free_port()?;
+    // The address is a path in the fence's own tree, so no other process
+    // can listen there before the master does (#1474): a loopback port
+    // found free and then let go was free for anyone between the letting
+    // go and the master's bind, and a request sent there reached whatever
+    // took it, another run's php-fpm among them.
+    let socket = own.join("php-fpm.sock");
+    let address = SocketAddr::from_pathname(&socket).with_context(|| {
+        format!(
+            "{} is longer than a socket's address holds",
+            socket.display()
+        )
+    })?;
+    let log = own.join("php-fpm.log");
     let conf = own.join("php-fpm.conf");
     fs::write(
         &conf,
         format!(
-            "[global]\nerror_log = {}\n[witness]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\nclear_env = no\n",
-            own.join("php-fpm.log").display()
+            "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = no\n",
+            log.display(),
+            socket.display()
         ),
     )
     .context("writing the php-fpm configuration")?;
+    // `-O` keeps the master's log on its stderr, so the stderr is the log.
+    let logged = fs::File::options()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .with_context(|| format!("opening {}", log.display()))?;
     let mut master = Command::new(host);
     master.args(["-n", "-F", "-O", "-y"]).arg(&conf);
     for ini in &recipe.ini {
@@ -146,20 +171,34 @@ pub(crate) fn served_as_fpm(
         .envs(env.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _master = Master(
+        .stderr(logged);
+    let mut master = Master(
         master
             .spawn()
             .with_context(|| format!("running {}", host.display()))?,
     );
     let started = Instant::now();
     let stream = loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
+        match UnixStream::connect_addr(&address) {
             Ok(stream) => break stream,
-            Err(_) if started.elapsed() < Duration::from_secs(10) => {
+            Err(refused) => {
+                if let Some(status) = master.0.try_wait()? {
+                    bail!(
+                        "php-fpm ended with {status} before it listened at {}; its log ends:\n{}",
+                        socket.display(),
+                        tail(&log)
+                    );
+                }
+                if started.elapsed() >= PATIENCE {
+                    bail!(
+                        "php-fpm did not listen at {} in {}s: {refused}; its log ends:\n{}",
+                        socket.display(),
+                        PATIENCE.as_secs(),
+                        tail(&log)
+                    );
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(e) => bail!("php-fpm did not listen on port {port}: {e}"),
         }
     };
     stream.set_read_timeout(Some(Duration::from_secs(recipe.limits.timeout_s)))?;
@@ -174,11 +213,22 @@ pub(crate) fn served_as_fpm(
     })
 }
 
+/// The last [`TAIL`] lines of the log at `log`, or what kept it unread.
+fn tail(log: &Path) -> String {
+    match fs::read_to_string(log) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(TAIL)..].join("\n")
+        }
+        Err(unread) => format!("({} unread: {unread})", log.display()),
+    }
+}
+
 /// Request 1 written to `stream` as a web server writes it, the server's
 /// own variables for `uri` ahead of `given`, and what php-fpm writes back
 /// on `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`.
 fn exchange(
-    mut stream: TcpStream,
+    mut stream: UnixStream,
     uri: &str,
     given: &[(String, OsString)],
     stdin: Option<&[u8]>,
@@ -225,5 +275,52 @@ fn exchange(
             END_REQUEST => return Ok((stdout, stderr)),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use crate::oracle::Pin;
+    use crate::scratch::Tree;
+
+    /// A master that ends before it listens fails the fence with its exit
+    /// and its log's last lines as soon as it has ended, not at the end of
+    /// the patience and not over a connection to whatever else listens
+    /// (#1474). The stand-in writes what php-fpm writes when its address
+    /// is taken, on the stderr `-O` keeps its log on, and exits as php-fpm
+    /// then does.
+    #[test]
+    fn a_master_that_ends_before_it_listens_is_named_by_its_exit_and_its_log() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pin =
+            Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
+        let hosts = Tree::new("witness-fpm-ended").unwrap();
+        let host = hosts.join("php-fpm");
+        fs::write(
+            &host,
+            "#!/bin/sh\necho 'ERROR: unable to bind listening socket for address: Address already in use (48)' >&2\n\
+             echo 'ERROR: FPM initialization failed' >&2\nexit 78\n",
+        )
+        .unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let failed =
+            super::served_as_fpm(&pin.oracle(), &host, "echo 1;", "--GET--\nq=1", &[]).unwrap_err();
+        let said = format!("{failed:#}");
+        assert!(
+            said.contains("ended with exit status: 78 before it listened")
+                && said.contains("unable to bind listening socket")
+                && said.contains("FPM initialization failed"),
+            "{said}"
+        );
+        assert!(
+            started.elapsed() < super::PATIENCE,
+            "the fence waited out its patience for a master already ended: {said}"
+        );
     }
 }
