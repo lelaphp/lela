@@ -36,6 +36,7 @@ pub(crate) use icu;
 
 pub(crate) mod breakiterator;
 pub(crate) mod enumeration;
+pub(crate) mod transliterator;
 
 /// `UParseError`: where a rule or pattern parse stopped, and the UTF-16
 /// around it, which `intl_parse_error_to_string` words.

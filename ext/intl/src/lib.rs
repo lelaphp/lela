@@ -36,6 +36,7 @@ mod error;
 mod ffi;
 #[allow(dead_code)]
 mod iterator;
+mod transliterator;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -304,6 +305,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = transliterator::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -312,6 +314,7 @@ pub fn extension() -> Extension {
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
     let builder = builder
+        .class::<transliterator::Transliterator>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
         .class::<breakiterator::IntlBreakIterator>()
