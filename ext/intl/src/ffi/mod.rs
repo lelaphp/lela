@@ -37,8 +37,12 @@ pub(crate) use icu;
 pub(crate) mod collator;
 pub(crate) mod enumeration;
 pub(crate) mod formatter;
+pub(crate) mod grapheme;
+pub(crate) mod idn;
 pub(crate) mod listformatter;
 pub(crate) mod locale;
+pub(crate) mod normalizer;
+pub(crate) mod uchar;
 
 mod sys {
     use std::ffi::c_char;

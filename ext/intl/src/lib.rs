@@ -35,10 +35,15 @@ mod error;
 #[allow(dead_code)]
 mod ffi;
 mod formatter;
+mod grapheme;
+mod idn;
 #[allow(dead_code)]
 mod iterator;
 mod listformatter;
 mod locale;
+mod normalizer;
+mod uchar;
+mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -309,7 +314,10 @@ pub fn extension() -> Extension {
         intl_error_name::declared(),
     ]);
     let builder = formatter::functions(builder);
+    let builder = grapheme::functions(builder);
+    let builder = idn::functions(builder);
     let builder = locale::functions(builder);
+    let builder = normalizer::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -321,9 +329,12 @@ pub fn extension() -> Extension {
         .class::<collator::Collator>()
         .class::<formatter::NumberFormatter>()
         .class::<listformatter::IntlListFormatter>()
+        .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
         .class::<IntlException>()
-        .class::<iterator::IntlIterator>();
+        .class::<iterator::IntlIterator>()
+        .class::<uchar::IntlChar>()
+        .class_constants(b"IntlChar", uchar::constants());
     builder
         .request_state::<State>()
         .info(intl_info)

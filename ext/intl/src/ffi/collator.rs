@@ -7,7 +7,8 @@ use std::ptr::NonNull;
 
 use super::{Code, length, static_str};
 
-mod sys {
+/// The declarations, which `grapheme`'s search reaches its collator by.
+pub(super) mod sys {
     use std::ffi::c_char;
 
     use super::Code;
@@ -25,14 +26,12 @@ mod sys {
         fn ucol_setStrength(coll: *mut UCollator, strength: i32);
         fn ucol_getLocaleByType(coll: *const UCollator, kind: i32, status: &mut Code) -> *const c_char;
         fn ucol_getSortKey(coll: *const UCollator, src: *const u16, len: i32, key: *mut u8, cap: i32) -> i32;
-        fn u_isspace(c: i32) -> i8;
     }
 }
 
 /// `u_isspace`.
 pub(crate) fn is_space(c: u16) -> bool {
-    // SAFETY: a pure query over any code point.
-    unsafe { sys::u_isspace(i32::from(c)) != 0 }
+    super::uchar::u_isspace(i32::from(c)) != 0
 }
 
 /// One open `UCollator`.
