@@ -22,6 +22,8 @@
 #![allow(clippy::struct_field_names)]
 
 mod classes;
+#[expect(dead_code, reason = "the server and client layers call it (#1562)")]
+mod encoding;
 #[expect(
     dead_code,
     reason = "the globals the encoding, SDL, server and client layers set and read (#1562)"
