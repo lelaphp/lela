@@ -219,6 +219,8 @@ Check: `serve`'s signature takes and returns an owned sink; a copied constant ar
 
 **73. Revision 73 (2026-10-02).** §8 says which matcher judges each phpt expectation, settled by Mitchell on #1558 for what #1543 builds. `--EXPECTF--` stays on the RE2-semantics engine, whose patterns `expectf_to_regex` writes; `--EXPECTREGEX--` is the test author's own PCRE, so the pinned php's `preg_match` matches it, as run-tests.php does (run-tests.php:2592-2598). A PCRE-only body such as `ext/zip/tests/bug76524.phpt`'s is then judged as php judges it, and the registry row the old sentence promised for it is not needed. Rejected: keeping every section on one engine with rows for PCRE-only bodies. Nothing is reversed, so there is no ADR. Check: `bug76524.phpt` meets its expectation through `xtask phpt`.
 
+**74. Revision 74 (2026-10-02).** §5.4's object header names what `php_heap` holds, settled by Mitchell on #1561: `class: u32` and `slots: u32` in the eight bytes where php keeps `ce`, and `extra_flags` beside `handle`, as php 8.5's `zend_object` has it; `properties_table`'s length is read from `slots`, since the header holds no `ce` to read it from. The class is a number the heap reads nothing of, so a class identity costs no byte of any object, which a `&Class` word would not allow. Nothing is reversed, so there is no ADR. Check: `php_heap`'s test holds the header to 40 bytes.
+
 ---
 
 ## 0. The one-paragraph design
@@ -622,10 +624,12 @@ Sizes follow Zend (min 8, doubling, `HT_MAX_SIZE`), so `memory_get_usage()` delt
 ### 5.4 Objects and properties
 
 ```
-Object     { Refcounted, handle: u32, ce: &Class, handlers: &'static Payload,
+Object     { Refcounted, handle: u32, extra_flags: u32, class: u32, slots: u32, handlers: &'static Payload,
              properties: *HashTable (lazy), native: NativeSlot,
-             properties_table: [Zval; ce.default_properties_count] }
+             properties_table: [Zval; slots] }
 ```
+
+Where php keeps `ce`, the header keeps the class as the engine numbers it and the slot count php reads off `ce->default_properties_count`, the same eight bytes (#1561).
 
 `handlers` is a thin `&'static` payload table beside the class word, eight bytes as php's `zend_object_handlers *` is; the payload the table describes sits after the header. `memory_get_usage()` reads the forty bytes php reads. The 25-slot handler table is reached through the class.
 
