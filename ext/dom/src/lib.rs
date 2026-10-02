@@ -59,13 +59,15 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
-    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, Ns, SharedDoc, XML_ATTRIBUTE_ID,
+    Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
+    XML_ATTRIBUTE_ID,
 };
 
 use document::{XML_NS, XMLNS_NS};
 use map::{Map, MapKind};
 use object::{Code, Dom, Extra, State};
 use props::Prop;
+pub use xpath::{Proxy, XPathCallbacks};
 
 /// Core's interfaces the lists implement and hand out, named for
 /// `implements` and the types that hold them.
@@ -161,8 +163,13 @@ pub fn extension() -> Extension {
             modern::import_simplexml::declared(),
         ])
         .constants([constants::declared(), modern_constants::declared()].concat())
-        .register(php_ext_libxml::register_export(b"DOMNode", export_node))
-        .register(php_ext_libxml::register_export(b"Dom\\Node", export_node))
+        .register(
+            php_ext_libxml::register_export(b"DOMNode", export_node).with_node_object(libxml_half),
+        )
+        .register(
+            php_ext_libxml::register_export(b"Dom\\Node", export_node)
+                .with_node_object(libxml_half),
+        )
         .dependencies(vec![
             dependency("libxml", DependencyKind::Required),
             dependency("lexbor", DependencyKind::Required),
@@ -740,6 +747,35 @@ pub fn create_object(
     context: Option<PhpObject>,
 ) -> Result<Value, Thrown> {
     object_for(req, node, context)
+}
+
+/// `php_dom_create_object(node, rv, (dom_object *) doc)` as ext/xsl's
+/// `xsl_proxy_factory` calls it, with the libxml half it keeps for one
+/// transformation standing in for a dom object (`xml_common.h`,
+/// `PHP_DOM_EXPORT`, design §4.10): the object standing for `node`, one
+/// more owner of it where one exists, a fresh one of the node's class,
+/// mapped by `doc`'s `registerNodeClass` table, counting `doc`'s
+/// document otherwise.
+pub fn create_object_in(req: &mut Request, node: Node, doc: &NodeObject) -> Result<Value, Thrown> {
+    if let Some(existing) = node.object() {
+        let value = existing.as_value();
+        req.addref(&value);
+        return Ok(value);
+    }
+    let Some(name) = class_for(node, doc.class_type() == ClassType::Modern) else {
+        let n = node.kind().number();
+        return Err(throw_error(
+            req,
+            "Error",
+            &format!("Unsupported node type: {n}"),
+        ));
+    };
+    let class = mapped(&doc.props(), class(req, name)?);
+    let object = new_object(req, class)?;
+    if let Some(mut obj) = libxml_half(req, object) {
+        obj.attach(req, node, doc.shared_doc());
+    }
+    Ok(object.as_value())
 }
 
 /// `php_dom_create_nullable_object`.
