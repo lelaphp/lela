@@ -60,8 +60,8 @@ pub(crate) const PRELOAD: &str = "ffi.preload";
 
 /// Request-scoped (ADR-0005): the C types this request's declarations
 /// made, the callbacks C may still call, the cell a callback reads
-/// the request from, and the memory `FFI` took from the request's heap
-/// by its address ([`cdata::alloc`]). Dropped after `rshutdown`, which frees
+/// the request from while C runs, and the memory `FFI` took from the
+/// request's heap by its address ([`cdata::alloc`]). Dropped after `rshutdown`, which frees
 /// every callback's code as php's `RSHUTDOWN` destroys
 /// `FFI_G(callbacks)`.
 #[derive(Default)]
@@ -107,12 +107,12 @@ pub(crate) fn types(req: &mut Request) -> &mut Types {
     &mut req.state::<State>().types
 }
 
-/// The cell a callback reads the request from ([`ffi::arm`]): bytes the
-/// request owns, at an address that stands for the request's life.
+/// The cell a callback reads the request from while C runs: eight bytes
+/// the request owns, at an address that stands for the request's life.
 pub(crate) fn slot(req: &mut Request) -> Result<usize, Thrown> {
     let state = req.state::<State>();
     if state.slot.is_none() {
-        state.slot = Block::zeroed(ffi::SLOT_SIZE);
+        state.slot = Block::zeroed(8);
     }
     match state.slot.as_ref() {
         Some(slot) => Ok(slot.addr()),

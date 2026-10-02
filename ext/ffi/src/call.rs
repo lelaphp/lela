@@ -483,7 +483,6 @@ pub(crate) fn create_callback(
         Err(ClosureError::Prepare) => return Err(ffi_error(req, "Cannot prepare callback")),
     };
     let code = closure.code();
-    ffi::arm(req, cell);
     let value = value.deref();
     req.addref(&value);
     req.state::<State>().callbacks.push(Callback {
@@ -498,23 +497,7 @@ pub(crate) fn create_callback(
 /// `zend_ffi_callback_trampoline`: C called a callback; its arguments
 /// are read into PHP values, the callable called, and its return
 /// written back where C reads it. A throwable the callable leaves is
-/// php's fatal, since it cannot unwind through C. C may call it whenever
-/// it likes until the request ends, not only inside a call PHP code made
-/// into C: here a signal handler, which the kernel enters from `kill()`
-/// in a native of another extension.
-///
-/// ```php
-/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
-/// $ffi->signal(SIGUSR1, function ($sig) { echo "caught $sig\n"; });
-/// $ffi->raise(SIGUSR1);
-/// posix_kill(posix_getpid(), SIGUSR1);
-/// echo "done\n";
-/// ```
-/// ```expect process
-/// caught 30
-/// caught 30
-/// done
-/// ```
+/// php's fatal, since it cannot unwind through C.
 fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
     let Some((callable, ty)) = req
         .state::<State>()
@@ -562,9 +545,6 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 /// owner released and its code freed, as php's `RSHUTDOWN` destroys
 /// `FFI_G(callbacks)`.
 pub(crate) fn release_callbacks(req: &mut Request) {
-    if let Some(slot) = req.state::<State>().slot.as_ref() {
-        ffi::disarm(slot.addr());
-    }
     let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
     for callback in callbacks {
         drop(callback.closure);
