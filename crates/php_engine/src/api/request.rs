@@ -23533,19 +23533,34 @@ pub(crate) fn escape_html(message: &str) -> String {
 }
 
 /// The bytes `php_escape_html_entities_ex` asks for the string
-/// [`escape_html`] writes: `zend_string_alloc(maxlen)` with `maxlen` 128
-/// for a message under 64 bytes and twice its length otherwise, grown
-/// by 128 before each character that finds fewer than 40 bytes left.
+/// [`escape_html`] writes, once grown ([`escaped_html_sizes`]).
 fn escaped_html_size(message: &str) -> usize {
+    escaped_html_sizes(message)
+        .last()
+        .copied()
+        .unwrap_or(24 + 128 + 1)
+}
+
+/// Each size `php_escape_html_entities_ex` asks for the string
+/// [`escape_html`] writes, in turn (`Z/ext/standard/html.c:1173-1194`):
+/// `zend_string_alloc(maxlen)` with `maxlen` 128 for a message under 64
+/// bytes and twice its length otherwise, then each
+/// `zend_string_safe_realloc` by 128 before a character that finds
+/// fewer than 40 bytes left, every one `_ZSTR_STRUCT_SIZE(maxlen)`.
+pub(crate) fn escaped_html_sizes(message: &str) -> Vec<usize> {
+    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
+    let size = |maxlen: usize| 24 + maxlen + 1;
     let mut maxlen = if message.len() < 64 {
         128
     } else {
         message.len() * 2
     };
+    let mut sizes = vec![size(maxlen)];
     let mut len = 0;
     for letter in message.chars() {
         if len > maxlen - 40 {
             maxlen += 128;
+            sizes.push(size(maxlen));
         }
         len += match letter {
             '&' => 5,
@@ -23554,8 +23569,7 @@ fn escaped_html_size(message: &str) -> usize {
             _ => letter.len_utf8(),
         };
     }
-    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
-    24 + maxlen + 1
+    sizes
 }
 
 /// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte

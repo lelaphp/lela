@@ -393,6 +393,21 @@ pub(crate) enum Origin<'a> {
 /// 13576 0
 /// 960 0
 /// ```
+///
+/// An escaped copy whose text outgrows `php_escape_html_entities_ex`'s
+/// estimate is grown by 128 bytes at a time as it is written, each
+/// growth laid as `zend_mm_realloc_heap` lays it, so the peak is php's:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// ini_set('html_errors', 1);
+/// foreach ([30, 100, 1000] as $n) pk(function () use ($n) { @fopen(str_repeat('<', $n), 'r'); });
+/// ```
+/// ```expect
+/// 1312
+/// 5296
+/// 10912
+/// ```
 pub(crate) fn verror(
     req: &mut Request,
     level: Level,
@@ -441,28 +456,28 @@ impl Laid {
         let html = req.ini_flag(b"html_errors");
         self.message = Some(strpprintf(req, message)?);
         if html {
-            self.blocks.push(escape_buffer(req, message.len())?);
+            self.blocks.push(escape_buffer(req, message)?);
             if let Some(printed) = self.message.take() {
                 req.release(Value::string(printed));
             }
         }
-        let (block, len, docref) = match origin {
+        let (block, text, docref) = match origin {
             Origin::Function(function) => {
-                let len = function.len() + params.len() + 2;
+                let text = format!("{function}({})", String::from_utf8_lossy(params));
                 let docref = match function.split_once("::") {
                     Some((class, method)) => class.len() + 1 + method.trim_start_matches('_').len(),
                     None => 9 + function.trim_start_matches('_').len(),
                 };
-                (printf_buffer(req, len)?, len, Some(docref))
+                (printf_buffer(req, text.len())?, text, Some(docref))
             }
             Origin::Phase(phase) => {
                 let block = req.heap_mut().block(phase.len() + 1);
-                (req.fatal_of(block)?, phase.len(), None)
+                (req.fatal_of(block)?, (*phase).to_owned(), None)
             }
         };
         self.blocks.push(block);
         if html {
-            let escaped = escape_buffer(req, len)?;
+            let escaped = escape_buffer(req, &text)?;
             if let Some(block) = self.blocks.pop() {
                 req.heap_mut().free_block(block);
             }
@@ -486,12 +501,20 @@ impl Laid {
     }
 }
 
-/// `php_escape_html_entities_ex`'s `zend_string_alloc(maxlen)` over
-/// `len` bytes: 128 for fewer than 64, twice the length past that.
-fn escape_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Thrown> {
-    let maxlen = if len < 64 { 128 } else { len.saturating_mul(2) };
-    let block = req.heap_mut().block(maxlen.saturating_add(25));
-    req.fatal_of(block)
+/// `php_escape_html_entities_ex`'s string over `text`: the
+/// `zend_string_alloc(maxlen)` it starts with, then each
+/// `zend_string_safe_realloc` it grows it by as it writes, laid as
+/// `zend_mm_realloc_heap` lays them
+/// ([`crate::api::request::escaped_html_sizes`]).
+fn escape_buffer(req: &mut Request, text: &str) -> Result<php_heap::Block, Thrown> {
+    let mut sizes = crate::api::request::escaped_html_sizes(text).into_iter();
+    let first = req.heap_mut().block(sizes.next().unwrap_or(24 + 128 + 1));
+    let mut block = req.fatal_of(first)?;
+    for size in sizes {
+        let grown = req.heap_mut().block_resize(block, size);
+        block = req.fatal_of(grown)?;
+    }
+    Ok(block)
 }
 
 /// `php_verror`'s `escape_html` of its message and its parameters under
