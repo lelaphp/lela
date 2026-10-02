@@ -37,8 +37,8 @@ pub use code::{
 };
 pub use frames::{
     Argument, Aside, Called, Evaluated, Pending, Position, Serves, Under, below, call, caller,
-    catches, entry, evaluate, exit, exiting, function_exists, oplines, pending, position, restore,
-    serves, set_aside,
+    catches, entry, evaluate, evaluate_code, exit, exiting, function_exists, oplines, pending,
+    position, restore, serves, set_aside,
 };
 pub(crate) use values::values_shown;
 pub use values::{

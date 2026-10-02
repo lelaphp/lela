@@ -37,6 +37,7 @@ tier::catches
 tier::class_named
 tier::entry
 tier::evaluate
+tier::evaluate_code
 tier::exit
 tier::exiting
 tier::frame_code

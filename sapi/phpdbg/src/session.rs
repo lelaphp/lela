@@ -226,14 +226,22 @@ pub struct Session {
     /// (`Z/sapi/phpdbg/phpdbg.c:1707-1709`); this host serves those
     /// cycles as requests of the engine's, each started with it.
     pub exit_status: i32,
+    /// A status phpdbg wrote itself during the request being served,
+    /// `EG(exit_status) = FAILURE` where `run` could not compile, which
+    /// the request's own ending does not know of.
+    pub status: Option<i32>,
     /// The init files `phpdbg_init` reads, in its order.
     pub init_files: Vec<Vec<u8>>,
     /// A cycle of php's main loop has started and its first request has
     /// not yet run the init files.
     pub init_due: bool,
     /// `PHPDBG_IS_INITIALIZING`: the init files are being run, and the
-    /// loop checks nothing between handlers.
+    /// loop checks nothing between handlers but for a throwable nothing
+    /// catches.
     pub initializing: bool,
+    /// The init files have been run once: `phpdbg_fully_started` is set
+    /// after the first cycle's, and stays set.
+    pub init_ran: bool,
     /// Whether the line has notices and errors coloured, `-b` not: what
     /// each cycle of php's main loop starts with.
     pub line_colours: Colours,
@@ -275,9 +283,11 @@ impl Session {
             thrown_into: None,
             origin: Origin::Program,
             exit_status: 0,
+            status: None,
             init_files: Vec::new(),
             init_due: true,
             initializing: false,
+            init_ran: false,
             line_colours: Colours::On,
         }
     }

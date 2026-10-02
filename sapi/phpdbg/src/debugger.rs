@@ -67,7 +67,7 @@ impl Tier for Debugger {
 /// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(plan) = session::with(|s| {
-        s.started = true;
+        s.started |= !s.initializing;
         s.plan
     })
     .flatten() else {
@@ -98,6 +98,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 tier::exit(req);
                 return Flow::Resume(frame);
             }
+            // The run's own entry, not what the init files or the prompt
+            // serve inside the request.
+            session::with(|s| {
+                if !s.initializing && s.origin == Origin::Program && s.execution == Execution::Run {
+                    announce(s);
+                }
+            });
             drive(req, frame)
         }
     }
@@ -105,7 +112,11 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
 
 /// The init files run where a cycle starts with a run, before the run's
 /// first opline, in the run's request, so what they leave the program
-/// finds; true where they stopped the session.
+/// finds; true where they stopped the session. php's `run` begins after
+/// them: a code block that bailed out of the loop left `in_execution`
+/// set, so `run` asks before it restarts, and stands at the prompt where
+/// the answer is no; where they left something pending, the context
+/// does not open; and the run cleans up after them.
 fn initialized(req: &mut Request) -> bool {
     if session::with(|s| !s.init_due).unwrap_or(true) {
         return false;
@@ -113,37 +124,114 @@ fn initialized(req: &mut Request) -> bool {
     let Some(mut session) = session::take() else {
         return false;
     };
+    let execution = std::mem::replace(&mut session.execution, Execution::Not);
     crate::init::run(&mut session, &mut Here::Idle { req });
+    // `run`'s clean up from the last execution, after the init files:
+    // no seek and no throwable handled, the hits at zero, and a step the
+    // init files' prompt asked for kept.
+    session.seek = None;
+    session.handled = None;
+    session.breaks.reset_hits();
+    let quits = session.after_run == AfterRun::Quit;
+    if session.stopped.is_none() && session.execution == Execution::BailedOut {
+        if prompt::restart_permitted(&mut session) && !quits {
+            session.stopped = Some(session::Stop::Restart(None));
+        } else {
+            idle_prompt(&mut session, req, quits);
+        }
+    } else if session.stopped.is_none() && unopened(&mut session, req) {
+        out::error(
+            format!(
+                "Failed to compile {}, cannot run",
+                String::from_utf8_lossy(session.exec.as_deref().unwrap_or_default())
+            )
+            .as_bytes(),
+        );
+        // `EG(exit_status) = FAILURE`.
+        session.status = Some(255);
+        session.execution = Execution::Not;
+        idle_prompt(&mut session, req, quits);
+    } else if session.execution != Execution::BailedOut {
+        session.execution = execution;
+    }
     let stopped = session.stopped.is_some();
     session::put(session);
     stopped
 }
 
+/// `phpdbg_compile`'s notice, once for the context, where nothing has
+/// written it yet: at the held prompt, or where `run` compiles a context
+/// the init files left unopened.
+fn announce(session: &mut Session) {
+    if session.context == Context::Announced {
+        return;
+    }
+    session.context = Context::Announced;
+    if let Some(exec) = &session.exec {
+        let message = if session.stdin_code.is_some() {
+            b"Successful compilation of stdin input".to_vec()
+        } else {
+            [&b"Successful compilation of "[..], exec].concat()
+        };
+        out::notice(&message);
+    }
+}
+
+/// Where `-rr` quits once `run` has come back, which it does here
+/// without running: the session ends; else the prompt, with nothing
+/// executing, stands in this request until a command ends it.
+fn idle_prompt(session: &mut Session, req: &mut Request, quits: bool) {
+    if quits {
+        session.stopped = Some(session::Stop::Quit);
+        return;
+    }
+    let _ = prompted(session, req, |req| Here::Idle { req });
+}
+
+/// What `phpdbg_compile` answers where the init files left a throwable
+/// or an exit pending: `php_stream_open_for_zend_ex` refuses the file,
+/// `Could not open file`, and the context is not compiled. True where
+/// that is so.
+fn unopened(session: &mut Session, req: &mut Request) -> bool {
+    if tier::pending(req).is_none() && !tier::exiting(req) {
+        return false;
+    }
+    // `run` compiles it again, and writes the notice then.
+    session.context = Context::Unannounced;
+    out::error(
+        format!(
+            "Could not open file {}",
+            String::from_utf8_lossy(session.exec.as_deref().unwrap_or_default())
+        )
+        .as_bytes(),
+    );
+    true
+}
+
 /// The execution context compiled and standing at its first opline: the
 /// compile notice, then the prompt, until `run` goes on in this same
-/// request or a command ends it.
+/// request or a command ends it. Where the init files left something
+/// pending, php's compile after them fails, and the prompt stands with
+/// nothing compiled.
 fn held(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(mut session) = session::take() else {
         return Flow::Continue;
     };
     crate::init::run(&mut session, &mut Here::Idle { req });
+    if session.stopped.is_none() && unopened(&mut session, req) {
+        idle_prompt(&mut session, req, false);
+    }
     if session.stopped.is_some() {
         session::put(session);
         tier::exit(req);
         return Flow::Resume(frame);
     }
-    if session.context != Context::Announced {
-        session.context = Context::Announced;
-        if let Some(exec) = &session.exec {
-            let message = if session.stdin_code.is_some() {
-                b"Successful compilation of stdin input".to_vec()
-            } else {
-                [&b"Successful compilation of "[..], exec].concat()
-            };
-            out::notice(&message);
-        }
+    announce(&mut session);
+    // What a code block of the init files bailed out of left
+    // `in_execution` set.
+    if session.execution != Execution::BailedOut {
+        session.execution = Execution::Not;
     }
-    session.execution = Execution::Not;
     let outcome = prompted(&mut session, req, |req| Here::Held { req });
     let stopped = session.stopped.is_some();
     session::put(session);
@@ -267,7 +355,11 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     let Some(mut session) = session::take() else {
         return AfterLog::Returned;
     };
-    if session.origin == Origin::Eval || session.after_run == AfterRun::Quit {
+    // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` is set when its run begins,
+    // after the init files.
+    if session.origin == Origin::Eval
+        || (session.after_run == AfterRun::Quit && !session.initializing)
+    {
         session::put(session);
         return AfterLog::Returned;
     }
@@ -455,9 +547,15 @@ fn leaves(opcode: Opcode) -> bool {
 /// prompt ended the request.
 fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Option<Flow> {
     // `PHPDBG_IS_INITIALIZING` (`phpdbg_prompt.c:1704-1708`): what the
-    // init files serve runs uninterrupted, logged by no oplog.
+    // init files serve runs uninterrupted, logged by no oplog, but for
+    // the throwable nothing catches, which is checked first. php's `-rr`
+    // flag is set when the startup run begins, after the init files.
     if session::with(|s| s.initializing).unwrap_or(false) {
-        return None;
+        let pending = tier::pending(req);
+        if !uncaught(req, at.frame, pending.as_ref()) {
+            return None;
+        }
+        return interactive(req, at.frame, &position.file, at.raised_line);
     }
     // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` (`phpdbg_prompt.c:1666-1669`):
     // the opline logged and nothing checked, so an uncaught throwable is
@@ -496,28 +594,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         function,
         class,
     };
-    let origin = session::with(|s| s.origin).unwrap_or(Origin::Program);
-    // The uncaught throwable, once per throwable, outside what `ev`
-    // serves.
-    let mut stop = false;
-    if let Some(thrown) = pending.as_ref().filter(|_| origin == Origin::Program) {
-        let handled = session::with(|s| s.handled == Some(thrown.id)).unwrap_or(true);
-        if !handled && !caught_anywhere(req, at.frame) {
-            session::with(|s| s.handled = Some(thrown.id));
-            let message = thrown.message.get(..80).unwrap_or(&thrown.message);
-            out::error(
-                format!(
-                    "Uncaught {} in {} on line {}: {}",
-                    String::from_utf8_lossy(&thrown.class),
-                    String::from_utf8_lossy(&thrown.file),
-                    thrown.line,
-                    String::from_utf8_lossy(message)
-                )
-                .as_bytes(),
-            );
-            stop = true;
-        }
-    }
+    let stop = uncaught(req, at.frame, pending.as_ref());
     if !at.unwinding {
         if !stop {
             stepped_opline(req, at.frame);
@@ -545,6 +622,32 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     // `ev` there ran has moved it.
     session::with(|s| s.last_line = line);
     flow
+}
+
+/// The uncaught throwable, reported once per throwable, outside what
+/// `ev` serves: whether the loop stops for it.
+fn uncaught(req: &mut Request, frame: FrameRef, pending: Option<&tier::Pending>) -> bool {
+    let origin = session::with(|s| s.origin).unwrap_or(Origin::Program);
+    let Some(thrown) = pending.filter(|_| origin == Origin::Program) else {
+        return false;
+    };
+    let handled = session::with(|s| s.handled == Some(thrown.id)).unwrap_or(true);
+    if handled || caught_anywhere(req, frame) {
+        return false;
+    }
+    session::with(|s| s.handled = Some(thrown.id));
+    let message = thrown.message.get(..80).unwrap_or(&thrown.message);
+    out::error(
+        format!(
+            "Uncaught {} in {} on line {}: {}",
+            String::from_utf8_lossy(&thrown.class),
+            String::from_utf8_lossy(&thrown.file),
+            thrown.line,
+            String::from_utf8_lossy(message)
+        )
+        .as_bytes(),
+    );
+    true
 }
 
 /// `phpdbg_print_opline` with the flags read: the opline written where

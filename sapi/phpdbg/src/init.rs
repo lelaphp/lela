@@ -9,6 +9,8 @@
 
 use std::os::unix::ffi::OsStrExt as _;
 
+use php_sapi::tier;
+
 use crate::cmd;
 use crate::input;
 use crate::out;
@@ -35,14 +37,19 @@ pub fn files(named: Option<&[u8]>, default: bool) -> Vec<Vec<u8>> {
 /// `phpdbg_init` with `PHPDBG_IS_INITIALIZING` set, where the session
 /// says a cycle has started: each file read a line at a time, with
 /// nothing of the execution context compiled. A `quit` among them ends
-/// the reading; else the breakpoints the last cycle carried are set
-/// again, their lines run as php's `phpdbg_string_init` runs them, with
-/// nothing written, after the init files have numbered theirs.
+/// the reading, and so does a fatal or an exit in a code block, which
+/// bails out of `phpdbg_init` to the `zend_try` around it; else the
+/// breakpoints the last cycle carried are set again, their lines run as
+/// php's `phpdbg_string_init` runs them, with nothing written, after the
+/// init files have numbered theirs. The first cycle's init files run
+/// before `phpdbg_fully_started`, so a fatal there stops at no prompt.
 pub fn run(s: &mut Session, here: &mut Here<'_>) {
     if !std::mem::take(&mut s.init_due) {
         return;
     }
     s.initializing = true;
+    let started = std::mem::replace(&mut s.started, s.init_ran);
+    s.init_ran = true;
     for file in s.init_files.clone() {
         let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&file));
         if std::fs::metadata(path).is_err() {
@@ -58,10 +65,11 @@ pub fn run(s: &mut Session, here: &mut Here<'_>) {
             );
             continue;
         };
-        if !lines(s, here, Some(&file), &text) {
+        if lines(s, here, Some(&file), &text) != Read::Whole {
             break;
         }
     }
+    s.started = started;
     if s.stopped.is_none()
         && let Some(carried) = s.carried.take()
     {
@@ -72,14 +80,31 @@ pub fn run(s: &mut Session, here: &mut Here<'_>) {
     s.initializing = false;
 }
 
+/// How far a file's lines were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    Whole,
+    /// A command stopped the session.
+    Stopped,
+    /// A code block bailed out of `phpdbg_init`.
+    BailedOut,
+}
+
+/// What `phpdbg_init` names an init file's code block by, the file name
+/// what it raises carries.
+const CODE: &[u8] = b"phpdbginit code";
+
 /// `phpdbg_try_file_init`'s lines, or `phpdbg_string_init`'s where no
-/// file is named, through `phpdbg_line_init`: trailing
-/// blanks cut, an empty line and one that starts with `#` skipped, and
-/// every other line run on its own, so a line that fails leaves the
-/// next to run; a code block between `<:` and `:>` is not run. False
-/// where the session stopped.
-fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8]) -> bool {
-    let mut in_code = false;
+/// file is named, through `phpdbg_line_init`: trailing blanks cut, an
+/// empty line and one that starts with `#` skipped, and every other line
+/// run on its own, so a line that fails leaves the next to run. The
+/// lines between a `<:` line and a `:>` line are a code block, joined
+/// with nothing between them and evaluated at the `:>` as
+/// `zend_eval_stringl` evaluates `phpdbginit code` with no value asked
+/// for: what it leaves uncaught, or a parse error, stays pending for
+/// the next `ev` to render.
+fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8]) -> Read {
+    let mut code: Option<Vec<u8>> = None;
     let mut text = text;
     if text.last() == Some(&b'\n') {
         text = &text[..text.len() - 1];
@@ -91,15 +116,23 @@ fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8])
         }
         match line {
             b"<:" => {
-                in_code = true;
+                code.get_or_insert_with(Vec::new);
                 continue;
             }
             b":>" => {
-                in_code = false;
+                if let Some(code) = code.take() {
+                    match block(s, here, &code) {
+                        Read::Whole => {}
+                        ended => return ended,
+                    }
+                }
                 continue;
             }
-            _ if in_code => continue,
             _ => {}
+        }
+        if let Some(code) = &mut code {
+            code.extend_from_slice(line);
+            continue;
         }
         // `phpdbg_read_input(cmd)`: the leading blanks taken off, and the
         // line kept as the one an empty prompt line repeats.
@@ -110,7 +143,7 @@ fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8])
         };
         match prompt::init_line(s, here, commands) {
             InitLine::Done => {}
-            InitLine::Stopped => return false,
+            InitLine::Stopped => return Read::Stopped,
             InitLine::Unrecognized(message) => {
                 let line = String::from_utf8_lossy(line);
                 let message = match file {
@@ -128,5 +161,30 @@ fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8])
             }
         }
     }
-    true
+    Read::Whole
+}
+
+/// A code block evaluated where the init file stands, with the session
+/// lent back to its cell, so the loop that serves it reports what it
+/// leaves uncaught and stops there, which the checks between handlers
+/// do before they give way to `PHPDBG_IS_INITIALIZING`.
+fn block(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Read {
+    let Some(req) = here.request() else {
+        return Read::Whole;
+    };
+    let evaluated = crate::session::lend(s, || tier::evaluate_code(req, CODE, code));
+    if s.stopped.is_some() {
+        return Read::Stopped;
+    }
+    match evaluated {
+        // A fatal served bailed out of the `phpdbg_execute_ex` that
+        // `zend_execute` entered, which leaves `in_execution` set.
+        tier::Evaluated::BailedOut => {
+            prompt::bailed_out(s);
+            Read::BailedOut
+        }
+        // The compiler's fatal bails out before anything is served.
+        tier::Evaluated::NotCompiled if tier::pending(req).is_none() => Read::BailedOut,
+        _ => Read::Whole,
+    }
 }

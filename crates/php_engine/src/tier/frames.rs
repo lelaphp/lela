@@ -265,7 +265,9 @@ pub fn restore(req: &mut Request, aside: Aside) {
 }
 
 /// What an evaluation served: the value it returned as `print_r`
-/// renders it, or nothing, what it left uncaught having been rendered.
+/// renders it, or nothing, what it left uncaught having been rendered;
+/// from [`evaluate_code`], which asks for no value and renders nothing,
+/// `Rendered` says the code was served.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evaluated {
     Printed(Vec<u8>),
@@ -300,6 +302,19 @@ pub enum Under {
 /// `zend_catch` catches it.
 pub fn evaluate(req: &mut Request, under: Under, code: &[u8]) -> Evaluated {
     req.evaluate_in(under, code)
+}
+
+/// `code` evaluated as phpdbg evaluates an init file's code block,
+/// `zend_eval_stringl` with no value asked for: compiled as an `eval`'s
+/// statements under `name`, with nothing executing, and served by the
+/// engine's loop. [`Evaluated::Rendered`] says it was served, and what it
+/// left uncaught stays pending; [`Evaluated::NotCompiled`] that it did
+/// not compile, what the compiler threw pending or the fatal it raised
+/// caught; [`Evaluated::BailedOut`] that a fatal or an exit it raised
+/// while served was caught, with the status it wrote and the exit left
+/// pending. With something pending already, nothing is served.
+pub fn evaluate_code(req: &mut Request, name: &[u8], code: &[u8]) -> Evaluated {
+    req.evaluate_code_in(name, code)
 }
 
 /// An argument a host passes a function by name.
@@ -470,5 +485,74 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen.contains(&String::from("5 ZEND_CATCH")), "{seen:?}");
+    }
+
+    thread_local! {
+        /// The code the tier evaluates at the program's entry, and what
+        /// each evaluation answered with what it left pending.
+        static CODE: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct Initializer;
+
+    impl Tier for Initializer {
+        fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
+            if site != Site::Entry {
+                return Flow::Continue;
+            }
+            for code in CODE.with_borrow_mut(std::mem::take) {
+                let evaluated = super::evaluate_code(req, b"phpdbginit code", code);
+                let pending = super::pending(req).map(|thrown| {
+                    format!(
+                        " {} in {}:{}",
+                        String::from_utf8_lossy(&thrown.class),
+                        String::from_utf8_lossy(&thrown.file),
+                        thrown.line
+                    )
+                });
+                SEEN.with_borrow_mut(|seen| {
+                    seen.push(format!("{evaluated:?}{}", pending.unwrap_or_default()));
+                });
+            }
+            Flow::Continue
+        }
+    }
+
+    fn initialized(code: &[&'static [u8]], source: &str) -> (String, Vec<String>) {
+        SEEN.with_borrow_mut(Vec::clear);
+        CODE.with_borrow_mut(|held| *held = code.to_vec());
+        let engine = Engine::builder().tier::<Initializer>().build();
+        let served = engine.serve_capture(source, Capture::default());
+        (
+            String::from_utf8_lossy(&served.stdout).into_owned(),
+            SEEN.with_borrow_mut(std::mem::take),
+        )
+    }
+
+    /// Statements evaluated under a name of the host's before the
+    /// program's first opline, as phpdbg evaluates an init file's code
+    /// block: no value printed, what they define the program's, and what
+    /// they leave uncaught, or the compiler threw, pending under that name,
+    /// with nothing served after it.
+    #[test]
+    fn a_tier_evaluates_code_under_its_own_name() {
+        let (out, seen) = initialized(&[b"echo 'a'; $x = 5;"], "<?php\necho $x;\n");
+        assert_eq!(
+            (out.as_str(), seen.as_slice()),
+            ("a5", ["Rendered".to_owned()].as_slice())
+        );
+        let (_, seen) = initialized(
+            &[b"throw new Exception('x');", b"echo 'not served';"],
+            "<?php\n",
+        );
+        assert_eq!(
+            seen,
+            [
+                "Rendered Exception in phpdbginit code:1",
+                "Rendered Exception in phpdbginit code:1"
+            ]
+        );
+        let (_, seen) = initialized(&[b"$y ="], "<?php\n");
+        assert_eq!(seen, ["NotCompiled ParseError in phpdbginit code:1"]);
     }
 }

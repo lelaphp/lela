@@ -47,10 +47,10 @@ pub mod tier {
         Argument, Aside, Called, Class, Code, Evaluated, Fatal, Flow, FrameRef, Identity, Key,
         Named, Opcode, Pending, Position, Request, SafepointIdx, Serves, Shape, Shown, Site,
         Stepped, Tier, TraceRow, Under, Variable, backtrace, below, call, caller, catches,
-        class_named, entry, evaluate, exit, exiting, frame_code, function_exists, function_named,
-        included_files, last_error, literals, method_named, oplines, pending, position, restore,
-        serves, set_aside, step, superglobals, table_sizes, unwind, user_classes, user_constants,
-        user_functions, variable, variables,
+        class_named, entry, evaluate, evaluate_code, exit, exiting, frame_code, function_exists,
+        function_named, included_files, last_error, literals, method_named, oplines, pending,
+        position, restore, serves, set_aside, step, superglobals, table_sizes, unwind,
+        user_classes, user_constants, user_functions, variable, variables,
     };
 }
 

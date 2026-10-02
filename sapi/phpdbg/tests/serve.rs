@@ -471,7 +471,13 @@ struct Served {
     file: String,
 }
 
-fn served(name: &str, flags: &[&str], init: Option<&str>, source: &str, stdin: &str) -> Served {
+fn under_phpdbg(
+    name: &str,
+    flags: &[&str],
+    init: Option<&str>,
+    source: &str,
+    stdin: &str,
+) -> Served {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join("t.php");
@@ -540,7 +546,7 @@ fn served(name: &str, flags: &[&str], init: Option<&str>, source: &str, stdin: &
 /// carried enabled (the pinned phpdbg's bytes for `phpdbg -qvb -n`).
 #[test]
 fn set_breaks_and_quiet_read_as_php_writes_them_across_a_cycle() {
-    let served = served(
+    let served = under_phpdbg(
         "set-quiet",
         &["-qvb", "-n"],
         None,
@@ -583,6 +589,123 @@ fn set_breaks_and_quiet_read_as_php_writes_them_across_a_cycle() {
              L0004 0003 RETURN CV1($y)\n\
              L0006 0003 ECHO V0\n",
             Some(0)
+        )
+    );
+}
+
+const BLOCK_PROGRAM: &str = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n";
+
+/// An init file's code block runs where its `:>` stands, its lines
+/// joined with nothing between them, a comment and a blank line among
+/// them skipped, as `phpdbginit code`: what it defines the program
+/// finds, and what it raises names that file (the pinned phpdbg's bytes
+/// for `phpdbg -qb -n -i<file>`, `-qrb` and `-qrrb`).
+#[test]
+fn an_init_code_block_runs_as_phpdbginit_code() {
+    let init = "<:\n$x = 5;\nfunction f() { echo \"f\\n\"; }\n  echo \"a\";\n# comment\n\n echo $undef, \"b\\n\";\n:>\nev $x\n";
+    let block = "a\n[PHP Warning:  Undefined variable $undef in phpdbginit code on line 1]\nb\n5\n";
+    let served = under_phpdbg("block-q", &["-qb", "-n"], Some(init), BLOCK_PROGRAM, "q\n");
+    let file = &served.file;
+    assert_eq!(
+        (served.out.as_str(), served.err.as_str(), served.status),
+        (
+            format!("{block}\n[Successful compilation of {file}]\nprompt> ").as_str(),
+            "",
+            Some(0)
+        )
+    );
+    let served = under_phpdbg("block-r", &["-qrb", "-n"], Some(init), BLOCK_PROGRAM, "q\n");
+    assert_eq!(
+        (served.out.as_str(), served.err.as_str(), served.status),
+        (
+            format!("{block}5\nf\n[Script ended normally]\n{block}prompt> ").as_str(),
+            "",
+            Some(0)
+        )
+    );
+    let served = under_phpdbg("block-rr", &["-qrrb", "-n"], Some(init), BLOCK_PROGRAM, "");
+    assert_eq!(
+        (served.out.as_str(), served.err.as_str(), served.status),
+        (format!("{block}5\nf\n").as_str(), "", Some(0))
+    );
+}
+
+/// What a code block leaves pending, a parse error or a throwable
+/// nothing catches, is rendered by the next `ev`, which writes nothing
+/// else; a throwable nothing catches stops the loop first, at a prompt
+/// with no listing of `phpdbginit code` to show. A fatal ends the
+/// reading of the init files, its log listing nothing, and stops at no
+/// prompt in the first cycle (the pinned phpdbg's bytes for
+/// `phpdbg -qb -n -i<file>`).
+#[test]
+fn what_an_init_code_block_leaves_is_the_next_evs() {
+    let compiled = |file: &str| format!("[Successful compilation of {file}]\nprompt> ");
+    let served = under_phpdbg(
+        "block-parse",
+        &["-qb", "-n"],
+        Some("<:\n$y =\n:>\nev 2\nev 3\n"),
+        BLOCK_PROGRAM,
+        "q\n",
+    );
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "[PHP Parse error:  syntax error, unexpected end of file in phpdbginit code on line 1]\n\
+                 3\n\n{}",
+                compiled(&served.file)
+            )
+            .as_str(),
+            Some(255)
+        )
+    );
+    let served = under_phpdbg(
+        "block-throw",
+        &["-qb", "-n"],
+        Some("<:\necho \"a\\n\";\nthrow new Exception(\"boo\");\n:>\nev 1\nev 2\n"),
+        BLOCK_PROGRAM,
+        "c\nq\n",
+    );
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "a\n\
+                 [Uncaught Exception in phpdbginit code on line 1: boo]\n\
+                 [Could not find information about included file...]\n\
+                 prompt> [PHP Fatal error:  Uncaught Exception: boo in phpdbginit code:1\n\
+                 Stack trace:\n\
+                 #0 {{main}}\n  \
+                 thrown in phpdbginit code on line 1]\n\
+                 2\n\n{}",
+                compiled(&served.file)
+            )
+            .as_str(),
+            Some(255)
+        )
+    );
+    let served = under_phpdbg(
+        "block-fatal",
+        &["-qb", "-n"],
+        Some("<:\nini_set(\"memory_limit\", \"2M\");\nstr_repeat(\"x\", 4 << 20);\n:>\nev 2\n"),
+        BLOCK_PROGRAM,
+        "c\nq\n",
+    );
+    assert_eq!(
+        (served.out.as_str(), served.err.as_str(), served.status),
+        (
+            format!(
+                "[PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in phpdbginit code on line 1\n\
+                 Stack trace:\n\
+                 #0 phpdbginit code(1): str_repeat('x', 4194304)\n\
+                 #1 {{main}}]\n\
+                 [Could not find information about included file...]\n\
+                 {}prompt> ",
+                compiled(&served.file)
+            )
+            .as_str(),
+            "",
+            Some(255)
         )
     );
 }

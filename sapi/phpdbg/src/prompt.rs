@@ -95,6 +95,11 @@ fn permitted(s: &mut Session, question: &[u8]) -> bool {
     }
 }
 
+/// `run`'s question where php takes something to be executing.
+pub fn restart_permitted(s: &mut Session) -> bool {
+    permitted(s, b"Do you really want to restart execution?")
+}
+
 /// How the prompt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -795,7 +800,7 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn bailed_out(s: &mut Session) {
+pub fn bailed_out(s: &mut Session) {
     if s.execution == Execution::Not {
         s.execution = Execution::BailedOut;
     }
@@ -938,7 +943,7 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
     if in_execution(s, here) {
-        if permitted(s, b"Do you really want to restart execution?") {
+        if restart_permitted(s) {
             s.stopped = Some(Stop::Restart(args));
         }
         return Ret::Success;

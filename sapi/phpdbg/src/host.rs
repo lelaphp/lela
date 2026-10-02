@@ -80,7 +80,7 @@ pub fn serve(engine: &Engine) -> i32 {
         let Some(mut s) = session::take() else {
             return status;
         };
-        s.exit_status = observed.exit_code;
+        s.exit_status = s.status.take().unwrap_or(observed.exit_code);
         status = s.exit_status;
         ended(&mut s, plan, &observed);
         session::put(s);
