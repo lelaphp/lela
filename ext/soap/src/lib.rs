@@ -29,6 +29,11 @@ mod classes;
 mod globals;
 #[expect(
     dead_code,
+    reason = "the headers the SDL and client layers send (#1562)"
+)]
+mod http;
+#[expect(
+    dead_code,
     reason = "the description the encoding, SDL, server and client layers fill and read (#1562)"
 )]
 mod model;

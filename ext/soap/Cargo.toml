@@ -18,6 +18,10 @@ php_ext = { path = "../../crates/php_ext" }
 # includes it (`ZEND_MOD_REQUIRED("libxml")`, design §4.10, revision 72);
 # no `src/ffi/` of its own (§7.2).
 php_ext_libxml = { path = "../libxml" }
+# `base64.h`, `md5.h` and `php_stream_context_get_option`, which
+# `php_http.c`, `php_encoding.c` and `php_sdl.c` include and call
+# (design §4.10).
+php_ext_standard = { path = "../standard" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
