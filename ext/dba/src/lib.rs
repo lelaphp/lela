@@ -1,10 +1,12 @@
 //! The `dba` extension: `php-src/ext/dba` as one crate under `ext/`
 //! (ADR-0004), behind the `dba` feature as php builds it with
 //! `--enable-dba`. `dba.c` with the three handlers php's own C provides,
-//! flatfile, inifile and cdb with `cdb_make`, ported with their libraries
-//! and no library of the system's; every read and write goes through the
-//! engine's streams. One dependency, the facade; one entry,
-//! `extension()`; its state on the request (ADR-0005). The phpt subset
+//! flatfile, inifile and cdb with `cdb_make`, ported with their libraries,
+//! every read and write through the engine's streams; and ndbm over the
+//! platform's library, `<ndbm.h>` from the C library as the oracle's build
+//! links it on macOS, bound in `ffi` alone. The facade and, for that
+//! binding, `libc`; one entry, `extension()`; its state on the request
+//! (ADR-0005). The phpt subset
 //! is `php-src/ext/dba/tests`, through `xtask phpt --subset`.
 //!
 //! A connection is a `Dba\Connection` object over a link, php's
@@ -13,7 +15,7 @@
 //! `dba_popen` of one path, `$mode` and handler answers a new object over
 //! the same link, and `dba_close` leaves it open, as php's
 //! `EG(persistent_list)` does for the life of a CLI process.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -27,6 +29,8 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod cdb;
+#[cfg(target_os = "macos")]
+mod ffi;
 mod flatfile;
 mod inifile;
 mod link;

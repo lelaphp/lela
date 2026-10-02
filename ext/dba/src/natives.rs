@@ -184,7 +184,6 @@ fn open(
     if asked.flags.is_some_and(|f| f < 0) {
         return Err(arg_value_error(req, 6, "be greater than or equal to 0"));
     }
-    let _ = asked.permission;
     let counter = if persistent {
         0
     } else {
@@ -235,7 +234,7 @@ fn open(
         return Ok(OrFalse::False);
     }
     let object = new_connection(req)?;
-    let Some(link) = open_link(req, &asked.path, handler, mode, persistent)? else {
+    let Some(link) = open_link(req, asked, handler, mode, persistent)? else {
         req.release(object.as_value());
         return Ok(OrFalse::False);
     };
@@ -321,18 +320,19 @@ fn open_stream(
 
 /// The rest of `php_dba_open` past the object: the `flock(2)` checked against
 /// the links listed, taken on the database or its `.lck` file, the
-/// database stream opened (the `.lck` file's unless the database is locked),
-/// cast to an fd, and the handler's open; `None` after php's
-/// warning for any step that failed, every stream opened freed.
+/// database stream opened for a handler that has one (the `.lck` file's
+/// unless the database is locked), cast to an fd, and the handler's open;
+/// `None` after php's warning for any step that failed, every stream
+/// opened freed.
 fn open_link(
     req: &mut Request,
-    path: &[u8],
+    asked: &Asked,
     handler: Handler,
     mode: Mode,
     persistent: bool,
 ) -> Result<Option<Link>, Thrown> {
     let lock = mode.lock();
-    let mut path = path.to_vec();
+    let mut path = asked.path.clone();
     let mut error: Option<&'static str> = None;
     if lock_held_on(req, &path).is_some_and(|other| lock.conflicts(other)) {
         error = Some("Unable to establish lock (database file already open)");
@@ -374,7 +374,7 @@ fn open_link(
             error = Some("Unable to establish lock");
         }
     }
-    let file = if error.is_some() {
+    let file = if error.is_some() || !handler.streams() {
         None
     } else if let (Some(held), true) = (lock_file, on_database) {
         Some(held)
@@ -396,27 +396,38 @@ fn open_link(
         free_streams(req, Some(file), lock_file);
         return Ok(None);
     }
-    let store = match (error, file) {
-        (None, Some(file)) => Store::open(req, handler, mode.access, file),
-        (Some(error), _) => Err(error),
-        (None, None) => Err(""),
-    };
-    match (store, file) {
-        (Ok(store), Some(file)) => Ok(Some(Link {
+    let at = library_path(req, &path);
+    let store = error.map_or_else(
+        || Store::open(req, handler, mode.access, file, &at, asked.permission),
+        Err,
+    );
+    match store {
+        Ok(store) => Ok(Some(Link {
             path,
             access: mode.access,
             handler,
             persistent,
             lock,
-            file,
             lock_file,
             store,
         })),
-        (refused, file) => {
-            refuse(req, handler, refused.err(), file, lock_file)?;
+        Err(why) => {
+            refuse(req, handler, Some(why), file, lock_file)?;
             Ok(None)
         }
     }
+}
+
+/// `info->path` as a library that opens it itself reads it: relative to
+/// the request's working directory, which php's process shares.
+fn library_path(req: &Request, path: &[u8]) -> Vec<u8> {
+    if path.first() == Some(&b'/') {
+        return path.to_vec();
+    }
+    let mut at = req.cwd().into_os_string().into_encoded_bytes();
+    at.push(b'/');
+    at.extend_from_slice(path);
+    at
 }
 
 /// php's warning for a link the `flock(2)`, the cast or the handler's open
@@ -578,12 +589,13 @@ pub(crate) fn dba_exists(
 ) -> Result<bool, Thrown> {
     with_link(req, dba, |req, link| {
         let key = key_bytes(req, key)?;
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(_) => Flatfile::fetch(req, file, &key)?.is_some(),
-            Store::Inifile(ini) => ini.fetch(req, file, &IniKey::split(&key), 0)?.is_some(),
-            Store::CdbReader(reader) => reader.exists(req, file, &key),
-            Store::CdbMaker(_) => false,
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().and_then(|db| db.fetch(&key)).is_some(),
+            Store::Flatfile(_, file) => Flatfile::fetch(req, *file, &key)?.is_some(),
+            Store::Inifile(ini, file) => ini.fetch(req, *file, &IniKey::split(&key), 0)?.is_some(),
+            Store::CdbReader(reader, file) => reader.exists(req, *file, &key),
+            Store::CdbMaker(..) => false,
         })
     })
 }
@@ -676,6 +688,10 @@ pub(crate) fn dba_fetch(
                     "Handler {name} accepts only skip value -1 and greater, using skip=0"
                 )),
                 Handler::Cdb | Handler::Inifile => None,
+                #[cfg(target_os = "macos")]
+                Handler::Ndbm => Some(format!(
+                    "Handler {name} does not support optional skip parameter, the value will be ignored"
+                )),
                 Handler::CdbMake | Handler::Flatfile => Some(format!(
                     "Handler {name} does not support optional skip parameter, the value will be ignored"
                 )),
@@ -685,12 +701,13 @@ pub(crate) fn dba_fetch(
                 skip = 0;
             }
         }
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(_) => Flatfile::fetch(req, file, &key)?,
-            Store::Inifile(ini) => ini.fetch(req, file, &IniKey::split(&key), skip)?,
-            Store::CdbReader(reader) => reader.fetch(req, file, &key, skip),
-            Store::CdbMaker(_) => None,
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().and_then(|db| db.fetch(&key)),
+            Store::Flatfile(_, file) => Flatfile::fetch(req, *file, &key)?,
+            Store::Inifile(ini, file) => ini.fetch(req, *file, &IniKey::split(&key), skip)?,
+            Store::CdbReader(reader, file) => reader.fetch(req, *file, &key, skip),
+            Store::CdbMaker(..) => None,
         })
     })?;
     or_false(req, value)
@@ -814,12 +831,13 @@ pub(crate) fn dba_firstkey(
     dba: Instance<Connection>,
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let key = with_link(req, dba, |req, link| {
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(walk) => walk.first_key(req, file)?,
-            Store::Inifile(ini) => ini.first_key(req, file)?,
-            Store::CdbReader(reader) => reader.first_key(req, file),
-            Store::CdbMaker(_) => None,
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().and_then(crate::ffi::Ndbm::first_key),
+            Store::Flatfile(walk, file) => walk.first_key(req, *file)?,
+            Store::Inifile(ini, file) => ini.first_key(req, *file)?,
+            Store::CdbReader(reader, file) => reader.first_key(req, *file),
+            Store::CdbMaker(..) => None,
         })
     })?;
     or_false(req, key)
@@ -849,12 +867,13 @@ pub(crate) fn dba_nextkey(
     dba: Instance<Connection>,
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let key = with_link(req, dba, |req, link| {
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(walk) => walk.next_key(req, file)?,
-            Store::Inifile(ini) if ini.walking() => ini.next_key(req, file)?,
-            Store::Inifile(_) | Store::CdbMaker(_) => None,
-            Store::CdbReader(reader) => reader.next_key(req, file),
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().and_then(crate::ffi::Ndbm::next_key),
+            Store::Flatfile(walk, file) => walk.next_key(req, *file)?,
+            Store::Inifile(ini, file) if ini.walking() => ini.next_key(req, *file)?,
+            Store::Inifile(..) | Store::CdbMaker(..) => None,
+            Store::CdbReader(reader, file) => reader.next_key(req, *file),
         })
     })?;
     or_false(req, key)
@@ -910,15 +929,16 @@ pub(crate) fn dba_delete(
             return Ok(false);
         }
         let key = key_bytes(req, key)?;
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(_) => Flatfile::delete(req, file, &key)?,
-            Store::Inifile(ini) => {
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().is_some_and(|db| db.delete(&key)),
+            Store::Flatfile(_, file) => Flatfile::delete(req, *file, &key)?,
+            Store::Inifile(ini, file) => {
                 let mut found = false;
-                let ok = ini.rewrite(req, file, &IniKey::split(&key), None, false, &mut found)?;
+                let ok = ini.rewrite(req, *file, &IniKey::split(&key), None, false, &mut found)?;
                 ok && found
             }
-            Store::CdbReader(_) | Store::CdbMaker(_) => false,
+            Store::CdbReader(..) | Store::CdbMaker(..) => false,
         })
     })
 }
@@ -936,9 +956,10 @@ fn update(
             return Ok(false);
         }
         let key = key_bytes(req, key)?;
-        let file = link.file;
         Ok(match &mut link.store {
-            Store::Flatfile(_) => match Flatfile::store(req, file, &key, value, insert)? {
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => db.as_mut().is_some_and(|db| db.store(&key, value, insert)),
+            Store::Flatfile(_, file) => match Flatfile::store(req, *file, &key, value, insert)? {
                 Stored::Done => true,
                 Stored::Exists => false,
                 Stored::Short => {
@@ -946,11 +967,11 @@ fn update(
                     false
                 }
             },
-            Store::Inifile(ini) => {
+            Store::Inifile(ini, file) => {
                 let mut found = false;
                 let ok = ini.rewrite(
                     req,
-                    file,
+                    *file,
                     &IniKey::split(&key),
                     Some(value),
                     insert,
@@ -961,8 +982,10 @@ fn update(
                 }
                 ok
             }
-            Store::CdbMaker(Some(maker)) if insert => maker.add(req, file, &key, value).is_some(),
-            Store::CdbMaker(_) | Store::CdbReader(_) => false,
+            Store::CdbMaker(Some(maker), file) if insert => {
+                maker.add(req, *file, &key, value).is_some()
+            }
+            Store::CdbMaker(..) | Store::CdbReader(..) => false,
         })
     })
 }
@@ -1069,10 +1092,10 @@ pub(crate) fn dba_sync(req: &mut Request, dba: Instance<Connection>) -> Result<b
 /// or each name with its library's version.
 ///
 /// ```php
-/// var_dump(in_array('flatfile', dba_handlers()), dba_handlers(true)['inifile'], dba_handlers(true)['cdb_make']);
+/// var_dump(implode(' ', dba_handlers()), dba_handlers(true)['inifile'], dba_handlers(true)['cdb_make']);
 /// ```
 /// ```expect
-/// bool(true)
+/// string(34) "ndbm cdb cdb_make inifile flatfile"
 /// string(52) "1.0, $Id: 4dc687ea6681ffc42006a5fa64ac97f828c52ce1 $"
 /// string(53) "0.75, $Id: 570e3625b0cea5c29455cecf40fdfd491c0eb3c6 $"
 /// ```
@@ -1082,7 +1105,7 @@ pub(crate) fn dba_handlers(
     #[php(default = false)] full_info: bool,
 ) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
-    for handler in Handler::ALL {
+    for &handler in Handler::ALL {
         if full_info {
             let name = string(req, handler.name().as_bytes())?;
             let version = string(req, handler.version().as_bytes())?;
