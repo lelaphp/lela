@@ -134,8 +134,9 @@ pub fn enabled() -> &'static [fn() -> Extension] {
 /// them: each extension php leaves out by default and the bundle carries,
 /// in its `config.m4` spelling (`--enable-mbstring`, `--with-openssl`);
 /// each php builds by default and the bundle leaves out, as its
-/// `--disable` or `--without`, the four no crate holds yet among them;
-/// and nothing for the extensions php always builds. By extension name.
+/// `--disable` or `--without`; and nothing for the extensions php always
+/// builds. By extension name, every switch behind its feature, which
+/// `tests/configure.rs` holds to the features.
 pub const CONFIGURE: &[&str] = &[
     #[cfg(feature = "bcmath")]
     "--enable-bcmath",
@@ -151,24 +152,32 @@ pub const CONFIGURE: &[&str] = &[
     "--enable-dba",
     #[cfg(not(feature = "dom"))]
     "--disable-dom",
+    #[cfg(feature = "exif")]
+    "--enable-exif",
     #[cfg(not(feature = "fileinfo"))]
     "--disable-fileinfo",
     #[cfg(not(feature = "filter"))]
     "--disable-filter",
+    #[cfg(feature = "ftp")]
+    "--enable-ftp",
+    #[cfg(feature = "gmp")]
+    "--with-gmp",
     #[cfg(not(feature = "iconv"))]
     "--without-iconv",
     #[cfg(not(feature = "libxml"))]
     "--without-libxml",
     #[cfg(feature = "mbstring")]
     "--enable-mbstring",
+    #[cfg(feature = "mysqli")]
+    "--with-mysqli",
+    #[cfg(feature = "mysqlnd")]
+    "--enable-mysqlnd",
     #[cfg(feature = "openssl")]
     "--with-openssl",
     #[cfg(feature = "pcntl")]
     "--enable-pcntl",
     #[cfg(not(feature = "pdo"))]
     "--disable-pdo",
-    #[cfg(feature = "mysqli")]
-    "--with-mysqli",
     #[cfg(feature = "pdo_mysql")]
     "--with-pdo-mysql",
     #[cfg(not(feature = "pdo_sqlite"))]
@@ -179,18 +188,32 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-posix",
     #[cfg(not(feature = "session"))]
     "--disable-session",
+    #[cfg(feature = "shmop")]
+    "--enable-shmop",
     #[cfg(not(feature = "simplexml"))]
     "--disable-simplexml",
     #[cfg(feature = "sockets")]
     "--enable-sockets",
+    #[cfg(not(feature = "sqlite3"))]
     "--without-sqlite3",
+    #[cfg(feature = "sysvmsg")]
+    "--enable-sysvmsg",
+    #[cfg(feature = "sysvsem")]
+    "--enable-sysvsem",
+    #[cfg(feature = "sysvshm")]
+    "--enable-sysvshm",
     #[cfg(feature = "tidy")]
     "--with-tidy",
     #[cfg(not(feature = "tokenizer"))]
     "--disable-tokenizer",
+    #[cfg(not(feature = "xml"))]
     "--disable-xml",
+    #[cfg(not(feature = "xmlreader"))]
     "--disable-xmlreader",
+    #[cfg(not(feature = "xmlwriter"))]
     "--disable-xmlwriter",
+    #[cfg(feature = "xsl")]
+    "--with-xsl",
     #[cfg(feature = "zip")]
     "--with-zip",
     #[cfg(feature = "zlib")]
