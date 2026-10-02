@@ -195,39 +195,6 @@ pub(crate) fn get_node_with_attribute(
     None
 }
 
-/// `get_node_with_attribute_recursive_ex`.
-pub(crate) fn get_node_with_attribute_recursive(
-    mut node: Option<Node>,
-    name: &[u8],
-    name_ns: Option<&[u8]>,
-    attribute: &[u8],
-    value: &[u8],
-    attr_ns: Option<&[u8]>,
-) -> Option<Node> {
-    while let Some(n) = node {
-        if node_is_equal(n, Some(name), name_ns)
-            && let Some(attr) = get_attribute(n.properties(), attribute, attr_ns)
-            && attr_content(attr) == value
-        {
-            return Some(n);
-        }
-        if n.children().is_some()
-            && let Some(found) = get_node_with_attribute_recursive(
-                n.children(),
-                name,
-                name_ns,
-                attribute,
-                value,
-                attr_ns,
-            )
-        {
-            return Some(found);
-        }
-        node = n.next();
-    }
-    None
-}
-
 /// `parse_namespace`: `prefix:value` split at its last colon, a leading
 /// colon leaving the whole as the value.
 pub(crate) fn parse_namespace(inval: &[u8]) -> (&[u8], Option<&[u8]>) {

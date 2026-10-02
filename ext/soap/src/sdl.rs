@@ -99,3 +99,6 @@ pub(crate) fn encoder(sdl: Option<&Sdl>, typemap: Option<&Typemap>, r: EncRef) -
         EncRef::Typemap(at) => typemap?.nth(at as usize).map(|t| t.enc.clone()),
     }
 }
+
+pub(crate) mod cache;
+pub(crate) mod wsdl;
