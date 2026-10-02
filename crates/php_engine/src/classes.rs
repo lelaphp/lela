@@ -947,6 +947,17 @@ impl Closure {
             req.addref(&given);
             return Ok(Instance::of(object));
         }
+        // A trampoline a `get_closure` handler made has no scope, which
+        // `zend_create_closure_from_callable` refuses with no reason.
+        if let Some(object) = given.as_object().copied()
+            && req.handler_closure(object).is_some()
+        {
+            return Err(throw_over_pending(
+                req,
+                "TypeError",
+                "Failed to create closure from callable",
+            ));
+        }
         let callable = match req.callable_checked(&given) {
             Ok(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
             Ok(callable) => callable,

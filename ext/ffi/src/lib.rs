@@ -40,13 +40,15 @@ mod parse;
 mod preload;
 mod types;
 
+use std::collections::HashMap;
+
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::ClassId;
+use php_ext::values::{ClassId, Emalloc};
 
 use crate::ffi::Block;
 use crate::types::Types;
@@ -57,8 +59,9 @@ const ENABLE: &str = "ffi.enable";
 pub(crate) const PRELOAD: &str = "ffi.preload";
 
 /// Request-scoped (ADR-0005): the C types this request's declarations
-/// made, the callbacks C may still call, and the cell a callback reads
-/// the request from while C runs. Dropped after `rshutdown`, which frees
+/// made, the callbacks C may still call, the cell a callback reads
+/// the request from while C runs, and the memory `FFI` took from the
+/// request's heap by its address ([`cdata::alloc`]). Dropped after `rshutdown`, which frees
 /// every callback's code as php's `RSHUTDOWN` destroys
 /// `FFI_G(callbacks)`.
 #[derive(Default)]
@@ -68,6 +71,7 @@ struct State {
     slot: Option<Block>,
     classes: Option<Classes>,
     imported: Vec<(Vec<u8>, parse::Scope)>,
+    heap: HashMap<usize, Emalloc>,
 }
 
 /// The classes the extension declares, looked up once per request.
@@ -149,11 +153,18 @@ fn restriction(req: &Request) -> Restriction {
 
 /// `ZEND_FFI_VALIDATE_API_RESTRICTION`: `ffi.enable=1` anywhere, and
 /// under `preload` the CLI, whose scripts php lets use FFI after
-/// startup, and the request `opcache.preload`'s file is served in.
+/// startup, a function `opcache.preload`'s file declared, in any host
+/// and any request, and the request that file is served in. The test
+/// `ffi_preloaded_caller` of `sapi/cgi` holds a preloaded function's
+/// call under php-cgi to the oracle.
 pub(crate) fn validate_api_restriction(req: &mut Request) -> Result<(), Thrown> {
     match restriction(req) {
         Restriction::Enabled => Ok(()),
-        Restriction::Preload if req.sapi_name() == "cli" || req.preloading() => Ok(()),
+        Restriction::Preload
+            if req.sapi_name() == "cli" || req.caller_preloaded() || req.preloading() =>
+        {
+            Ok(())
+        }
         _ => Err(ffi_error(
             req,
             "FFI API is restricted by \"ffi.enable\" configuration directive",
@@ -226,6 +237,7 @@ pub fn extension() -> Extension {
         .class::<decls::instance::FFI>()
         .request_state::<State>()
         .engine_state(preload::engine_state)
+        .post_startup(preload::post_startup)
         .rshutdown(call::release_callbacks)
         .info(info)
         .build("FFI")
