@@ -208,8 +208,10 @@ Options:
 ├── ctype
 ├── curl
 ├── date
+├── dba
 ├── dom
 ├── exif
+├── fileinfo
 ├── filter
 ├── ftp
 ├── hash
@@ -247,7 +249,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=2014347006ec25e95e32adce9d33940117df139324982f20522d1ef24937333b out=fa1e0031c44f48d89ab6d93bf78741fd77c547afa820775e4766a45ff85e1c49 -->
+<!-- /computed in=e9529fce20eaded1ead0b22b4b315172b2c1f7484dbaf6b633adb267cb15922d out=60d66039f11e0c8c90cd7f67553b2a5e5b73f827814fce0ffb65cf34a0e8283b -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
