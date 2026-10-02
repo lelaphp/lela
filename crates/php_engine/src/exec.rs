@@ -250,6 +250,22 @@ impl FrameState {
     }
 }
 
+/// What php's `INCLUDE_OR_EVAL` keeps on the request's heap for the op
+/// array a code frame serves, freed with the frame however it ends
+/// (`zend_leave_helper`'s `ZEND_CALL_NESTED_CODE` arm, `destroy_op_array`
+/// and `efree_size`): the op array itself, which `zend_accel_load_script`
+/// copies out of the cache and `zend_compile` makes, and the runtime
+/// cache `i_init_code_execute_data` lays down for it, since a main op
+/// array's is `ZEND_ACC_HEAP_RT_CACHE`. The engine's op array and cache
+/// are the unit's and the map table's; these are php's bytes.
+pub(crate) struct HeapOpArray {
+    pub(crate) copy: crate::api::values::Emalloc,
+    pub(crate) run_time_cache: Option<crate::api::values::Emalloc>,
+}
+
+/// `sizeof(zend_op_array)` as `emalloc` bins it, the 256-byte bin.
+pub(crate) const OP_ARRAY_SIZE: usize = 256;
+
 /// One frame's engine state.
 pub(crate) struct FrameState {
     /// The unit being served, shared with every other request serving it
@@ -344,6 +360,9 @@ pub(crate) struct FrameState {
     /// is left `UNDEF`. Nothing but `FAST_CALL`, `FAST_RET`,
     /// `DISCARD_EXCEPTION` and the unwinder reads it.
     fast_calls: Vec<FastCall>,
+    /// The op array's bytes an `INCLUDE_OR_EVAL` frame holds on the
+    /// request's heap ([`HeapOpArray`]); none for every other frame.
+    pub(crate) op_array: Option<HeapOpArray>,
     /// `EX(run_time_cache)`: where the op array's runtime cache stands in
     /// the request's map table (design §5.6), read off the op array as
     /// `RUN_TIME_CACHE(op_array)` reads it when the frame is activated.
@@ -783,6 +802,7 @@ impl Vm {
             leaving: false,
             generator: None,
             fast_calls: Vec::new(),
+            op_array: None,
             runtime_cache,
         });
     }

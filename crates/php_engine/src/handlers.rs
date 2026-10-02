@@ -3272,24 +3272,38 @@ pub(crate) fn include_or_eval<T: Tier>(
         )));
     };
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let written = crate::ops::to_string(req, &operand);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let written = match written {
-        Ok(string) => {
-            let bytes = string.as_bytes().to_vec();
-            req.release(Value::string(string));
-            bytes
-        }
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
+    let edge = match crate::ops::to_string(req, &operand) {
+        Ok(string) => {
+            let written = string.as_bytes().to_vec();
+            req.release(Value::string(string));
+            included(req, frame, kind, &written, returns_to)
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    };
+    // `FREE_OP1()`: the operand stands while the file is opened and its
+    // frame pushed, and goes before the file runs.
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    edge
+}
+
+/// `zend_include_or_eval` over the path or the code `written`, and the
+/// handler's arms after it: the value answered without a frame, or the
+/// code frame pushed with the op array php holds for it.
+fn included(
+    req: &mut Request,
+    frame: FrameRef,
+    kind: exec::IncludeKind,
+    written: &[u8],
+    returns_to: Option<(FrameRef, u32)>,
+) -> Edge {
     let opened = match kind {
-        exec::IncludeKind::Eval => req.eval_string(&written),
+        exec::IncludeKind::Eval => req.eval_string(written),
         exec::IncludeKind::Include
         | exec::IncludeKind::IncludeOnce
         | exec::IncludeKind::Require
-        | exec::IncludeKind::RequireOnce => req.include_file(kind, &written),
+        | exec::IncludeKind::RequireOnce => req.include_file(kind, written),
     };
     let unit = match opened {
         Ok(Opened::Unit(unit)) => unit,
@@ -3304,6 +3318,12 @@ pub(crate) fn include_or_eval<T: Tier>(
     if !crate::engine::note_compiled(req, &unit, source) {
         return Ok(Stepped::Threw(frame));
     }
+    // The op array `zend_accel_load_script` copies out of the cache, or
+    // `zend_compile` makes, the request's while the file runs.
+    let copy = match crate::api::values::Emalloc::new(req, exec::OP_ARRAY_SIZE) {
+        Ok(copy) => copy,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let main = exec::code_of(&unit);
     if let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return
@@ -3311,9 +3331,13 @@ pub(crate) fn include_or_eval<T: Tier>(
     {
         let value = exec::constant(main, ConstIdx(only.op1));
         req.addref(&value);
+        copy.free(req);
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;
+    if let Err(thrown) = req.hold_op_array(callee, copy) {
+        return threw(req, callee, &thrown);
+    }
     Ok(Stepped::Pushed(callee))
 }
 

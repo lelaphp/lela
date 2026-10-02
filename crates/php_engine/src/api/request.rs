@@ -77,6 +77,7 @@ mod recording;
 mod site_override;
 mod table;
 mod unit_cache;
+pub(crate) use unit_cache::HandlePath;
 mod variables;
 mod zone;
 pub use post::Upload;
@@ -3006,6 +3007,58 @@ impl Request {
         Ok(frame)
     }
 
+    /// The op array `frame` serves held on the request's heap as php's
+    /// `INCLUDE_OR_EVAL` holds it ([`exec::HeapOpArray`]): `copy`, made
+    /// before the frame was pushed, and the runtime cache
+    /// `i_init_code_execute_data` lays down after the symbol table is
+    /// attached, `cache_size` bytes. Both go when the frame is popped,
+    /// whether the file returned or threw, and an `eval`'s as an
+    /// include's:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/' . uniqid() . '.php';
+    /// file_put_contents($f, '<?php if ($t) throw new Exception("x"); $y = 2; return $y;'); touch($f, time() - 10); clearstatcache();
+    /// $t = false; include $f; $t = true; try { include $f; } catch (Exception $e) {} unset($e);
+    /// $m = memory_get_usage(); try { include $f; } catch (Exception $e) {} unset($e); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $t = false; $r = include $f; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $r = eval('$q = 1; return $q;'); echo memory_get_usage() - $m, "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 0
+    /// 0
+    /// ```
+    ///
+    /// The `Err` is the memory limit, the copy held already.
+    pub(crate) fn hold_op_array(
+        &mut self,
+        frame: FrameRef,
+        copy: crate::api::values::Emalloc,
+    ) -> Result<(), Thrown> {
+        let size = self
+            .vm
+            .serving(frame)
+            .and_then(|serving| serving.code().map(|code| code.cache_size))
+            .unwrap_or(0);
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.op_array = Some(exec::HeapOpArray {
+                copy,
+                run_time_cache: None,
+            });
+        }
+        let cache =
+            crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX))?;
+        if let Some(held) = self
+            .vm
+            .at_mut(frame)
+            .and_then(|state| state.op_array.as_mut())
+        {
+            held.run_time_cache = Some(cache);
+        }
+        Ok(())
+    }
+
     /// `zend_leave_helper`'s arm for a nested code frame
     /// (`Z/Zend/zend_vm_def.h:3030`): the frame's CVs detached into the
     /// table it shares with its includer, the frame popped, and the
@@ -3187,7 +3240,14 @@ impl Request {
                 self.release(closure.as_value());
             }
         }
-        self.vm.pop();
+        // `destroy_op_array`, which frees the heap runtime cache, then
+        // `efree_size(EX(func))`.
+        if let Some(held) = self.vm.pop().and_then(|state| state.op_array) {
+            if let Some(cache) = held.run_time_cache {
+                cache.free(self);
+            }
+            held.copy.free(self);
+        }
         self.stack.pop_frame(&mut self.heap);
     }
 
@@ -17013,9 +17073,14 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
+        let handle = if kind.once() {
+            HandlePath::Opened
+        } else {
+            HandlePath::Filename
+        };
         let cached = match held {
             Some(held) => Some(held.unit.clone()),
-            None => self.cached_file(&path, Some(written)),
+            None => self.cached_file(&path, Some(written), handle),
         };
         match cached {
             Some(Ok(unit)) => {

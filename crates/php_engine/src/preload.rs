@@ -99,7 +99,7 @@ impl Engine {
         let compiled = match req.resolve_path(script) {
             Ok(resolved) => {
                 req.note_primary_file(&resolved);
-                req.cached_file(&resolved, None)
+                req.cached_file(&resolved, None, crate::api::request::HandlePath::Opened)
             }
             Err(_) => None,
         };
