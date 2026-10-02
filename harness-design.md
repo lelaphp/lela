@@ -157,6 +157,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **65. Revision 65 (2026-10-02).** §4.4's **What an `unless` permits** names the second kind of evidence #1448 gave the sensor, settled by Mitchell on #1471: where no reading stands over the crate's tree now, a match is the instrument's own when its block stands as it was at a commit an instrument's reading was taken over, the reading found in this workspace's store or another worktree's. A merge makes a state of the crate no branch measured, so the reading over the tree now cannot carry a verdict a branch's `--accept` captured across it. The sentence that follows reads "neither kind of evidence" where it read "no such reading", which the new sentence would otherwise contradict. Check: a hand-typed `exit=` line is denied on a merged branch, and a captured one is permitted (#1448's fixtures).
 
+**66. Revision 66 (2026-10-02).** §6's Wiring states the rule that orders pre-commit's region render and `computed check`, and leaves the order to the region, settled by Mitchell on #1470. #1416 moved the render ahead of `clippy` and `test` so xtask's map tests read the map the commit carries, and the paragraph, which restated the hook's order in prose, still said the render ran last. The paragraph now gives the reasons (#1252, #1416, revision 44) and the region renders the order, its pattern widened to the two `if` lines that run the render and the check. Rejected: the sentence #1470 drafted, which restated the new order and would drift with the next move. Check: `computed check harness-design.md` holds the region to the hook; a step the hook moves moves in the region.
+
 ---
 
 ## 2. Vocabulary
@@ -470,9 +472,9 @@ The constraint table of revision 1 stands, with its column of where each rule no
 
 The strongest rows are still the ones with no path to take. Every row below them has a twin: a rule `permit` evaluates before the write has a lint or an `xtask` check after it, so no function hook is ever the only sensor for a constraint (revision 2 C.8 item 8), and the column says which.
 
-**Wiring.** Pre-commit runs `cargo fmt --check` first; then, at once, the instruments that only read the tree, a refusal among them ending the hook before anything is built (#1252); then the instruments that build, with `crosscheck`'s exit not read (revision 44); and last `xtask regions`, which renders the region files by name and says which it wrote so the hook re-stages them (revision 16), the gitignored `.claude/harness.local.md` not among them (#1312), `computed check` then refusing a hand-edited region. The sequence is the hook's own, rendered from it (revision 64):
+**Wiring.** Pre-commit runs `cargo fmt --check` first, and the instruments that only read the tree at once, a refusal among them ending the hook before anything is built (#1252). `xtask regions` renders the region files by name and says which it wrote so the hook re-stages them (revision 16), the gitignored `.claude/harness.local.md` not among them (#1312), and `computed check` refuses a hand-edited region; both run before anything that reads the map, so xtask's map tests read from the index the map the commit carries (#1416). `crosscheck`'s exit is not read (revision 44). The sequence is the hook's own, rendered from it, the render and the check among its lines (revisions 64, 66):
 
-<!-- computed exec cmd="grep -E '^(step|spawn|gather)( |$)' scripts/hooks/pre-commit" inputs=scripts/hooks/pre-commit name=pre-commit as=fence | do not edit; run computed -->
+<!-- computed exec cmd="grep -E '^(step|spawn|gather)( |$)|^if (rendered=|! computed check)' scripts/hooks/pre-commit" inputs=scripts/hooks/pre-commit name=pre-commit as=fence | do not edit; run computed -->
 ```
 step cargo fmt --check
 spawn $X api-check --staged
@@ -481,13 +483,15 @@ spawn $X unsafe-audit --staged
 spawn $X vocab --staged
 spawn $X permit --diff
 gather
+if rendered=$($X regions $regions); then
+if ! computed check $regions >/dev/null 2>&1; then
 step $X clippy --staged
 step $X test --staged
 spawn $X witness --staged
 spawn $X crosscheck --staged
 gather
 ```
-<!-- /computed in=9c4b64b30f954cb5620e1990fca59102d6f6c824e0836e44f816196cd4a90740 out=955ee8dba11ced026fcb20897dd8fb40eb06a1d57db9774251b75f4ec020ea2e -->
+<!-- /computed in=881bb3baf244f0f8d0c2f7479dfdefb61bdcfb1addb0d013d818594297000520 out=797e27d8f534c9856c14a7fd09e8f80088cbcb865a0f6192dbcefc04fffae727 -->
 
 Pre-push: `xtask done`. Both hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
 
