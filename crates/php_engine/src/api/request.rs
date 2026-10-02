@@ -919,6 +919,29 @@ impl Stream {
             .and_then(|stream| stream.orig_path().map(<[u8]>::to_vec))
     }
 
+    /// `stream->orig_path = estrdup(path)` over a stream an extension
+    /// made ([`Request::new_stream`]), which no path opened:
+    /// `php_stream_zip_open` names an entry's stream by the entry, and
+    /// `stream_get_meta_data` answers it under `uri`. Nothing for a closed
+    /// stream.
+    ///
+    /// ```php
+    /// $f = 'orig-path-witness.zip';
+    /// $z = new ZipArchive; $z->open($f, ZipArchive::CREATE); $z->addFromString('dir/a.txt', 'abc'); $z->close();
+    /// $z->open($f); $s = $z->getStream('dir/a.txt');
+    /// var_dump(stream_get_meta_data($s)['uri'], fread($s, 3));
+    /// fclose($s); $z->close(); unlink($f);
+    /// ```
+    /// ```expect
+    /// string(9) "dir/a.txt"
+    /// string(3) "abc"
+    /// ```
+    pub fn set_orig_path(self, req: &mut Request, path: &[u8]) -> Result<(), Thrown> {
+        req.stream_op(self, |req, s| s.set_orig_path(req, path))
+            .transpose()
+            .map(|_| ())
+    }
+
     /// `stream->flags |= PHP_STREAM_FLAG_NO_FCLOSE`: an object keeps the
     /// stream, and `fclose()` over its resource refuses it with php's
     /// warning; the object's own close is not refused.

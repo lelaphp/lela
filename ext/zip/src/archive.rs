@@ -1,0 +1,1451 @@
+//! libzip's archive re-derived (`zipint.h`'s `zip_t`, `zip_entry_t` and
+//! `zip_dirent_t`): the entries as the file had them and as the program
+//! changed them, the changes held until `close` writes them, each call
+//! failing with libzip's code where libzip's fails. The central directory
+//! is read here, every entry's data through the zip crate.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
+
+use crate::dostime::{DosTime, TORRENTZIP, Zone};
+use crate::error::{Done, Er, Failed, Status};
+use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
+
+// `zip_open` flags.
+pub(crate) const CREATE: u32 = 1;
+pub(crate) const EXCL: u32 = 2;
+pub(crate) const CHECKCONS: u32 = 4;
+pub(crate) const TRUNCATE: u32 = 8;
+pub(crate) const RDONLY: u32 = 16;
+// `zip_flags_t`.
+pub(crate) const FL_NOCASE: u32 = 1;
+pub(crate) const FL_NODIR: u32 = 2;
+pub(crate) const FL_COMPRESSED: u32 = 4;
+pub(crate) const FL_UNCHANGED: u32 = 8;
+pub(crate) const FL_ENCRYPTED: u32 = 32;
+pub(crate) const FL_OVERWRITE: u32 = 8192;
+// Archive flags.
+pub(crate) const AFL_RDONLY: u32 = 2;
+pub(crate) const AFL_IS_TORRENTZIP: u32 = 4;
+pub(crate) const AFL_WANT_TORRENTZIP: u32 = 8;
+pub(crate) const AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: u32 = 16;
+// Compression methods.
+pub(crate) const CM_DEFAULT: i32 = -1;
+pub(crate) const CM_REPLACED_DEFAULT: i32 = -2;
+pub(crate) const CM_DEFLATE: i32 = 8;
+pub(crate) const CM_BZIP2: i32 = 12;
+pub(crate) const CM_LZMA: i32 = 14;
+pub(crate) const CM_ZSTD: i32 = 93;
+// Encryption methods.
+pub(crate) const EM_NONE: u16 = 0;
+pub(crate) const EM_TRAD_PKWARE: u16 = 1;
+pub(crate) const EM_AES_128: u16 = 0x0101;
+pub(crate) const EM_AES_192: u16 = 0x0102;
+pub(crate) const EM_AES_256: u16 = 0x0103;
+pub(crate) const EM_UNKNOWN: u16 = 0xffff;
+// `ZIP_DIRENT_*`: what a changed entry changed.
+pub(crate) const D_COMP_METHOD: u32 = 0x01;
+pub(crate) const D_FILENAME: u32 = 0x02;
+pub(crate) const D_COMMENT: u32 = 0x04;
+pub(crate) const D_EXTRA_FIELD: u32 = 0x08;
+pub(crate) const D_ATTRIBUTES: u32 = 0x10;
+pub(crate) const D_LAST_MOD: u32 = 0x20;
+pub(crate) const D_ENCRYPTION_METHOD: u32 = 0x40;
+pub(crate) const D_PASSWORD: u32 = 0x80;
+/// `ZIP_OPSYS_DEFAULT`, `ZIP_OPSYS_UNIX`.
+pub(crate) const OPSYS_DEFAULT: u8 = 3;
+/// `ZIP_EXT_ATTRIB_DEFAULT`.
+pub(crate) const EXT_ATTRIB_DEFAULT: u32 = 0o100_666 << 16;
+/// `ZIP_EXT_ATTRIB_DEFAULT_DIR`.
+pub(crate) const EXT_ATTRIB_DEFAULT_DIR: u32 = 0o40_777 << 16;
+/// The general purpose bits: encrypted, `PK\x07\x08` record after the data, strong
+/// encryption and UTF-8.
+pub(crate) const GPBF_ENCRYPTED: u16 = 0x0001;
+pub(crate) const GPBF_DATA_DESCRIPTOR: u16 = 0x0008;
+const GPBF_STRONG_ENCRYPTION: u16 = 0x0040;
+pub(crate) const GPBF_ENCODING_UTF_8: u16 = 0x0800;
+
+/// `ZIP_CM_IS_DEFAULT`.
+pub(crate) fn is_default(method: i32) -> bool {
+    method == CM_DEFAULT || method == CM_REPLACED_DEFAULT
+}
+
+/// `ZIP_CM_ACTUAL`.
+pub(crate) fn actual(method: i32) -> u16 {
+    if is_default(method) {
+        8
+    } else {
+        u16::try_from(method & 0xffff).unwrap_or(0)
+    }
+}
+
+/// `zip_compression_method_supported`: the methods this build writes
+/// and reads, the oracle's libzip's set.
+pub(crate) fn compression_supported(method: i64) -> bool {
+    matches!(method, -1 | 0 | 8 | 12 | 14 | 93 | 95)
+}
+
+/// `zip_encryption_method_supported`.
+pub(crate) fn encryption_supported(method: i64) -> bool {
+    matches!(method, 0 | 1 | 0x0101..=0x0103)
+}
+
+/// `zip_dirent_t`: one central directory record, as read or as changed.
+#[derive(Clone, Debug)]
+pub(crate) struct Dirent {
+    pub(crate) changed: u32,
+    pub(crate) crc_valid: bool,
+    pub(crate) version_madeby: u16,
+    pub(crate) version_needed: u16,
+    pub(crate) bitflags: u16,
+    pub(crate) comp_method: i32,
+    pub(crate) last_mod: DosTime,
+    /// `last_mod_mtime`, where `zip_file_set_mtime` gave it.
+    pub(crate) mtime: Option<i64>,
+    pub(crate) crc: u32,
+    pub(crate) comp_size: u64,
+    pub(crate) uncomp_size: u64,
+    pub(crate) filename: Option<ZStr>,
+    /// The extra fields of the local header, libzip's own taken out;
+    /// `None` until read.
+    pub(crate) extra_local: Option<Vec<u8>>,
+    pub(crate) extra_central: Vec<u8>,
+    pub(crate) comment: Option<ZStr>,
+    pub(crate) disk_number: u32,
+    pub(crate) int_attrib: u16,
+    pub(crate) ext_attrib: u32,
+    pub(crate) offset: u64,
+    pub(crate) compression_level: u32,
+    pub(crate) encryption_method: u16,
+    pub(crate) password: Option<Vec<u8>>,
+}
+
+impl Default for Dirent {
+    /// `_zip_dirent_init`.
+    fn default() -> Dirent {
+        Dirent {
+            changed: 0,
+            crc_valid: true,
+            version_madeby: 63 | (u16::from(OPSYS_DEFAULT) << 8),
+            version_needed: 10,
+            bitflags: 0,
+            comp_method: CM_DEFAULT,
+            last_mod: DosTime::default(),
+            mtime: None,
+            crc: 0,
+            comp_size: 0,
+            uncomp_size: 0,
+            filename: None,
+            extra_local: Some(Vec::new()),
+            extra_central: Vec::new(),
+            comment: None,
+            disk_number: 0,
+            int_attrib: 0,
+            ext_attrib: EXT_ATTRIB_DEFAULT,
+            offset: 0,
+            compression_level: 0,
+            encryption_method: EM_NONE,
+            password: None,
+        }
+    }
+}
+
+/// `_zip_dirent_clone`: a copy with nothing marked changed.
+fn clone_of(orig: Option<&Dirent>) -> Dirent {
+    let mut de = orig.cloned().unwrap_or_default();
+    de.changed = 0;
+    de
+}
+
+/// What new data an entry is given, `zip_source_t` for the sources php
+/// makes: a string, or a file read at `close`.
+#[derive(Debug)]
+pub(crate) enum Source {
+    Buffer {
+        data: Vec<u8>,
+        mtime: i64,
+    },
+    File {
+        path: PathBuf,
+        /// The file `ZipArchive::FL_OPEN_FILE_NOW` opened.
+        file: Option<File>,
+        start: u64,
+        len: u64,
+        mtime: i64,
+        mode: u32,
+    },
+}
+
+impl Source {
+    /// `zip_source_buffer`, made now.
+    pub(crate) fn buffer(data: Vec<u8>) -> Source {
+        Source::Buffer { data, mtime: now() }
+    }
+
+    /// `zip_source_file` and `zip_source_filep`: the file stated now, the
+    /// window held to its size; `None` for a file that is gone, which
+    /// libzip refuses without an error.
+    pub(crate) fn file(
+        path: PathBuf,
+        file: Option<File>,
+        start: u64,
+        len: i64,
+    ) -> Result<Option<Source>, Er> {
+        use std::os::unix::fs::MetadataExt;
+        let length = u64::try_from(len).unwrap_or(0);
+        if start > i64::MAX as u64 || start.checked_add(length).is_none() {
+            return Err(Er::Inval);
+        }
+        let meta = match &file {
+            Some(f) => f.metadata(),
+            None => std::fs::metadata(&path),
+        };
+        let Ok(meta) = meta else {
+            return Ok(None);
+        };
+        let mut length = length;
+        if meta.is_file() {
+            if start + length > meta.len() {
+                return Err(Er::Inval);
+            }
+            if length == 0 {
+                length = meta.len() - start;
+            }
+        }
+        Ok(Some(Source::File {
+            path,
+            file,
+            start,
+            len: length,
+            mtime: meta.mtime(),
+            mode: meta.mode(),
+        }))
+    }
+
+    /// The source's `ZIP_SOURCE_STAT`.
+    pub(crate) fn stat(&self) -> Stat {
+        match self {
+            Source::Buffer { data, mtime } => Stat {
+                size: data.len() as u64,
+                comp_size: data.len() as u64,
+                mtime: *mtime,
+                ..Stat::default()
+            },
+            Source::File { len, mtime, .. } => Stat {
+                size: *len,
+                mtime: *mtime,
+                ..Stat::default()
+            },
+        }
+    }
+
+    /// `ZIP_SOURCE_GET_FILE_ATTRIBUTES`: a file's host and permissions, the
+    /// read-only bit where the owner may not write.
+    pub(crate) fn attributes(&self) -> Option<(u8, u32)> {
+        match self {
+            Source::Buffer { .. } => None,
+            Source::File { mode, .. } => Some((3, (mode << 16) | u32::from(mode & 0o200 == 0))),
+        }
+    }
+
+    /// Every byte of the source.
+    pub(crate) fn read_all(&mut self) -> Result<Vec<u8>, Status> {
+        match self {
+            Source::Buffer { data, .. } => Ok(data.clone()),
+            Source::File {
+                path,
+                file,
+                start,
+                len,
+                ..
+            } => {
+                let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
+                let mut opened;
+                let f = if let Some(f) = file {
+                    f
+                } else {
+                    opened = File::open(&*path).map_err(|e| Status::of(Er::Open, sys(&e)))?;
+                    &mut opened
+                };
+                f.seek(SeekFrom::Start(*start))
+                    .map_err(|e| Status::of(Er::Seek, sys(&e)))?;
+                let mut out = Vec::new();
+                f.take(*len)
+                    .read_to_end(&mut out)
+                    .map_err(|e| Status::of(Er::Read, sys(&e)))?;
+                if (out.len() as u64) < *len {
+                    return Err(Status::of(Er::DataLength, 0));
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
+/// `time(NULL)`.
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// `zip_entry_t`.
+#[derive(Debug, Default)]
+pub(crate) struct Entry {
+    pub(crate) orig: Option<Dirent>,
+    pub(crate) changes: Option<Dirent>,
+    pub(crate) source: Option<Source>,
+    pub(crate) deleted: bool,
+}
+
+impl Entry {
+    /// `ZIP_ENTRY_CHANGED`.
+    pub(crate) fn changed(&self, what: u32) -> bool {
+        self.changes.as_ref().is_some_and(|c| c.changed & what != 0)
+    }
+
+    /// `ZIP_ENTRY_HAS_CHANGES`.
+    pub(crate) fn has_changes(&self) -> bool {
+        self.source.is_some() || self.deleted || self.changed(u32::MAX)
+    }
+}
+
+/// `zip_stat_t`, its fields as php's `RETURN_SB` prints them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Stat {
+    pub(crate) name: Vec<u8>,
+    pub(crate) index: u64,
+    pub(crate) crc: u32,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
+    pub(crate) comp_size: u64,
+    pub(crate) comp_method: u16,
+    pub(crate) encryption_method: u16,
+}
+
+/// An entry's data as `zip_fopen_index_encrypted` opens it: every byte
+/// read up front, what went wrong reading it kept for the read that
+/// reaches it, and whether `zip_fseek` may seek it.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    pub(crate) data: Vec<u8>,
+    pub(crate) fault: Option<Status>,
+    pub(crate) seekable: bool,
+}
+
+/// The file the archive was read from, and the zip crate's reader over
+/// it with each entry's index there by its local header's offset.
+pub(crate) struct Data {
+    pub(crate) zip: zip::ZipArchive<File>,
+    pub(crate) by_offset: HashMap<u64, usize>,
+    pub(crate) file: File,
+    pub(crate) mode: u32,
+}
+
+/// `zip_t`.
+pub(crate) struct Archive {
+    pub(crate) path: PathBuf,
+    pub(crate) open_flags: u32,
+    pub(crate) error: Status,
+    pub(crate) flags: u32,
+    pub(crate) ch_flags: u32,
+    pub(crate) default_password: Option<Vec<u8>>,
+    pub(crate) comment_orig: Option<ZStr>,
+    pub(crate) comment_changes: Option<ZStr>,
+    pub(crate) comment_changed: bool,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) data: Option<Data>,
+    pub(crate) zone: Zone,
+    pub(crate) progress: Option<f64>,
+    pub(crate) cancel: bool,
+}
+
+impl Archive {
+    /// `_zip_allocate_new`.
+    fn new(path: PathBuf, flags: u32) -> Archive {
+        let rdonly = if flags & RDONLY != 0 { AFL_RDONLY } else { 0 };
+        Archive {
+            path,
+            open_flags: flags,
+            error: Status::default(),
+            flags: rdonly,
+            ch_flags: rdonly,
+            default_password: None,
+            comment_orig: None,
+            comment_changes: None,
+            comment_changed: false,
+            entries: Vec::new(),
+            data: None,
+            zone: Zone::local(),
+            progress: None,
+            cancel: false,
+        }
+    }
+
+    /// `zip_open`: the archive at `path` under `flags`, or the code and
+    /// `errno` it failed with.
+    pub(crate) fn open(path: PathBuf, flags: u32) -> Result<Archive, Status> {
+        use std::os::unix::fs::PermissionsExt;
+        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
+        if flags & (RDONLY | TRUNCATE) == RDONLY | TRUNCATE {
+            return Err(Status::of(Er::Rdonly, 0));
+        }
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if flags & CREATE == 0 {
+                    return Err(Status::of(Er::Noent, 0));
+                }
+                return Ok(Archive::new(path, flags));
+            }
+            Err(e) => return Err(Status::of(Er::Read, sys(&e))),
+        };
+        if !meta.is_file() {
+            return Err(Status::of(Er::Opnotsupp, 0));
+        }
+        if flags & EXCL != 0 {
+            return Err(Status::of(Er::Exists, 0));
+        }
+        let file = File::open(&path).map_err(|e| Status::of(Er::Open, sys(&e)))?;
+        let mut za = Archive::new(path, flags);
+        if flags & TRUNCATE != 0 {
+            return Ok(za);
+        }
+        za.read_cdir(file, meta.len(), meta.permissions().mode())?;
+        Ok(za)
+    }
+
+    /// `_zip_open` past the stat: the central directory through the zip
+    /// crate, each record read again here for what libzip keeps of it.
+    fn read_cdir(&mut self, mut file: File, len: u64, mode: u32) -> Result<(), Status> {
+        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
+        let reader = file
+            .try_clone()
+            .map_err(|e| Status::of(Er::Open, sys(&e)))?;
+        let zip = zip::ZipArchive::new(reader).map_err(|e| match e {
+            zip::result::ZipError::Io(e) => Status::of(Er::Read, sys(&e)),
+            zip::result::ZipError::InvalidArchive(m) if !m.contains("EOCD") && len >= 22 => {
+                Status::of(Er::Incons, 0)
+            }
+            zip::result::ZipError::UnsupportedArchive(_) => Status::of(Er::Multidisk, 0),
+            _ => {
+                let mut head = [0u8; 4];
+                let truncated = file.read_exact(&mut head).is_ok() && head == *b"PK\x03\x04";
+                Status::of(
+                    if truncated {
+                        Er::TruncatedZip
+                    } else {
+                        Er::Nozip
+                    },
+                    0,
+                )
+            }
+        })?;
+        let base = zip.offset();
+        let start = zip.central_directory_start();
+        let comment = zip.comment().to_vec();
+        let mut cdir = Vec::new();
+        file.seek(SeekFrom::Start(start))
+            .and_then(|_| {
+                file.by_ref()
+                    .take(len.saturating_sub(start))
+                    .read_to_end(&mut cdir)
+            })
+            .map_err(|e| Status::of(Er::Read, sys(&e)))?;
+        let mut at = 0usize;
+        while cdir.get(at..at + 4) == Some(b"PK\x01\x02") {
+            let (de, used) = parse_central(&cdir[at..], base).ok_or(Status::of(Er::Incons, 0))?;
+            self.entries.push(Entry {
+                orig: Some(de),
+                ..Entry::default()
+            });
+            at += used;
+        }
+        let cdir_bytes = &cdir[..at];
+        if is_torrentzip(&comment, cdir_bytes) {
+            self.flags |= AFL_IS_TORRENTZIP;
+        } else if let Ok(c) = ZStr::new(&comment, 0) {
+            self.comment_orig = c;
+        }
+        self.ch_flags = self.flags;
+        let mut zip = zip;
+        let mut by_offset = HashMap::new();
+        for i in 0..zip.len() {
+            if let Ok(f) = zip.by_index_raw(i) {
+                by_offset.insert(f.header_start(), i);
+            }
+        }
+        if self.open_flags & CHECKCONS != 0 {
+            self.check_names()?;
+        }
+        self.data = Some(Data {
+            zip,
+            by_offset,
+            file,
+            mode,
+        });
+        if self.open_flags & CHECKCONS != 0 {
+            for i in 0..self.entries.len() {
+                self.local_header(i)
+                    .map_err(|()| Status::of(Er::Incons, 0))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `_zip_hash_add` under `ZIP_CHECKCONS`: a name twice is
+    /// `ZIP_ER_EXISTS`.
+    fn check_names(&self) -> Result<(), Status> {
+        let mut seen = std::collections::HashSet::new();
+        for e in &self.entries {
+            let name =
+                strings::get(e.orig.as_ref().and_then(|d| d.filename.as_ref()), 0).into_owned();
+            if !seen.insert(name) {
+                return Err(Status::of(Er::Exists, 0));
+            }
+        }
+        Ok(())
+    }
+
+    /// `zip_get_num_entries(za, 0)`.
+    pub(crate) fn num_entries(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn fail<T>(&mut self, er: Er) -> Done<T> {
+        self.error.set(er, 0);
+        Err(Failed)
+    }
+
+    /// `ZIP_IS_RDONLY`.
+    fn rdonly(&self) -> bool {
+        self.ch_flags & AFL_RDONLY != 0
+    }
+
+    /// `ZIP_WANT_TORRENTZIP`.
+    pub(crate) fn want_torrentzip(&self) -> bool {
+        self.ch_flags & AFL_WANT_TORRENTZIP != 0
+    }
+
+    /// The checks every setter makes first: read-only, then torrentzip.
+    fn writable(&mut self, torrentzip_matters: bool) -> Done {
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        if torrentzip_matters && self.want_torrentzip() {
+            return self.fail(Er::NotAllowed);
+        }
+        Ok(())
+    }
+
+    /// `_zip_get_dirent`, its error the code it would set.
+    pub(crate) fn dirent(&self, idx: usize, flags: u32) -> Result<&Dirent, Er> {
+        let e = self.entries.get(idx).ok_or(Er::Inval)?;
+        match &e.changes {
+            Some(c) if flags & FL_UNCHANGED == 0 => Ok(c),
+            _ => {
+                let orig = e.orig.as_ref().ok_or(Er::Inval)?;
+                if e.deleted && flags & FL_UNCHANGED == 0 {
+                    return Err(Er::Deleted);
+                }
+                Ok(orig)
+            }
+        }
+    }
+
+    /// `_zip_get_name` without setting an error.
+    fn name_of(&self, idx: usize, flags: u32) -> Result<Vec<u8>, Er> {
+        let de = self.dirent(idx, flags)?;
+        Ok(strings::get(de.filename.as_ref(), flags).into_owned())
+    }
+
+    /// `zip_get_name`.
+    pub(crate) fn get_name(&mut self, idx: usize, flags: u32) -> Done<Vec<u8>> {
+        match self.name_of(idx, flags) {
+            Ok(name) => Ok(name),
+            Err(er) => self.fail(er),
+        }
+    }
+
+    /// `_zip_name_locate`, its error the code it would set.
+    fn locate(&self, fname: &[u8], flags: u32) -> Result<usize, Er> {
+        if fname.len() > 0xffff {
+            return Err(Er::Inval);
+        }
+        let converted;
+        let fname = if flags & (FL_ENC_UTF_8 | FL_ENC_RAW) == 0 && !fname.is_empty() {
+            let s = ZStr::new(fname, flags).map_err(|()| Er::Inval)?;
+            converted = strings::get(s.as_ref(), 0).into_owned();
+            converted.as_slice()
+        } else {
+            fname
+        };
+        let linear = flags & (FL_NOCASE | FL_NODIR | FL_ENC_RAW | FL_ENC_STRICT) != 0;
+        for i in 0..self.entries.len() {
+            let name_flags = if linear { flags } else { flags & FL_UNCHANGED };
+            let Ok(name) = self.name_of(i, name_flags) else {
+                continue;
+            };
+            if !linear && flags & FL_UNCHANGED == 0 && self.entries[i].deleted {
+                continue;
+            }
+            let name = if flags & FL_NODIR != 0 {
+                match name.iter().rposition(|b| *b == b'/') {
+                    Some(at) => name[at + 1..].to_vec(),
+                    None => name,
+                }
+            } else {
+                name
+            };
+            let same = if flags & FL_NOCASE != 0 {
+                name.eq_ignore_ascii_case(fname)
+            } else {
+                name == fname
+            };
+            if same {
+                return Ok(i);
+            }
+        }
+        Err(Er::Noent)
+    }
+
+    /// `zip_name_locate`, which sets `ZIP_ER_NOENT` where nothing matches.
+    pub(crate) fn name_locate(&mut self, fname: &[u8], flags: u32) -> Done<usize> {
+        match self.locate(fname, flags) {
+            Ok(i) => Ok(i),
+            Err(er) => self.fail(er),
+        }
+    }
+
+    /// `zip_stat_index`.
+    pub(crate) fn stat_index(&mut self, idx: usize, flags: u32) -> Done<Stat> {
+        let Ok(de) = self.dirent(idx, flags) else {
+            let er = self.dirent(idx, flags).err().unwrap_or(Er::Inval);
+            return self.fail(er);
+        };
+        let de = de.clone();
+        let name = self.get_name(idx, flags)?;
+        let entry = &self.entries[idx];
+        let mut st = if flags & FL_UNCHANGED == 0
+            && let Some(source) = &entry.source
+        {
+            let mut st = source.stat();
+            if !is_default(de.comp_method) {
+                st.comp_method = u16::try_from(de.comp_method & 0xffff).unwrap_or(0);
+                if st.comp_method == 0 {
+                    st.comp_size = st.size;
+                }
+            }
+            if entry.changed(D_LAST_MOD) {
+                st.mtime = self.mtime_of(&de);
+            }
+            st
+        } else {
+            Stat {
+                crc: de.crc,
+                size: de.uncomp_size,
+                mtime: self.mtime_of(&de),
+                comp_size: de.comp_size,
+                comp_method: u16::try_from(de.comp_method & 0xffff).unwrap_or(0),
+                encryption_method: de.encryption_method,
+                ..Stat::default()
+            }
+        };
+        if self.want_torrentzip() && flags & FL_UNCHANGED == 0 {
+            st.comp_method = 8;
+            st.mtime = self.zone.d2u(TORRENTZIP);
+        }
+        st.index = idx as u64;
+        st.name = name;
+        Ok(st)
+    }
+
+    /// `zip_dirent_get_last_mod_mtime`.
+    fn mtime_of(&self, de: &Dirent) -> i64 {
+        de.mtime.unwrap_or_else(|| self.zone.d2u(de.last_mod))
+    }
+
+    /// `_zip_set_name`.
+    fn set_name(&mut self, idx: usize, name: &[u8], flags: u32) -> Done {
+        if idx >= self.entries.len() {
+            return self.fail(Er::Inval);
+        }
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        let s = if name.is_empty() {
+            None
+        } else {
+            match ZStr::new(name, flags) {
+                Ok(s) => s.map(|s| {
+                    if flags & (FL_ENC_UTF_8 | strings::FL_ENC_CP437) == 0 {
+                        s.promoted()
+                    } else {
+                        s
+                    }
+                }),
+                Err(()) => return self.fail(Er::Inval),
+            }
+        };
+        match self.locate(name, 0) {
+            Ok(i) if i != idx => return self.fail(Er::Exists),
+            Ok(_) => return Ok(()),
+            Err(_) => {}
+        }
+        let e = &mut self.entries[idx];
+        let same_as_orig = e
+            .orig
+            .as_ref()
+            .is_some_and(|o| o.filename.as_ref().map(|f| &f.raw) == s.as_ref().map(|f| &f.raw));
+        if same_as_orig {
+            if let Some(c) = &mut e.changes
+                && c.changed & D_FILENAME != 0
+            {
+                c.changed &= !D_FILENAME;
+                if c.changed == 0 {
+                    e.changes = None;
+                } else {
+                    c.filename = e.orig.as_ref().and_then(|o| o.filename.clone());
+                }
+            }
+        } else {
+            let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+            c.changed |= D_FILENAME;
+            c.filename = s;
+        }
+        Ok(())
+    }
+
+    /// `_zip_file_replace`: `idx` given new data, or with `None` a new
+    /// entry, or the one named `name` under `ZIP_FL_OVERWRITE`.
+    pub(crate) fn file_replace(
+        &mut self,
+        idx: Option<usize>,
+        name: Option<&[u8]>,
+        source: Source,
+        flags: u32,
+    ) -> Done<usize> {
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        let before = self.entries.len();
+        let idx = if let Some(idx) = idx {
+            idx
+        } else {
+            let found = match name {
+                Some(name) if flags & FL_OVERWRITE != 0 => self.locate(name, flags).ok(),
+                _ => None,
+            };
+            found.unwrap_or_else(|| {
+                self.entries.push(Entry::default());
+                before
+            })
+        };
+        if let Some(name) = name
+            && self.set_name(idx, name, flags).is_err()
+        {
+            self.entries.truncate(before.max(idx.min(before)));
+            return Err(Failed);
+        }
+        self.prepare_extra_change(idx)?;
+        let e = &mut self.entries[idx];
+        if let Some(c) = &mut e.changes {
+            c.extra_central.clear();
+            c.extra_local = Some(Vec::new());
+        }
+        unchange_data(e);
+        if e.orig.is_some() && !e.changed(D_COMP_METHOD) {
+            let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+            c.comp_method = CM_REPLACED_DEFAULT;
+            c.changed |= D_COMP_METHOD;
+        }
+        e.source = Some(source);
+        Ok(idx)
+    }
+
+    /// `_zip_file_extra_field_prepare_for_change`.
+    fn prepare_extra_change(&mut self, idx: usize) -> Done {
+        if self.entries[idx].changed(D_EXTRA_FIELD) {
+            return Ok(());
+        }
+        if self.entries[idx].orig.is_some() && self.read_local_ef(idx).is_err() {
+            return Err(Failed);
+        }
+        let e = &mut self.entries[idx];
+        let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+        c.changed |= D_EXTRA_FIELD;
+        Ok(())
+    }
+
+    /// `zip_dir_add`.
+    pub(crate) fn dir_add(&mut self, name: &[u8], flags: u32) -> Done<usize> {
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        let mut name = name.to_vec();
+        if name.last() != Some(&b'/') {
+            name.push(b'/');
+        }
+        let idx = self.file_replace(None, Some(&name), Source::buffer(Vec::new()), flags)?;
+        if self
+            .set_external_attributes(idx, OPSYS_DEFAULT, EXT_ATTRIB_DEFAULT_DIR)
+            .is_err()
+        {
+            let _ = self.delete(idx);
+            return Err(Failed);
+        }
+        Ok(idx)
+    }
+
+    /// `zip_delete`.
+    pub(crate) fn delete(&mut self, idx: usize) -> Done {
+        if idx >= self.entries.len() {
+            return self.fail(Er::Inval);
+        }
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        self.get_name(idx, 0)?;
+        self.unchange_one(idx, true)?;
+        self.entries[idx].deleted = true;
+        Ok(())
+    }
+
+    /// `_zip_unchange`.
+    pub(crate) fn unchange_one(&mut self, idx: usize, allow_duplicates: bool) -> Done {
+        if idx >= self.entries.len() {
+            return self.fail(Er::Inval);
+        }
+        let e = &self.entries[idx];
+        let renamed = e.changed(D_FILENAME);
+        if !allow_duplicates && (renamed || e.deleted) && e.orig.is_some() {
+            let orig_name = self.get_name(idx, FL_UNCHANGED)?;
+            if let Ok(i) = self.locate(&orig_name, 0)
+                && i != idx
+            {
+                return self.fail(Er::Exists);
+            }
+        }
+        let e = &mut self.entries[idx];
+        e.changes = None;
+        unchange_data(e);
+        Ok(())
+    }
+
+    /// `zip_unchange_all`.
+    pub(crate) fn unchange_all(&mut self) -> Done {
+        for i in 0..self.entries.len() {
+            self.unchange_one(i, true)?;
+        }
+        self.unchange_archive();
+        Ok(())
+    }
+
+    /// `zip_unchange_archive`.
+    pub(crate) fn unchange_archive(&mut self) {
+        self.comment_changes = None;
+        self.comment_changed = false;
+        self.ch_flags = self.flags;
+    }
+
+    /// `zip_file_rename`.
+    pub(crate) fn rename(&mut self, idx: usize, name: &[u8]) -> Done {
+        if idx >= self.entries.len() || name.len() > 0xffff {
+            return self.fail(Er::Inval);
+        }
+        if self.rdonly() {
+            return self.fail(Er::Rdonly);
+        }
+        let old = self.get_name(idx, 0)?;
+        if (name.last() == Some(&b'/')) != (old.last() == Some(&b'/')) {
+            return self.fail(Er::Inval);
+        }
+        self.set_name(idx, name, 0)
+    }
+
+    /// `zip_set_archive_comment`.
+    pub(crate) fn set_archive_comment(&mut self, comment: &[u8]) -> Done {
+        self.writable(true)?;
+        let s = match ZStr::new(comment, 0) {
+            Ok(Some(s)) if s.guess() == Enc::Cp437 => return self.fail(Er::Inval),
+            Ok(s) => s,
+            Err(()) => return self.fail(Er::Inval),
+        };
+        if self.comment_orig.as_ref().map(|c| &c.raw) == s.as_ref().map(|c| &c.raw) {
+            self.comment_changes = None;
+            self.comment_changed = false;
+        } else {
+            self.comment_changes = s;
+            self.comment_changed = true;
+        }
+        Ok(())
+    }
+
+    /// `zip_get_archive_comment`.
+    pub(crate) fn archive_comment(&self, flags: u32) -> Vec<u8> {
+        let c = if flags & FL_UNCHANGED != 0 || self.comment_changes.is_none() {
+            self.comment_orig.as_ref()
+        } else {
+            self.comment_changes.as_ref()
+        };
+        strings::get(c, flags).into_owned()
+    }
+
+    /// `zip_file_set_comment`.
+    pub(crate) fn set_file_comment(&mut self, idx: usize, comment: &[u8], flags: u32) -> Done {
+        if self.dirent(idx, 0).is_err() {
+            return Err(Failed);
+        }
+        self.writable(true)?;
+        let s = match ZStr::new(comment, flags) {
+            Ok(s) if flags & (FL_ENC_UTF_8 | strings::FL_ENC_CP437) == 0 => s.map(ZStr::promoted),
+            Ok(s) => s,
+            Err(()) => return self.fail(Er::Inval),
+        };
+        let e = &mut self.entries[idx];
+        if let Some(c) = &mut e.changes {
+            c.comment = None;
+            c.changed &= !D_COMMENT;
+        }
+        let changed = match e.orig.as_ref().and_then(|o| o.comment.as_ref()) {
+            Some(orig) => s.as_ref().map(|s| &s.raw) != Some(&orig.raw),
+            None => s.is_some(),
+        };
+        if changed {
+            let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+            c.comment = s;
+            c.changed |= D_COMMENT;
+        } else if e.changes.as_ref().is_some_and(|c| c.changed == 0) {
+            e.changes = None;
+        }
+        Ok(())
+    }
+
+    /// `zip_file_get_comment`, `None` where `_zip_get_dirent` fails.
+    pub(crate) fn file_comment(&self, idx: usize, flags: u32) -> Option<Vec<u8>> {
+        let de = self.dirent(idx, flags).ok()?;
+        Some(strings::get(de.comment.as_ref(), flags).into_owned())
+    }
+
+    /// `zip_file_set_external_attributes`.
+    pub(crate) fn set_external_attributes(
+        &mut self,
+        idx: usize,
+        opsys: u8,
+        attributes: u32,
+    ) -> Done {
+        if self.dirent(idx, 0).is_err() {
+            return Err(Failed);
+        }
+        self.writable(true)?;
+        let e = &mut self.entries[idx];
+        let unchanged_opsys = e
+            .orig
+            .as_ref()
+            .map_or(OPSYS_DEFAULT, |o| (o.version_madeby >> 8) as u8);
+        let unchanged_attributes = e.orig.as_ref().map_or(EXT_ATTRIB_DEFAULT, |o| o.ext_attrib);
+        if opsys != unchanged_opsys || attributes != unchanged_attributes {
+            let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+            c.version_madeby = (u16::from(opsys) << 8) | (c.version_madeby & 0xff);
+            c.ext_attrib = attributes;
+            c.changed |= D_ATTRIBUTES;
+        } else if let Some(c) = &mut e.changes {
+            c.changed &= !D_ATTRIBUTES;
+            if c.changed == 0 {
+                e.changes = None;
+            } else {
+                c.version_madeby = (u16::from(unchanged_opsys) << 8) | (c.version_madeby & 0xff);
+                c.ext_attrib = unchanged_attributes;
+            }
+        }
+        Ok(())
+    }
+
+    /// `zip_file_get_external_attributes`.
+    pub(crate) fn external_attributes(&self, idx: usize, flags: u32) -> Option<(u8, u32)> {
+        let de = self.dirent(idx, flags).ok()?;
+        Some(((de.version_madeby >> 8) as u8, de.ext_attrib))
+    }
+
+    /// `zip_set_file_compression`.
+    pub(crate) fn set_compression(&mut self, idx: usize, method: i32, level: u32) -> Done {
+        if idx >= self.entries.len() {
+            return self.fail(Er::Inval);
+        }
+        self.writable(true)?;
+        if !compression_supported(i64::from(method)) {
+            return self.fail(Er::Compnotsupp);
+        }
+        let e = &mut self.entries[idx];
+        let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+        c.comp_method = method;
+        c.compression_level = level & 0xffff;
+        c.changed |= D_COMP_METHOD;
+        Ok(())
+    }
+
+    /// `zip_file_set_encryption`.
+    pub(crate) fn set_encryption(
+        &mut self,
+        idx: usize,
+        method: u16,
+        password: Option<&[u8]>,
+    ) -> Done {
+        if idx >= self.entries.len() {
+            return self.fail(Er::Inval);
+        }
+        self.writable(true)?;
+        if method != EM_NONE && !encryption_supported(i64::from(method)) {
+            return self.fail(Er::Encrnotsupp);
+        }
+        let e = &mut self.entries[idx];
+        let orig_password = e.orig.as_ref().and_then(|o| o.password.clone());
+        let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+        c.encryption_method = method;
+        c.changed |= D_ENCRYPTION_METHOD;
+        if let Some(password) = password {
+            c.password = Some(password.to_vec());
+            c.changed |= D_PASSWORD;
+        } else if c.changed & D_PASSWORD != 0 {
+            c.password = orig_password;
+            c.changed &= !D_PASSWORD;
+        }
+        Ok(())
+    }
+
+    /// `zip_file_set_mtime`.
+    pub(crate) fn set_mtime(&mut self, idx: usize, mtime: i64) -> Done {
+        let dos = self.zone.u2d(mtime);
+        if self.dirent(idx, 0).is_err() {
+            return Err(Failed);
+        }
+        self.writable(true)?;
+        let e = &self.entries[idx];
+        if e.orig
+            .as_ref()
+            .is_some_and(|o| o.encryption_method == EM_TRAD_PKWARE)
+            && !e.changed(D_ENCRYPTION_METHOD)
+            && e.source.is_none()
+        {
+            return self.fail(Er::Opnotsupp);
+        }
+        let e = &mut self.entries[idx];
+        let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
+        c.last_mod = dos;
+        c.mtime = Some(mtime);
+        c.changed |= D_LAST_MOD;
+        Ok(())
+    }
+
+    /// `zip_set_archive_flag`.
+    pub(crate) fn set_archive_flag(&mut self, flag: u32, value: bool) -> Done {
+        if flag == AFL_IS_TORRENTZIP {
+            return self.fail(Er::Inval);
+        }
+        let new_flags = if value {
+            self.ch_flags | flag
+        } else {
+            self.ch_flags & !flag
+        };
+        if new_flags == self.ch_flags {
+            return Ok(());
+        }
+        if self.flags & AFL_RDONLY != 0 {
+            return self.fail(Er::Rdonly);
+        }
+        if flag & AFL_RDONLY != 0 && value && self.ch_flags & AFL_RDONLY == 0 && self.changed().0 {
+            return self.fail(Er::Changed);
+        }
+        self.ch_flags = new_flags;
+        Ok(())
+    }
+
+    /// `zip_get_archive_flag`.
+    pub(crate) fn archive_flag(&self, flag: u32, flags: u32) -> bool {
+        let fl = if flags & FL_UNCHANGED != 0 {
+            self.flags
+        } else {
+            self.ch_flags
+        };
+        fl & flag != 0
+    }
+
+    /// `_zip_changed`: whether anything changed, and how many entries
+    /// survive.
+    pub(crate) fn changed(&self) -> (bool, usize) {
+        let mut changed =
+            self.comment_changed || (self.want_torrentzip() && self.flags & AFL_IS_TORRENTZIP == 0);
+        let mut survivors = 0;
+        for e in &self.entries {
+            changed |= e.has_changes();
+            survivors += usize::from(!e.deleted);
+        }
+        (changed, survivors)
+    }
+
+    /// The local header of entry `idx`: where its data starts, and its
+    /// extra fields with libzip's own taken out.
+    pub(crate) fn local_header(&mut self, idx: usize) -> Result<(u64, Vec<u8>), ()> {
+        let offset = self.entries[idx].orig.as_ref().ok_or(())?.offset;
+        let data = self.data.as_mut().ok_or(())?;
+        let mut head = [0u8; 30];
+        data.file.seek(SeekFrom::Start(offset)).map_err(|_| ())?;
+        data.file.read_exact(&mut head).map_err(|_| ())?;
+        if head[..4] != *b"PK\x03\x04" {
+            return Err(());
+        }
+        let nlen = u64::from(u16::from_le_bytes([head[26], head[27]]));
+        let elen = usize::from(u16::from_le_bytes([head[28], head[29]]));
+        let mut extra = vec![0u8; elen];
+        data.file
+            .seek(SeekFrom::Current(i64::try_from(nlen).unwrap_or(0)))
+            .map_err(|_| ())?;
+        data.file.read_exact(&mut extra).map_err(|_| ())?;
+        let elen = elen as u64;
+        Ok((offset + 30 + nlen + elen, strip_internal(&extra)))
+    }
+
+    /// `_zip_read_local_ef`.
+    pub(crate) fn read_local_ef(&mut self, idx: usize) -> Done {
+        if self.entries[idx]
+            .orig
+            .as_ref()
+            .is_none_or(|o| o.extra_local.is_some())
+        {
+            return Ok(());
+        }
+        let Ok((_, extra)) = self.local_header(idx) else {
+            return self.fail(Er::Incons);
+        };
+        if let Some(o) = &mut self.entries[idx].orig {
+            o.extra_local = Some(extra.clone());
+        }
+        if let Some(c) = &mut self.entries[idx].changes
+            && c.changed & D_EXTRA_FIELD == 0
+        {
+            c.extra_local = Some(extra);
+        }
+        Ok(())
+    }
+
+    /// The raw data of an unchanged entry, as stored.
+    pub(crate) fn raw_data(&mut self, idx: usize) -> Result<Vec<u8>, Status> {
+        let size = self.entries[idx].orig.as_ref().map_or(0, |o| o.comp_size);
+        let (start, _) = self
+            .local_header(idx)
+            .map_err(|()| Status::of(Er::Incons, 0))?;
+        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
+        data.file
+            .seek(SeekFrom::Start(start))
+            .map_err(|e| Status::of(Er::Seek, sys(&e)))?;
+        let mut out = Vec::new();
+        data.file
+            .by_ref()
+            .take(size)
+            .read_to_end(&mut out)
+            .map_err(|e| Status::of(Er::Read, sys(&e)))?;
+        if (out.len() as u64) < size {
+            return Err(Status::of(Er::Eof, 0));
+        }
+        Ok(out)
+    }
+
+    /// An unchanged entry's data, decrypted with `password` and
+    /// decompressed, through the zip crate; ZSTD, which the crate reads
+    /// only through a C library, through ruzstd.
+    pub(crate) fn decoded(
+        &mut self,
+        idx: usize,
+        password: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, Option<Status>), Status> {
+        let orig = self.entries[idx]
+            .orig
+            .clone()
+            .ok_or(Status::of(Er::Internal, 0))?;
+        if !matches!(
+            orig.encryption_method,
+            EM_NONE | EM_TRAD_PKWARE | EM_AES_128 | EM_AES_192 | EM_AES_256
+        ) {
+            return Err(Status::of(Er::Encrnotsupp, 0));
+        }
+        if orig.comp_method == CM_ZSTD {
+            if orig.encryption_method != EM_NONE {
+                return Err(Status::of(Er::Compnotsupp, 0));
+            }
+            let raw = self.raw_data(idx)?;
+            return Ok(crate::codec::unzstd(&raw));
+        }
+        if !matches!(orig.comp_method, 0 | 8 | 12 | 14 | 95) {
+            return Err(Status::of(Er::Compnotsupp, 0));
+        }
+        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        let zi = *data
+            .by_offset
+            .get(&orig.offset)
+            .ok_or(Status::of(Er::Incons, 0))?;
+        let opts = zip::ZipReadOptions::new()
+            .password(password)
+            .ignore_crc32(true);
+        let mut file = data
+            .zip
+            .by_index_with_options(zi, opts)
+            .map_err(|e| match e {
+                zip::result::ZipError::InvalidPassword => Status::of(Er::Wrongpasswd, 0),
+                zip::result::ZipError::UnsupportedArchive(
+                    zip::result::ZipError::PASSWORD_REQUIRED,
+                ) => Status::of(Er::Nopasswd, 0),
+                zip::result::ZipError::Io(e) => Status::of(Er::Read, e.raw_os_error().unwrap_or(0)),
+                _ => Status::of(Er::Compnotsupp, 0),
+            })?;
+        let mut out = Vec::new();
+        let fault = file
+            .read_to_end(&mut out)
+            .err()
+            .map(|_| Status::of(Er::CompressedData, 0));
+        Ok((out, fault))
+    }
+
+    /// `zip_fopen_index_encrypted`: entry `idx`'s data, decrypted with
+    /// `password` or the archive's, decompressed, its CRC checked.
+    pub(crate) fn fopen(
+        &mut self,
+        idx: usize,
+        flags: u32,
+        password: Option<&[u8]>,
+    ) -> Done<Opened> {
+        let password = password.filter(|p| !p.is_empty()).map(<[u8]>::to_vec);
+        let Some(entry) = self.entries.get(idx) else {
+            return self.fail(Er::Inval);
+        };
+        let flags = if flags & FL_ENCRYPTED != 0 {
+            flags | FL_COMPRESSED
+        } else {
+            flags
+        };
+        let changed_data = flags & FL_UNCHANGED == 0 && entry.source.is_some();
+        if flags & FL_UNCHANGED == 0
+            && (if changed_data {
+                flags & FL_COMPRESSED != 0
+            } else {
+                entry.deleted
+            })
+        {
+            return self.fail(Er::Changed);
+        }
+        let stat_flags = if changed_data {
+            flags
+        } else {
+            flags | FL_UNCHANGED
+        };
+        let Ok(st) = self.stat_index(idx, stat_flags) else {
+            return self.fail(Er::Internal);
+        };
+        let encrypted = st.encryption_method != EM_NONE;
+        let needs_decrypt = flags & FL_ENCRYPTED == 0 && encrypted;
+        let password = password.or_else(|| self.default_password.clone());
+        if needs_decrypt && password.is_none() {
+            return self.fail(Er::Nopasswd);
+        }
+        if !changed_data && flags & FL_COMPRESSED != 0 && needs_decrypt {
+            return self.fail(Er::Encrnotsupp);
+        }
+        let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
+        let read = if changed_data {
+            let read = self.entries[idx].source.as_mut().map(Source::read_all);
+            read.unwrap_or(Err(Status::of(Er::Internal, 0)))
+                .map(|d| (d, None, true))
+        } else if flags & FL_COMPRESSED != 0 {
+            self.raw_data(idx).map(|d| (d, None, true))
+        } else {
+            let password = if needs_decrypt {
+                password.as_deref()
+            } else {
+                None
+            };
+            self.decoded(idx, password).map(|(data, fault)| {
+                let crc = fault.is_none() && crc_valid && crc32fast::hash(&data) != st.crc;
+                let fault = if crc {
+                    Some(Status::of(Er::Crc, 0))
+                } else {
+                    fault
+                };
+                (data, fault, st.comp_method == 0 && !encrypted)
+            })
+        };
+        match read {
+            Ok((data, fault, seekable)) => Ok(Opened {
+                data,
+                fault,
+                seekable,
+            }),
+            Err(status) => {
+                self.error = status;
+                Err(Failed)
+            }
+        }
+    }
+}
+
+/// `_zip_unchange_data`.
+fn unchange_data(e: &mut Entry) {
+    e.source = None;
+    if let Some(c) = &mut e.changes
+        && c.changed & D_COMP_METHOD != 0
+        && c.comp_method == CM_REPLACED_DEFAULT
+    {
+        c.changed &= !D_COMP_METHOD;
+        if c.changed == 0 {
+            e.changes = None;
+        }
+    }
+    e.deleted = false;
+}
+
+fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn u64_at(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// The extra fields libzip makes itself and drops on reading: Zip64,
+/// the two UTF-8 fields and `WinZip` AES (`_zip_ef_remove_internal`).
+fn strip_internal(ef: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let (Some(id), Some(len)) = (u16_at(ef, at), u16_at(ef, at + 2)) {
+        let end = at + 4 + usize::from(len);
+        let Some(field) = ef.get(at..end) else {
+            break;
+        };
+        if !matches!(id, 0x0001 | 0x7075 | 0x6375 | 0x9901) {
+            out.extend_from_slice(field);
+        }
+        at = end;
+    }
+    out
+}
+
+/// The data of extra field `id`.
+fn find_ef(ef: &[u8], id: u16) -> Option<&[u8]> {
+    let mut at = 0;
+    while let (Some(fid), Some(len)) = (u16_at(ef, at), u16_at(ef, at + 2)) {
+        let data = ef.get(at + 4..at + 4 + usize::from(len))?;
+        if fid == id {
+            return Some(data);
+        }
+        at += 4 + usize::from(len);
+    }
+    None
+}
+
+/// `_zip_dirent_read` of a central record: the dirent, and the bytes it
+/// took.
+fn parse_central(b: &[u8], base: u64) -> Option<(Dirent, usize)> {
+    let nlen = usize::from(u16_at(b, 28)?);
+    let elen = usize::from(u16_at(b, 30)?);
+    let clen = usize::from(u16_at(b, 32)?);
+    let name = b.get(46..46 + nlen)?;
+    let ef = b.get(46 + nlen..46 + nlen + elen)?;
+    let comment = b.get(46 + nlen + elen..46 + nlen + elen + clen)?;
+    let bitflags = u16_at(b, 8)?;
+    let mut de = Dirent {
+        version_madeby: u16_at(b, 4)?,
+        version_needed: u16_at(b, 6)?,
+        bitflags,
+        comp_method: i32::from(u16_at(b, 10)?),
+        last_mod: DosTime {
+            time: u16_at(b, 12)?,
+            date: u16_at(b, 14)?,
+        },
+        crc: u32_at(b, 16)?,
+        comp_size: u64::from(u32_at(b, 20)?),
+        uncomp_size: u64::from(u32_at(b, 24)?),
+        disk_number: u32::from(u16_at(b, 34)?),
+        int_attrib: u16_at(b, 36)?,
+        ext_attrib: u32_at(b, 38)?,
+        offset: u64::from(u32_at(b, 42)?),
+        extra_local: None,
+        extra_central: strip_internal(ef),
+        ..Dirent::default()
+    };
+    let utf8 = bitflags & GPBF_ENCODING_UTF_8 != 0;
+    let known = if utf8 { Some(Enc::Utf8Known) } else { None };
+    de.filename = (!name.is_empty()).then(|| ZStr {
+        raw: name.to_vec(),
+        known,
+    });
+    de.comment = (!comment.is_empty()).then(|| ZStr {
+        raw: comment.to_vec(),
+        known,
+    });
+    for (id, target) in [(0x7075u16, &mut de.filename), (0x6375, &mut de.comment)] {
+        if let Some(f) = find_ef(ef, id)
+            && f.first() == Some(&1)
+            && let Some(s) = target.as_ref()
+            && u32_at(f, 1) == Some(crc32fast::hash(&s.raw))
+        {
+            *target = Some(ZStr {
+                raw: f[5..].to_vec(),
+                known: Some(Enc::Utf8Known),
+            });
+        }
+    }
+    if let Some(z64) = find_ef(ef, 0x0001) {
+        let mut at = 0;
+        if de.uncomp_size == 0xffff_ffff {
+            de.uncomp_size = u64_at(z64, at)?;
+            at += 8;
+        }
+        if de.comp_size == 0xffff_ffff {
+            de.comp_size = u64_at(z64, at)?;
+            at += 8;
+        }
+        if de.offset == 0xffff_ffff {
+            de.offset = u64_at(z64, at)?;
+        }
+    }
+    de.offset += base;
+    if de.comp_method == 99 {
+        let aes = find_ef(ef, 0x9901)?;
+        if u16_at(aes, 0)? == 2 {
+            de.crc_valid = false;
+        }
+        de.encryption_method = 0x0100 | u16::from(*aes.get(4)?);
+        de.comp_method = i32::from(u16_at(aes, 5)?);
+    } else if bitflags & GPBF_ENCRYPTED != 0 {
+        de.encryption_method = if bitflags & GPBF_STRONG_ENCRYPTION != 0 {
+            EM_UNKNOWN
+        } else {
+            EM_TRAD_PKWARE
+        };
+    }
+    Some((de, 46 + nlen + elen + clen))
+}
+
+/// `zip_check_torrentzip`: the comment `TORRENTZIPPED-` and the central
+/// directory's CRC-32 in upper-case hex.
+fn is_torrentzip(comment: &[u8], cdir: &[u8]) -> bool {
+    let Some(hex) = comment.strip_prefix(b"TORRENTZIPPED-") else {
+        return false;
+    };
+    if hex.len() != 8
+        || !hex
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
+    {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(hex) else {
+        return false;
+    };
+    u32::from_str_radix(text, 16).is_ok_and(|crc| crc == crc32fast::hash(cdir))
+}

@@ -57,9 +57,10 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── xml
 ├── xmlreader
 ├── xmlwriter
+├── zip
 └── zlib
 ```
-<!-- /computed in=ed86da7cfcc8a738e5ac468fcb8c9f9043480a769103d9d4d40a962d8de6c261 out=ba4d7005d32dc13dac780192dbf962fd53f3b6869645922ead1eec98b1faf83d -->
+<!-- /computed in=9ea78d28c1990d607a4368d4f70442096d1b5f4b2a418a7cdc98a43a7b52a56e out=c982993af197cbd881e9e36affc5dc97afdd4d92e787419ebda205fdcee8f6c8 -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

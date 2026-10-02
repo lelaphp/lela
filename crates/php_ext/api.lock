@@ -691,6 +691,7 @@ request::Stream::set_closer
 request::Stream::set_ctx
 request::Stream::set_notifier
 request::Stream::set_option
+request::Stream::set_orig_path
 request::Stream::set_wrapper_data
 request::Stream::shutdown
 request::Stream::socket_name
