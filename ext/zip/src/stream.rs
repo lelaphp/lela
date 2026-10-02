@@ -7,17 +7,14 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
 
 use crate::archive::{Archive, CREATE};
-use crate::error::Status;
 use crate::object::{basedir_refuses, expand};
+use crate::read::Reader;
 
-/// `struct php_zip_stream_data_t`: the entry's bytes, the cursor, what
-/// reading past the last byte meets, and the stat `php_zip_ops_stat`
-/// answers for a stream the wrapper opened.
+/// `struct php_zip_stream_data_t`: the opened entry, read as the
+/// stream is read, and the stat `php_zip_ops_stat` answers for a stream
+/// the wrapper opened.
 struct ZipStream {
-    data: Vec<u8>,
-    cursor: usize,
-    fault: Option<Status>,
-    seekable: bool,
+    zf: Reader,
     stat: Option<(u64, i64, bool)>,
     /// The archive a `getStream` stream reads, by its number.
     archive: Option<u64>,
@@ -33,38 +30,97 @@ impl StreamOps for ZipStream {
         Some(buf.len())
     }
 
-    /// `php_zip_ops_read`: `eof` at a short read, and php's warning for
-    /// the error the end of the data meets.
+    /// `php_zip_ops_read`: `zip_fread`, `eof` at a short read, and php's
+    /// warning for the error a read meets.
+    ///
+    /// A large entry is read a buffer at a time, and a CRC error is met
+    /// at the read that reaches the end:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('read-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('big', str_repeat(hash('sha256', 'x'), 204800)); $z->close();
+    /// $z->open('read-witness.zip'); $m = memory_get_usage();
+    /// $f = $z->getStream('big'); $s = fread($f, 100);
+    /// var_dump(strlen($s), memory_get_usage() - $m < 100000, strlen(stream_get_contents($f)));
+    /// fclose($f); $z->close();
+    /// $b = file_get_contents('read-witness.zip'); $c = strpos($b, "PK\x01\x02") + 16;
+    /// $b[$c] = chr(ord($b[$c]) ^ 1); file_put_contents('read-witness.zip', $b);
+    /// $z->open('read-witness.zip'); $f = $z->getStream('big');
+    /// var_dump(strlen(fread($f, 8192)), feof($f));
+    /// $n = 0; while (!feof($f)) { $n += strlen((string) fread($f, 8192)); } var_dump($n);
+    /// var_dump(strlen($z->getFromName('big', 10)), strlen($z->getFromName('big')));
+    /// $z->close(); unlink('read-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(100)
+    /// bool(true)
+    /// int(13107100)
+    /// int(8192)
+    /// bool(false)
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    /// int(13099008)
+    /// int(10)
+    /// int(13107200)
+    /// ```
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         if self
             .archive
             .is_some_and(|id| req.state::<crate::State>().closed.contains(&id))
         {
-            self.data.clear();
-            self.fault = Some(Status::of(crate::error::Er::Zipclosed, 0));
+            self.zf = Reader::closed();
         }
-        let rest = self.data.get(self.cursor..).unwrap_or_default();
-        if rest.is_empty()
-            && let Some(fault) = self.fault.take()
-        {
-            *eof = true;
-            let text = fault.text(req);
-            docref(req, Level::Warning, &format!("Zip stream error: {text}"));
-            return None;
+        match self.zf.read(buf.len()) {
+            Ok(data) => {
+                let n = data.len();
+                buf[..n].copy_from_slice(&data);
+                if n == 0 || n < buf.len() {
+                    *eof = true;
+                }
+                Some(n)
+            }
+            Err(status) => {
+                *eof = true;
+                let text = status.text(req);
+                docref(req, Level::Warning, &format!("Zip stream error: {text}"));
+                None
+            }
         }
-        let n = rest.len().min(buf.len());
-        buf[..n].copy_from_slice(&rest[..n]);
-        if n == 0 || n < buf.len() {
-            *eof = true;
-        }
-        self.cursor += n;
-        Some(n)
     }
 
     fn close(&mut self, _req: &mut Request) {}
 
     /// `php_zip_ops_seek`: `zip_fseek` within the entry, the position
-    /// `zip_ftell` then reads.
+    /// `zip_ftell` then reads, `-1` once a seek has failed, after which
+    /// every read fails too.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('seek-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('s', 'abcdefghij'); $z->setCompressionName('s', ZipArchive::CM_STORE);
+    /// $z->addFromString('d', str_repeat('hello world ', 1000)); $z->close(); $z->open('seek-witness.zip');
+    /// $f = $z->getStream('s');
+    /// var_dump(fseek($f, 4), fread($f, 3), ftell($f), fseek($f, -2, SEEK_END), fread($f, 5), fseek($f, 1), fread($f, 2));
+    /// var_dump(fseek($f, 50), ftell($f), fread($f, 3), fseek($f, 0));
+    /// $f = $z->getStream('d'); var_dump(@fseek($f, 4), strlen(fread($f, 100)));
+    /// $z->close(); unlink('seek-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// string(3) "efg"
+    /// int(7)
+    /// int(0)
+    /// string(2) "ij"
+    /// int(0)
+    /// string(2) "bc"
+    ///
+    /// Warning: fread(): Zip stream error: Invalid argument in %s on line %d
+    /// int(-1)
+    /// bool(false)
+    /// bool(false)
+    /// int(-1)
+    /// int(-1)
+    /// int(100)
+    /// ```
     fn seek(
         &mut self,
         _req: &mut Request,
@@ -72,25 +128,21 @@ impl StreamOps for ZipStream {
         whence: Option<Whence>,
         position: &mut i64,
     ) -> Option<bool> {
-        if !self.seekable {
+        if !self.zf.seekable() {
             return None;
         }
-        let size = i64::try_from(self.data.len()).unwrap_or(i64::MAX);
-        let base = match whence {
-            Some(Whence::Cur) => i64::try_from(self.cursor).unwrap_or(i64::MAX),
-            Some(Whence::End) => size,
+        let whence = match whence {
+            Some(Whence::Cur) => 1,
+            Some(Whence::End) => 2,
             _ => 0,
         };
-        let target = base.checked_add(offset).filter(|t| (0..=size).contains(t));
-        if let Some(t) = target {
-            self.cursor = usize::try_from(t).unwrap_or(0);
-        }
-        *position = i64::try_from(self.cursor).unwrap_or(0);
-        Some(target.is_some())
+        let done = self.zf.seek(offset, whence);
+        *position = self.zf.tell();
+        Some(done)
     }
 
     fn seekable(&self) -> bool {
-        self.seekable
+        self.zf.seekable()
     }
 
     /// `php_zip_ops_stat`: the entry's size and time, a file or, by a
@@ -121,7 +173,7 @@ impl StreamOps for ZipStream {
 /// where `$mode` does not start with `r`.
 pub(crate) fn open_entry(
     req: &mut Request,
-    opened: crate::archive::Opened,
+    zf: Reader,
     orig: Option<(&[u8], u64)>,
     mode: &[u8],
     stat: Option<(u64, i64, bool)>,
@@ -130,10 +182,7 @@ pub(crate) fn open_entry(
         return Ok(None);
     }
     let kind = ZipStream {
-        data: opened.data,
-        cursor: 0,
-        fault: opened.fault,
-        seekable: opened.seekable,
+        zf,
         stat,
         archive: orig.map(|(_, id)| id),
     };
@@ -198,11 +247,11 @@ fn open(
     let Ok(st) = archive.stat_index(idx, 0) else {
         return Ok(None);
     };
-    let Ok(opened) = archive.fopen(idx, 0, None) else {
+    let Ok(zf) = archive.fopen(idx, 0, None) else {
         return Ok(None);
     };
     let dir = path.last() == Some(&b'/');
-    open_entry(req, opened, None, mode, Some((st.size, st.mtime, dir)))
+    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)))
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

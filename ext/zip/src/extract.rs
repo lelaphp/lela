@@ -146,18 +146,20 @@ fn extract_file(
     else {
         return Ok(false);
     };
-    let Ok(opened) = archive.fopen(idx, 0, None) else {
+    let Ok(mut zf) = archive.fopen(idx, 0, None) else {
         return Ok(false);
     };
     let Some(stream) = req.open_stream(&full, b"w+b", false)? else {
         return Ok(false);
     };
-    for chunk in opened.data.chunks(8192) {
-        stream.write(req, chunk);
+    while let Ok(chunk) = zf.read(8192)
+        && !chunk.is_empty()
+    {
+        stream.write(req, &chunk);
     }
     req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))))?;
     stream.free(req);
-    Ok(opened.fault.is_none())
+    Ok(zf.ok())
 }
 
 /// `ZipArchive::extractTo`'s body past `ZIP_FROM_OBJECT`.

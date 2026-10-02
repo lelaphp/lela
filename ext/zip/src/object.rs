@@ -2528,18 +2528,13 @@ fn get_from(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, len: i64, flags:
         return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
     let len = if len < 1 { st.size } else { c::u64(len) };
-    let Ok(opened) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
+    let Ok(mut zf) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
         return Ok(OrFalse::False);
     };
-    let take = usize::try_from(len)
-        .unwrap_or(usize::MAX)
-        .min(opened.data.len());
-    let data = if opened.fault.is_some() && opened.data.len() < take {
-        &[][..]
-    } else {
-        &opened.data[..take]
-    };
-    Ok(OrFalse::Value(PhpString::new(req, data)?))
+    let data = zf
+        .read(usize::try_from(len).unwrap_or(usize::MAX))
+        .unwrap_or_default();
+    Ok(OrFalse::Value(PhpString::new(req, &data)?))
 }
 
 /// `php_zip_get_stream`: the entry as a read stream, its name the
@@ -2553,11 +2548,11 @@ fn get_stream(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, flags: i64) ->
     let Some(st) = locate(za, which, flags) else {
         return Ok(Untyped(OrFalse::False));
     };
-    let Ok(opened) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
+    let Ok(zf) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
         return Ok(Untyped(OrFalse::False));
     };
     let id = this.object().native::<Intern>(req).map_or(0, |i| i.id);
-    let stream = crate::stream::open_entry(req, opened, Some((&st.name, id)), b"rb", None)?;
+    let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None)?;
     Ok(Untyped(
         stream.map_or(OrFalse::False, |s| OrFalse::Value(s.resource())),
     ))

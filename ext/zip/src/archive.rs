@@ -4,13 +4,13 @@
 //! failing with libzip's code where libzip's fails. The central directory
 //! is read here, every entry's data through the zip crate.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
 use crate::error::{Done, Er, Failed, Status};
+use crate::read::{Layers, Reader, Window};
 use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
 
 // `zip_open` flags.
@@ -37,7 +37,6 @@ pub(crate) const CM_REPLACED_DEFAULT: i32 = -2;
 pub(crate) const CM_DEFLATE: i32 = 8;
 pub(crate) const CM_BZIP2: i32 = 12;
 pub(crate) const CM_LZMA: i32 = 14;
-pub(crate) const CM_ZSTD: i32 = 93;
 // Encryption methods.
 pub(crate) const EM_NONE: u16 = 0;
 pub(crate) const EM_TRAD_PKWARE: u16 = 1;
@@ -250,6 +249,29 @@ impl Source {
         }
     }
 
+    /// The source opened for reading (`ZIP_SOURCE_OPEN`): a string's
+    /// bytes, or a window on the file read as it is read.
+    pub(crate) fn reader(&self) -> Result<Reader, Status> {
+        match self {
+            Source::Buffer { data, .. } => Ok(Reader::bytes(data.clone())),
+            Source::File {
+                path,
+                file,
+                start,
+                len,
+                ..
+            } => {
+                let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
+                let f = match file {
+                    Some(f) => f.try_clone(),
+                    None => File::open(path),
+                }
+                .map_err(|e| Status::of(Er::Open, sys(&e)))?;
+                Ok(Reader::window(Window::new(f, *start, *len, false), None))
+            }
+        }
+    }
+
     /// Every byte of the source.
     pub(crate) fn read_all(&mut self) -> Result<Vec<u8>, Status> {
         match self {
@@ -325,21 +347,8 @@ pub(crate) struct Stat {
     pub(crate) encryption_method: u16,
 }
 
-/// An entry's data as `zip_fopen_index_encrypted` opens it: every byte
-/// read up front, what went wrong reading it kept for the read that
-/// reaches it, and whether `zip_fseek` may seek it.
-#[derive(Debug)]
-pub(crate) struct Opened {
-    pub(crate) data: Vec<u8>,
-    pub(crate) fault: Option<Status>,
-    pub(crate) seekable: bool,
-}
-
-/// The file the archive was read from, and the zip crate's reader over
-/// it with each entry's index there by its local header's offset.
+/// The file the archive was read from, and its permissions.
 pub(crate) struct Data {
-    pub(crate) zip: zip::ZipArchive<File>,
-    pub(crate) by_offset: HashMap<u64, usize>,
     pub(crate) file: File,
     pub(crate) mode: u32,
 }
@@ -470,22 +479,10 @@ impl Archive {
             self.comment_orig = c;
         }
         self.ch_flags = self.flags;
-        let mut zip = zip;
-        let mut by_offset = HashMap::new();
-        for i in 0..zip.len() {
-            if let Ok(f) = zip.by_index_raw(i) {
-                by_offset.insert(f.header_start(), i);
-            }
-        }
         if self.open_flags & CHECKCONS != 0 {
             self.check_names()?;
         }
-        self.data = Some(Data {
-            zip,
-            by_offset,
-            file,
-            mode,
-        });
+        self.data = Some(Data { file, mode });
         if self.open_flags & CHECKCONS != 0 {
             for i in 0..self.entries.len() {
                 self.local_header(i)
@@ -1153,10 +1150,73 @@ impl Archive {
         Ok(out)
     }
 
+    /// The window on the archive's file that entry `idx`'s data is, past
+    /// its local header (`_zip_file_get_offset`): the header's name and
+    /// extra field lengths are read and its signature is not, and a file
+    /// too short for them is `ZIP_ER_EOF`.
+    fn window(&self, idx: usize) -> Result<Window, Status> {
+        use std::os::unix::fs::FileExt;
+        let orig = self.entries[idx]
+            .orig
+            .as_ref()
+            .ok_or(Status::of(Er::Internal, 0))?;
+        let (offset, size) = (orig.offset, orig.comp_size);
+        let data = self.data.as_ref().ok_or(Status::of(Er::Internal, 0))?;
+        let mut lens = [0u8; 4];
+        let mut got = 0;
+        while got < 4 {
+            match data
+                .file
+                .read_at(&mut lens[got..], offset + 26 + got as u64)
+            {
+                Ok(0) => return Err(Status::of(Er::Eof, 0)),
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
+            }
+        }
+        let start = offset
+            + 30
+            + u64::from(u16::from_le_bytes([lens[0], lens[1]]))
+            + u64::from(u16::from_le_bytes([lens[2], lens[3]]));
+        let file = data
+            .file
+            .try_clone()
+            .map_err(|e| Status::of(Er::Open, e.raw_os_error().unwrap_or(0)))?;
+        Ok(Window::new(file, start, size, true))
+    }
+
+    /// An unchanged entry's data opened for reading whole: decrypted with
+    /// `password` where one is given, decompressed, its CRC checked at
+    /// the end where `stat` has one (`zip_source_zip_file_create`).
+    fn decoder(
+        &mut self,
+        idx: usize,
+        flags: u32,
+        password: Option<&[u8]>,
+        st: &Stat,
+        check_crc: bool,
+    ) -> Result<Reader, Status> {
+        let de = self.dirent(idx, flags).map_err(|e| Status::of(e, 0))?;
+        let dostime = de.last_mod.time;
+        let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
+        let layers = Layers {
+            method: st.comp_method,
+            encryption: st.encryption_method,
+            password,
+            size: st.size,
+            comp_size: st.comp_size,
+            crc: (check_crc && crc_valid).then_some(st.crc),
+            dostime,
+            check: self.open_flags & CHECKCONS != 0,
+        };
+        let window = self.window(idx)?;
+        Reader::decoded(window, &layers)
+    }
+
     /// An unchanged entry's data, decrypted with `password` and
-    /// decompressed, through the zip crate; ZSTD, which the crate reads
-    /// only through a C library, through ruzstd. Each of two entries
-    /// under one name reads its own data.
+    /// decompressed, and the error that stopped the read short. Each of
+    /// two entries under one name reads its own data.
     ///
     /// ```php
     /// $f = 'dup-witness.zip'; $z = new ZipArchive; $z->open($f, ZipArchive::CREATE);
@@ -1180,68 +1240,25 @@ impl Archive {
         idx: usize,
         password: Option<&[u8]>,
     ) -> Result<(Vec<u8>, Option<Status>), Status> {
-        let orig = self.entries[idx]
-            .orig
-            .clone()
-            .ok_or(Status::of(Er::Internal, 0))?;
-        if !matches!(
-            orig.encryption_method,
-            EM_NONE | EM_TRAD_PKWARE | EM_AES_128 | EM_AES_192 | EM_AES_256
-        ) {
-            return Err(Status::of(Er::Encrnotsupp, 0));
+        let st = self
+            .stat_index(idx, FL_UNCHANGED)
+            .map_err(|Failed| Status::of(Er::Internal, 0))?;
+        if st.encryption_method != EM_NONE && password.is_none() {
+            return Err(Status::of(Er::Nopasswd, 0));
         }
-        if orig.comp_method == CM_ZSTD {
-            if orig.encryption_method != EM_NONE {
-                return Err(Status::of(Er::Compnotsupp, 0));
-            }
-            let raw = self.raw_data(idx)?;
-            return Ok(crate::codec::unzstd(&raw));
-        }
-        if !matches!(orig.comp_method, 0 | 8 | 12 | 14 | 95) {
-            return Err(Status::of(Er::Compnotsupp, 0));
-        }
-        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
-        let fail = |e| match e {
-            zip::result::ZipError::InvalidPassword => Status::of(Er::Wrongpasswd, 0),
-            zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED) => {
-                Status::of(Er::Nopasswd, 0)
-            }
-            zip::result::ZipError::Io(e) => Status::of(Er::Read, e.raw_os_error().unwrap_or(0)),
-            _ => Status::of(Er::Compnotsupp, 0),
-        };
-        let opts = zip::ZipReadOptions::new()
-            .password(password)
-            .ignore_crc32(true);
-        // A name the central directory holds twice is one row of the zip
-        // crate's map by name; the others are read from their own local
-        // header, as libzip reads every entry by its position.
-        let mut file = if let Some(zi) = data.by_offset.get(&orig.offset) {
-            data.zip.by_index_with_options(*zi, opts).map_err(fail)?
-        } else {
-            data.file
-                .seek(SeekFrom::Start(orig.offset))
-                .map_err(|e| Status::of(Er::Seek, e.raw_os_error().unwrap_or(0)))?;
-            let size = orig.comp_size;
-            zip::read::read_zipfile_from_stream_with_compressed_size(&mut data.file, size)
-                .map_err(fail)?
-                .ok_or(Status::of(Er::Incons, 0))?
-        };
-        let mut out = Vec::new();
-        let fault = file
-            .read_to_end(&mut out)
-            .err()
-            .map(|_| Status::of(Er::CompressedData, 0));
-        Ok((out, fault))
+        let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false)?;
+        Ok(reader.read_to_end())
     }
 
-    /// `zip_fopen_index_encrypted`: entry `idx`'s data, decrypted with
-    /// `password` or the archive's, decompressed, its CRC checked.
+    /// `zip_fopen_index_encrypted`: entry `idx` opened for reading,
+    /// decrypted with `password` or the archive's, decompressed as it is
+    /// read, its CRC checked at the end.
     pub(crate) fn fopen(
         &mut self,
         idx: usize,
         flags: u32,
         password: Option<&[u8]>,
-    ) -> Done<Opened> {
+    ) -> Done<Reader> {
         let password = password.filter(|p| !p.is_empty()).map(<[u8]>::to_vec);
         let Some(entry) = self.entries.get(idx) else {
             return self.fail(Er::Inval);
@@ -1279,39 +1296,24 @@ impl Archive {
             return self.fail(Er::Encrnotsupp);
         }
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
-        let read = if changed_data {
-            let read = self.entries[idx].source.as_mut().map(Source::read_all);
-            read.unwrap_or(Err(Status::of(Er::Internal, 0)))
-                .map(|d| (d, None, true))
+        let opened = if changed_data {
+            let opened = self.entries[idx].source.as_ref().map(Source::reader);
+            opened.unwrap_or(Err(Status::of(Er::Internal, 0)))
         } else if flags & FL_COMPRESSED != 0 {
-            self.raw_data(idx).map(|d| (d, None, true))
+            let crc = (st.comp_method == 0 && crc_valid).then_some((st.crc, st.size));
+            self.window(idx).map(|w| Reader::window(w, crc))
         } else {
             let password = if needs_decrypt {
                 password.as_deref()
             } else {
                 None
             };
-            self.decoded(idx, password).map(|(data, fault)| {
-                let crc = fault.is_none() && crc_valid && crc32fast::hash(&data) != st.crc;
-                let fault = if crc {
-                    Some(Status::of(Er::Crc, 0))
-                } else {
-                    fault
-                };
-                (data, fault, st.comp_method == 0 && !encrypted)
-            })
+            self.decoder(idx, flags, password, &st, true)
         };
-        match read {
-            Ok((data, fault, seekable)) => Ok(Opened {
-                data,
-                fault,
-                seekable,
-            }),
-            Err(status) => {
-                self.error = status;
-                Err(Failed)
-            }
-        }
+        opened.map_err(|status| {
+            self.error = status;
+            Failed
+        })
     }
 }
 

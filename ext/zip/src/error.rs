@@ -21,6 +21,8 @@ pub(crate) enum Er {
     Exists = 10,
     Open = 11,
     Tmpopen = 12,
+    Zlib = 13,
+    Memory = 14,
     Changed = 15,
     Compnotsupp = 16,
     Eof = 17,
@@ -68,8 +70,8 @@ impl Status {
     }
 
     /// `zip_error_strerror`: the sentence, then `: ` and the `errno`'s
-    /// text for a code whose kind has one. No zlib code or detail is ever
-    /// set here, so those kinds have no system half.
+    /// text, or zlib's `zError`, for a code whose kind has one. No detail
+    /// is ever set here, so that kind has no system half.
     pub(crate) fn text(self, req: &Request) -> String {
         let entry = usize::try_from(self.zip)
             .ok()
@@ -79,9 +81,24 @@ impl Status {
         };
         match kind {
             "S" => format!("{sentence}: {}", req.os_error_text(self.sys)),
-            "Z" => format!("{sentence}: "),
+            "Z" => format!("{sentence}: {}", z_error(self.sys)),
             _ => sentence.to_owned(),
         }
+    }
+}
+
+/// zlib's `zError`: the message for a zlib return code.
+fn z_error(code: i32) -> &'static str {
+    match code {
+        2 => "need dictionary",
+        1 => "stream end",
+        -1 => "file error",
+        -2 => "stream error",
+        -3 => "data error",
+        -4 => "insufficient memory",
+        -5 => "buffer error",
+        -6 => "incompatible version",
+        _ => "",
     }
 }
 
