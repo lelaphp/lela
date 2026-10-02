@@ -2658,6 +2658,11 @@ impl ReflectionClass {
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
+        // `ce->get_iterator`, which a class that is no `Traversable`
+        // may set itself, as `FFI\CData` does.
+        if req.class_own_iterator(class) {
+            return Ok(true);
+        }
         let Some(traversable) = lookup_class(req, b"Traversable")? else {
             return Ok(false);
         };

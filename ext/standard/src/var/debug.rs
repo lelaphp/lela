@@ -11,8 +11,6 @@ use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
 use php_ext::values::{HeldRow, Key, Laziness, RecursionGuard, Value, ValueRef};
 
-use super::class_name;
-
 /// `debug_zval_dump(mixed $value, mixed ...$values): void`, php's
 /// `PHP_FUNCTION(debug_zval_dump)` (`Z/ext/standard/var.c:434`): each
 /// argument dumped at the top level. The refcounts are the engine's, and
@@ -318,7 +316,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             let props = held.rows().to_vec();
             // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
             // anonymous class's name.
-            let full = class_name(req, *object);
+            let full = object.handlers(req).get_class_name(req, *object);
             let name = String::from_utf8_lossy(full.split(|b| *b == 0).next().unwrap_or_default())
                 .into_owned();
             // `php_var_dump_object_prefix`: what a lazy object is.

@@ -811,8 +811,10 @@ fn method_exists(
     let mut on = object;
     while let Some(object) = on {
         let table = req.object_handlers(object.heap());
-        if table.get_method(req, object, &lowered)?.is_some() {
-            return Ok(true);
+        // A function `get_method` made, `ZEND_ACC_CALL_VIA_TRAMPOLINE`,
+        // answers `false`, as `FFI`'s C functions do.
+        if let Some(function) = table.get_method_as(req, object, &lowered, method.as_bytes())? {
+            return Ok(!req.via_native_trampoline(function));
         }
         if req
             .call_trampoline(object.class(), method.as_bytes(), false)

@@ -55,7 +55,7 @@ pub(crate) struct CallTrampoline {
 }
 
 /// What a made function is made of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Via {
     /// `zend_get_call_trampoline_func`: the `__call` or `__callStatic`
     /// that serves a name the class has no method for.
@@ -66,7 +66,29 @@ pub(crate) enum Via {
     /// one per function a closure holds, served by the closure it is
     /// called on.
     Invoke(Function),
+    /// A native an extension's `get_method` or `get_closure` makes under
+    /// a name it learns only when a call names it, as `zend_ffi_get_func`
+    /// makes one per C function a declaration names
+    /// (`Z/ext/ffi/ffi.c:2911`): its body is the entry, which reads its
+    /// arguments off the call and its name off
+    /// [`Request::active_function_name`].
+    Native(crate::api::abi::Entry),
 }
+
+/// Two made functions are one where they are made of one function, or
+/// of one native's entry, compared by address as php compares its
+/// handler pointers.
+impl PartialEq for Via {
+    fn eq(&self, other: &Via) -> bool {
+        match (self, other) {
+            (Via::Magic(a), Via::Magic(b)) | (Via::Invoke(a), Via::Invoke(b)) => a == b,
+            (Via::Native(a), Via::Native(b)) => std::ptr::fn_addr_eq(*a, *b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Via {}
 
 impl CallTrampoline {
     /// `zend_get_closure_invoke_method` over the declaration of the
@@ -143,6 +165,45 @@ impl CallTrampoline {
         }
     }
 
+    /// The native `zend_ffi_get_func` makes (`Z/ext/ffi/ffi.c:2956-2970`):
+    /// `ZEND_ACC_CALL_VIA_TRAMPOLINE` with no scope and no `arg_info`,
+    /// every argument passed by value, named as the call was.
+    pub(crate) fn native(entry: crate::api::abi::Entry, name: &[u8]) -> Self {
+        let arguments = Parameter {
+            name: Name(b"arguments".as_slice().into()),
+            ty: None,
+            by_ref: false,
+            prefer_ref: false,
+            promoted: false,
+            variadic: true,
+            default: ParameterDefault::None,
+            attributes: Vec::new(),
+        };
+        CallTrampoline {
+            via: Via::Native(entry),
+            decl: MethodDecl {
+                function: FunctionDecl {
+                    name: Name(name.into()),
+                    parameters: vec![arguments],
+                    return_type: None,
+                    returns_by_ref: false,
+                    is_generator: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: Name(Box::new([])),
+                    line: 0,
+                    end_line: 0,
+                    frameless: Vec::new(),
+                },
+                visibility: Visibility::Public,
+                is_instance: true,
+                is_abstract: false,
+                is_final: false,
+                tentative_return: false,
+            },
+        }
+    }
+
     /// Whether this is the trampoline of `magic` under `name`.
     pub(crate) fn is(&self, magic: Function, name: &[u8]) -> bool {
         let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
@@ -154,7 +215,7 @@ impl CallTrampoline {
     pub(crate) fn magic(&self) -> Option<Function> {
         match self.via {
             Via::Magic(magic) => Some(magic),
-            Via::Invoke(_) => None,
+            Via::Invoke(_) | Via::Native(_) => None,
         }
     }
 }

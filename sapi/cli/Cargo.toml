@@ -59,9 +59,10 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `gd`, php's `--enable-gd --with-external-gd`, which the oracle is built
 # with (#1575), and
 # `sodium`, php's `--with-sodium`, which the oracle is built with (#1566),
-# `gettext`, php's `--with-gettext`, which the oracle is built with (#1568), and
-# `readline`, php's `--with-libedit`, which the oracle is built with (#1567).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline"] }
+# `gettext`, php's `--with-gettext`, which the oracle is built with (#1568),
+# `readline`, php's `--with-libedit`, which the oracle is built with (#1567), and
+# `ffi`, php's `--with-ffi`, which the oracle is built with (#1576).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline", "ffi"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `additional_functions` and the built-in server's module are
 # declared with, as an extension declares its own (ADR-0008, #1348).

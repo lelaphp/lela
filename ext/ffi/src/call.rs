@@ -1,0 +1,554 @@
+//! The call into C and back: `zend_ffi_trampoline`, which serves every
+//! C function an `FFI` object declares and every function pointer a
+//! `FFI\CData` holds, each argument passed as `zend_ffi_pass_arg` and
+//! `zend_ffi_pass_var_arg` pass it; and the callbacks
+//! `zend_ffi_create_callback` makes of a PHP callable a C function is
+//! handed, which C calls back through `zend_ffi_callback_trampoline`.
+
+use php_ext::abi::Callable;
+use php_ext::coerce::{callable_checked, to_double, to_long, to_string, truthy, value_name};
+use php_ext::raising::{Thrown, fatal};
+use php_ext::request::Request;
+use php_ext::values::{Value, ValueRef};
+
+use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, write_value};
+use crate::decls::function_symbol;
+use crate::ffi::{self, ARG_SIZE, Closure, ClosureError, Layout, Signature};
+use crate::types::{Int, Kind, Scalar, TypeId, attr};
+use crate::{State, ffi_error, slot, types};
+
+/// A callback C may call: libffi's closure over the PHP callable, kept
+/// until the request ends as php keeps `FFI_G(callbacks)`.
+pub(crate) struct Callback {
+    closure: Closure,
+    callable: Callable,
+    value: Value,
+    ty: TypeId,
+}
+
+/// `zend_ffi_trampoline` for a method of an `FFI` object: the C
+/// function its declarations name under the method's name.
+///
+/// ```php
+/// $ffi = FFI::cdef("size_t strlen(const char *s); int abs(int j);");
+/// var_dump($ffi->strlen("hello"), $ffi->abs(-7));
+/// try { $ffi->abs(); } catch (FFI\Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { $ffi->nope(); } catch (FFI\Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(5)
+/// int(7)
+/// Incorrect number of arguments for C function 'abs', expecting exactly 1 parameter
+/// Attempt to call undefined C function 'nope'
+/// ```
+pub(crate) fn trampoline(req: &mut Request) -> Result<Value, Thrown> {
+    let name = req.active_function_name();
+    let Some(this) = req.this() else {
+        return Ok(Value::null());
+    };
+    let Some((ty, addr)) = function_symbol(req, this, name.as_bytes()) else {
+        let message = format!("Attempt to call undefined C function '{name}'");
+        return Err(ffi_error(req, &message));
+    };
+    call(req, &name, ty, addr)
+}
+
+/// `zend_ffi_trampoline` for a `FFI\CData` called as a function, which
+/// `zend_ffi_cdata_get_closure` names `__invoke`.
+///
+/// ```php
+/// $ffi = FFI::cdef("int abs(int j);");
+/// $f = $ffi->abs;
+/// var_dump($f(-3));
+/// ```
+/// ```expect
+/// int(3)
+/// ```
+pub(crate) fn invoke(req: &mut Request) -> Result<Value, Thrown> {
+    let Some(this) = req.this() else {
+        return Ok(Value::null());
+    };
+    let v = view(req, this);
+    let Some(func) = func_pointee(req, v.ty) else {
+        return Err(ffi_error(req, "Attempt to call non C function pointer"));
+    };
+    let addr = ffi::read::<usize>(v.ptr);
+    call(req, "__invoke", func, addr)
+}
+
+/// The function's parameters, its return, its calling convention and
+/// whether it takes more after them.
+struct Shape {
+    args: Vec<TypeId>,
+    ret: TypeId,
+    abi: i32,
+    variadic: bool,
+}
+
+fn shape(req: &mut Request, func: TypeId) -> Option<Shape> {
+    let t = types(req).get(func);
+    let f = t.func()?;
+    Some(Shape {
+        args: f.args.clone().unwrap_or_default(),
+        ret: f.ret,
+        abi: f.abi,
+        variadic: t.attr & attr::VARIADIC != 0,
+    })
+}
+
+/// What a call's arguments are laid out in: each value's room, the
+/// strings it passes, and each argument's address and libffi type.
+struct Frame {
+    slots: Vec<[u64; 2]>,
+    strings: Vec<Vec<u8>>,
+    addrs: Vec<usize>,
+    layouts: Vec<Layout>,
+    /// A throwable an argument raised that php leaves pending while the
+    /// call still goes ahead, `zend_ffi_pass_incompatible` over a `char`.
+    pending: Option<Thrown>,
+}
+
+impl Frame {
+    fn slot(&self, n: usize) -> usize {
+        self.slots.as_ptr() as usize + n * ARG_SIZE
+    }
+
+    /// A string's bytes and a NUL, standing until the call returns, as
+    /// php passes `Z_STRVAL`.
+    fn string(&mut self, bytes: &[u8]) -> usize {
+        let mut owned = bytes.to_vec();
+        owned.push(0);
+        let addr = owned.as_ptr() as usize;
+        self.strings.push(owned);
+        addr
+    }
+}
+
+/// `zend_ffi_trampoline`: the arity held to the declaration, each
+/// argument passed, the call, and the return read back.
+fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Value, Thrown> {
+    let Some(shape) = shape(req, func) else {
+        return Err(fatal(
+            req,
+            "InternalError: a C function of no function type",
+        ));
+    };
+    let given = req.argument_count();
+    let count = shape.args.len();
+    let plural = if count == 1 { "" } else { "s" };
+    if shape.variadic && count > given {
+        let message = format!(
+            "Incorrect number of arguments for C function '{name}', expecting at least {count} parameter{plural}"
+        );
+        return Err(ffi_error(req, &message));
+    }
+    if !shape.variadic && count != given {
+        let message = format!(
+            "Incorrect number of arguments for C function '{name}', expecting exactly {count} parameter{plural}"
+        );
+        return Err(ffi_error(req, &message));
+    }
+    let mut frame = Frame {
+        slots: vec![[0; 2]; given],
+        strings: Vec::new(),
+        addrs: Vec::with_capacity(given),
+        layouts: Vec::with_capacity(given),
+        pending: None,
+    };
+    for n in 0..given {
+        let slot = frame.slot(n);
+        frame.addrs.push(slot);
+        let position = u32::try_from(n + 1).unwrap_or(u32::MAX);
+        let arg = req.argument(position).unwrap_or(Value::null()).deref();
+        match shape.args.get(n) {
+            Some(ty) => pass_arg(req, name, n, &arg, *ty, &mut frame)?,
+            None => pass_var_arg(req, name, n, &arg, &mut frame)?,
+        }
+    }
+    let Some(ret) = types(req).layout(shape.ret) else {
+        return Err(return_unsupported(req, shape.ret));
+    };
+    let fixed = shape.variadic.then_some(count);
+    let Some(mut sig) = Signature::prepare(shape.abi, &ret, &frame.layouts, fixed) else {
+        return Err(ffi_error(req, "Cannot prepare callback CIF"));
+    };
+    let ret_size = types(req).get(shape.ret).size;
+    let mut buffer = vec![0u64; ret_size.max(8).div_ceil(8)];
+    let cell = slot(req)?;
+    ffi::call(req, cell, &mut sig, addr, &frame.addrs, &mut buffer);
+    drop(frame.strings);
+    if let Some(thrown) = frame.pending {
+        return Err(thrown);
+    }
+    if matches!(types(req).get(shape.ret).kind, Kind::Void) {
+        return Ok(Value::null());
+    }
+    to_value(
+        req,
+        None,
+        buffer.as_ptr() as usize,
+        shape.ret,
+        Fetch::Read,
+        false,
+        true,
+        false,
+    )
+}
+
+/// `zend_ffi_return_unsupported`.
+fn return_unsupported(req: &mut Request, ty: TypeId) -> Thrown {
+    let message = match types(req).get(ty).kind {
+        Kind::Struct(_) => "FFI return struct/union is not implemented",
+        Kind::Array { .. } => "FFI return array is not implemented",
+        _ => "FFI internal error. Unsupported return type",
+    };
+    ffi_error(req, message)
+}
+
+/// `zend_ffi_pass_unsupported`.
+fn pass_unsupported(req: &mut Request, ty: TypeId) -> Thrown {
+    let message = match types(req).get(ty).kind {
+        Kind::Struct(_) => "FFI passing struct/union is not implemented",
+        Kind::Array { .. } => "FFI passing array is not implemented",
+        _ => "FFI internal error. Unsupported parameter type",
+    };
+    ffi_error(req, message)
+}
+
+/// `zend_ffi_pass_incompatible`.
+fn pass_incompatible(
+    req: &mut Request,
+    name: &str,
+    n: usize,
+    arg: &Value,
+    ty: TypeId,
+) -> Result<Thrown, Thrown> {
+    let at = n + 1;
+    let Some(expecting) = type_name(req, ty) else {
+        let message = format!("Passing incompatible argument {at} of C function '{name}'");
+        return Ok(ffi_error(req, &message));
+    };
+    let message = if let Some(object) = as_cdata(req, arg)? {
+        let found = view(req, object).ty;
+        match type_name(req, found) {
+            Some(found) => format!(
+                "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}', found '{found}'"
+            ),
+            None => format!(
+                "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}'"
+            ),
+        }
+    } else {
+        let given = value_name(req, arg);
+        format!(
+            "Passing incompatible argument {at} of C function '{name}', expecting '{expecting}', found PHP '{given}'"
+        )
+    };
+    Ok(ffi_error(req, &message))
+}
+
+/// `zend_ffi_pass_arg`: one argument of a declared parameter.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per kind of C type, as zend_ffi_pass_arg's switch is"
+)]
+fn pass_arg(
+    req: &mut Request,
+    name: &str,
+    n: usize,
+    arg: &Value,
+    ty: TypeId,
+    frame: &mut Frame,
+) -> Result<(), Thrown> {
+    let slot = frame.slot(n);
+    let (scalar, pointee, is_struct) = {
+        let t = types(req).get(ty);
+        (t.scalar(), t.pointee(), t.record().is_some())
+    };
+    if let Some(scalar) = scalar {
+        let layout = match scalar {
+            Scalar::Float => {
+                ffi::write(slot, to_double(req, arg)? as f32);
+                Layout::Float
+            }
+            Scalar::Double | Scalar::LongDouble => {
+                ffi::write(slot, to_double(req, arg)?);
+                Layout::Double
+            }
+            Scalar::Int(int) => {
+                let value = to_long(req, arg)?;
+                match int {
+                    Int::U8 | Int::I8 => ffi::write(slot, value as u8),
+                    Int::U16 | Int::I16 => ffi::write(slot, value as u16),
+                    Int::U32 | Int::I32 => ffi::write(slot, value as u32),
+                    Int::U64 | Int::I64 => ffi::write(slot, value),
+                }
+                match int {
+                    Int::U8 => Layout::U8,
+                    Int::I8 => Layout::I8,
+                    Int::U16 => Layout::U16,
+                    Int::I16 => Layout::I16,
+                    Int::U32 => Layout::U32,
+                    Int::I32 => Layout::I32,
+                    Int::U64 => Layout::U64,
+                    Int::I64 => Layout::I64,
+                }
+            }
+            Scalar::Bool => {
+                let truth = truthy(req, arg);
+                ffi::write(slot, u8::from(truth));
+                Layout::U8
+            }
+            Scalar::Char => {
+                let text = to_string(req, arg)?;
+                let bytes = text.as_bytes().to_vec();
+                req.release(Value::string(text));
+                ffi::write(slot, bytes.first().copied().unwrap_or(0));
+                if bytes.len() != 1 && frame.pending.is_none() {
+                    frame.pending = Some(pass_incompatible(req, name, n, arg, ty)?);
+                }
+                Layout::I8
+            }
+        };
+        frame.layouts.push(layout);
+        return Ok(());
+    }
+    if let Some(pointee) = pointee {
+        frame.layouts.push(Layout::Pointer);
+        if matches!(arg.as_ref(), ValueRef::Null) {
+            ffi::write(slot, 0usize);
+            return Ok(());
+        }
+        if let ValueRef::Str(text) = arg.as_ref()
+            && matches!(types(req).get(pointee).kind, Kind::Char | Kind::Void)
+        {
+            let bytes = text.as_bytes().to_vec();
+            let addr = frame.string(&bytes);
+            ffi::write(slot, addr);
+            return Ok(());
+        }
+        if let Some(object) = as_cdata(req, arg)? {
+            let v = view(req, object);
+            let (compatible, is_pointer) = {
+                let types = types(req);
+                (
+                    types.is_compatible(ty, v.ty),
+                    types.get(v.ty).pointee().is_some(),
+                )
+            };
+            if compatible {
+                if is_pointer {
+                    if v.ptr == 0 {
+                        return Err(ffi_error(req, "NULL pointer dereference"));
+                    }
+                    ffi::write(slot, ffi::read::<usize>(v.ptr));
+                } else {
+                    ffi::write(slot, v.ptr);
+                }
+                return Ok(());
+            }
+        } else if let Some(func) = func_pointee(req, ty) {
+            let code = create_callback(req, func, arg)?;
+            ffi::write(slot, code);
+            return Ok(());
+        }
+        return Err(pass_incompatible(req, name, n, arg, ty)?);
+    }
+    if is_struct {
+        if let Some(object) = as_cdata(req, arg)? {
+            let v = view(req, object);
+            if types(req).is_compatible(ty, v.ty) {
+                let Some(layout) = types(req).layout(ty) else {
+                    return Err(pass_unsupported(req, ty));
+                };
+                frame.layouts.push(layout);
+                if let Some(addr) = frame.addrs.get_mut(n) {
+                    *addr = v.ptr;
+                }
+                return Ok(());
+            }
+        }
+        return Err(pass_incompatible(req, name, n, arg, ty)?);
+    }
+    Err(pass_unsupported(req, ty))
+}
+
+/// `zend_ffi_pass_var_arg`: one argument past the declared ones, its C
+/// type read off its PHP type.
+fn pass_var_arg(
+    req: &mut Request,
+    name: &str,
+    n: usize,
+    arg: &Value,
+    frame: &mut Frame,
+) -> Result<(), Thrown> {
+    let slot = frame.slot(n);
+    let layout = match arg.as_ref() {
+        ValueRef::Null => {
+            ffi::write(slot, 0usize);
+            Layout::Pointer
+        }
+        ValueRef::Bool(b) => {
+            ffi::write(slot, u8::from(b));
+            Layout::U8
+        }
+        ValueRef::Int(value) => {
+            ffi::write(slot, value);
+            Layout::I64
+        }
+        ValueRef::Float(value) => {
+            ffi::write(slot, value);
+            Layout::Double
+        }
+        ValueRef::Str(text) => {
+            let bytes = text.as_bytes().to_vec();
+            let addr = frame.string(&bytes);
+            ffi::write(slot, addr);
+            Layout::Pointer
+        }
+        ValueRef::Object(_) => {
+            if let Some(object) = as_cdata(req, arg)? {
+                let ty = view(req, object).ty;
+                return pass_arg(req, name, n, arg, ty, frame);
+            }
+            return Err(ffi_error(req, "Unsupported argument type"));
+        }
+        _ => return Err(ffi_error(req, "Unsupported argument type")),
+    };
+    frame.layouts.push(layout);
+    Ok(())
+}
+
+/// `zend_ffi_create_callback`: the C function pointer a callable is
+/// made into for a parameter or a field of the function type `func`.
+///
+/// ```php
+/// $ffi = FFI::cdef("void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *));");
+/// $a = $ffi->new("int[4]");
+/// foreach ([3, 1, 4, 2] as $i => $v) { $a[$i] = $v; }
+/// $ffi->qsort($a, 4, 4, function ($x, $y) use ($ffi) {
+///     return $ffi->cast("int*", $x)[0] <=> $ffi->cast("int*", $y)[0];
+/// });
+/// foreach ($a as $v) { echo $v; }
+/// echo "\n";
+/// ```
+/// ```expect
+/// 1234
+/// ```
+pub(crate) fn create_callback(
+    req: &mut Request,
+    func: TypeId,
+    value: &Value,
+) -> Result<usize, Thrown> {
+    let Some(shape) = shape(req, func) else {
+        return Err(ffi_error(req, "Cannot prepare callback CIF"));
+    };
+    if shape.variadic {
+        return Err(ffi_error(
+            req,
+            "Variadic function closures are not supported",
+        ));
+    }
+    let callable = match callable_checked(req, value) {
+        Ok(callable) => callable,
+        Err(error) => {
+            let message = format!("Attempt to assign an invalid callback, {error}");
+            return Err(ffi_error(req, &message));
+        }
+    };
+    if shape.args.len() < callable.required(req) {
+        return Err(ffi_error(
+            req,
+            "Attempt to assign an invalid callback, insufficient number of arguments",
+        ));
+    }
+    let mut layouts = Vec::with_capacity(shape.args.len());
+    for arg in &shape.args {
+        match types(req).layout(*arg) {
+            Some(layout) => layouts.push(layout),
+            None => return Err(pass_unsupported(req, *arg)),
+        }
+    }
+    let Some(ret) = types(req).layout(shape.ret) else {
+        return Err(return_unsupported(req, shape.ret));
+    };
+    let Some(sig) = Signature::prepare(shape.abi, &ret, &layouts, None) else {
+        return Err(ffi_error(req, "Cannot prepare callback CIF"));
+    };
+    let cell = slot(req)?;
+    let index = req.state::<State>().callbacks.len();
+    let closure = match Closure::new(sig, cell, callback, index) {
+        Ok(closure) => closure,
+        Err(ClosureError::Alloc) => return Err(ffi_error(req, "Cannot allocate callback")),
+        Err(ClosureError::Prepare) => return Err(ffi_error(req, "Cannot prepare callback")),
+    };
+    let code = closure.code();
+    let value = value.deref();
+    req.addref(&value);
+    req.state::<State>().callbacks.push(Callback {
+        closure,
+        callable,
+        value,
+        ty: func,
+    });
+    Ok(code)
+}
+
+/// `zend_ffi_callback_trampoline`: C called a callback; its arguments
+/// are read into PHP values, the callable called, and its return
+/// written back where C reads it. A throwable the callable leaves is
+/// php's fatal, since it cannot unwind through C.
+fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
+    let Some((callable, ty)) = req
+        .state::<State>()
+        .callbacks
+        .get(index)
+        .map(|callback| (callback.callable.clone(), callback.ty))
+    else {
+        return;
+    };
+    let Some(shape) = shape(req, ty) else {
+        return;
+    };
+    let mut values = Vec::with_capacity(args.len());
+    for (arg, arg_ty) in args.iter().zip(&shape.args) {
+        let is_const = types(req).get(*arg_ty).attr & attr::CONST != 0;
+        match to_value(
+            req,
+            None,
+            *arg,
+            *arg_ty,
+            Fetch::Read,
+            is_const,
+            false,
+            false,
+        ) {
+            Ok(value) => values.push(value),
+            Err(_) => break,
+        }
+    }
+    let called = php_ext::call::call(req, &callable, &values);
+    for value in values {
+        req.release(value);
+    }
+    let Ok(returned) = called else {
+        let _ = fatal(req, "Throwing from FFI callbacks is not allowed");
+        return;
+    };
+    if !matches!(types(req).get(shape.ret).kind, Kind::Void) {
+        let _ = write_value(req, ret, shape.ret, &returned);
+    }
+    req.release(returned);
+}
+
+/// The callbacks given up at the end of the request, each callable's
+/// owner released and its code freed, as php's `RSHUTDOWN` destroys
+/// `FFI_G(callbacks)`.
+pub(crate) fn release_callbacks(req: &mut Request) {
+    let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
+    for callback in callbacks {
+        drop(callback.closure);
+        let _ = callback.callable;
+        req.release(callback.value);
+    }
+}

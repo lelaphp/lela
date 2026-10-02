@@ -138,6 +138,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_gettext::extension,
         #[cfg(feature = "readline")]
         php_ext_readline::extension,
+        #[cfg(feature = "ffi")]
+        php_ext_ffi::extension,
     ]
 }
 
@@ -166,6 +168,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-dom",
     #[cfg(feature = "exif")]
     "--enable-exif",
+    #[cfg(feature = "ffi")]
+    "--with-ffi",
     #[cfg(not(feature = "fileinfo"))]
     "--disable-fileinfo",
     #[cfg(not(feature = "filter"))]

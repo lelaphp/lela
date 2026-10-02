@@ -1287,6 +1287,35 @@ impl Callable {
         forwarded
     }
 
+    /// `fcc.function_handler->common.required_num_args`: the parameters
+    /// of the callee up to the last one a call must pass, what
+    /// `zend_ffi_create_callback` holds a C function's arity to.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("typedef struct { int (*cb)(int); } s;");
+    /// $s = $ffi->new("s");
+    /// try { $s->cb = function ($a, $b) { return 0; }; } catch (FFI\Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Attempt to assign an invalid callback, insufficient number of arguments
+    /// ```
+    #[must_use]
+    pub fn required(&self, req: &Request) -> usize {
+        let function = match self.target {
+            Target::Function(function) | Target::Method { function, .. } => function,
+            Target::Closure(closure) => match closure.closure(req) {
+                Some(info) => info.function,
+                None => return 0,
+            },
+        };
+        req.function_decl(function).map_or(0, |decl| {
+            decl.parameters
+                .iter()
+                .rposition(php_unit::decl::Parameter::is_required)
+                .map_or(0, |at| at + 1)
+        })
+    }
+
     /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
     /// that keeps the callable past the frame it was read off takes, its
     /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved
@@ -1797,6 +1826,24 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(req.std_method(object.class(), lowered))
     }
 
+    /// php's `get_method` as the slot is handed the name the call wrote
+    /// beside its lowered key (`zend_object_handlers.h`: `zend_string
+    /// *method_name, const zval *key`): a class whose methods are names
+    /// it learns only when a call names them, and holds by case, as `FFI`
+    /// holds the C functions a declaration names (`zend_ffi_get_func`),
+    /// reads `written`. At `Std` and at every class keyed by the lowered
+    /// name, [`ObjectHandlers::get_method`].
+    fn get_method_as(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let _ = written;
+        self.get_method(req, object, lowered)
+    }
+
     /// The object a method `get_method` did not find is looked up on
     /// and called on in its place, the `*object` php's `get_method`
     /// may replace: `spl_dual_it_get_method` hands an outer iterator's
@@ -1831,9 +1878,13 @@ pub trait ObjectHandlers: Send + Sync {
         req.constructor_of(object)
     }
 
-    /// `get_class_name`, `zend_std_get_class_name` at `Std`: `ce->name`.
-    fn get_class_name(&self, req: &mut Request, object: PhpObject) -> String {
-        req.class_name(object.class())
+    /// `get_class_name`, `zend_std_get_class_name` at `Std`: `ce->name`,
+    /// its bytes as they stand. What `var_dump`, `debug_zval_dump` and
+    /// `print_r` print an object's class as, which `FFI\CData` answers
+    /// with its C type after the class's name
+    /// (`zend_ffi_cdata_get_class_name`).
+    fn get_class_name(&self, req: &mut Request, object: PhpObject) -> Vec<u8> {
+        req.class_name_bytes(object.class())
     }
 
     /// `cast_object`, `zend_std_cast_object_tostring` at `Std`: the
@@ -1994,6 +2045,16 @@ pub trait ObjectHandlers: Send + Sync {
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         let _ = (req, object, by_ref);
         Ok(None)
+    }
+
+    /// Whether the class sets `ce->get_iterator` though it is not
+    /// `Traversable`: a `foreach` over its objects walks
+    /// [`ObjectHandlers::get_iterator`] and never their properties, and
+    /// Reflection calls the class iterable, as `FFI\CData` is
+    /// (`zend_ffi_cdata_get_iterator`). `false` at `Std`, where only a
+    /// `Traversable` class walks with an iterator.
+    fn own_iterator(&self) -> bool {
+        false
     }
 
     /// `sizeof` the iterator struct the class's `get_iterator` `emalloc`s,

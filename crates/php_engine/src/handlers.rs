@@ -1400,6 +1400,25 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         });
     }
     let class = object.class();
+    // `Z_OBJ_HANDLER_P(function, get_closure)` of a class that answers
+    // a function of its own making rather than its `__invoke`, as
+    // `zend_ffi_cdata_get_closure` answers a C function pointer's
+    // trampoline.
+    if let Some(table) = req.own_handlers(class)
+        && let Some(made) = table.get_closure(req, object)
+        && req.method_named(class, b"__invoke") != Some(made.function)
+    {
+        if let Some(this) = made.this {
+            req.addref(&this.as_value());
+        }
+        return Ok(DynamicTarget {
+            function: made.function,
+            name: None,
+            this: made.this,
+            called_scope: made.called_scope,
+            closure: None,
+        });
+    }
     let Some(function) = req.method_named(class, b"__invoke") else {
         let shown = req.class_name(class);
         return Err(crate::api::raising::throw_error(
@@ -1508,7 +1527,7 @@ fn dynamic_call_array(
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let found = match table.get_method(req, object, &method.to_ascii_lowercase())? {
+    let found = match table.get_method_as(req, object, &method.to_ascii_lowercase(), &method)? {
         Some(function) => Some(function),
         None => req.call_trampoline(class, &method, false),
     };
@@ -5421,7 +5440,7 @@ fn method_found(
     let mut receiver = None;
     loop {
         let table = req.object_handlers(on.heap());
-        if let Some(function) = table.get_method(req, on, lowered)? {
+        if let Some(function) = table.get_method_as(req, on, lowered, written)? {
             return Ok(Some((function, receiver)));
         }
         if let Some(trampoline) = req.call_trampoline(on.class(), written, false) {

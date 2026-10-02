@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 378 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 996 | 1500 | pass |
+| api | api.lock | 1002 | 1500 | pass |
 | sapi | sapi.lock | 24 |  | pass |
 | tier | tier.lock | 62 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=063a435043cbbd3323911672aaaf8f964fbac71f42b4c55d5ecb0b15787e21a5 out=8cc9905053208a05a961c18f55a83fc866af4c071c5a3e68089961ace65a71fa -->
+<!-- /computed in=977205ab081f81c08ac399e33f7a58b3d4f4fc391fe8aac45d7a2af61b9f1478 out=98bd0c38b0db9369353bf5744f8812f1747cbe8175f0c15b9dddce79f5c7315d -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -211,6 +211,7 @@ Options:
 ├── dba
 ├── dom
 ├── exif
+├── ffi
 ├── fileinfo
 ├── filter
 ├── ftp
@@ -259,7 +260,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=70435bca5552712433f1210d6e33ad8600a1b4e87f5ca8788cb6bdf2ce44a776 out=3c60632b6ad539e0651cd584be009925c219dda70144cb0f727a0de7f4ec7714 -->
+<!-- /computed in=06161343381589b02d8f019bd204a085109f6d52c603c5006247e5f303e2e5fe out=2134d6e4de1c13b9f6d9af63f23db49b9671e601a28fb52e4d94378dc82cdd3f -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

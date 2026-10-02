@@ -1796,7 +1796,9 @@ fn dump_members(
     let count = member_count(req, object, &rows);
     // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
     out.extend_from_slice(format!("{common}object(").as_bytes());
-    out.extend_from_slice(php_unit::decl::shown_bytes(&req.class_name_bytes(class)));
+    // `Z_OBJ_HANDLER_P(struc, get_class_name)`.
+    let name = object.handlers(req).get_class_name(req, object);
+    out.extend_from_slice(php_unit::decl::shown_bytes(&name));
     out.extend_from_slice(format!(")#{} ({count}) {{\n", object.index()).as_bytes());
     for row in rows {
         match row {
@@ -2012,9 +2014,9 @@ fn dump_rows(
     level: usize,
 ) {
     out.extend_from_slice(format!("{common}object(").as_bytes());
-    out.extend_from_slice(php_unit::decl::shown_bytes(
-        &req.class_name_bytes(object.class()),
-    ));
+    // `Z_OBJ_HANDLER_P(struc, get_class_name)`.
+    let name = object.handlers(req).get_class_name(req, object);
+    out.extend_from_slice(php_unit::decl::shown_bytes(&name));
     out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
     for (key, value) in rows.snapshot() {
         if too_deep(out, level, req.stack_limit().overflowed()) {

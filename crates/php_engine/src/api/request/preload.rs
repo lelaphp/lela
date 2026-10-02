@@ -333,6 +333,15 @@ enum Row {
 }
 
 impl Request {
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD`: whether this is the
+    /// request `opcache.preload`'s file is served in, whose declarations
+    /// every request after starts from, as `FFI::load` registers the
+    /// scope a header names for `FFI::scope` in it (`zend_ffi_load`).
+    #[must_use]
+    pub fn preloading(&self) -> bool {
+        self.preloading.is_some()
+    }
+
     /// The request, started, is the preload's from here: every file it
     /// compiles is compiled into the preload.
     pub(crate) fn begin_preload(&mut self) {
