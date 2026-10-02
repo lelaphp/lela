@@ -1,0 +1,33 @@
+# ext/fileinfo: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_fileinfo"
+version = "0.0.0"
+edition.workspace = true
+# The binding and shim/ are the workspace's; libmagic/ and data_file.c are
+# php-src's vendored copy of file(1)'s libmagic and its compiled database,
+# under libmagic/LICENSE, a two-clause BSD licence.
+license = "MIT AND BSD-2-Clause"
+rust-version.workspace = true
+publish = false
+description = "The fileinfo extension, php-src/ext/fileinfo"
+# The one crate that links libmagic.
+links = "magic"
+
+[lints]
+workspace = true
+
+# The facade, and libpcre2-8, which php's libmagic matches its `regex`
+# entries with through php's PCRE glue (shim/shim.c), as php links it for
+# ext/pcre (design §7.2); bound in `src/ffi/` alone (`unsafe.homes`).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+pcre2-sys = { workspace = true }
+
+# libmagic is php-src's vendored copy, compiled by `build.rs` (design §7.2,
+# #1451) and bound in `src/ffi/` alone (`unsafe.homes`).
+[build-dependencies]
+cc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
