@@ -316,34 +316,34 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
 /// ```
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let escaped = escaped(req, message);
-    let message = escaped.as_str();
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
-    let text = if req.ini_stage() == crate::api::abi::IniStage::Startup {
-        format!("PHP Startup: {message}")
-    } else if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
+    if req.ini_stage() == crate::api::abi::IniStage::Startup {
+        return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
+    }
+    if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();
-        format!("{}: {message}", origin(req, &function, ""))
-    } else {
-        let origin = match req.phase() {
-            crate::api::request::Phase::Startup => String::from("PHP Request Startup"),
-            // The code being served names it, as
-            // `get_active_function_name` does when a handler raises it.
-            crate::api::request::Phase::Running if req.bailing_out() => String::from("Unknown"),
-            crate::api::request::Phase::Running => req
-                .active_user_function()
-                .map_or_else(|| String::from("Unknown"), |name| format!("{name}()")),
-            crate::api::request::Phase::Shutdown | crate::api::request::Phase::ResourceShutdown => {
-                String::from("PHP Request Shutdown")
+        return verror(req, level, Origin::Function(&function), b"", message);
+    }
+    let phase = match req.phase() {
+        crate::api::request::Phase::Startup => "PHP Request Startup",
+        // The code being served names it, as
+        // `get_active_function_name` does when a handler raises it.
+        crate::api::request::Phase::Running if !req.bailing_out() => {
+            if let Some(name) = req.active_user_function() {
+                return verror(req, level, Origin::Function(&name), b"", message);
             }
-        };
-        format!("{origin}: {message}")
+            "Unknown"
+        }
+        crate::api::request::Phase::Running => "Unknown",
+        crate::api::request::Phase::Shutdown | crate::api::request::Phase::ResourceShutdown => {
+            "PHP Request Shutdown"
+        }
     };
-    raise(req, level, &text);
+    verror(req, level, Origin::Phase(phase), b"", message);
 }
 
 /// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
@@ -353,10 +353,145 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
 /// raises what libmagic's opens of a magic file raise.
 pub fn docref_parameter(req: &mut Request, level: Level, parameter: &[u8], message: &str) {
     let function = req.active_native();
-    let parameter = escaped(req, &String::from_utf8_lossy(parameter));
-    let message = escaped(req, message);
-    let text = format!("{}: {message}", origin(req, &function, &parameter));
-    raise(req, level, &text);
+    verror(req, level, Origin::Function(&function), parameter, message);
+}
+
+/// What `php_verror` names a diagnostic by: a function, its parameters
+/// in parentheses after it and its manual page as the docref, or a
+/// phase of the request, as it stands.
+#[derive(Clone, Copy)]
+pub(crate) enum Origin<'a> {
+    Function(&'a str),
+    Phase(&'a str),
+}
+
+/// `php_verror` (`Z/main/main.c:1057-1240`): `message` raised behind its
+/// origin and `: `, each escaped under `html_errors`, through
+/// `zend_error_zstr`. Its buffers stand while the sentence is printed
+/// and are freed before it is raised: the message printed
+/// (`vstrpprintf`) and its escaped copy, the origin (`spprintf`, or
+/// `estrndup` of a phase) and its escaped copy, and the function's
+/// docref (`spprintf`), so a docref diagnostic peaks over them, displayed
+/// or silenced alike:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { unserialize('x'); });
+/// pk(function () { @unserialize('x'); });
+/// pk(function () { ini_set('html_errors', 1); @unserialize('x'); ini_set('html_errors', 0); });
+/// pk(function () { @unserialize(str_repeat('x', 300)); });
+/// pk(function () { @fopen('nope/nope', 'r'); });
+/// ```
+/// ```expect
+///
+/// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
+///
+/// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
+/// 13192 0
+/// 13192 0
+/// 13200 0
+/// 13576 0
+/// 960 0
+/// ```
+pub(crate) fn verror(
+    req: &mut Request,
+    level: Level,
+    origin: Origin<'_>,
+    params: &[u8],
+    message: &str,
+) {
+    let mut laid = Laid::default();
+    let sentence = laid.lay(req, &origin, params, message).and_then(|()| {
+        let params = escaped(req, &String::from_utf8_lossy(params));
+        let origin = match origin {
+            Origin::Function(function) => self::origin(req, function, &params),
+            Origin::Phase(phase) => phase.to_owned(),
+        };
+        let text = format!("{origin}: {}", escaped(req, message));
+        strpprintf(req, &text)
+    });
+    laid.free(req);
+    // The memory limit refusing a buffer has rendered its fatal.
+    if let Ok(sentence) = sentence {
+        req.note_error_string(level, sentence);
+        req.release(Value::string(sentence));
+    }
+}
+
+/// [`verror`]'s buffers while its sentence is printed.
+#[derive(Default)]
+struct Laid {
+    message: Option<PhpString>,
+    blocks: Vec<php_heap::Block>,
+}
+
+impl Laid {
+    /// The message printed, or under `html_errors` the block its escaped
+    /// copy is, then the origin's block, escaped likewise, and the
+    /// function's docref, `function.%s` or `%s.%s` of the class and the
+    /// method past its leading underscores. The `Err` is the memory
+    /// limit, with what was laid kept for [`Laid::free`].
+    fn lay(
+        &mut self,
+        req: &mut Request,
+        origin: &Origin<'_>,
+        params: &[u8],
+        message: &str,
+    ) -> Result<(), Thrown> {
+        let html = req.ini_flag(b"html_errors");
+        self.message = Some(strpprintf(req, message)?);
+        if html {
+            self.blocks.push(escape_buffer(req, message.len())?);
+            if let Some(printed) = self.message.take() {
+                req.release(Value::string(printed));
+            }
+        }
+        let (block, len, docref) = match origin {
+            Origin::Function(function) => {
+                let len = function.len() + params.len() + 2;
+                let docref = match function.split_once("::") {
+                    Some((class, method)) => class.len() + 1 + method.trim_start_matches('_').len(),
+                    None => 9 + function.trim_start_matches('_').len(),
+                };
+                (printf_buffer(req, len)?, len, Some(docref))
+            }
+            Origin::Phase(phase) => {
+                let block = req.heap_mut().block(phase.len() + 1);
+                (req.fatal_of(block)?, phase.len(), None)
+            }
+        };
+        self.blocks.push(block);
+        if html {
+            let escaped = escape_buffer(req, len)?;
+            if let Some(block) = self.blocks.pop() {
+                req.heap_mut().free_block(block);
+            }
+            self.blocks.push(escaped);
+        }
+        if let Some(docref) = docref {
+            self.blocks.push(printf_buffer(req, docref)?);
+        }
+        Ok(())
+    }
+
+    /// Every buffer given back, as `php_verror` frees them before
+    /// `zend_error_zstr`.
+    fn free(self, req: &mut Request) {
+        for block in self.blocks {
+            req.heap_mut().free_block(block);
+        }
+        if let Some(printed) = self.message {
+            req.release(Value::string(printed));
+        }
+    }
+}
+
+/// `php_escape_html_entities_ex`'s `zend_string_alloc(maxlen)` over
+/// `len` bytes: 128 for fewer than 64, twice the length past that.
+fn escape_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Thrown> {
+    let maxlen = if len < 64 { 128 } else { len.saturating_mul(2) };
+    let block = req.heap_mut().block(maxlen.saturating_add(25));
+    req.fatal_of(block)
 }
 
 /// `php_verror`'s `escape_html` of its message and its parameters under

@@ -4489,9 +4489,20 @@ impl Request {
             return;
         }
         let function = self.active_native();
-        let origin = crate::api::raising::origin(self, &function, &String::from_utf8_lossy(path));
-        let text = format!("{origin}: {caption}: {message}");
-        warning(self, &text);
+        self.wrapper_warning(&function, path, &format!("{caption}: {message}"));
+    }
+
+    /// The warning `php_stream_display_wrapper_errors` raises with
+    /// `php_error_docref1`, the path its `estrdup` (`php_strip_url_passwd`)
+    /// standing across the raise as the parameter `function` names.
+    pub(crate) fn wrapper_warning(&mut self, function: &str, path: &[u8], text: &str) {
+        let copy = self.heap_mut().block(path.len() + 1);
+        let Ok(copy) = self.fatal_of(copy) else {
+            return;
+        };
+        let origin = crate::api::raising::Origin::Function(function);
+        crate::api::raising::verror(self, Level::Warning, origin, path, text);
+        self.heap_mut().free_block(copy);
     }
 
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the

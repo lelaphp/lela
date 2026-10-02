@@ -17840,9 +17840,11 @@ impl Request {
             .split_once(" (os error")
             .map_or(reason.as_str(), |(text, _)| text);
         let opener = self.opener(kind);
-        let origin = crate::api::raising::origin(self, &opener, &String::from_utf8_lossy(written));
-        let message = format!("{origin}: Failed to open stream: {reason}");
-        crate::api::raising::warning(self, &message);
+        self.wrapper_warning(
+            &opener,
+            written,
+            &format!("Failed to open stream: {reason}"),
+        );
     }
 
     /// `php_message_handler_for_zend`'s `ZMSG_FAILED_INCLUDE_FOPEN` and
