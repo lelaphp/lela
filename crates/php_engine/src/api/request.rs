@@ -5704,9 +5704,15 @@ impl Request {
                     let name = self.declared_name(function);
                     let name = Value::string(self.interned(name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
-                    if let Some(class) = self.method_class(function).or(scope) {
-                        // `ce->name` whole: an anonymous class's with its NUL and site.
-                        let class = self.class_name_bytes(class);
+                    // `ce->name` whole: an anonymous class's with its NUL
+                    // and site; a receiver's class name for a function of
+                    // no scope it is passed to, `zend_ffi_get_func`'s.
+                    let class = match (self.method_class(function).or(scope), this) {
+                        (Some(class), _) => Some(self.class_name_bytes(class)),
+                        (None, Some(this)) => Some(this.handlers(self).get_class_name(self, this)),
+                        (None, None) => None,
+                    };
+                    if let Some(class) = class {
                         let class = Value::string(self.interned(&class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
@@ -5999,6 +6005,22 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// A native trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`), the C
+    /// function `zend_ffi_get_func` makes, has no site of its own to give
+    /// what it calls, so the walk goes on to the user code that called
+    /// it; and its row, of no scope, names its receiver's class:
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
+    /// $ffi->signal(SIGUSR1, function ($sig) { debug_print_backtrace(); echo debug_backtrace()[1]['class'], "\n"; });
+    /// $ffi->raise(SIGUSR1);
+    /// ```
+    /// ```expect process
+    /// #0 %s(4): {closure:%s:3}(%d)
+    /// #1 %s(4): FFI->raise(%d)
+    /// FFI
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -6017,14 +6039,24 @@ impl Request {
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
         let mut rows = Vec::new();
-        for at in 0..chain.len() {
-            let site = match chain.get(at.saturating_add(1)) {
+        // The site of the link at `below`: a native's is none, but where
+        // it is a trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`) the walk
+        // goes on to the user code that called it.
+        let site_of = |mut below: usize| loop {
+            break match chain.get(below) {
                 Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
+                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
+                    below = below.saturating_add(1);
+                    continue;
+                }
                 Some(Link::Call(_)) | None => None,
             };
-            match &chain[at] {
+        };
+        for (at, link) in chain.iter().enumerate() {
+            let site = site_of(at.saturating_add(1));
+            match link {
                 Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
