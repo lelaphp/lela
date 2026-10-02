@@ -17065,17 +17065,35 @@ impl Request {
     }
 
     /// `php_execute_script`'s `expand_filepath` of the primary file
-    /// (`Z/main/main.c:2610-2619`): the file the request names made whole
-    /// against its working directory with its links resolved, which is
-    /// the name the unit compiles under and the page `php_statpage`
-    /// stats, put in `EG(included_files)`; the name as given where it
-    /// expands to nothing.
-    pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
-        let script = self.description.script_name.clone().unwrap_or_default();
+    /// (`Z/main/main.c:2610-2619`), before `auto_prepend_file` runs: the
+    /// file the request names made whole against its working directory
+    /// with its links resolved, which is the name the unit compiles under
+    /// and the page `php_statpage` stats, put in `EG(included_files)`;
+    /// the name as given where it expands to nothing. A source the host
+    /// `served` under a name puts the name expanded in the table and
+    /// compiles under the name as given; one named `Standard input code`,
+    /// or nothing, is in no table.
+    ///
+    /// ```php
+    /// var_dump(count(get_included_files()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    pub(crate) fn expand_primary_file(&mut self, served: bool) {
+        let script = self.description.script_name.clone();
+        if served {
+            if let Some(script) = script.filter(|name| name != b"Standard input code")
+                && let Some(expanded) = self.expand_filepath(&script)
+            {
+                let _ = self.note_included(&expanded);
+            }
+            return;
+        }
+        let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
         let _ = self.note_included(&expanded);
-        self.description.script_name = Some(expanded.clone());
-        expanded
+        self.description.script_name = Some(expanded);
     }
 
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
