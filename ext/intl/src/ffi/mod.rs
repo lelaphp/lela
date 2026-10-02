@@ -34,6 +34,7 @@ macro_rules! icu {
 #[allow(unused_imports)]
 pub(crate) use icu;
 
+pub(crate) mod calendar;
 pub(crate) mod cpp;
 pub(crate) mod enumeration;
 pub(crate) mod timezone;

@@ -188,29 +188,42 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
-        let mut table = PhpArray::new(req)?;
-        let rows = zone(req, object).map(|zone| {
-            let id = tz::php_intl_tz_id(zone).and_then(|id| id.to_utf8().ok());
-            let (mut raw, mut dst, mut status) = (0, 0, Code::ZERO);
-            tz::php_intl_tz_offset(zone, now(), false, &mut raw, &mut dst, &mut status);
-            (id, (!status.is_failure()).then_some((raw, raw + dst)))
-        });
-        set(req, &mut table, b"valid", Value::bool(rows.is_some()))?;
-        if let Some((Some(id), offsets)) = rows {
-            let id = Value::string(PhpString::new(req, &id)?);
-            set(req, &mut table, b"id", id)?;
-            if let Some((raw, current)) = offsets {
-                set(req, &mut table, b"rawOffset", Value::int(i64::from(raw)))?;
-                set(
-                    req,
-                    &mut table,
-                    b"currentOffset",
-                    Value::int(i64::from(current)),
-                )?;
-            }
-        }
-        Ok(Some(table.into()))
+        let rows = zone(req, object).map(debug_rows);
+        debug_table(req, rows).map(|table| Some(table.into()))
     }
+}
+
+/// What `TimeZone_get_debug_info` reads of a zone: its id, and its raw
+/// and current offsets where ICU answers them.
+pub(crate) type DebugRows = (Option<Vec<u8>>, Option<(i32, i32)>);
+
+/// The id and offsets of `zone` now.
+pub(crate) fn debug_rows(zone: &TimeZone) -> DebugRows {
+    let id = tz::php_intl_tz_id(zone).and_then(|id| id.to_utf8().ok());
+    let (mut raw, mut dst, mut status) = (0, 0, Code::ZERO);
+    tz::php_intl_tz_offset(zone, now(), false, &mut raw, &mut dst, &mut status);
+    (id, (!status.is_failure()).then_some((raw, raw + dst)))
+}
+
+/// `TimeZone_get_debug_info`'s table: `valid`, then `id`, `rawOffset`
+/// and `currentOffset` as far as they were read.
+pub(crate) fn debug_table(req: &mut Request, rows: Option<DebugRows>) -> Result<PhpArray, Thrown> {
+    let mut table = PhpArray::new(req)?;
+    set(req, &mut table, b"valid", Value::bool(rows.is_some()))?;
+    if let Some((Some(id), offsets)) = rows {
+        let id = Value::string(PhpString::new(req, &id)?);
+        set(req, &mut table, b"id", id)?;
+        if let Some((raw, current)) = offsets {
+            set(req, &mut table, b"rawOffset", Value::int(i64::from(raw)))?;
+            set(
+                req,
+                &mut table,
+                b"currentOffset",
+                Value::int(i64::from(current)),
+            )?;
+        }
+    }
+    Ok(table)
 }
 
 /// `zend_hash_str_update(table, name, value)`.
