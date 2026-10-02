@@ -167,7 +167,11 @@ pub fn main() -> ExitCode {
             |path| path.as_os_str().as_bytes().to_vec(),
         ));
     }
-    session.init_files = init::files(line.init_file.as_deref(), line.init_default);
+    session.init_files = init::Files {
+        named: line.init_file.clone(),
+        default: line.init_default,
+        scan_dir: std::env::var_os("PHP_INI_SCAN_DIR").map(|dir| dir.as_bytes().to_vec()),
+    };
     session.quiet = !line.verbose;
     session.line_quiet = session.quiet;
     if line.boring {

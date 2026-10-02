@@ -67,7 +67,9 @@ impl Tier for Debugger {
 /// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(plan) = session::with(|s| {
-        s.started |= !s.initializing;
+        // The init files' own request comes before the context's first
+        // compile, as do the servings inside them.
+        s.started |= !s.initializing && s.plan != Some(Plan::Init);
         s.plan
     })
     .flatten() else {
@@ -77,6 +79,38 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
         Plan::Hold => {
             session::with(|s| s.plan = Some(Plan::Run));
             held(req, frame)
+        }
+        Plan::Init => {
+            session::with(|s| s.plan = Some(Plan::Run));
+            let Some(mut session) = session::take() else {
+                return Flow::Continue;
+            };
+            crate::init::run(&mut session, &mut Here::Idle { req });
+            let quits = session.after_run == AfterRun::Quit;
+            if session.stopped.is_some() {
+            } else if std::mem::take(&mut session.init_runs)
+                && session.execution == Execution::BailedOut
+            {
+                // The run they come before finds `in_execution` set, and
+                // asks before it compiles.
+                if prompt::restart_permitted(&mut session) && !quits {
+                    session.stopped = Some(session::Stop::Restart(None));
+                } else {
+                    idle_prompt(&mut session, req, quits);
+                }
+            } else if quits {
+                // `-rr`'s run compiles it under `PHPDBG_PREVENT_INTERACTIVE`:
+                // what the compiler says alone, and the session ends.
+                let _ = out::replay(&session.refused);
+                session.status = Some(255);
+                session.stopped = Some(session::Stop::Quit);
+            } else {
+                refused(&mut session);
+                let _ = prompted(&mut session, req, |req| Here::Idle { req });
+            }
+            session::put(session);
+            tier::exit(req);
+            Flow::Resume(frame)
         }
         Plan::Idle => {
             session::with(|s| s.plan = Some(Plan::Run));
@@ -125,7 +159,9 @@ fn initialized(req: &mut Request) -> bool {
         return false;
     };
     let execution = std::mem::replace(&mut session.execution, Execution::Not);
+    session.program_held = true;
     crate::init::run(&mut session, &mut Here::Idle { req });
+    session.program_held = false;
     // `run`'s clean up from the last execution, after the init files:
     // no seek and no throwable handled, the hits at zero, and a step the
     // init files' prompt asked for kept.
@@ -133,7 +169,11 @@ fn initialized(req: &mut Request) -> bool {
     session.handled = None;
     session.breaks.reset_hits();
     let quits = session.after_run == AfterRun::Quit;
-    if session.stopped.is_none() && session.execution == Execution::BailedOut {
+    if session.inline_run {
+        // A `run` among them runs the program now.
+        let frame = tier::entry(req);
+        inline(&mut session, req, frame);
+    } else if session.stopped.is_none() && session.execution == Execution::BailedOut {
         if prompt::restart_permitted(&mut session) && !quits {
             session.stopped = Some(session::Stop::Restart(None));
         } else {
@@ -162,11 +202,12 @@ fn initialized(req: &mut Request) -> bool {
 /// `phpdbg_compile`'s notice, once for the context, where nothing has
 /// written it yet: at the held prompt, or where `run` compiles a context
 /// the init files left unopened.
-fn announce(session: &mut Session) {
+pub fn announce(session: &mut Session) {
     if session.context == Context::Announced {
         return;
     }
     session.context = Context::Announced;
+    session.refused.clear();
     if let Some(exec) = &session.exec {
         let message = if session.stdin_code.is_some() {
             b"Successful compilation of stdin input".to_vec()
@@ -175,6 +216,27 @@ fn announce(session: &mut Session) {
         };
         out::notice(&message);
     }
+}
+
+/// The context's compile after the init files, which the compiler
+/// refused: its log as `php_sapi_phpdbg_log_message` writes it, the
+/// listing where nothing executes, and the status 255; the first cycle
+/// is fully started after it, so a later fatal's log stops at a prompt.
+fn refused(session: &mut Session) {
+    prompt::refused_again(session, None);
+    session.started = true;
+}
+
+/// A `run` in the init files about to run the program at `frame`: the
+/// run's clean up, and its `phpdbg_clean` after it, which lets go of the
+/// compiled context, so a `print exec` after it compiles it again.
+fn inline(session: &mut Session, req: &mut Request, frame: FrameRef) {
+    session.execution = Execution::Run;
+    session.seek = None;
+    session.handled = None;
+    session.breaks.reset_hits();
+    session.ran_code = tier::frame_code(req, frame);
+    session.init_compiled = false;
 }
 
 /// Where `-rr` quits once `run` has come back, which it does here
@@ -217,7 +279,16 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(mut session) = session::take() else {
         return Flow::Continue;
     };
+    session.program_held = true;
     crate::init::run(&mut session, &mut Here::Idle { req });
+    session.program_held = false;
+    if session.stopped.is_none() && session.inline_run {
+        // A `run` among them runs the program now, the loop stopping for
+        // nothing but a throwable nothing catches.
+        inline(&mut session, req, frame);
+        session::put(session);
+        return drive(req, frame);
+    }
     if session.stopped.is_none() && unopened(&mut session, req) {
         idle_prompt(&mut session, req, false);
     }
@@ -352,6 +423,9 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
 /// prompt>
 /// ```
 pub fn fatal_logged(req: &mut Request) -> AfterLog {
+    if out::logging() {
+        return AfterLog::Returned;
+    }
     let Some(mut session) = session::take() else {
         return AfterLog::Returned;
     };
@@ -382,7 +456,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },
         None => Here::Idle { req },
     };
-    let outcome = prompt::interactive(&mut session, &mut here);
+    let outcome = out::in_log(|| prompt::interactive(&mut session, &mut here));
     let stopped = session.stopped.is_some();
     session::put(session);
     if stopped || outcome == Outcome::Stopped {

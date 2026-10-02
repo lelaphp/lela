@@ -478,14 +478,45 @@ fn under_phpdbg(
     source: &str,
     stdin: &str,
 ) -> Served {
+    under_phpdbg_with(name, flags, init, source, stdin, &Setup::default())
+}
+
+/// What a test sets up beside the program: files under its directory,
+/// which is the working directory, by relative path; the environment
+/// over the test's, `{dir}` in a value standing for the directory; and
+/// how much of stdout is read before the binary is killed, for a
+/// session that loops.
+#[derive(Default)]
+struct Setup<'a> {
+    files: &'a [(&'a str, &'a str)],
+    env: &'a [(&'a str, &'a str)],
+    limit: Option<usize>,
+}
+
+fn under_phpdbg_with(
+    name: &str,
+    flags: &[&str],
+    init: Option<&str>,
+    source: &str,
+    stdin: &str,
+    setup: &Setup<'_>,
+) -> Served {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
+    let dir = std::fs::canonicalize(&dir).unwrap();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
-    let file = std::fs::canonicalize(&file).unwrap();
+    for (path, text) in setup.files {
+        let path = dir.join(path);
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        std::fs::write(path, text).unwrap();
+    }
     let init_file = dir.join("init");
     let mut command = Command::new(env!("CARGO_BIN_EXE_phpdbg"));
     command.args(flags);
+    for (name, value) in setup.env {
+        command.env(name, value.replace("{dir}", &dir.display().to_string()));
+    }
     if let Some(init) = init {
         std::fs::write(&init_file, init).unwrap();
         command.arg(format!("-i{}", init_file.display()));
@@ -505,9 +536,20 @@ fn under_phpdbg(
     });
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
+    let limit = setup.limit.unwrap_or(usize::MAX);
+    let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&read);
     let out = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stdout, &mut bytes);
+        let mut chunk = [0u8; 4096];
+        while bytes.len() < limit {
+            match std::io::Read::read(&mut stdout, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+            }
+            counted.store(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        bytes.truncate(limit);
         bytes
     });
     let err = std::thread::spawn(move || {
@@ -520,7 +562,9 @@ fn under_phpdbg(
         if let Some(status) = child.try_wait().unwrap() {
             break status.code();
         }
-        if std::time::Instant::now() > deadline {
+        if std::time::Instant::now() > deadline
+            || read.load(std::sync::atomic::Ordering::Relaxed) >= limit
+        {
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -706,6 +750,172 @@ fn what_an_init_code_block_leaves_is_the_next_evs() {
             .as_str(),
             "",
             Some(255)
+        )
+    );
+}
+
+/// php runs the init file before it compiles the context, so where the
+/// context does not compile, what the file writes comes first, the
+/// compiler's log after it, and the prompt stands in the request the
+/// file ran in, with what it left; a `print exec` there compiles the
+/// context again and writes the log again (the pinned phpdbg's bytes for
+/// `phpdbg -qb -n -i<file>`).
+#[test]
+fn an_init_file_runs_before_a_context_that_does_not_compile() {
+    let served = under_phpdbg(
+        "init-refused",
+        &["-qb", "-n"],
+        Some("b 3\nev $x = 3\nprint exec\n"),
+        "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n$b =\n",
+        "ev $x\nprint exec\nc\nr\nq\n",
+    );
+    let file = &served.file;
+    let refused = format!(
+        "[PHP Parse error:  syntax error, unexpected end of file in {file} on line 5]\n\
+         [Could not find information about included file...]\n"
+    );
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "[Breakpoint #0 added at {file}:3]\n3\n\n\
+                 {refused}{refused}prompt> 3\n\
+                 prompt> {refused}prompt> [Not running]\n\
+                 prompt> {refused}prompt> "
+            )
+            .as_str(),
+            Some(255)
+        )
+    );
+}
+
+/// `print exec` in the init file compiles the context there, with its
+/// notice, once a cycle, and the context's own compile after the file
+/// writes it again (the pinned phpdbg's bytes for `phpdbg -qb -n
+/// -i<file>`).
+#[test]
+fn print_exec_in_the_init_file_compiles_the_context_first() {
+    let served = under_phpdbg(
+        "init-print",
+        &["-qb", "-n"],
+        Some("print exec\nev 5\nprint exec\n"),
+        "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n",
+        "q\n",
+    );
+    let file = &served.file;
+    assert_eq!(
+        (
+            served.out.as_str(),
+            served.err.matches("$_main:").count(),
+            served.status
+        ),
+        (
+            format!(
+                "[Successful compilation of {file}]\n\
+                 [Context {file} (7 ops)]\n\
+                 5\n\n\
+                 [Context {file} (7 ops)]\n\
+                 [Successful compilation of {file}]\n\
+                 prompt> "
+            )
+            .as_str(),
+            2,
+            Some(0)
+        )
+    );
+}
+
+/// `run` in the init file compiles the context and runs it there, the
+/// breakpoints the file set not stopping it, and the file's next lines
+/// run after it, an `ev` among them writing nothing; under `-rr` the
+/// startup run then finds the program executing and asks, and the end
+/// of the input quits. Without it php's cycle ends and starts again with
+/// the init file, which runs the program again, for as long as the
+/// session lasts (the pinned phpdbg's bytes for `phpdbg -qrrb -n
+/// -i<file>`, and the first two cycles of `phpdbg -qb -n -i<file>`).
+#[test]
+fn run_in_the_init_file_runs_the_program_there() {
+    let init = "ev 1\nb 3\nrun\nev 2\nb 3\n";
+    let program = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n";
+    let cycle = |file: &str| {
+        format!(
+            "1\n\n[Breakpoint #0 added at {file}:3]\n\
+             [Successful compilation of {file}]\n\
+             prog unset\n\
+             [Breakpoint at {file}:3 exists]\n"
+        )
+    };
+    let served = under_phpdbg("init-run-rr", &["-qrrb", "-n"], Some(init), program, "q\n");
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "{}Do you really want to restart execution? (type y or n): \
+                 Please enter either y (yes) or n (no): ",
+                cycle(&served.file)
+            )
+            .as_str(),
+            Some(0)
+        )
+    );
+    let served = under_phpdbg_with(
+        "init-run",
+        &["-qb", "-n"],
+        Some(init),
+        program,
+        "q\n",
+        &Setup {
+            limit: Some(4096),
+            ..Setup::default()
+        },
+    );
+    let file = &served.file;
+    let cycle = cycle(file);
+    let expected = format!(
+        "{cycle}[Successful compilation of {file}]\n\
+         [Script ended normally]\n\
+         {cycle}[Script ended normally]\n"
+    );
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}
+
+/// With no `-i` and no `-I`, the init files are `PHP_CONFIG_FILE_PATH`'s
+/// `.phpdbginit`, one in each directory of `PHP_INI_SCAN_DIR`, and the
+/// working directory's; php's walk of `PHP_INI_SCAN_DIR` cuts it at its
+/// first `:` where it stands in the environment, so the program reads
+/// the first directory alone, and so does every cycle after the first
+/// (the pinned phpdbg's bytes for `phpdbg -qb -n`).
+#[test]
+fn the_default_init_files_are_read_where_php_reads_them() {
+    let served = under_phpdbg_with(
+        "init-default",
+        &["-qb", "-n"],
+        None,
+        "<?php\necho getenv(\"PHP_INI_SCAN_DIR\"), \"\\n\";\n",
+        "r\nr\nq\n",
+        &Setup {
+            files: &[
+                ("a/.phpdbginit", "ev \"A\"\n"),
+                ("b/.phpdbginit", "ev \"B\"\n"),
+                (".phpdbginit", "ev \"W\"\n"),
+            ],
+            env: &[("PHP_INI_SCAN_DIR", "{dir}/a:{dir}/b")],
+            limit: None,
+        },
+    );
+    let file = &served.file;
+    let dir = file.strip_suffix("/t.php").unwrap_or_default();
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "A\nB\nW\n\n[Successful compilation of {file}]\n\
+                 prompt> {dir}/a\n[Script ended normally]\nA\nW\n\
+                 prompt> {dir}/a\n[Script ended normally]\nA\nW\n\
+                 prompt> "
+            )
+            .as_str(),
+            Some(0)
         )
     );
 }

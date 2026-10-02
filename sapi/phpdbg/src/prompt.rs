@@ -210,6 +210,8 @@ pub enum InitLine {
     Done,
     /// A command ended the request: the session's `stopped` says why.
     Stopped,
+    /// `run` runs the program inline, and the reading goes on after it.
+    Ran,
     /// A command named nothing php's table resolves, or what it named was
     /// held to the wrong parameters, and no registered function took the
     /// line: the error, which `phpdbg_line_init` writes with the line.
@@ -247,6 +249,9 @@ pub fn init_line(s: &mut Session, here: &mut Here<'_>, commands: Vec<Command>) -
         };
         if s.stopped.is_some() {
             return InitLine::Stopped;
+        }
+        if s.inline_run {
+            return InitLine::Ran;
         }
         match asked {
             Ret::Success => {}
@@ -866,6 +871,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     );
     s.exec = Some(resolved);
     s.stdin_code = None;
+    s.refused.clear();
     s.context = if in_execution(s, here) {
         Context::Announced
     } else {
@@ -908,6 +914,7 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(b"Standard input code".to_vec());
     s.stdin_code = Some(code);
     s.context = Context::Unannounced;
+    s.refused.clear();
     s.stopped = Some(Stop::Exec);
     Ret::Success
 }
@@ -946,6 +953,15 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
         if restart_permitted(s) {
             s.stopped = Some(Stop::Restart(args));
         }
+        return Ret::Success;
+    }
+    // In the init files, php's `run` compiles the context and runs it
+    // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
+    // stopping but for a throwable nothing catches, and the reading goes
+    // on after it.
+    if s.initializing && s.program_held && args.is_none() {
+        compiled_in_init(s);
+        s.inline_run = true;
         return Ret::Success;
     }
     match here {
@@ -1154,6 +1170,11 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
 /// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
+    // `phpdbg_execute_ex` bails out at its entry while the cycle is being
+    // cleaned, and `ev`'s `zend_catch` writes nothing.
+    if s.init_cleaning {
+        return Ret::Success;
+    }
     let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
@@ -1308,15 +1329,32 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// `PHPDBG_PRINT(exec)`.
+/// `PHPDBG_PRINT(exec)`. In the init files, before php's cycle has
+/// compiled the context, `phpdbg_compile` compiles it here first and
+/// writes its notice, once a cycle.
 fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let Some(exec) = s.exec.clone() else {
         out::error(b"No execution context set");
         return Ret::Success;
     };
+    // The compiler refuses the context again, its log written again.
+    if s.context == Context::Refused {
+        refused_again(s, Some(here));
+        return Ret::Success;
+    }
     let Some(req) = here.request() else {
+        // After a `run` in the init files, no request stands, and
+        // `phpdbg_compile` compiles the context again.
+        if s.init_cleaning
+            && let Some(code) = s.ran_code.clone()
+        {
+            compiled_in_init(s);
+            out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
+            out::dump(&code.dump);
+        }
         return Ret::Success;
     };
+    compiled_in_init(s);
     let entry = tier::entry(req);
     let main = main_frame(req, entry);
     if let Some(code) = tier::frame_code(req, main) {
@@ -1324,6 +1362,69 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::dump(&code.dump);
     }
     Ret::Success
+}
+
+/// What `phpdbg_compile` writes where the compiler refuses the context:
+/// the diagnostic, displayed or logged, and where it was logged, the
+/// listing where nothing executes and, once the session is fully started,
+/// a prompt inside the log, under which nothing more is logged; and the
+/// status 255. Inside the log already, nothing is written.
+///
+/// ```php
+/// $a = 1;
+/// $b =
+/// ```
+/// ```request phpdbg
+/// print exec
+/// c
+/// print exec
+/// ev 1
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt>%s
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt> [Not running]
+/// prompt>%s
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt> 1
+/// prompt> [Not running]
+/// prompt>
+/// ```
+pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
+    s.status = Some(255);
+    if out::logging() {
+        return;
+    }
+    // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
+    // listing and prompt, where the compiler's fatal was logged.
+    if out::replay(&s.refused) {
+        crate::list::code(s, NO_ACTIVE_FILE, 0);
+        if s.started
+            && let Some(here) = here
+        {
+            let _ = out::in_log(|| interactive(s, here));
+        }
+    }
+}
+
+/// `phpdbg_compile`'s notice where the init files compile the context,
+/// `PHPDBG_G(ops)` being empty until they have: once a cycle, whatever
+/// the cycle's own compile writes after them.
+pub fn compiled_in_init(s: &mut Session) {
+    if !s.initializing || std::mem::replace(&mut s.init_compiled, true) {
+        return;
+    }
+    if let Some(exec) = &s.exec {
+        let message = if s.stdin_code.is_some() {
+            b"Successful compilation of stdin input".to_vec()
+        } else {
+            [&b"Successful compilation of "[..], exec].concat()
+        };
+        out::notice(&message);
+    }
 }
 
 /// The bottom frame of the chain from `frame`, past any native between

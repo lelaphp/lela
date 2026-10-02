@@ -32,6 +32,11 @@ pub enum Plan {
     /// standing across its commands as php's one request does; or the
     /// one command a run left that needs a request standing.
     Idle,
+    /// A request with no program, where the cycle starts with a context
+    /// that does not compile: php runs the init files before its compile
+    /// fails, so what they write comes first, the compiler's log after
+    /// them, and the prompt stands in the request they ran in.
+    Init,
 }
 
 /// Why the request being served was ended before its program did.
@@ -230,8 +235,22 @@ pub struct Session {
     /// `EG(exit_status) = FAILURE` where `run` could not compile, which
     /// the request's own ending does not know of.
     pub status: Option<i32>,
-    /// The init files `phpdbg_init` reads, in its order.
-    pub init_files: Vec<Vec<u8>>,
+    /// What the line asked of `phpdbg_init`.
+    pub init_files: crate::init::Files,
+    /// Where a `run` in the init files left their reading, for once the
+    /// program it ran inline is over.
+    pub init_rest: Option<crate::init::Rest>,
+    /// `PHPDBG_IS_CLEANING` while the init files' lines after a `run`
+    /// are read: what would serve code bails out of it at once.
+    pub init_cleaning: bool,
+    /// A `run` in the init files asked for the program inline.
+    pub inline_run: bool,
+    /// The request the init files run in holds the execution context's
+    /// program at its first opline, which a `run` among them runs.
+    pub program_held: bool,
+    /// The program a `run` in the init files ran, kept for a `print exec`
+    /// after it, which compiles it again where no request stands.
+    pub ran_code: Option<php_sapi::tier::Code>,
     /// A cycle of php's main loop has started and its first request has
     /// not yet run the init files.
     pub init_due: bool,
@@ -242,6 +261,14 @@ pub struct Session {
     /// The init files have been run once: `phpdbg_fully_started` is set
     /// after the first cycle's, and stays set.
     pub init_ran: bool,
+    /// What the compiler wrote of a context it refused, which a cycle's
+    /// request for its init files writes after them.
+    pub refused: Vec<crate::out::Written>,
+    /// The request for the init files stands where a run was asked for.
+    pub init_runs: bool,
+    /// The init files being run have compiled the context, which php's
+    /// `print exec` and `run` do there before its cycle does.
+    pub init_compiled: bool,
     /// Whether the line has notices and errors coloured, `-b` not: what
     /// each cycle of php's main loop starts with.
     pub line_colours: Colours,
@@ -284,10 +311,18 @@ impl Session {
             origin: Origin::Program,
             exit_status: 0,
             status: None,
-            init_files: Vec::new(),
+            init_files: crate::init::Files::default(),
+            init_rest: None,
+            init_cleaning: false,
+            inline_run: false,
+            program_held: false,
+            ran_code: None,
             init_due: true,
             initializing: false,
             init_ran: false,
+            init_compiled: false,
+            refused: Vec::new(),
+            init_runs: false,
             line_colours: Colours::On,
         }
     }
