@@ -366,6 +366,43 @@ impl Types {
         self.all.get_mut(id.0 as usize)
     }
 
+    /// How many types the arena holds, the number the next is made at.
+    pub(crate) fn len(&self) -> usize {
+        self.all.len()
+    }
+
+    /// What php `emalloc`s for each type made from the `from`th on:
+    /// `sizeof(zend_ffi_type)`, 88; for a function with parameters its
+    /// `args` table, `sizeof(HashTable)` and the packed buckets of
+    /// `zend_hash_init(args, 4, ...)`; for a struct with fields the
+    /// buckets of `fields`, eight or the next power of two, then each
+    /// `zend_ffi_field` and its name's `zend_string`.
+    pub(crate) fn emallocs(&self, from: usize) -> Vec<usize> {
+        const TYPE: usize = 88;
+        let mut sizes = Vec::new();
+        for ty in self.all.iter().skip(from) {
+            sizes.push(TYPE);
+            match &ty.kind {
+                Kind::Func(f) if f.args.as_ref().is_some_and(|args| !args.is_empty()) => {
+                    sizes.push(56);
+                    sizes.push(8 * 16 + 2 * 4);
+                }
+                Kind::Struct(record) if !record.fields.is_empty() => {
+                    let slots = record.fields.len().next_power_of_two().max(8);
+                    sizes.push(slots * 32 + slots * 2 * 4);
+                    for (name, _) in &record.fields {
+                        sizes.push(24);
+                        if let Some(name) = name {
+                            sizes.push(24 + name.len() + 1);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        sizes
+    }
+
     /// A new type, `emalloc(sizeof(zend_ffi_type))` filled in.
     pub(crate) fn add(&mut self, ty: Type) -> TypeId {
         let id = TypeId(u32::try_from(self.all.len()).unwrap_or(u32::MAX));
