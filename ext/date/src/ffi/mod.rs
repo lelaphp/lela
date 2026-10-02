@@ -255,7 +255,8 @@ impl Zone {
     }
 
     /// `tz->name`.
-    pub(crate) fn name(&self) -> &[u8] {
+    #[must_use]
+    pub fn name(&self) -> &[u8] {
         bytes_of(self.info().name)
     }
 
