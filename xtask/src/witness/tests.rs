@@ -763,3 +763,61 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
         ["xtask"]
     );
 }
+
+/// With the pinned php absent, a `request fpm` fence the engine's php-fpm
+/// fails is `Unserved`, as it is beside the oracle, so its native is no
+/// witness short, and the reading names the serve's failure (#1535). The
+/// fixture `request-empty`'s stand-in, which reads the request and closes
+/// it with no response, stands in for the engine's `php-fpm-witness`. The
+/// control: a fence whose serve failed recorded nothing, which read the
+/// fixture's one native as missing and named nothing.
+#[test]
+fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_missing() {
+    let root = workspace().join("xtask/fixtures/witness/request-empty");
+    let mut manifest = Manifest::load(&root).unwrap();
+    manifest.pin.oracle.path = root.join("no-php-here");
+    let rule = super::coverage_rule(&manifest);
+    let krate = manifest
+        .crates
+        .iter()
+        .find(|krate| krate.name == "ext/pcre")
+        .unwrap();
+    let found = super::extract(&root, krate, rule, Target::built()).unwrap();
+    let binary = Binary::with_fpm(&root, root.join("php-fpm"));
+    let tally = judge(
+        &manifest.pin.oracle(),
+        &binary,
+        &Registry::default(),
+        &Ask::default(),
+        &found,
+        None,
+    )
+    .unwrap();
+    assert!(tally.oracle_absent.is_some(), "{tally:#?}");
+    assert_eq!(tally.subjects, 1, "{tally:#?}");
+    assert!(
+        tally.missing.is_empty(),
+        "a serve that failed is no missing witness: {tally:#?}"
+    );
+    let [unserved] = tally.unserved.as_slice() else {
+        panic!("{tally:#?}")
+    };
+    assert!(
+        unserved.contains("lib.rs") && unserved.contains("the php-fpm binary did not serve it"),
+        "{unserved}"
+    );
+    let reading = super::reading(&tally, &root, krate, rule).unwrap();
+    assert!(
+        reading.message.contains("1 fence the engine did not serve")
+            && reading
+                .message
+                .contains("the php-fpm binary did not serve it"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        !reading.message.contains("without a witness"),
+        "{}",
+        reading.message
+    );
+}

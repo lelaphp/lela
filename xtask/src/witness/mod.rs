@@ -204,6 +204,11 @@ pub(crate) struct Tally {
     /// green would be a claim. A binary at the path whose digest is not
     /// the pin's refuses the run instead (§4.3).
     pub oracle_absent: Option<String>,
+    /// The fences the engine did not serve where the oracle is absent,
+    /// each as `at: trouble`: each stands as [`Record::Unserved`], as one
+    /// the oracle's run failed does, so its natives are no witness short,
+    /// and the reading names why it did not serve (#1535).
+    pub unserved: Vec<String>,
 }
 
 impl Tally {
@@ -243,13 +248,24 @@ pub(crate) fn reading(
         // the reading is a pass or a fail on what the engine wrote.
         run.outcome(&Runner::Linked)
     };
-    // What did not run for want of the oracle, as a message's tail.
+    // What did not run for want of the oracle, and what the engine did
+    // not serve for its trace there, as a message's tail.
     let unrun = match (&tally.oracle_absent, run.not_run()) {
         (Some(why), n) if n > 0 => {
             let s = if n == 1 { "" } else { "es" };
             format!("; {n} witness{s} did not run, {why}")
         }
         _ => String::new(),
+    };
+    let unrun = match tally.unserved.len() {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "s" };
+            format!(
+                "{unrun}; {n} fence{s} the engine did not serve: {}",
+                tally.unserved.join("; ")
+            )
+        }
     };
     let message = match &outcome {
         Outcome::Failed => {
@@ -323,6 +339,7 @@ pub(crate) fn reading(
     reading.count("accepted", tally.captured.len() as u64)?;
     reading.count("unread", tally.problems.len() as u64)?;
     reading.count("not_run", run.not_run())?;
+    reading.count("unserved", tally.unserved.len() as u64)?;
     reading.count("wall_ms", declared_ms(tally.wall))?;
     Ok(reading)
 }
@@ -528,6 +545,9 @@ fn run_in(
         for missing in &tally.missing {
             println!("missing {missing}");
         }
+        for unserved in &tally.unserved {
+            println!("unserved {unserved}");
+        }
         if let (Some(why), n) = (&tally.oracle_absent, tally.witnesses.not_run())
             && n > 0
         {
@@ -665,19 +685,26 @@ pub(crate) fn judge(
     let captured = Mutex::new(Vec::new());
     // What each fence's run through the linked engine entered, by its id.
     let entered: Mutex<HashMap<String, Record>> = Mutex::new(HashMap::new());
+    let mut unserved = Vec::new();
     let witnesses = if oracle_absent.is_some() {
         // Coverage is what a fence ran, and neither the linked engine nor
         // the binary needs php: where the attributes declare natives each
         // fence is still served, for its trace alone, though nothing is
-        // judged.
+        // judged. A serve that fails is `Unserved`, as it is beside the
+        // oracle, and named, never a fence that entered nothing (#1535).
         if found.anchored.is_some() {
             for (witness, regime) in &runnable {
-                if let Ok((_, natives)) = judge::serve(oracle, binary, witness, *regime) {
-                    entered
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(witness.id(), Record::Entered(natives));
-                }
+                let record = match judge::serve(oracle, binary, witness, *regime) {
+                    Ok((_, natives)) => Record::Entered(natives),
+                    Err(trouble) => {
+                        unserved.push(format!("{}: {trouble}", witness.at()));
+                        Record::Unserved
+                    }
+                };
+                entered
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(witness.id(), record);
             }
         }
         tally::Tally::found(runnable.len())
@@ -726,6 +753,7 @@ pub(crate) fn judge(
         wall,
         captured,
         oracle_absent,
+        unserved,
     })
 }
 
