@@ -414,7 +414,7 @@ impl Connection for Handle {
             handler.release(req);
         }
         for registration in std::mem::take(&mut self.registrations) {
-            for handler in self.db.unregister(registration) {
+            for handler in registration.unregister() {
                 handler.release(req);
             }
         }

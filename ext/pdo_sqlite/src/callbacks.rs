@@ -58,7 +58,7 @@ impl Callbacks for PdoSqlite {
         handler: &Handler,
         left: &[u8],
         right: &[u8],
-    ) -> Result<i32, Thrown> {
+    ) -> (i32, Option<Thrown>) {
         collate(req, handler, left, right)
     }
 
@@ -212,32 +212,43 @@ fn finalize(
 }
 
 /// `php_sqlite3_collation_callback`: the two strings compared by the
-/// callback, whose answer must be an integer.
-fn collate(req: &mut Request, handler: &Handler, left: &[u8], right: &[u8]) -> Result<i32, Thrown> {
-    let values = [
-        Value::string(PhpString::new(req, left)?),
-        Value::string(PhpString::new(req, right)?),
-    ];
+/// callback, whose answer must be an integer; `0` where it threw, and
+/// `FAILURE` beside the `TypeError` for an answer of another type.
+fn collate(
+    req: &mut Request,
+    handler: &Handler,
+    left: &[u8],
+    right: &[u8],
+) -> (i32, Option<Thrown>) {
+    let values = match (PhpString::new(req, left), PhpString::new(req, right)) {
+        (Ok(left), Ok(right)) => [Value::string(left), Value::string(right)],
+        (Err(thrown), _) | (_, Err(thrown)) => return (0, Some(thrown)),
+    };
     let returned = call(req, &handler.callable, &values);
     release_all(req, values.to_vec());
-    let returned = returned?;
+    let returned = match returned {
+        Ok(returned) => returned,
+        Err(thrown) => return (0, Some(thrown)),
+    };
     if let Some(n) = returned.deref().as_int() {
-        return Ok(match n.signum() {
+        let order = match n.signum() {
             -1 => -1,
             0 => 0,
             _ => 1,
-        });
+        };
+        return (order, None);
     }
     let name = req.active_function_name();
     let given = value_name(req, &returned);
     req.release(returned);
-    Err(throw(
+    let thrown = throw(
         req,
         "TypeError",
         &format!(
             "{name}(): Return value of the collation callback must be of type int, {given} returned"
         ),
-    ))
+    );
+    (-1, Some(thrown))
 }
 
 /// `authorizer`'s user half: the action and its four names handed to

@@ -86,6 +86,14 @@ impl Function {
         }
     }
 
+    /// Its handlers, handed over.
+    pub fn into_handlers(self) -> Vec<Handler> {
+        match self {
+            Function::Scalar(handler) => vec![handler],
+            Function::Aggregate { step, finalize } => vec![step, finalize],
+        }
+    }
+
     /// Its handlers given up.
     pub fn release(self, req: &mut Request) {
         match self {
@@ -146,14 +154,15 @@ pub trait Callbacks: Sync {
         call: &mut Invocation<'_>,
     ) -> Result<(), Thrown>;
 
-    /// A collation's comparison of two strings.
+    /// A collation's comparison of two strings: the order the library
+    /// is answered, and what the callback threw beside it.
     fn collate(
         &self,
         req: &mut Request,
         handler: &Handler,
         left: &[u8],
         right: &[u8],
-    ) -> Result<i32, Thrown>;
+    ) -> (i32, Option<Thrown>);
 
     /// The authorizer's answer to one action and its four names, with
     /// the handler set, if any, and whether a callback already threw
@@ -347,30 +356,50 @@ impl Db {
         };
     }
 
-    /// `sqlite3_close` now, where this is the connection's last owner:
-    /// `Err` with the connection still open, the code and the library's
-    /// text, where it is not, which is the text `sqlite3_close` sets for
-    /// a connection a statement, a blob or a call in progress still holds.
-    pub fn close(self) -> Result<(), (Db, i32, Vec<u8>)> {
+    /// `sqlite3_close` now, the functions and collations registered on
+    /// the connection taken off it first, their handlers handed back:
+    /// `Err` with the connection still open and everything handed back,
+    /// the code and the library's text, where something beside them
+    /// holds it, the text `sqlite3_close` sets for a connection a
+    /// statement, a blob or a call in progress still holds.
+    pub fn close(self, registrations: Vec<Registration>) -> Result<Vec<Handler>, Box<Unclosed>> {
         // SAFETY: `self` is an owner; the field is read.
         let owners = unsafe { (*self.0.as_ptr()).owners };
-        if owners > 1 {
-            let text = b"unable to close due to unfinalized statements or unfinished backups";
-            return Err((self, SQLITE_BUSY, text.to_vec()));
+        let held = registrations.iter().filter(|r| r.db.0 == self.0).count();
+        if owners > 1 + held {
+            let message =
+                b"unable to close due to unfinalized statements or unfinished backups".to_vec();
+            return Err(Box::new(Unclosed {
+                db: self,
+                registrations,
+                released: Vec::new(),
+                code: SQLITE_BUSY,
+                message,
+            }));
         }
-        // SAFETY: the last owner, so no statement, blob or registration's
-        // call can reach the connection after it is closed.
+        let released: Vec<Handler> = registrations
+            .into_iter()
+            .flat_map(Registration::unregister)
+            .collect();
+        // SAFETY: the last owner, so no statement, blob or registration
+        // can reach the connection after it is closed.
         let rc = unsafe { sys::sqlite3_close(self.inner_raw()) };
         if rc != SQLITE_OK {
-            let failed = (self.errcode(), self.errmsg());
-            return Err((self, failed.0, failed.1));
+            let (code, message) = (self.errcode(), self.errmsg());
+            return Err(Box::new(Unclosed {
+                db: self,
+                registrations: Vec::new(),
+                released,
+                code,
+                message,
+            }));
         }
         let inner = self.0;
         std::mem::forget(self);
         // SAFETY: the allocation `open` leaked, its connection closed and
         // its last owner forgotten, freed once.
         drop(unsafe { Box::from_raw(inner.as_ptr()) });
-        Ok(())
+        Ok(released)
     }
 
     /// `sqlite3_backup_init`, `sqlite3_backup_step(-1)` until it stops
@@ -541,6 +570,7 @@ impl Db {
             return Err((Box::new(registered.function), rc));
         }
         Ok(Registration {
+            db: self.clone(),
             name: c_name,
             argc,
             kind: Kind::Function(registered),
@@ -575,59 +605,11 @@ impl Db {
             return Err((registered.handler, rc));
         }
         Ok(Registration {
+            db: self.clone(),
             name: c_name,
             argc: 0,
             kind: Kind::Collation(registered),
         })
-    }
-
-    /// A registration taken off the library, `sqlite3_create_function`
-    /// or `sqlite3_create_collation` with no callback, and the handlers
-    /// it held handed back for the caller to release.
-    pub fn unregister(&self, registration: Registration) -> Vec<Handler> {
-        let Registration { name, argc, kind } = registration;
-        match kind {
-            Kind::Function(registered) => {
-                // SAFETY: a live connection; no callback and no data,
-                // which deletes the function.
-                unsafe {
-                    sys::sqlite3_create_function_v2(
-                        self.inner_raw(),
-                        name.as_ptr(),
-                        argc,
-                        sys::SQLITE_UTF8,
-                        ptr::null_mut(),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                };
-                // SAFETY: the registration's own box, no longer the
-                // library's data.
-                let registered = unsafe { Box::from_raw(registered) };
-                match registered.function {
-                    Function::Scalar(handler) => vec![handler],
-                    Function::Aggregate { step, finalize } => vec![step, finalize],
-                }
-            }
-            Kind::Collation(registered) => {
-                // SAFETY: as above, for a collation.
-                unsafe {
-                    sys::sqlite3_create_collation_v2(
-                        self.inner_raw(),
-                        name.as_ptr(),
-                        sys::SQLITE_UTF8,
-                        ptr::null_mut(),
-                        None,
-                        None,
-                    )
-                };
-                // SAFETY: as above.
-                let registered = unsafe { Box::from_raw(registered) };
-                vec![registered.handler]
-            }
-        }
     }
 
     /// `authorizer_fcc`: the handler set, the one it replaced handed back.
@@ -720,6 +702,17 @@ impl Db {
     }
 }
 
+/// What [`Db::close`] hands back where the connection stays open: the
+/// connection, the registrations it was given, the handlers of any it
+/// took off, and the code and text of why.
+pub struct Unclosed {
+    pub db: Db,
+    pub registrations: Vec<Registration>,
+    pub released: Vec<Handler>,
+    pub code: i32,
+    pub message: Vec<u8>,
+}
+
 /// The type of a scalar or step callback in a registration.
 type Scalar =
     Option<unsafe extern "C" fn(*mut sys::sqlite3_context, c_int, *mut *mut sys::sqlite3_value)>;
@@ -746,8 +739,11 @@ enum Kind {
 
 /// One function or collation registered on a connection, php's
 /// `pdo_sqlite_func` or `pdo_sqlite_collation`, which the connection
-/// keeps until it closes, [`Db::unregister`].
+/// keeps until it closes ([`Registration::unregister`], [`Db::close`]):
+/// an owner of the connection, so the data the library holds for it is
+/// never freed while the library can call back with it.
 pub struct Registration {
+    db: Db,
     name: CString,
     argc: i32,
     kind: Kind,
@@ -758,6 +754,57 @@ pub struct Registration {
 unsafe impl Send for Registration {}
 
 impl Registration {
+    /// Taken off the library, `sqlite3_create_function` or
+    /// `sqlite3_create_collation` with no callback, and the handlers it
+    /// held handed back for the caller to release.
+    pub fn unregister(self) -> Vec<Handler> {
+        let Registration {
+            db,
+            name,
+            argc,
+            kind,
+        } = self;
+        match kind {
+            Kind::Function(registered) => {
+                // SAFETY: the registration's live connection; no callback
+                // and no data, which deletes the function.
+                unsafe {
+                    sys::sqlite3_create_function_v2(
+                        db.inner_raw(),
+                        name.as_ptr(),
+                        argc,
+                        sys::SQLITE_UTF8,
+                        ptr::null_mut(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                // SAFETY: the registration's own box, no longer the
+                // library's data.
+                let registered = unsafe { Box::from_raw(registered) };
+                registered.function.into_handlers()
+            }
+            Kind::Collation(registered) => {
+                // SAFETY: as above, for a collation.
+                unsafe {
+                    sys::sqlite3_create_collation_v2(
+                        db.inner_raw(),
+                        name.as_ptr(),
+                        sys::SQLITE_UTF8,
+                        ptr::null_mut(),
+                        None,
+                        None,
+                    )
+                };
+                // SAFETY: as above.
+                let registered = unsafe { Box::from_raw(registered) };
+                vec![registered.handler]
+            }
+        }
+    }
+
     /// The handlers it holds, for the cycle collector.
     pub fn handlers(&self) -> Vec<Handler> {
         match self.kind {
@@ -1048,13 +1095,11 @@ unsafe extern "C" fn collate(
     };
     let left = slice(left.cast(), left_len);
     let right = slice(right.cast(), right_len);
-    match callbacks(inner).collate(req, &collation.handler, &left, &right) {
-        Ok(order) => order,
-        Err(thrown) => {
-            throw_out(inner, thrown);
-            -1
-        }
+    let (order, thrown) = callbacks(inner).collate(req, &collation.handler, &left, &right);
+    if let Some(thrown) = thrown {
+        throw_out(inner, thrown);
     }
+    order
 }
 
 /// `authorizer`: `SQLITE_OK` without a handler, the handler's answer

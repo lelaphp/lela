@@ -29,6 +29,8 @@
 mod blob;
 mod callbacks;
 pub mod ffi;
+
+pub use blob::BlobStream;
 mod sqlite;
 
 use php_ext::abi::{
