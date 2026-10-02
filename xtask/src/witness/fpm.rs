@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{SocketAddr, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -64,33 +64,99 @@ fn pair(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
 /// How long a master has to listen before the fence gives it up.
 const PATIENCE: Duration = Duration::from_secs(10);
 
+/// The pool's ping page, asked for once the fence's response has ended.
+const PING: &str = "/witness-ping";
+
 /// How many of the log's last lines a master that never listened is
 /// named with.
 const TAIL: usize = 10;
 
-/// A php-fpm master, ended when dropped.
-struct Master(Child);
+/// A php-fpm master over a pool of one child listening on the socket at
+/// `socket`, its log at `log`; ended with `SIGTERM` when dropped.
+struct Pool {
+    master: Child,
+    socket: PathBuf,
+    address: SocketAddr,
+    log: PathBuf,
+}
 
-impl Drop for Master {
+impl Pool {
+    /// A connection to the pool once the master listens. A master that
+    /// ends first is named by its exit and the log's last lines as soon as
+    /// it has ended, and one still not listening after [`PATIENCE`] by
+    /// the same lines.
+    fn connect(&mut self) -> Result<UnixStream> {
+        let started = Instant::now();
+        loop {
+            let refused = match UnixStream::connect_addr(&self.address) {
+                Ok(stream) => return Ok(stream),
+                Err(refused) => refused,
+            };
+            if let Some(status) = self.master.try_wait()? {
+                bail!(
+                    "php-fpm ended with {status} before it listened at {}; its log ends:\n{}",
+                    self.socket.display(),
+                    tail(&self.log)
+                );
+            }
+            if started.elapsed() >= PATIENCE {
+                bail!(
+                    "php-fpm did not listen at {} in {}s: {refused}; its log ends:\n{}",
+                    self.socket.display(),
+                    PATIENCE.as_secs(),
+                    tail(&self.log)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Once the request whose response was read has ended, as well as its
+    /// response.
+    ///
+    /// The response can end before the request does: a program that calls
+    /// `fastcgi_finish_request()` runs on in the child after the last
+    /// record, and what the child appends at the request's end, the trace
+    /// of the natives it entered, comes after that. Dropping the pool ends
+    /// the child wherever it stands, so a run that dropped it once the
+    /// response was read lost the trace whenever the child had not yet
+    /// reached the end, which two runs at once on one machine made likely.
+    /// The pool's one child takes the next connection only once its
+    /// request has ended, so the ping page it answers says that it has.
+    fn settle(&mut self, timeout: Duration) -> Result<()> {
+        let ping = self.connect()?;
+        ping.set_read_timeout(Some(timeout))?;
+        exchange(
+            ping,
+            PING,
+            &[("REQUEST_METHOD".to_owned(), OsString::from("GET"))],
+            None,
+        )
+        .context("asking for the ping once the response had ended")?;
+        Ok(())
+    }
+}
+
+impl Drop for Pool {
     fn drop(&mut self) {
         // A master that already ended, one that never listened among them,
         // has nothing left to be sent.
-        if matches!(self.0.try_wait(), Ok(Some(_))) {
+        if matches!(self.master.try_wait(), Ok(Some(_))) {
             return;
         }
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(self.0.id().to_string())
+            .arg(self.master.id().to_string())
             .status();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if matches!(self.0.try_wait(), Ok(Some(_))) {
+            if matches!(self.master.try_wait(), Ok(Some(_))) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.master.kill();
+        let _ = self.master.wait();
     }
 }
 
@@ -146,7 +212,7 @@ pub(crate) fn served_as_fpm(
     fs::write(
         &conf,
         format!(
-            "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = no\n",
+            "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = no\nping.path = {PING}\n",
             log.display(),
             socket.display()
         ),
@@ -172,38 +238,21 @@ pub(crate) fn served_as_fpm(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(logged);
-    let mut master = Master(
-        master
+    let mut pool = Pool {
+        master: master
             .spawn()
             .with_context(|| format!("running {}", host.display()))?,
-    );
-    let started = Instant::now();
-    let stream = loop {
-        match UnixStream::connect_addr(&address) {
-            Ok(stream) => break stream,
-            Err(refused) => {
-                if let Some(status) = master.0.try_wait()? {
-                    bail!(
-                        "php-fpm ended with {status} before it listened at {}; its log ends:\n{}",
-                        socket.display(),
-                        tail(&log)
-                    );
-                }
-                if started.elapsed() >= PATIENCE {
-                    bail!(
-                        "php-fpm did not listen at {} in {}s: {refused}; its log ends:\n{}",
-                        socket.display(),
-                        PATIENCE.as_secs(),
-                        tail(&log)
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
+        socket,
+        address,
+        log,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(recipe.limits.timeout_s)))?;
+    let started = Instant::now();
+    let timeout = Duration::from_secs(recipe.limits.timeout_s);
+    let stream = pool.connect()?;
+    stream.set_read_timeout(Some(timeout))?;
     let uri = format!("/{}", recipe.script_name);
     let (stdout, stderr) = exchange(stream, &uri, &given, described.stdin.as_deref())?;
+    pool.settle(timeout)?;
     let rules = &recipe.normalise;
     Ok(Observation {
         stdout: normalise_in(rules, own.path(), stdout),
@@ -321,6 +370,47 @@ mod tests {
         assert!(
             started.elapsed() < super::PATIENCE,
             "the fence waited out its patience for a master already ended: {said}"
+        );
+    }
+
+    /// What the child appends after the response has ended is there when
+    /// the fence returns, though the master is ended where its child
+    /// stands. The stand-in answers the request with its last record at
+    /// once, as a child whose program called `fastcgi_finish_request()`
+    /// does, takes half a second before it appends to the file the
+    /// variable names, and only then takes the next connection, as
+    /// php-fpm's one child does.
+    #[test]
+    fn what_the_child_appends_after_the_response_ends_is_there_when_the_fence_returns() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pin =
+            Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
+        let hosts = Tree::new("witness-fpm-finishing").unwrap();
+        let host = hosts.join("php-fpm");
+        fs::write(
+            &host,
+            "#!/usr/bin/perl\nuse Socket;\nuse Time::HiRes qw(time sleep);\n\
+             my ($conf, $path);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\n\
+             open(my $f, '<', $conf) or die;\nwhile (<$f>) { $path = $1 if /^listen = (\\S+)/; }\n\
+             socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;\nbind($s, sockaddr_un($path)) or die;\nlisten($s, 5) or die;\n\
+             sub answer { my ($c) = @_; my $b; sysread($c, $b, 65536); syswrite($c, pack('CCnnCC', 1, 3, 1, 8, 0, 0) . (\"\\0\" x 8)); close($c); }\n\
+             accept(my $c, $s) or die;\nanswer($c);\n\
+             my $until = time + 0.5;\nsleep(0.05) while time < $until;\n\
+             open(my $t, '>>', $ENV{WITNESS_FPM_APPENDED}) or die;\nprint $t \"appended\\n\";\nclose($t);\n\
+             while (accept(my $next, $s)) { answer($next); }\n",
+        )
+        .unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+        let appended = hosts.join("appended");
+        let env = [(
+            "WITNESS_FPM_APPENDED".to_owned(),
+            appended.clone().into_os_string(),
+        )];
+        super::served_as_fpm(&pin.oracle(), &host, "echo 1;", "--GET--\nq=1", &env).unwrap();
+        assert_eq!(
+            fs::read_to_string(&appended).unwrap_or_default(),
+            "appended\n",
+            "the child was ended before the end of its request"
         );
     }
 }
