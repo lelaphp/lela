@@ -1255,6 +1255,35 @@ impl Callable {
         forwarded
     }
 
+    /// `fcc.function_handler->common.required_num_args`: the parameters
+    /// of the callee up to the last one a call must pass, what
+    /// `zend_ffi_create_callback` holds a C function's arity to.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("typedef struct { int (*cb)(int); } s;");
+    /// $s = $ffi->new("s");
+    /// try { $s->cb = function ($a, $b) { return 0; }; } catch (FFI\Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Attempt to assign an invalid callback, insufficient number of arguments
+    /// ```
+    #[must_use]
+    pub fn required(&self, req: &Request) -> usize {
+        let function = match self.target {
+            Target::Function(function) | Target::Method { function, .. } => function,
+            Target::Closure(closure) => match closure.closure(req) {
+                Some(info) => info.function,
+                None => return 0,
+            },
+        };
+        req.function_decl(function).map_or(0, |decl| {
+            decl.parameters
+                .iter()
+                .rposition(php_unit::decl::Parameter::is_required)
+                .map_or(0, |at| at + 1)
+        })
+    }
+
     /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
     /// that keeps the callable past the frame it was read off takes, its
     /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved

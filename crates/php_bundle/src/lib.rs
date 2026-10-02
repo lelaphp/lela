@@ -128,6 +128,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_tidy::extension,
         #[cfg(feature = "soap")]
         php_ext_soap::extension,
+        #[cfg(feature = "ffi")]
+        php_ext_ffi::extension,
     ]
 }
 

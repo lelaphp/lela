@@ -19,6 +19,7 @@ abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
 abi::Callable
+abi::Callable::required
 abi::Callable::with_called_scope
 abi::Cases
 abi::Cases::CASES
