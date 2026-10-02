@@ -1013,10 +1013,12 @@ pub(crate) fn scalar_type_hint(
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
             }
-            // `cast_object(zobj, &obj, IS_STRING)`, which for a class
-            // with no `__toString` fails without a word.
+            // `cast_object(zobj, &obj, IS_STRING)`, the class's own
+            // slot, which at `Std` fails without a word for a class with
+            // no `__toString`.
             ValueRef::Object(object) => {
-                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
+                let table = req.object_handlers(object.heap());
+                if let Some(text) = table.cast_object(req, *object, TypeTag::String)? {
                     return Ok(Some(text));
                 }
             }
