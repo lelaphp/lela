@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 378 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 991 | 1500 | pass |
+| api | api.lock | 996 | 1500 | pass |
 | sapi | sapi.lock | 24 |  | pass |
 | tier | tier.lock | 62 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=e6b583d11f1831daaa951f389f80ba436381647381ee1611a17904fcdacb0052 out=50ddaadf835856b3e17705377863852fc914415fed6244a70e4b89a962de65c1 -->
+<!-- /computed in=063a435043cbbd3323911672aaaf8f964fbac71f42b4c55d5ecb0b15787e21a5 out=8cc9905053208a05a961c18f55a83fc866af4c071c5a3e68089961ace65a71fa -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -215,6 +215,7 @@ Options:
 ├── filter
 ├── ftp
 ├── gd
+├── gettext
 ├── gmp
 ├── hash
 ├── iconv
@@ -235,12 +236,14 @@ Options:
 ├── phar
 ├── posix
 ├── random
+├── readline
 ├── reflection
 ├── session
 ├── shmop
 ├── simplexml
 ├── soap
 ├── sockets
+├── sodium
 ├── spl
 ├── sqlite3
 ├── standard
@@ -257,7 +260,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=fc98b5b672239baa9358aaaba26ad6d40ac91c33519075d818f7f3db670059b5 out=c49655d34cf93a1d202c6fda2f9c73e308eb06f40b2d28bc51be8ea03230bc72 -->
+<!-- /computed in=f58b43ebd278000449b06b874cb33ad1657ef10b5e5054265cfc653ba3257415 out=20709ee324a90188eec59b0fc8a03e0e05e5910ab6c399ae9fa8dcfbff71fbe9 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

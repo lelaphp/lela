@@ -705,6 +705,7 @@ dependencies = [
  "php_ext_filter",
  "php_ext_ftp",
  "php_ext_gd",
+ "php_ext_gettext",
  "php_ext_gmp",
  "php_ext_hash",
  "php_ext_iconv",
@@ -725,12 +726,14 @@ dependencies = [
  "php_ext_phar",
  "php_ext_posix",
  "php_ext_random",
+ "php_ext_readline",
  "php_ext_reflection",
  "php_ext_session",
  "php_ext_shmop",
  "php_ext_simplexml",
  "php_ext_soap",
  "php_ext_sockets",
+ "php_ext_sodium",
  "php_ext_spl",
  "php_ext_sqlite3",
  "php_ext_standard",
@@ -884,6 +887,14 @@ dependencies = [
  "cc",
  "php_ext",
  "pkg-config",
+]
+
+[[package]]
+name = "php_ext_gettext"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "php_ext",
 ]
 
 [[package]]
@@ -1066,6 +1077,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_ext_readline"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "php_ext",
+ "pkg-config",
+]
+
+[[package]]
 name = "php_ext_reflection"
 version = "0.0.0"
 dependencies = [
@@ -1115,6 +1135,14 @@ dependencies = [
  "libc",
  "nix",
  "php_ext",
+]
+
+[[package]]
+name = "php_ext_sodium"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "pkg-config",
 ]
 
 [[package]]

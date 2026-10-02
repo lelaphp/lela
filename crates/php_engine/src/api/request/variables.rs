@@ -155,6 +155,16 @@ impl Request {
         self.symbol_value(table, name)
     }
 
+    /// The names `EG(symbol_table)` holds, in its order, what the
+    /// shell's completion of a `$` walks
+    /// (`cli_completion_generator_var`).
+    pub fn global_names(&mut self) -> Vec<Vec<u8>> {
+        let table = self.global_table();
+        self.table_mut(table)
+            .map(|entries| entries.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// A variable of `EG(symbol_table)` written or deleted, what an
     /// extension that binds a global does: `Some` is
     /// `zend_hash_update_ind`, `value` the table's from here, into the CV

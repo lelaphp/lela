@@ -12,14 +12,19 @@
 //! and `-E`, `-l`'s lint of each program named, `-s` and `-w`, the
 //! program highlighted or stripped as `zend_highlight` and `zend_strip`
 //! write it, the reports `--rf`, `--rc`, `--re`, `--rz`, `--ri` and
-//! `--ini` print, or the built-in web server. `-n` and every `-d` are the
+//! `--ini` print, the interactive shell `-a` serves where the bundle
+//! provides one, or the built-in web server. `-n` and every `-d` are the
 //! engine's to lay over its defaults before it is built, so the binary
 //! reads them off [`Options`] and builds the engine; the host then serves
 //! [`Options::ask`] on it, `--repeat`'s count of times.
 //!
-//! The switches taken and changing nothing: `-a`, which is `do_cli`'s
-//! sentence for a build without the readline extension, since this
-//! engine has none; `-c`, `-e` and `-H`: no `php.ini` is looked for
+//! The binary carries php's shell callbacks
+//! ([`php_sapi::EngineBuilder::cli_shell`]), which the readline extension
+//! fills, so `-a` asks the engine whether it has a shell, as `do_cli`
+//! asks `cli_shell_callbacks.cli_shell_run`, and is `do_cli`'s sentence
+//! where it has none.
+//!
+//! The switches taken and changing nothing: `-c`, `-e` and `-H`: no `php.ini` is looked for
 //! anywhere, the compiler emits no extended info, and `-H` blanks copies
 //! of the arguments nothing reads again; `-C` and `-q`, php's own no-ops. `--ini=diff` is refused with
 //! php's usage: the engine keeps no default apart from an entry's value.
@@ -103,7 +108,7 @@ pub fn main() -> ExitCode {
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
     let _ = TITLE.set(ffi::save_ps_args().map(ProcessTitle::new));
-    let options = match Options::parse(&argv) {
+    let options = match Options::parse(&argv, &|ini| engine(ini).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
             let _ = std::io::stderr()
@@ -125,7 +130,12 @@ pub fn main() -> ExitCode {
             server,
             php_sapi::ini::enabled(&options.ini, "cli_server.color", false),
         ),
-        ask => repeated(&engine(&options.ini), ask, options.repeat),
+        ask => {
+            if options.interactive {
+                print("Interactive shell\n\n");
+            }
+            repeated(&engine(&options.ini), ask, options.repeat)
+        }
     };
     php_sapi::exit_code(status)
 }
@@ -157,6 +167,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
         Ask::Highlight(program, arguments) => request::highlight(engine, program, arguments),
         Ask::Strip(program, arguments) => request::strip(engine, program, arguments),
         Ask::Report(report, file) => request::report(engine, report, file.as_deref()),
+        Ask::Shell(file, arguments) => request::shell(engine, file.as_deref(), arguments),
         // `do_cli`'s lint loop: the status starts at 0, a lint that fails
         // sets 255 and a file that cannot be opened sets 1, each as it
         // comes, and one that passes changes nothing.
@@ -188,8 +199,8 @@ fn print(text: &str) -> i32 {
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
 /// order and `php_bundle::Tier` bound, the CLI's `additional_functions`
 /// under `standard` ([`natives::cli`]), the shebang line of every file
-/// passed over as `do_cli` sets `CG(skip_shebang)`, started over the
-/// line's `ini` ([`php_sapi::start`]).
+/// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
+/// carried, started over the line's `ini` ([`php_sapi::start`]).
 fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
@@ -197,7 +208,8 @@ fn engine(ini: &[(String, String)]) -> Engine {
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
-        .skip_shebang();
+        .skip_shebang()
+        .cli_shell();
     php_sapi::start(natives::cli(builder), ini)
 }
 
