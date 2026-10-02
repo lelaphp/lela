@@ -252,14 +252,27 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
     match req.callable_checked(value) {
         Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
         Ok(callable) => Ok(callable),
-        Err(refusal) => {
+        // `zend_get_callable_name_ex`'s string stands beside the
+        // sentence, made for an array or an object and the string's own
+        // for a string.
+        Err(refusal) => Err(refusal.across(req, |req| {
             let name = req.callable_name(value);
-            Err(crate::api::raising::throw_over_pending(
-                req,
-                "Error",
-                &format!("Invalid callback {name}, {refusal}"),
-            ))
-        }
+            let message = format!("Invalid callback {name}, {refusal}");
+            let made = match value.deref().as_ref() {
+                ValueRef::Array(_) | ValueRef::Object(_) => {
+                    match PhpString::new(req, name.as_bytes()) {
+                        Ok(made) => Some(made),
+                        Err(refused) => return refused,
+                    }
+                }
+                _ => None,
+            };
+            let thrown = crate::api::raising::throw_over_pending(req, "Error", &message);
+            if let Some(made) = made {
+                req.release(Value::string(made));
+            }
+            thrown
+        })),
     }
 }
 
@@ -736,11 +749,8 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
             Err(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
             Err(why) => {
                 let or_null = if nullable { " or null" } else { "" };
-                Err(arg_type_error(
-                    req,
-                    position,
-                    &format!("be a valid callback{or_null}, {why}"),
-                ))
+                let tail = format!("be a valid callback{or_null}, {why}");
+                Err(why.across(req, |req| arg_type_error(req, position, &tail)))
             }
         };
     }

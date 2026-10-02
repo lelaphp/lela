@@ -950,19 +950,18 @@ impl Closure {
         let callable = match req.callable_checked(&given) {
             Ok(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
             Ok(callable) => callable,
-            Err(Refusal::Said(reason)) => {
-                return Err(throw_over_pending(
-                    req,
-                    "TypeError",
-                    &format!("Failed to create closure from callable: {reason}"),
-                ));
-            }
             Err(Refusal::Unsaid) => {
                 return Err(throw_over_pending(
                     req,
                     "TypeError",
                     "Failed to create closure from callable",
                 ));
+            }
+            Err(refusal) => {
+                return Err(refusal.across(req, |req| {
+                    let message = format!("Failed to create closure from callable: {refusal}");
+                    throw_over_pending(req, "TypeError", &message)
+                }));
             }
         };
         fake_closure(req, &callable).map(Instance::of)

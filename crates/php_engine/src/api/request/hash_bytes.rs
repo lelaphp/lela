@@ -1,11 +1,12 @@
-//! Two of php's `HashTable`s the engine keeps in a shape of its own,
+//! Three of php's `HashTable`s the engine keeps in a shape of its own,
 //! with the bytes php's take on the request's heap held beside them
 //! (design §5.13): `EG(included_files)`, keyed by the path of every file
-//! the request opened, and the symbol table `zend_rebuild_symbol_table`
+//! the request opened, the symbol table `zend_rebuild_symbol_table`
 //! gives a function frame, with `EG(symtable_cache)`, the tables a
-//! frame's end cleaned and kept for the next rebuild. Both go with the
-//! heap at the request's end, as `shutdown_executor`'s fast shutdown
-//! leaves them to the memory manager.
+//! frame's end cleaned and kept for the next rebuild, and
+//! `EG(modified_ini_directives)`. The first two go with the heap at the
+//! request's end, as `shutdown_executor`'s fast shutdown leaves them to
+//! the memory manager; the third is freed by `zend_ini_deactivate`.
 
 use super::{Request, SymbolTable};
 use crate::api::raising::Thrown;
@@ -165,6 +166,16 @@ impl IncludedFiles {
         self.paths.iter().any(|held| held.as_bytes() == path)
     }
 
+    /// The table's string for `path`, `zend_string_copy`'d by the
+    /// caller, as an op array's `filename` is the string its file was
+    /// compiled under; `None` for a path the request did not open.
+    pub(crate) fn held(&self, path: &[u8]) -> Option<PhpString> {
+        self.paths
+            .iter()
+            .copied()
+            .find(|held| held.as_bytes() == path)
+    }
+
     /// The paths in the table's order.
     pub(crate) fn paths(&self) -> Vec<Vec<u8>> {
         self.paths
@@ -214,6 +225,54 @@ impl Request {
         self.included_files.table = table;
         self.included_files.paths.push(held);
         added
+    }
+
+    /// One entry added to `EG(modified_ini_directives)`, which the
+    /// first lays down, `ALLOC_HASHTABLE` and `zend_hash_init(8)`, and
+    /// the first write gives its data; a `@` is the first change of a
+    /// request that changes no entry, and `error_clear_last()` gives
+    /// none of it back (the warning first stores a last error, whose
+    /// message the `@`'s replaces at its size):
+    ///
+    /// ```php
+    /// echo $w;
+    /// $m = memory_get_usage(); @$x; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ini_set('precision', '10'); echo memory_get_usage() - $m, "\n";
+    /// error_clear_last();
+    /// $m = memory_get_usage(); for ($i = 0; $i < 7; $i++) ini_set(['user_agent', 'arg_separator.output', 'default_socket_timeout', 'from', 'serialize_precision', 'highlight.string', 'highlight.comment'][$i], '1'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $w in %s on line 2
+    /// 376
+    /// 0
+    /// 320
+    /// ```
+    pub(super) fn ini_modified_bytes(&mut self) {
+        let table = match self.ini_bytes.take() {
+            Some(table) => Ok(table),
+            None => HashBytes::new_array(self, 8),
+        };
+        // The memory limit's fatal is recorded and ends the request.
+        if let Ok(mut table) = table {
+            let _ = table.add(self);
+            self.ini_bytes = Some(table);
+        }
+    }
+
+    /// One entry deleted from `EG(modified_ini_directives)`, by
+    /// `ini_restore()`, the last of the table's where `last` says so.
+    pub(super) fn ini_unmodified_bytes(&mut self, last: bool) {
+        if let Some(table) = self.ini_bytes.as_mut() {
+            table.del(last);
+        }
+    }
+
+    /// `zend_hash_destroy` and `FREE_HASHTABLE` of
+    /// `EG(modified_ini_directives)`, `zend_ini_deactivate`'s.
+    pub(super) fn free_modified_ini_bytes(&mut self) {
+        if let Some(table) = self.ini_bytes.take() {
+            table.free(self);
+        }
     }
 
     /// `zend_rebuild_symbol_table`'s table for a function frame with

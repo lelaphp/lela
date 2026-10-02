@@ -812,11 +812,50 @@ pub(crate) fn under_name(
     thrown
 }
 
+/// `zend_vstrpprintf` (`Z/Zend/zend.c:336`), which `zend_error`
+/// formats a diagnostic's message with: a `smart_str` laid down at its
+/// 256-byte start, or the page past the text, and trimmed to the
+/// message's string by `smart_str_extract`. A trim within the small
+/// bins lays the string down before it frees the buffer, so the peak
+/// holds both; one from a page is `zend_mm_realloc_slow`'s, whose peak
+/// is the page's. A silenced warning peaks at the two:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { echo @$u; });
+/// pk(function () { echo @$uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu; });
+/// pk(function () { echo @${str_repeat('u', 300)}; });
+/// ```
+/// ```expect
+/// 304 32
+/// 416 0
+/// 4480 0
+/// ```
+pub(crate) fn strpprintf(req: &mut Request, text: &str) -> Result<PhpString, Thrown> {
+    // `SMART_STR_START_LEN`, the 256 bytes less the string's header and
+    // terminator, and `SMART_STR_NEW_LEN` past it.
+    let paged = text.len() >= 231;
+    let size = if paged {
+        (text.len() + 25).next_multiple_of(4096)
+    } else {
+        256
+    };
+    let block = req.heap_mut().block(size);
+    let buffer = req.fatal_of(block)?;
+    if paged {
+        req.heap_mut().free_block(buffer);
+        return PhpString::new(req, text.as_bytes());
+    }
+    let string = PhpString::new(req, text.as_bytes());
+    req.heap_mut().free_block(buffer);
+    string
+}
+
 /// `zend_vspprintf`'s buffer over `len` bytes of text: a
 /// `smart_string`, laid down at its 255-byte start and grown to the
 /// page past the text and its terminator (`_smart_string_alloc`), the
 /// `char *` php frees once the text is used.
-fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Thrown> {
+pub(crate) fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Thrown> {
     // `SMART_STRING_START_LEN` and `SMART_STRING_PAGE`; a buffer grows
     // where the text reaches its size, so 255 bytes fill the first.
     let size = if len < 255 {

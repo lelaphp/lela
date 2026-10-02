@@ -32,19 +32,72 @@ pub(crate) enum Deprecations {
 }
 
 /// php's `*error` after `zend_is_callable_ex` refused a value: the
-/// sentence it wrote, or none, where a deprecation's user handler threw
-/// and `zend_is_callable_check_class` gave up with the throwable
-/// pending, which php's `%s` prints as `(null)`.
+/// sentence it printed with `zend_spprintf`, the one it copied with
+/// `estrdup`, or none, where a deprecation's user handler threw and
+/// `zend_is_callable_check_class` gave up with the throwable pending,
+/// which php's `%s` prints as `(null)`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Refusal {
     Said(String),
+    Copied(&'static str),
     Unsaid,
+}
+
+impl Refusal {
+    /// `throw` taken with the sentence's `char *` standing on the
+    /// request's heap, `zend_spprintf`'s buffer or `estrdup`'s copy,
+    /// and freed after, as php holds `error` across the throw that
+    /// quotes it and `efree`s it then (`zend_wrong_callback_error`,
+    /// `ZEND_INIT_USER_CALL`, `zend_create_closure_from_callable` and
+    /// `zend_call_function`). Each refusal peaks with the 256 bytes of
+    /// its sentence:
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { try { array_map('nope', [1]); } catch (TypeError $e) {} });
+    /// pk(function () { $a = [2, 1]; try { usort($a, 'nope'); } catch (TypeError $e) {} });
+    /// pk(function () { try { Closure::fromCallable('nope'); } catch (TypeError $e) {} });
+    /// pk(function () { try { call_user_func('nope'); } catch (TypeError $e) {} });
+    /// pk(function () { try { call_user_func([new stdClass, 'nope']); } catch (TypeError $e) {} });
+    /// pk(function () { try { call_user_func(1); } catch (TypeError $e) {} });
+    /// ```
+    /// ```expect
+    /// 3240 32
+    /// 3272 0
+    /// 2952 0
+    /// 2392 0
+    /// 2648 0
+    /// 2136 0
+    /// ```
+    pub(crate) fn across(
+        &self,
+        req: &mut Request,
+        throw: impl FnOnce(&mut Request) -> crate::api::raising::Thrown,
+    ) -> crate::api::raising::Thrown {
+        let laid = match self {
+            Refusal::Said(sentence) => crate::api::raising::printf_buffer(req, sentence.len()),
+            Refusal::Copied(sentence) => {
+                let block = req.heap_mut().block(sentence.len() + 1);
+                req.fatal_of(block)
+            }
+            Refusal::Unsaid => return throw(req),
+        };
+        match laid {
+            Ok(block) => {
+                let thrown = throw(req);
+                req.heap_mut().free_block(block);
+                thrown
+            }
+            Err(refused) => refused,
+        }
+    }
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::Said(sentence) => f.write_str(sentence),
+            Refusal::Copied(sentence) => f.write_str(sentence),
             Refusal::Unsaid => f.write_str("(null)"),
         }
     }
@@ -56,9 +109,9 @@ impl From<String> for Refusal {
     }
 }
 
-impl From<&str> for Refusal {
-    fn from(sentence: &str) -> Refusal {
-        Refusal::Said(sentence.to_owned())
+impl From<&'static str> for Refusal {
+    fn from(sentence: &'static str) -> Refusal {
+        Refusal::Copied(sentence)
     }
 }
 
