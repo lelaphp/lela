@@ -209,6 +209,8 @@ Check: `serve`'s signature takes and returns an owned sink; a copied constant ar
 
 **68. Revision 68 (2026-10-02).** §4.10 gains the `pdo_sqlite` → `sqlite3` surface, settled by Mitchell on #1509, for #1501's ext/sqlite3 over the libsqlite3 binding ext/pdo_sqlite holds. The row states the edge, why it exists and what it mirrors, and names no items: as #1344 and #1347 ruled, a surface's items are a region rendered from `api-check`'s `pub beyond extension()` (#1363), and a long list waits for it rather than being typed and going stale as the binding grows. Rejected: the drafted row listing about fifteen items by name. Nothing is reversed, so there is no ADR. Check: `cargo xtask api-check` prints pdo_sqlite's items beyond `extension()` and `ext/sqlite3` has no `src/ffi/`.
 
+**69. Revision 69 (2026-10-02).** §7.2's sqlite row and §12's build row say where SQLite comes from, settled by Mitchell on #1519 for what #1510 built. `libsqlite3-sys`'s `bundled` amalgamation is that crate's release, not the one the pinned keg links, so by #624's rule ext/pdo_sqlite links the keg's libsqlite3 through `pkg-config`, statically, never vendored, as revision 32 has `libxml2`, and keeps `libsqlite3-sys` for its declarations alone. The design names no version: the version is the pin's, and a linked keg follows it. A Rust SQLite (a crate bundling the C at its own release, or a rewrite such as Turso) was considered: the first answers the crate's version, the second is a second implementation whose errors and PRAGMAs are not SQLite's. Rejected: those, vendoring the keg's amalgamation, and naming the version. Nothing is reversed, so there is no ADR. Check: `SQLite3::version()` and `PRAGMA compile_options` under the engine are the oracle's.
+
 ---
 
 ## 0. The one-paragraph design
@@ -841,7 +843,7 @@ There is no `dl()` and no C `zend_module_entry` ABI; both predecessors ruled thi
 | `Dom\HTMLDocument` (8.4), `Uri\WhatWg\Url` (8.5) | vendored `lexbor` (Apache-2.0), php-src's copy, compiled by `ext/lexbor`'s `build.rs` and bound in its `src/ffi/`; `ext/lexbor` is a crate of its own, as php's `lexbor` is a module of its own | php bundles lexbor for exactly these |
 | uri (8.5, `Uri\Rfc3986`) | `uriparser` (BSD) | php bundles uriparser |
 | zlib | a pure-Rust deflate first, held byte for byte to the oracle's zlib at every level; `libz-sys` over the platform's zlib where it cannot match (revision 34) | php's tests observe the compressed bytes, which follow the linked zlib's algorithm; the oracle links the platform's |
-| sqlite3, pdo_sqlite | `libsqlite3-sys` bundled | Mahout already does this |
+| sqlite3, pdo_sqlite | the libsqlite3 the pinned keg links, found through `pkg-config` and linked statically, never vendored, as `libxml2` is (revision 32); `libsqlite3-sys` for its declarations alone (#624, #1510) | the oracle's SQLite and its compile options, not a crate's bundled release |
 | openssl | `openssl-sys` | TLS and cipher parity |
 | curl | `curl-sys` | |
 | sodium | `libsodium-sys` | |
@@ -1016,7 +1018,7 @@ Lane D starts on day 3 against a locked `api`, not on day 15 against a finished 
 | `libmbfl` is LGPL-2.1, statically linked | Certain | Vendored as its own directory under its `LICENSE`; the crate's `license` field names it; LGPL §6(a) is met by shipping the engine's source; a binary-only release is a person's licence decision, and the same C then builds as a shared library for §6(b). No `encoding_rs` fallback: it would be a second implementation with different output (principle 1). |
 | Synchronous destructors and native re-entry recurse on the Rust stack | Medium | Stack-limit checks with php's own `Error` message and threshold; fibers get their own stacks; the calling thread's bounds read at request start as `zend_call_stack_get` reads them, the limit what the thread has, the engine sizing no thread of its own (§5.6, §5.14). |
 | `become` never stabilises | Irrelevant | The shipped dispatch is a `match` loop; tail calls are a measured option, not a dependency. |
-| Vendored C (timelib, libmbfl, lexbor, uriparser) complicates the build | Medium | `cc`-built `-sys` crates with pinned php-src tags; no system-library discovery for vendored ones. The one platform library the default build links is `libxml2`, found by `pkg-config` in `ext/libxml`'s `build.rs` (§7.2). |
+| Vendored C (timelib, libmbfl, lexbor, uriparser) complicates the build | Medium | `cc`-built `-sys` crates with pinned php-src tags; no system-library discovery for vendored ones. The platform libraries the default build links are `libxml2` and `libsqlite3`, the pinned keg's, found by `pkg-config` in `ext/libxml`'s and `ext/pdo_sqlite`'s builds (§7.2). |
 | Agent-driven development regrows process weight | High | No tickets in the repo; ADRs only on reversal; budgets gate documentation and harness lines too. |
 | Full-corpus parity slips because `ext/` is 15k of the 21.5k tests | Certain for some extensions | Parity is the oracle's own run (§1); what it excludes is named under *Not in parity* with its ruling, and the extensions lane orders the rest by tests per unit of effort (#1182). |
 | `api.lock` v0 is wrong in shape and the port stalls on renames | Medium | `port-map` is the measure; the first 20 census items by call count are kept by name; renames are mechanical. |
