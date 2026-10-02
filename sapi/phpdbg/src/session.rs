@@ -213,6 +213,14 @@ pub struct Session {
     /// (`Z/sapi/phpdbg/phpdbg.c:1707-1709`); this host serves those
     /// cycles as requests of the engine's, each started with it.
     pub exit_status: i32,
+    /// The init files `phpdbg_init` reads, in its order.
+    pub init_files: Vec<Vec<u8>>,
+    /// A cycle of php's main loop has started and its first request has
+    /// not yet run the init files.
+    pub init_due: bool,
+    /// `PHPDBG_IS_INITIALIZING`: the init files are being run, and the
+    /// loop checks nothing between handlers.
+    pub initializing: bool,
 }
 
 impl Session {
@@ -247,6 +255,9 @@ impl Session {
             thrown_into: None,
             origin: Origin::Program,
             exit_status: 0,
+            init_files: Vec::new(),
+            init_due: true,
+            initializing: false,
         }
     }
 }

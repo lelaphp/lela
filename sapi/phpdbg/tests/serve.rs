@@ -197,3 +197,80 @@ fn a_native_the_prompt_serves_reads_the_session() {
         )
     );
 }
+
+/// What the binary wrote on stdout for `flags` and an init file of
+/// `init` over a program of `source`, with `stdin` on its stdin; the
+/// program's real path and the init file's path.
+fn initialized(
+    name: &str,
+    flags: &[&str],
+    init: &str,
+    source: &str,
+    stdin: &str,
+) -> (String, String, String) {
+    let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("t.php");
+    std::fs::write(&file, source).unwrap();
+    let file = std::fs::canonicalize(&file).unwrap();
+    let init_file = dir.join("init");
+    std::fs::write(&init_file, init).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
+        .args(flags)
+        .arg(format!("-i{}", init_file.display()))
+        .arg(&file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        file.display().to_string(),
+        init_file.display().to_string(),
+    )
+}
+
+const INIT_PROGRAM: &str = "<?php\n$i = 1;\necho $x ?? \"unset\", \"\\n\";\n";
+const INIT: &str = "b 3\nev $x = 7\nnope\n";
+
+/// The init file's commands run before the startup run, in its request,
+/// a line at a time: a line that names no command writes its error with
+/// the line and the next line still runs (the pinned phpdbg's bytes for
+/// `phpdbg -qrrb -n -i<file>` and `phpdbg -qrb -n -i<file>`).
+#[test]
+fn the_init_file_runs_before_the_startup_run() {
+    let (out, file, init) = initialized("init-rr", &["-qrrb", "-n"], INIT, INIT_PROGRAM, "");
+    assert_eq!(
+        out,
+        format!(
+            "[Breakpoint #0 added at {file}:3]\n\
+             7\n\
+             \n\
+             [Unrecognized command in {init}:3: nope, The command \"nope\" could not be found!]\n\
+             7\n"
+        )
+    );
+    let (out, file, init) = initialized("init-r", &["-qrb", "-n"], INIT, INIT_PROGRAM, "q\n");
+    assert_eq!(
+        out,
+        format!(
+            "[Breakpoint #0 added at {file}:3]\n\
+             7\n\
+             \n\
+             [Unrecognized command in {init}:3: nope, The command \"nope\" could not be found!]\n\
+             [Breakpoint #0 at {file}:3, hits: 1]\n\
+             >00003: echo $x ?? \"unset\", \"\\n\";\n \
+             00004: \n\
+             prompt> "
+        )
+    );
+}

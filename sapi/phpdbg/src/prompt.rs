@@ -199,6 +199,58 @@ pub fn run_queued(s: &mut Session) {
     }
 }
 
+/// How one line of an init file ended.
+pub enum InitLine {
+    /// Its commands ran, or one failed and wrote its own error.
+    Done,
+    /// A command ended the request: the session's `stopped` says why.
+    Stopped,
+    /// A command named nothing php's table resolves, or what it named was
+    /// held to the wrong parameters, and no registered function took the
+    /// line: the error, which `phpdbg_line_init` writes with the line.
+    Unrecognized(String),
+}
+
+/// One line of an init file, `phpdbg_line_init`'s `phpdbg_stack_execute`:
+/// its commands in turn until one does not succeed. What resolving and
+/// verifying a command writes is held back in php's error buffer and
+/// handed to the caller instead; a handler's own error is written, and a
+/// line that fails in its handler or goes on with the program ends
+/// silently, as php's buffer is let go before the handler runs.
+pub fn init_line(s: &mut Session, here: &mut Here<'_>, commands: Vec<Command>) -> InitLine {
+    if commands.is_empty() {
+        return InitLine::Unrecognized(String::from("The stack contains nothing !"));
+    }
+    for command in commands {
+        let asked = match &command {
+            Command::Params(params) => {
+                let resolved = resolve(&ROOT, None, params).and_then(|(def, rest)| {
+                    verify(def, rest)?;
+                    Ok((def, rest))
+                });
+                match resolved {
+                    Ok((def, rest)) => (def.handler)(s, here, rest),
+                    Err(error) => {
+                        if call_registered(s, here, params) {
+                            return InitLine::Done;
+                        }
+                        return error.map_or(InitLine::Done, InitLine::Unrecognized);
+                    }
+                }
+            }
+            Command::Eval(_) | Command::Run(_) | Command::Shell(_) => execute(s, here, &command),
+        };
+        if s.stopped.is_some() {
+            return InitLine::Stopped;
+        }
+        match asked {
+            Ret::Success => {}
+            Ret::Failure | Ret::Run | Ret::Resume => return InitLine::Done,
+        }
+    }
+    InitLine::Done
+}
+
 /// The command a run left that needs a request standing, served by an
 /// idle request of its own once the run's has ended.
 pub fn idle_job(s: &mut Session, req: &mut Request, command: &Command) {

@@ -21,6 +21,7 @@ mod cmd;
 mod debugger;
 mod host;
 mod info;
+mod init;
 mod input;
 mod list;
 mod natives;
@@ -160,7 +161,7 @@ pub fn main() -> ExitCode {
             |path| path.as_os_str().as_bytes().to_vec(),
         ));
     }
-    session.queued = init(&line);
+    session.init_files = init::files(line.init_file.as_deref(), line.init_default);
     if let Some(delimiter) = &line.stdin_delimiter {
         session.queued.push(Command::Params(vec![
             Param::Str(b"stdin".to_vec()),
@@ -173,39 +174,4 @@ pub fn main() -> ExitCode {
     }
     session::install(session);
     php_sapi::exit_code(host::serve(&engine))
-}
-
-/// `phpdbg_init`: the commands of the init file the line names, or,
-/// unless `-I`, of a `.phpdbginit` in each directory of
-/// `PHP_INI_SCAN_DIR` and then the working directory's, a line each; run
-/// before anything the prompt reads.
-fn init(line: &Line) -> Vec<Command> {
-    let mut files: Vec<Vec<u8>> = Vec::new();
-    if let Some(file) = &line.init_file {
-        files.push(file.clone());
-    } else if line.init_default {
-        if let Some(dirs) = std::env::var_os("PHP_INI_SCAN_DIR") {
-            for dir in dirs.as_bytes().split(|b| *b == b':') {
-                files.push([dir, b"/.phpdbginit"].concat());
-            }
-        }
-        files.push(b".phpdbginit".to_vec());
-    }
-    let mut commands = Vec::new();
-    for file in files {
-        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&file));
-        let Ok(text) = std::fs::read(path) else {
-            continue;
-        };
-        for command in text.split(|b| *b == b'\n') {
-            let command = command.trim_ascii_end();
-            if command.is_empty() || command.first() == Some(&b'#') {
-                continue;
-            }
-            if let Ok(parsed) = cmd::parse(command) {
-                commands.extend(parsed);
-            }
-        }
-    }
-    commands
 }
