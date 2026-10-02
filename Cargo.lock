@@ -723,6 +723,7 @@ dependencies = [
 name = "php_ext_dba"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_ext",
 ]
 

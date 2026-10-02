@@ -9,11 +9,15 @@ use crate::cdb::{Maker, Reader};
 use crate::flatfile::Flatfile;
 use crate::inifile::Inifile;
 
-/// One of the handlers php's own C provides, in `handler[]`'s order. All
-/// four take php's locks (`DBA_LOCK_ALL`) and have their database
-/// stream opened for them (`DBA_STREAM_OPEN`).
+/// One of the handlers, in `handler[]`'s order: ndbm over the platform's
+/// library where the C library has one, as the oracle's build finds it on
+/// macOS, then the four php's own C provides. All take php's locks
+/// (`DBA_LOCK_ALL`); all but ndbm have their database stream opened for
+/// them (`DBA_STREAM_OPEN`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Handler {
+    #[cfg(target_os = "macos")]
+    Ndbm,
     Cdb,
     CdbMake,
     Inifile,
@@ -22,7 +26,9 @@ pub(crate) enum Handler {
 
 impl Handler {
     /// `handler[]`, as `dba_handlers()` lists it.
-    pub(crate) const ALL: [Handler; 4] = [
+    pub(crate) const ALL: &[Handler] = &[
+        #[cfg(target_os = "macos")]
+        Handler::Ndbm,
         Handler::Cdb,
         Handler::CdbMake,
         Handler::Inifile,
@@ -31,6 +37,8 @@ impl Handler {
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
+            Handler::Ndbm => "ndbm",
             Handler::Cdb => "cdb",
             Handler::CdbMake => "cdb_make",
             Handler::Inifile => "inifile",
@@ -41,13 +49,26 @@ impl Handler {
     /// The handler a name names, `strcasecmp` as php looks it up.
     pub(crate) fn named(name: &[u8]) -> Option<Handler> {
         Handler::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|h| h.name().as_bytes().eq_ignore_ascii_case(name))
+    }
+
+    /// `DBA_STREAM_OPEN`: whether `php_dba_open` opens the database
+    /// stream for the handler.
+    pub(crate) const fn streams(self) -> bool {
+        match self {
+            #[cfg(target_os = "macos")]
+            Handler::Ndbm => false,
+            Handler::Cdb | Handler::CdbMake | Handler::Inifile | Handler::Flatfile => true,
+        }
     }
 
     /// `hnd->info(hnd, NULL)`: the library's version.
     pub(crate) const fn version(self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
+            Handler::Ndbm => "NDBM",
             Handler::Cdb => crate::cdb::READER_VERSION,
             Handler::CdbMake => crate::cdb::MAKER_VERSION,
             Handler::Inifile => crate::inifile::VERSION,
@@ -73,6 +94,17 @@ impl Access {
     /// `DBA_WRITE_CHECK`: what a modification is allowed on.
     pub(crate) const fn writes(self) -> bool {
         !matches!(self, Access::Read)
+    }
+
+    /// `gmode`, the `open(2)` flags `dba_open_ndbm` hands the library.
+    #[cfg(target_os = "macos")]
+    const fn open_flags(self) -> i32 {
+        match self {
+            Access::Read => libc::O_RDONLY,
+            Access::Write => libc::O_RDWR,
+            Access::Create => libc::O_RDWR | libc::O_CREAT,
+            Access::Truncate => libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+        }
     }
 }
 
@@ -226,64 +258,105 @@ impl Mode {
     }
 }
 
-/// The handler's own state over the database stream, `info->dbf`.
+/// The handler's own state, `info->dbf`, with the database stream of a
+/// handler that has one opened for it, `info->fp`.
 pub(crate) enum Store {
-    Flatfile(Flatfile),
-    Inifile(Inifile),
+    /// The library's open database; `None` where `dbm_open` refused, which
+    /// `dba_open_ndbm` answers as success all the same.
+    #[cfg(target_os = "macos")]
+    Ndbm(Option<crate::ffi::Ndbm>),
+    Flatfile(Flatfile, Stream),
+    Inifile(Inifile, Stream),
     /// A cdb opened to read, under either name.
-    CdbReader(Reader),
+    CdbReader(Reader, Stream),
     /// A cdb opened `n`, made as it is written; `None` once finished.
-    CdbMaker(Option<Maker>),
+    CdbMaker(Option<Maker>, Stream),
 }
 
 impl Store {
-    /// `hnd->open`: the handler's state, or the reason it refuses.
+    /// `hnd->open`: the handler's state over the database stream, or
+    /// over `path` itself for ndbm, which opens it in the library with
+    /// `permission`; or the reason it refuses.
     pub(crate) fn open(
         req: &mut Request,
         handler: Handler,
         access: Access,
-        file: Stream,
+        file: Option<Stream>,
+        path: &[u8],
+        permission: i64,
     ) -> Result<Store, &'static str> {
-        Ok(match handler {
-            Handler::Flatfile => Store::Flatfile(Flatfile::default()),
-            Handler::Inifile => Store::Inifile(Inifile::default()),
-            Handler::Cdb | Handler::CdbMake => match access {
-                Access::Read => Store::CdbReader(Reader::default()),
-                Access::Truncate => Store::CdbMaker(Some(Maker::start(req, file))),
+        let _ = (path, permission);
+        Ok(match (handler, file) {
+            #[cfg(target_os = "macos")]
+            (Handler::Ndbm, _) => {
+                // `int filemode` handed on as `mode_t`.
+                let mode = u16::try_from(permission & 0xffff).unwrap_or_default();
+                Store::Ndbm(crate::ffi::Ndbm::open(path, access.open_flags(), mode))
+            }
+            (_, None) => return Err(""),
+            (Handler::Flatfile, Some(file)) => Store::Flatfile(Flatfile::default(), file),
+            (Handler::Inifile, Some(file)) => Store::Inifile(Inifile::default(), file),
+            (Handler::Cdb | Handler::CdbMake, Some(file)) => match access {
+                Access::Read => Store::CdbReader(Reader::default(), file),
+                Access::Truncate => Store::CdbMaker(Some(Maker::start(req, file)), file),
                 Access::Create | Access::Write => {
                     return Err("Update operations are not supported");
                 }
             },
         })
     }
+
+    /// `info->fp`, where the handler has one.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "every handler but ndbm has one, and ndbm is macOS's"
+        )
+    )]
+    pub(crate) const fn stream(&self) -> Option<Stream> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(_) => None,
+            Store::Flatfile(_, file)
+            | Store::Inifile(_, file)
+            | Store::CdbReader(_, file)
+            | Store::CdbMaker(_, file) => Some(*file),
+        }
+    }
 }
 
 /// One open database, php's `dba_info`: the path (the opened file's own
 /// where the `flock(2)` is on the database), `$mode`'s access, the
-/// handler, the `flock(2)`
-/// and the streams, and the handler's state.
+/// handler, the `flock(2)` and its stream, and the handler's state with
+/// the database stream.
 pub(crate) struct Link {
     pub(crate) path: Vec<u8>,
     pub(crate) access: Access,
     pub(crate) handler: Handler,
     pub(crate) persistent: bool,
     pub(crate) lock: Held,
-    /// `info->fp`, the database stream.
-    pub(crate) file: Stream,
     /// `info->lock.fp` where it is a stream of its own, a `.lck` file.
     pub(crate) lock_file: Option<Stream>,
     pub(crate) store: Store,
 }
 
 impl Link {
-    /// `dba_close_info`: the handler closed, a cdb being made finished,
-    /// then the streams freed.
+    /// `dba_close_info`: the handler closed, a cdb being made finished
+    /// and an ndbm database closed, then the streams freed.
     pub(crate) fn close(self, req: &mut Request) {
-        if let Store::CdbMaker(Some(maker)) = self.store {
+        let file = self.store.stream();
+        match self.store {
             // `dba_close_cdb` ignores what `cdb_make_finish` answers.
-            let _ = maker.finish(req, self.file);
+            Store::CdbMaker(Some(maker), file) => {
+                let _ = maker.finish(req, file);
+            }
+            // `dba_close_ndbm`'s `dbm_close`, before the lock is let go.
+            store => drop(store),
         }
-        self.file.free(req);
+        if let Some(file) = file {
+            file.free(req);
+        }
         if let Some(lock) = self.lock_file {
             lock.free(req);
         }
