@@ -344,7 +344,7 @@ budget = 1000     # fileinfo.c over libmagic, vendored from php-src and compiled
 porting = true
 [[crate]]
 name = "ext/dba"
-budget = 6000     # dba.c with the flatfile, inifile and cdb handlers, php's own C ported, no library; php's --enable-dba; 4,555 lines of C (#1166, #727's rule, #1451)
+budget = 6000     # dba.c with the flatfile, inifile and cdb handlers, php's own C ported, and ndbm over the platform's <ndbm.h>, bound in src/ffi/, the bindings pool's (#1512, #1523); php's --enable-dba; 4,555 lines of C (#1166, #727's rule, #1451)
 feature = "dba"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
