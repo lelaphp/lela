@@ -28,7 +28,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
-use php_ext::raising::{Level, Thrown, deprecated, throw, warning};
+use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{
     ClassId, DeclaredRows, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value,
@@ -365,7 +365,7 @@ impl ArrayObject {
         let this = this.object();
         if is_object(req, this)? {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Cannot append properties to objects, use {class}::offsetSet() instead"),
@@ -1477,12 +1477,12 @@ fn illegal(req: &mut Request, object: PhpObject, offset: &Value, how: &str) -> T
         "unset" => format!("Cannot unset offset of type {ty} on {class}"),
         _ => format!("Cannot access offset of type {ty} on {class}"),
     };
-    throw(req, "TypeError", &message)
+    throw_error(req, "TypeError", &message)
 }
 
 fn sorting_refused(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     if payload(req, object)?.sorting > 0 {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Modification of ArrayObject during sorting is prohibited",
@@ -1643,7 +1643,7 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
                 String::from_utf8_lossy(&declaring),
                 String::from_utf8_lossy(&name)
             );
-            return Err(throw(req, "Error", &message));
+            return Err(throw_error(req, "Error", &message));
         }
         at = crate::parent_of(req, class);
     }
@@ -2445,7 +2445,7 @@ fn sort_through(
     req.release(name);
     let Some(callable) = callable else {
         let shown = String::from_utf8_lossy(native).into_owned();
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Cannot call method {shown} when function {shown} is disabled"),

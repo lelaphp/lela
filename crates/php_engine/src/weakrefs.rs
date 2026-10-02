@@ -25,7 +25,7 @@ use php_macros::php_class;
 use crate::api::abi::{
     ClassIterator, CloneObj, DebugInfo, DimensionRead, Instance, ObjectHandlers, This, Untyped,
 };
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value};
 use crate::classes::ArrayAccess;
@@ -268,7 +268,11 @@ struct WeakMapHandlers;
 fn map_key(req: &mut Request, offset: &Value) -> Result<PhpObject, Thrown> {
     match offset.deref().as_object().copied() {
         Some(object) => Ok(object),
-        None => Err(throw(req, "TypeError", "WeakMap key must be an object")),
+        None => Err(throw_error(
+            req,
+            "TypeError",
+            "WeakMap key must be an object",
+        )),
     }
 }
 
@@ -340,7 +344,7 @@ impl ObjectHandlers for WeakMapHandlers {
         read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset) = offset else {
-            return Err(throw(req, "Error", "Cannot append to WeakMap"));
+            return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
         };
         let key = map_key(req, offset)?;
         let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
@@ -349,7 +353,7 @@ impl ObjectHandlers for WeakMapHandlers {
                 return Ok(Value::null());
             }
             let class = req.class_name(key.class());
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Object {class}#{} not contained in WeakMap", key.index()),
@@ -410,7 +414,7 @@ impl ObjectHandlers for WeakMapHandlers {
     ) -> Result<(), Thrown> {
         let Some(offset) = offset else {
             req.release(value);
-            return Err(throw(req, "Error", "Cannot append to WeakMap"));
+            return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
         };
         let key = match map_key(req, offset) {
             Ok(key) => key,
@@ -675,7 +679,7 @@ fn weakmap_place(
     offset: Option<&Value>,
 ) -> Result<php_heap::ZvalRef, Thrown> {
     let Some(offset) = offset else {
-        return Err(throw(req, "Error", "Cannot append to WeakMap"));
+        return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
     };
     let key = map_key(req, offset)?;
     let at = Key::Int(i64::from(key.index()));
@@ -683,7 +687,7 @@ fn weakmap_place(
     let held = entries.and_then(|entries| entries.get(&at).map(|value| (entries, value)));
     let Some((entries, value)) = held else {
         let class = req.class_name(key.class());
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Object {class}#{} not contained in WeakMap", key.index()),
@@ -692,7 +696,7 @@ fn weakmap_place(
     let _ = value;
     match entries.heap().value_ref(at.heap()) {
         Some(place) => Ok(place),
-        None => Err(throw(req, "Error", "Cannot append to WeakMap")),
+        None => Err(throw_error(req, "Error", "Cannot append to WeakMap")),
     }
 }
 
@@ -759,7 +763,7 @@ impl WeakReference {
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead",
@@ -832,7 +836,11 @@ impl WeakReference {
             return Ok(Instance::of(reference));
         }
         let Some(class) = req.class_named(b"WeakReference") else {
-            return Err(throw(req, "Error", "Class \"WeakReference\" not found"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Class \"WeakReference\" not found",
+            ));
         };
         let reference = req.new_object_with(
             class,

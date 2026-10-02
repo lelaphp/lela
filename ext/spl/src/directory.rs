@@ -19,7 +19,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
 use php_ext::request::{Request, Stream, Whence};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -764,7 +764,7 @@ impl SplFileInfo {
     #[php(final, deprecated(since = "8.2"))]
     fn _bad_state_ex(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "The parent constructor was not called: the object is in an invalid state",
@@ -1222,7 +1222,7 @@ impl GlobIterator {
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         match glob_stream(req, this.object())?.and_then(|dir| dir.glob_count(req)) {
             Some(n) => Ok(i64::try_from(n).unwrap_or(i64::MAX)),
-            None => Err(throw(req, "Error", "GlobIterator is not initialized")),
+            None => Err(throw_error(req, "Error", "GlobIterator is not initialized")),
         }
     }
 }
@@ -1317,7 +1317,7 @@ impl SplFileObject {
         let this = this.object();
         let name = filename.0.as_bytes().to_vec();
         if fs(req, this, |it| it.stream.is_some())? {
-            return Err(throw(req, "Error", "Cannot call constructor twice"));
+            return Err(throw_error(req, "Error", "Cannot call constructor twice"));
         }
         file_open(req, this, &name, mode.as_bytes(), useIncludePath)?;
         // The path is the directory of the path the stream opened.
@@ -1936,7 +1936,7 @@ impl SplTempFileObject {
     ) -> Result<(), Thrown> {
         let this = this.object();
         if fs(req, this, |it| it.stream.is_some())? {
-            return Err(throw(req, "Error", "Cannot call constructor twice"));
+            return Err(throw_error(req, "Error", "Cannot call constructor twice"));
         }
         let name: Vec<u8> = if maxMemory < 0 {
             b"php://memory".to_vec()
@@ -1965,7 +1965,7 @@ fn fs<R>(
 }
 
 fn uninitialized(req: &mut Request) -> Thrown {
-    throw(req, "Error", "Object not initialized")
+    throw_error(req, "Error", "Object not initialized")
 }
 
 /// `IS_SLASH`.
@@ -2191,7 +2191,7 @@ impl ObjectHandlers for FileHandlers {
     ) -> Result<Option<Function>, Thrown> {
         let unopened = fs(req, object, |it| it.dir.is_none() && it.orig_path.is_none())?;
         if unopened {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "The parent constructor was not called: the object is in an invalid state",
@@ -2217,7 +2217,7 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         )
     })?;
     if kind == Type::File {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Trying to clone an uncloneable object of class SplFileObject",
@@ -2564,7 +2564,7 @@ fn dir_construct(
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if fs(req, this, |it| it.path.is_some())? {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Directory object is already initialized",
@@ -2811,7 +2811,7 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
             let name = php_ext::coerce::value_name(req, &answered);
             req.release(answered);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!(

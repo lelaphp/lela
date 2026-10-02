@@ -12,7 +12,7 @@ use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
-use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
+use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -87,7 +87,7 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
 fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {
     match req.called_scope() {
         Some(class) => class_name(req, class),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "get_called_class() must be called from within a class",

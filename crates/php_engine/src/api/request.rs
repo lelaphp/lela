@@ -3496,7 +3496,7 @@ impl Request {
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
         let Some(closure) = object.closure(self).cloned() else {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 "Closure object cannot have properties",
@@ -4727,7 +4727,7 @@ impl Request {
             Some(scope) => format!("scope {}", self.class_name(scope)),
             None => String::from("global scope"),
         };
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!(
@@ -4762,7 +4762,7 @@ impl Request {
             String::from_utf8_lossy(&name.0)
         );
         if is_abstract {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Cannot call abstract method {shown}()"),
@@ -4894,7 +4894,7 @@ impl Request {
             ClassKind::Class => return Ok(()),
         };
         let name = self.class_name(class);
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot instantiate {what} {name}"),
@@ -6571,7 +6571,7 @@ impl Request {
                 .and_then(|call| call.name)
                 .map(|name| String::from_utf8_lossy(name.as_bytes()).into_owned())
                 .unwrap_or_default();
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Call to undefined function {name}()"),
@@ -8430,7 +8430,7 @@ impl Request {
         };
         let class = self.class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
@@ -8559,7 +8559,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Undefined constant {class_name}::{shown}"),
@@ -8574,7 +8574,7 @@ impl Request {
                 Visibility::Protected => "protected",
                 Visibility::Private => "private",
             };
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
@@ -8586,7 +8586,7 @@ impl Request {
             .class_decl(asked)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
         {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Cannot access trait constant {class_name}::{shown} directly"),
@@ -8728,7 +8728,7 @@ impl Request {
                     "string"
                 };
                 self.release(value);
-                outcome = Err(crate::api::raising::throw(
+                outcome = Err(crate::api::raising::throw_error(
                     self,
                     "TypeError",
                     &format!("Enum case type {given} does not match enum backing type {want}"),
@@ -8741,7 +8741,7 @@ impl Request {
             if let Some((_, earlier)) = seen.iter().find(|(held, _)| *held == value) {
                 let earlier = String::from_utf8_lossy(earlier).into_owned();
                 self.release(value);
-                outcome = Err(crate::api::raising::throw(
+                outcome = Err(crate::api::raising::throw_error(
                     self,
                     "Error",
                     &format!(
@@ -8794,7 +8794,7 @@ impl Request {
         }
         let Some((_, constant)) = self.class_constant_of(class, name, 0) else {
             let class = self.class_name(class);
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!(
@@ -8924,7 +8924,7 @@ impl Request {
                 return Ok(None);
             }
             let class = self.class_name(class);
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!(
@@ -9023,7 +9023,7 @@ impl Request {
         if held.tag() == TypeTag::Undef {
             if property.ty.is_some() && read == PropertyRead::Warning {
                 let declaring = self.class_name(declaring);
-                return Err(crate::api::raising::throw(
+                return Err(crate::api::raising::throw_error(
                     self,
                     "Error",
                     &format!(
@@ -9479,7 +9479,7 @@ impl Request {
         }
         let class = self.class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name);
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!(
@@ -9880,7 +9880,7 @@ impl Request {
         let class = self.class_name(declaring);
         let ty = crate::api::coerce::declared_type_name(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "TypeError",
             &format!(
@@ -9929,7 +9929,7 @@ impl Request {
     ) -> Thrown {
         let class = self.class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot {operation} readonly property {class}::${shown}"),
@@ -9942,7 +9942,7 @@ impl Request {
     fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
@@ -9992,7 +9992,7 @@ impl Request {
     /// bool(false)
     /// ```
     pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             "Cannot access property starting with \"\\0\"",
@@ -10027,7 +10027,7 @@ impl Request {
         };
         let class = self.class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot access {word} property {class}::${shown}"),
@@ -10814,7 +10814,7 @@ impl Request {
         }
         let class = self.class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        let error = crate::api::raising::throw(
+        let error = crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
@@ -11520,7 +11520,7 @@ impl Request {
         let shown = String::from_utf8_lossy(name).into_owned();
         let class_name = self.class_name(class);
         if carries == DynamicProperties::Forbidden {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Cannot create dynamic property {class_name}::${shown}"),
@@ -11539,7 +11539,7 @@ impl Request {
         if self.is_pending() {
             return Err(Thrown::of(None));
         }
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot create dynamic property {class_name}::${shown}"),
@@ -11852,7 +11852,7 @@ impl Request {
                 if decl.is_readonly {
                     let class = self.class_name(declaring);
                     let shown = String::from_utf8_lossy(&decl.name.0).into_owned();
-                    return Err(crate::api::raising::throw(
+                    return Err(crate::api::raising::throw_error(
                         self,
                         "Error",
                         &format!("Cannot acquire reference to readonly property {class}::${shown}"),
@@ -12328,7 +12328,7 @@ impl Request {
         for (key, value) in properties.snapshot_refs() {
             let value = match value.as_php_ref() {
                 Some(r) if r.as_value().refcount() > 1 => {
-                    return Err(crate::api::raising::throw(
+                    return Err(crate::api::raising::throw_error(
                         self,
                         "Error",
                         "Cannot assign by reference when cloning with updated properties",
@@ -12393,7 +12393,7 @@ impl Request {
     /// php's `Error` for a class whose `clone_obj` slot is null.
     fn uncloneable(&mut self, object: PhpObject) -> Thrown {
         let class = self.class_name(object.class());
-        crate::api::raising::throw(
+        crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Trying to clone an uncloneable object of class {class}"),
@@ -12425,7 +12425,7 @@ impl Request {
             Some(with) => {
                 let Some(clone_obj_with) = table.clone_obj_with() else {
                     let class = self.class_name(object.class());
-                    return Err(crate::api::raising::throw(
+                    return Err(crate::api::raising::throw_error(
                         self,
                         "Error",
                         &format!(
@@ -12917,7 +12917,7 @@ impl Request {
             return true;
         }
         let from = self.scope_phrase();
-        let thrown = crate::api::raising::throw(
+        let thrown = crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Call to {shown} {class}::__destruct() from {from}"),
@@ -14022,7 +14022,7 @@ impl Request {
                     {
                         let declaring = self.class_name(placed.declaring);
                         let shown = String::from_utf8_lossy(name).into_owned();
-                        return Err(crate::api::raising::throw(
+                        return Err(crate::api::raising::throw_error(
                             self,
                             "Error",
                             &format!("Cannot unset readonly property {declaring}::${shown}"),
@@ -14118,7 +14118,7 @@ impl Request {
             return Ok(());
         }
         let class = self.class_name(object.class());
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Cannot use object of type {class} as array"),
@@ -14321,7 +14321,7 @@ impl Request {
             None => String::from("global scope"),
         };
         object.heap().set_destructor_called(true);
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             self,
             "Error",
             &format!("Call to {shown} {class}::__construct() from {from}"),
@@ -14349,7 +14349,7 @@ impl Request {
                 }
                 self.release(value);
                 let class = self.class_name(object.class());
-                Err(crate::api::raising::throw(
+                Err(crate::api::raising::throw_error(
                     self,
                     "Error",
                     &format!("Method {class}::__toString() must return a string value"),
@@ -14514,7 +14514,7 @@ impl Request {
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
         if self.stack_limit.overflowed() {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 "Maximum call stack size reached during object comparison",
@@ -16294,7 +16294,7 @@ impl Request {
                     String::from_utf8_lossy(name),
                     self.class_name(found)
                 );
-                let thrown = crate::api::raising::throw(self, "Error", &message);
+                let thrown = crate::api::raising::throw_error(self, "Error", &message);
                 return Err(self.link_abandoned(name, thrown, false));
             }
             if let Err(thrown) = self.deprecated_trait(found, name) {
@@ -16456,7 +16456,7 @@ impl Request {
             None => crate::api::call::autoload(self, &name.0)?,
         };
         found.ok_or_else(|| {
-            crate::api::raising::throw(
+            crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
@@ -17561,7 +17561,7 @@ impl Request {
             String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
         let shown = String::from_utf8_lossy(written).into_owned();
         if kind.required() {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
@@ -18427,7 +18427,11 @@ impl Request {
     /// native being served.
     pub(crate) fn dynamic_call(&mut self) -> Thrown {
         let name = self.active_function_name();
-        crate::api::raising::throw(self, "Error", &format!("Cannot call {name}() dynamically"))
+        crate::api::raising::throw_error(
+            self,
+            "Error",
+            &format!("Cannot call {name}() dynamically"),
+        )
     }
 
     /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
@@ -21292,7 +21296,7 @@ impl Request {
             return Ok(false);
         };
         if self.tick_functions[at].calling {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 "Registered tick function cannot be unregistered while it is being executed",
@@ -23132,7 +23136,7 @@ mod tests {
     /// The entry of the `__destruct` above: the branch under test
     /// refuses the call, so a raise here is the test failing.
     fn never_served(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
-        Err(crate::api::raising::throw(
+        Err(crate::api::raising::throw_error(
             req,
             "Error",
             "the destructor was served",

@@ -4,7 +4,7 @@
 
 use php_ext::abi::{Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpString, Resource, Value};
 use php_ext_libxml::Errors;
@@ -833,7 +833,7 @@ impl XMLWriter {
         }
         match open_uri(req, uri.0.as_bytes())? {
             Opened::Unresolved => Err(arg_value_error(req, 1, "resolve to a valid file path")),
-            Opened::Failed => Err(throw(req, "Error", "Could not construct libxml writer")),
+            Opened::Failed => Err(throw_error(req, "Error", UNCONSTRUCTED)),
             Opened::Emitter(writer) => create_static(req, writer),
         }
     }
@@ -873,7 +873,7 @@ impl XMLWriter {
     fn toMemory(req: &mut Request) -> Result<Static, Thrown> {
         match Emitter::memory() {
             Some(writer) => create_static(req, writer),
-            None => Err(throw(req, "Error", "Could not construct libxml writer")),
+            None => Err(throw_error(req, "Error", UNCONSTRUCTED)),
         }
     }
 
@@ -896,13 +896,13 @@ impl XMLWriter {
     fn toStream(req: &mut Request, stream: Resource) -> Result<Static, Thrown> {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message = "XMLWriter::toStream(): supplied resource is not a valid stream resource";
-            return Err(throw(req, "TypeError", message));
+            return Err(throw_error(req, "TypeError", message));
         };
         let (made, raised, thrown) = Emitter::stream(req, stream);
         Errors::settle(req, raised, thrown)?;
         match made {
             Some(writer) => create_static(req, writer),
-            None => Err(throw(req, "Error", "Could not construct libxml writer")),
+            None => Err(throw_error(req, "Error", UNCONSTRUCTED)),
         }
     }
 
@@ -1186,3 +1186,6 @@ impl XMLWriter {
         flush(req, this.object(), empty, false)
     }
 }
+
+/// What `zend_throw_error` says where libxml constructed nothing.
+const UNCONSTRUCTED: &str = "Could not construct libxml writer";

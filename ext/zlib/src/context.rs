@@ -11,7 +11,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string, value_name};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{FreshString, Key, PhpObject, PhpString, Value, ValueRef};
 
@@ -116,7 +116,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(req, "Error", self.0))
+        Err(throw_error(req, "Error", self.0))
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -255,7 +255,7 @@ fn made<P: 'static + Send>(
 ) -> Result<PhpObject, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw(req, "Error", &text));
+        return Err(throw_error(req, "Error", &text));
     };
     let object = new_object(req, id)?;
     if let Some(payload) = object.native_mut::<P>(req) {
@@ -303,7 +303,7 @@ fn deflate_init(
     let options = Options(options.value());
     let level = options.long(req, b"level", -1)?;
     if !(-1..=9).contains(&level) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "deflate_init(): \"level\" option must be between -1 and 9",
@@ -311,7 +311,7 @@ fn deflate_init(
     }
     let memory = options.long(req, b"memory", 8)?;
     if !(1..=9).contains(&memory) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "deflate_init(): \"memory\" option must be between 1 and 9",
@@ -319,7 +319,7 @@ fn deflate_init(
     }
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "deflate_init(): \"window\" option must be between 8 and 15",
@@ -327,7 +327,7 @@ fn deflate_init(
     }
     let strategy = options.long(req, b"strategy", 0)?;
     if !(0..=4).contains(&strategy) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "deflate_init(): \"strategy\" option must be one of ZLIB_FILTERED, ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY",
@@ -421,7 +421,7 @@ fn deflate_add(
         return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
     let Some(mut stream) = context.payload_mut(req)?.0.take() else {
-        return Err(throw(req, "Error", "DeflateContext has no stream"));
+        return Err(throw_error(req, "Error", "DeflateContext has no stream"));
     };
     let deflated = deflate_rounds(req, &mut stream, input, flush);
     context.payload_mut(req)?.0 = Some(stream);
@@ -514,10 +514,10 @@ fn inflate_init(
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
         let text = format!("zlib window size (logarithm) ({window}) must be within 8..15");
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     }
     if !known(encoding) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE",
@@ -634,7 +634,7 @@ fn inflate_add(
     let input = data.as_bytes();
     let payload = context.payload_mut(req)?;
     let Some(mut stream) = payload.stream.take() else {
-        return Err(throw(req, "Error", "InflateContext has no stream"));
+        return Err(throw_error(req, "Error", "InflateContext has no stream"));
     };
     let (mut dictionary, mut status) = (payload.dictionary.take(), payload.status);
     let inflated = (|| {

@@ -41,7 +41,7 @@ mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
 use php_ext::attr::php_const;
-use php_ext::raising::{Cause, Level, Thrown, docref, throw};
+use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpRef, PhpString, Value};
 
@@ -475,7 +475,7 @@ fn absorb<T>(req: &mut Request, done: Result<T, Thrown>) -> Result<Option<T>, Th
 /// `zend_throw_error(NULL, ...)` where no throwable is pending yet.
 fn throw_error(req: &mut Request, message: &str) {
     if req.state::<State>().thrown.is_none() {
-        let thrown = throw(req, "Error", message);
+        let thrown = php_ext::raising::throw_error(req, "Error", message);
         req.state::<State>().thrown = Some(thrown);
     }
 }

@@ -10,7 +10,7 @@ use php_ext::abi::{Instance, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -188,7 +188,7 @@ fn socket_select(
         *set = to_fd_set(req, u32::try_from(at).unwrap_or(0) + 1, array)?;
     }
     if sets.iter().flatten().all(Vec::is_empty) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "socket_select(): At least one array argument must be passed",

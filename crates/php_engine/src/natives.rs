@@ -30,7 +30,7 @@ use php_unit::decl::{ClassKind, Type, Visibility};
 
 use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Variadic};
 use crate::api::coerce::to_string;
-use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
+use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
 use crate::api::request::Request;
 use crate::api::values::{
     ClassId, Key, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
@@ -781,7 +781,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, 
                 scope
             }
             None => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "get_class() without arguments must be called from within a class",
@@ -925,7 +925,7 @@ fn define(
 ) -> Result<bool, Thrown> {
     let bytes = constant_name.as_bytes();
     if bytes.windows(2).any(|pair| pair == b"::") {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "define(): Argument #1 ($constant_name) cannot be a class constant",
@@ -941,7 +941,7 @@ fn define(
         && value.is_refcounted()
     {
         if !constant_array_is_acyclic(req, *array)? {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "define(): Argument #2 ($value) cannot be a recursive array",

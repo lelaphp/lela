@@ -8,7 +8,7 @@ use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Path, 
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
-    Level, Thrown, argument_error, docref, fatal, throw, throw_chained, while_pending,
+    Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
 use php_ext::request::{Request, Resolve};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -64,7 +64,7 @@ pub(crate) struct Open {
 pub(crate) fn not_ready(req: &mut Request, class: &str) -> Thrown {
     let text =
         format!("The {class} object has not been correctly initialised or is already closed");
-    throw(req, "Error", &text)
+    throw_error(req, "Error", &text)
 }
 
 /// `php_sqlite3_error` with no throwable pending: a `SQLite3Exception`

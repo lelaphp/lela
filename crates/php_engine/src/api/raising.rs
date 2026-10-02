@@ -473,7 +473,7 @@ pub fn call_stack_end(req: &mut Request) -> Result<(), Thrown> {
 
 /// `zend_call_stack_size_error`: php's sentence over `size`.
 fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         &format!(
@@ -489,7 +489,7 @@ pub fn fatal(req: &mut Request, message: &str) -> Thrown {
     Thrown::of(None)
 }
 
-/// Throw a new instance of `class` with `message`, `zend_throw_error`.
+/// Throw a new instance of `class` with `message`, `zend_throw_exception`.
 /// A throwable the memory limit refuses to build is the fatal that ends
 /// the request, already recorded, and the `Thrown` says so. The
 /// instance's one owner is the `Thrown`'s, as `zend_throw_exception`
@@ -514,6 +514,38 @@ pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
             thrown
         }
         Err(fatal) => fatal,
+    }
+}
+
+/// `zend_throw_error`, `zend_type_error` and `zend_value_error`
+/// (`Z/Zend/zend.c:1816-1900`): `message` printed by `zend_vspprintf`
+/// into a buffer that stands while [`throw`] makes the throwable and
+/// goes after it, so a printed throw peaks where php's does, 256 bytes
+/// over a [`throw`] for a sentence under 255. A message php hands
+/// `zend_throw_exception` as it stands, or `zend_throw_exception_ex`'s
+/// string that becomes the message itself, is [`throw`]'s.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { unserialize('i:1;', ['allowed_classes' => 1]); } catch (TypeError $e) {} });
+/// pk(function () { $z = 0; try { 1 / $z; } catch (DivisionByZeroError $e) {} });
+/// pk(function () { $z = 0; try { 1 % $z; } catch (DivisionByZeroError $e) {} });
+/// pk(function () { try { (new SplStack)->pop(); } catch (RuntimeException $e) {} });
+/// ```
+/// ```expect
+/// 14968 32
+/// 2024 0
+/// 1760 0
+/// 2312 0
+/// ```
+pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
+    match printf_buffer(req, message.len()) {
+        Ok(buffer) => {
+            let thrown = throw(req, class, message);
+            req.heap_mut().free_block(buffer);
+            thrown
+        }
+        Err(refused) => refused,
     }
 }
 
@@ -595,7 +627,7 @@ pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) 
     match req.take_pending() {
         Some(earlier) => throw_chained(req, Thrown::of(Some(earlier)), class, message),
         None if req.is_pending() => Thrown::of(None),
-        None => throw(req, class, message),
+        None => throw_error(req, class, message),
     }
 }
 
@@ -608,7 +640,7 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
         req.addref(throwable);
         return Thrown::of(Some(*object));
     }
-    throw(
+    throw_error(
         req,
         "Error",
         "Cannot throw objects that do not implement Throwable",
@@ -736,19 +768,9 @@ fn throw_argument_error(req: &mut Request, class: &str, tail: &str, message: &st
     } else {
         None
     };
-    let buffers = printf_buffer(req, tail.len()).and_then(|formatted| {
-        match printf_buffer(req, message.len()) {
-            Ok(sentence) => Ok((formatted, sentence)),
-            Err(refused) => {
-                req.heap_mut().free_block(formatted);
-                Err(refused)
-            }
-        }
-    });
-    let thrown = match buffers {
-        Ok((formatted, sentence)) => {
-            let thrown = throw(req, class, message);
-            req.heap_mut().free_block(sentence);
+    let thrown = match printf_buffer(req, tail.len()) {
+        Ok(formatted) => {
+            let thrown = throw_error(req, class, message);
             req.heap_mut().free_block(formatted);
             thrown
         }

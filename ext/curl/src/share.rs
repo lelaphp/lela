@@ -7,7 +7,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, write_prop};
 use php_ext::coerce::{numeric_string, to_long, value_name};
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -114,7 +114,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(req, "Error", self.constructor))
+        Err(throw_error(req, "Error", self.constructor))
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

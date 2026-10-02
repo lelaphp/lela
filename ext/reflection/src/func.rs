@@ -16,7 +16,7 @@ use php_ext::call::{
 };
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, deprecated, fatal, throw};
+use php_ext::raising::{Thrown, arg_count_error, deprecated, fatal, throw, throw_error};
 use php_ext::request::{Execution, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -68,7 +68,7 @@ fn this_method(
         .and_then(|this| this.prop(req, b"class"))
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionMethod::$class must not be accessed before initialization",
@@ -1625,7 +1625,7 @@ fn fake_closure(
 fn kept_execution(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
     let execution = kept_object(req, this).and_then(|kept| Some((kept, req.execution(kept)?)));
     execution.ok_or_else(|| {
-        throw(
+        throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
@@ -1655,7 +1655,7 @@ fn standing_generator(
 fn standing_fiber(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
     let (kept, execution) = kept_execution(req, this)?;
     if execution.executing.is_none() {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Cannot fetch information from a fiber that has not been started or is terminated",
@@ -2067,7 +2067,7 @@ impl ReflectionMethod {
             (Union::A(object), Some(name)) => (object.class(), name),
             (Union::A(_), None) => {
                 // `zend_argument_value_error` with no `must`.
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
@@ -2279,7 +2279,7 @@ impl ReflectionMethod {
             .prop(req, b"class")
             .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
         else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Typed property ReflectionMethod::$class must not be accessed before initialization",
@@ -2452,7 +2452,7 @@ impl ReflectionMethod {
             return fake_closure(req, scope, &name, None);
         }
         let Some(object) = object else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods",
@@ -2838,7 +2838,7 @@ impl ReflectionFiber {
     fn getCallable(req: &mut Request, this: This<Self>) -> Result<Callable, Thrown> {
         let (_, execution) = kept_execution(req, this.object())?;
         execution.callable.ok_or_else(|| {
-            throw(
+            throw_error(
                 req,
                 "Error",
                 "Cannot fetch the callable from a fiber that has terminated",

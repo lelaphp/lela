@@ -8,7 +8,7 @@
 
 use php_ext::call::call;
 use php_ext::coerce::{to_string, value_name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpRef, PhpString, Value, ValueRef};
 
@@ -241,7 +241,7 @@ fn collate(
     let name = req.active_function_name();
     let given = value_name(req, &returned);
     req.release(returned);
-    let thrown = throw(
+    let thrown = throw_error(
         req,
         "TypeError",
         &format!(
@@ -287,7 +287,7 @@ fn authorize(
     let Some(answer) = returned.deref().as_int() else {
         let given = value_name(req, &returned);
         req.release(returned);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "TypeError",
             &format!(
@@ -297,7 +297,7 @@ fn authorize(
     };
     match i32::try_from(answer) {
         Ok(answer @ (SQLITE_OK | SQLITE_IGNORE | SQLITE_DENY)) => Ok(answer),
-        _ => Err(throw(
+        _ => Err(throw_error(
             req,
             "ValueError",
             &format!(

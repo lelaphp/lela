@@ -27,7 +27,7 @@ use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
@@ -1337,7 +1337,7 @@ fn wordwrap(
         return Err(arg_value_error(req, 3, "not be empty"));
     }
     if linelength == 0 && docut {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0",
@@ -1583,7 +1583,7 @@ fn imploded(
     let (glue, pieces) = match (separator, array) {
         (Union::A(array), None) => (PhpString::new(req, b"")?, array),
         (_, None) => {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!(
@@ -1775,7 +1775,7 @@ fn str_decrement(req: &mut Request, string: PhpString) -> Result<PhpString, Thro
     // range", ...)`: a sentence without the `must` the face writes.
     let out_of_range = |req: &mut Request| {
         let text = String::from_utf8_lossy(string.as_bytes()).into_owned();
-        throw(
+        throw_error(
             req,
             "ValueError",
             &format!("str_decrement(): Argument #1 ($string) \"{text}\" is out of decrement range"),

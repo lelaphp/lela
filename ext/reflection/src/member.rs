@@ -17,7 +17,7 @@ use php_ext::call::{
 use php_ext::decl::{
     ClassConstDecl, ClassKind, HookKind, MethodDecl, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -46,7 +46,7 @@ fn this_declared(req: &mut Request, this: PhpObject) -> Result<Reflected, Thrown
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionProperty::$class must not be accessed before initialization",
@@ -195,7 +195,7 @@ fn this_constant(
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionClassConstant::$class must not be accessed before initialization",

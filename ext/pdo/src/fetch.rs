@@ -10,7 +10,7 @@ use php_ext::abi::{Callable, OrFalse, Raw, True};
 use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
 use php_ext::decl::Name;
-use php_ext::raising::{Level, Thrown, arg_count_error, argument_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_count_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -254,14 +254,14 @@ pub(super) fn value(
 ) -> Result<Value, Thrown> {
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let Ok(at) = usize::try_from(column) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     };
     if at >= count {
-        return Err(throw(req, "ValueError", "Invalid column index"));
+        return Err(throw_error(req, "ValueError", "Invalid column index"));
     }
     let got = stmt::with_driver(req, object, |req, driver| driver.value(req, at, ty))?;
     let mut value = match got {
@@ -764,14 +764,14 @@ fn column_row(
         column
     };
     if colno < 0 {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     }
     if usize::try_from(colno).is_ok_and(|c| c >= count) {
-        return Err(throw(req, "ValueError", "Invalid column index"));
+        return Err(throw_error(req, "ValueError", "Invalid column index"));
     }
     let read_at = if flags.is(Flag::Group) && column == -1 {
         1
@@ -1252,7 +1252,7 @@ fn all_arguments(
             };
             with.func = match callable_checked(req, &callback) {
                 Ok(callable) => Some(callable),
-                Err(error) => return Err(throw(req, "TypeError", &error)),
+                Err(error) => return Err(throw_error(req, "TypeError", &error)),
             };
         }
         Some(Kind::Column) => {
@@ -1426,7 +1426,7 @@ pub(super) fn set_fetch_mode(
     let args: Vec<Value> = args.iter().map(Value::deref).collect();
     let (object, _) = stmt::this_stmt(req, this)?;
     if stmt::read(req, object, |s| s.in_fetch).unwrap_or(false) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Cannot change default fetch mode while fetching",

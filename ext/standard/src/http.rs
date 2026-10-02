@@ -41,7 +41,7 @@ use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, arg_type_error, throw, warning};
+use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
 use php_ext::request::{BodyLimits, Request};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -131,7 +131,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
     for (key, value) in options.snapshot() {
         let key = match key {
             Key::Int(_) => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "Invalid integer key in $options argument",
@@ -140,7 +140,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
             Key::Str(key) => key,
         };
         if key.is_empty() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "Invalid empty string key in $options argument",
@@ -151,7 +151,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                 "Invalid key \"{}\" in $options argument",
                 String::from_utf8_lossy(key.as_bytes())
             );
-            return Err(throw(req, "ValueError", &text));
+            return Err(throw_error(req, "ValueError", &text));
         };
         let value = value.deref();
         let quantity = match value.as_ref() {
@@ -168,7 +168,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                     "Invalid {} value in $options argument",
                     value_name(req, &value)
                 );
-                return Err(throw(req, "ValueError", &text));
+                return Err(throw_error(req, "ValueError", &text));
             }
         };
         limits.push((limit, quantity));
@@ -211,7 +211,7 @@ impl Query<'_> {
                     .class_decl(object.class())
                     .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                     .unwrap_or_default();
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     &format!("Unbacked enum {name} cannot be converted to a string"),
@@ -272,7 +272,11 @@ impl Query<'_> {
         key_prefix: Option<&[u8]>,
     ) -> Result<(), Thrown> {
         if req.stack_overflowed() {
-            return Err(throw(req, "Error", "Maximum call stack size reached."));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Maximum call stack size reached.",
+            ));
         }
         for (key, value) in rows {
             let value = value.deref();

@@ -28,7 +28,9 @@ use std::cmp::Ordering;
 use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, fatal, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_error, docref, fatal, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString, Value};
 
@@ -120,7 +122,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct Shmop, use shmop_open() instead",
@@ -261,7 +263,7 @@ fn shmop_open(
     // `object_init_ex` before the mode is read, so the object takes its
     // id before any `ValueError` does, as php's does.
     let Some(class) = lookup_class(req, b"Shmop")? else {
-        return Err(throw(req, "Error", "Class \"Shmop\" not found"));
+        return Err(throw_error(req, "Error", "Class \"Shmop\" not found"));
     };
     let shmop = Instance::of(new_object(req, class)?);
     let opened = open(req, key, mode.as_bytes(), permissions, size);
@@ -424,7 +426,11 @@ fn shmop_write(
         (segment.read_only(), long(segment.len()))
     })?;
     if read_only {
-        return Err(throw(req, "Error", "Read-only segment cannot be written"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Read-only segment cannot be written",
+        ));
     }
     if offset < 0 || offset > len {
         return Err(argument_error(req, "ValueError", 3, "is out of range"));

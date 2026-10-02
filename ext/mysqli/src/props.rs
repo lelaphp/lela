@@ -12,7 +12,7 @@ use php_ext::abi::{
     CloneObj, DebugInfo, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Std,
 };
 use php_ext::coerce::truthy;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -107,7 +107,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         req.release(value);
         let class = class_name(req, object.class());
         let text = format!("Cannot write read-only property {class}::${handled}");
-        Err(throw(req, "Error", &text))
+        Err(throw_error(req, "Error", &text))
     }
 
     fn write_overloaded(&self) -> bool {
@@ -175,7 +175,11 @@ pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Value>, T
     if quiet {
         return Ok(None);
     }
-    Err(throw(req, "Error", "Property access is not allowed yet"))
+    Err(throw_error(
+        req,
+        "Error",
+        "Property access is not allowed yet",
+    ))
 }
 
 /// `MYSQLI_GET_*`'s refusal of a closed object where not quiet.

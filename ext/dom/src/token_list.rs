@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
@@ -476,7 +476,7 @@ fn value_read(req: &mut Request, object: PhpObject) -> crate::Read {
 fn value_write(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let bytes = value.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
     if bytes.contains(&0) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "Value must not contain any null bytes",
@@ -618,7 +618,7 @@ fn illegal_offset(req: &mut Request, object: PhpObject, value: &Value, isset: bo
         let class = class_name(req, object.class());
         format!("Cannot access offset of type {given} on {class}")
     };
-    throw(req, "TypeError", &message)
+    throw_error(req, "TypeError", &message)
 }
 
 /// `dom_token_list_object_handlers`.
@@ -712,7 +712,7 @@ impl ObjectHandlers for TokenListHandlers {
         read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset_value) = offset_value else {
-            return Err(throw(req, "Error", "Cannot append to Dom\\TokenList"));
+            return Err(throw_error(req, "Error", "Cannot append to Dom\\TokenList"));
         };
         match offset(req, offset_value)? {
             Some(index) => item_value(req, object, index),
@@ -755,7 +755,7 @@ impl ObjectHandlers for TokenListHandlers {
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
             let message = "An iterator cannot be used with foreach by reference";
-            return Err(throw(req, "Error", message));
+            return Err(throw_error(req, "Error", message));
         }
         let (pos, tag) =
             with_set(req, object, |set| (set.valid_from(0), set.tag)).unwrap_or_default();
@@ -777,7 +777,7 @@ fn varargs(
         let arg = token.value();
         let Some(bytes) = arg.as_str_bytes().map(<[u8]>::to_vec) else {
             let given = php_ext::coerce::value_name(req, &arg);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!(
@@ -977,7 +977,7 @@ impl TokenList {
     /// no supported tokens, so php's `TypeError`.
     fn supports(req: &mut Request, _this: This<Self>, token: Path) -> Result<bool, Thrown> {
         let _ = token;
-        Err(throw(
+        Err(throw_error(
             req,
             "TypeError",
             "Attribute \"class\" does not define any supported tokens",

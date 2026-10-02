@@ -43,7 +43,8 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{clone_with, instantiate, lookup_class};
 use php_ext::raising::{
-    Thrown, arg_count_error, arg_value_error, clear, deprecated, new_throwable, throw, throw_value,
+    Thrown, arg_count_error, arg_value_error, clear, deprecated, new_throwable, throw, throw_error,
+    throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -89,7 +90,7 @@ impl Failure {
     pub(crate) fn raise(self, req: &mut Request) -> Thrown {
         match self {
             Failure::Thrown(thrown) => thrown,
-            Failure::Broken => throw(
+            Failure::Broken => throw_error(
                 req,
                 "Random\\BrokenRandomEngineError",
                 &format!(
@@ -424,7 +425,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
     for (key, value) in members.snapshot_refs() {
         let Key::Str(key) = key else {
             let Key::Int(h) = key else { continue };
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Cannot create dynamic property {class}::${h}"),
@@ -440,7 +441,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
         };
         let Some((name, readonly)) = declared.iter().find(|(name, _)| name.as_slice() == plain)
         else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(
@@ -450,7 +451,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
             ));
         };
         if *readonly && object.prop(req, name).is_some() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(

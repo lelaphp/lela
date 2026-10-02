@@ -795,7 +795,7 @@ fn serialize(
 
 /// `dom_xml_serialize`'s refusal where the stack came down to its limit.
 fn too_deep(req: &mut Request) -> Thrown {
-    php_ext::raising::throw(
+    php_ext::raising::throw_error(
         req,
         "Error",
         "Maximum call stack size reached. Infinite recursion?",

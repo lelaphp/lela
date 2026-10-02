@@ -10,7 +10,9 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::decl::Name;
-use php_ext::raising::{Thrown, argument_error, deprecated, pending, throw, throwing_warnings};
+use php_ext::raising::{
+    Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
+};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -261,7 +263,7 @@ pub(super) fn constructed(req: &mut Request, object: PhpObject) -> Result<(), Th
         return Ok(());
     }
     let class = crate::class_name(req, object.class());
-    Err(throw(
+    Err(throw_error(
         req,
         "Error",
         &format!("{class} object is uninitialized"),
@@ -690,7 +692,7 @@ fn attribute_set(
                 ValueRef::Int(n) => n != 0,
                 _ => {
                     let given = value_name(req, value);
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "TypeError",
                         &format!(
@@ -807,7 +809,7 @@ pub(super) fn statement_class(
 ) -> Result<(ClassId, Option<PhpArray>), Thrown> {
     let type_error = |req: &mut Request, tail: &str| match arg {
         Some(at) => argument_error(req, "TypeError", at, tail),
-        None => throw(req, "TypeError", tail),
+        None => throw_error(req, "TypeError", tail),
     };
     let Some(array) = value.as_array().copied() else {
         let given = value_name(req, value);
@@ -820,7 +822,7 @@ pub(super) fn statement_class(
         let tail = "PDO::ATTR_STATEMENT_CLASS value must be an array with the format array(classname, constructor_args)";
         return Err(match arg {
             Some(at) => argument_error(req, "ValueError", at, tail),
-            None => throw(req, "ValueError", tail),
+            None => throw_error(req, "ValueError", tail),
         });
     };
     let class = match first.deref().as_str_bytes().map(<[u8]>::to_vec) {
@@ -912,7 +914,7 @@ fn instantiate(
         },
     };
     if with_args && constructor_visibility(req, class).is_none() {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "User-supplied statement does not accept constructor arguments",

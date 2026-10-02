@@ -53,8 +53,8 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable, throw,
-    throw_value,
+    Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
+    throw_error, throw_value,
 };
 use php_ext::request::{Input, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
@@ -558,7 +558,7 @@ const BOTH_FAILURES: &str = "cannot use both FILTER_NULL_ON_FAILURE and FILTER_T
 /// with a sentence that does not open with `must`, which
 /// `arg_value_error` supplies.
 fn options_error(req: &mut Request, native: &str, position: u32, tail: &str) -> Thrown {
-    throw(
+    throw_error(
         req,
         "ValueError",
         &format!("{native}(): Argument #{position} ($options) {tail}"),

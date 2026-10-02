@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use php_ext::abi::{Class, Instance, ObjectHandlers as _, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -112,7 +112,7 @@ pub(super) fn initialize(
                 .native::<crate::obj::TzObj>(req)
                 .and_then(|t| t.tz.clone())
             else {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "The DateTimeZone object has not been correctly initialized by its constructor",
@@ -633,7 +633,7 @@ fn timestamp_of(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
     }
     match time.date_to_int() {
         Some(ts) => Ok(ts),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "DateRangeError",
             "Epoch doesn't fit in a PHP integer",
@@ -705,7 +705,7 @@ fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<PhpObject
         Ok(true) => Ok(object),
         Ok(false) => {
             req.release(object.as_value());
-            Err(throw(
+            Err(throw_error(
                 req,
                 "Error",
                 &format!("Invalid serialization data for {class} object"),
@@ -775,7 +775,7 @@ fn unserialize(
     hash: PhpArray,
 ) -> Result<(), Thrown> {
     if !initialize_from_hash(req, object, hash)? {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Invalid serialization data for {class} object"),
@@ -795,7 +795,7 @@ fn wakeup(req: &mut Request, class: &str, object: PhpObject) -> Result<(), Throw
     let done = initialize_from_hash(req, object, hash);
     req.release(Value::array(hash));
     if !done? {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Invalid serialization data for {class} object"),

@@ -14,7 +14,9 @@ use php_ext::attr::php_class;
 use php_ext::call::{clone_with, known_method, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, Exponent, float_format, to_string, value_name};
 use php_ext::decl::Name;
-use php_ext::raising::{Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw};
+use php_ext::raising::{
+    Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -485,7 +487,7 @@ impl Number {
             None => expanded(req, base.scale)?,
         };
         let Some(mut root) = num::sqrt(&base.num, scale) else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "Base number must be greater than or equal to 0",
@@ -670,7 +672,7 @@ fn invalid_serialization(req: &mut Request) -> Thrown {
 
 /// `zend_readonly_property_modification_error_ex`.
 fn readonly(req: &mut Request, name: &str) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         &format!("Cannot modify readonly property {CLASS}::${name}"),
@@ -949,7 +951,7 @@ fn expanded(req: &mut Request, scale: usize) -> Result<usize, Thrown> {
 
 /// php's `ValueError` for a computed scale wider than `INT_MAX`.
 fn too_large_scale(req: &mut Request) -> Thrown {
-    throw(req, "ValueError", "scale of the result is too large")
+    throw_error(req, "ValueError", "scale of the result is too large")
 }
 
 /// The expanded scale given back down to the digits the quotient, root
@@ -1035,7 +1037,7 @@ fn power(
     site: Site,
 ) -> Result<Decimal, Thrown> {
     let refuse = |req: &mut Request, tail: &str| match site {
-        Site::Operator => throw(req, "ValueError", tail),
+        Site::Operator => throw_error(req, "ValueError", tail),
         Site::Method => value_error(req, 1, tail),
     };
     if exponent.num.scale() != 0 {
@@ -1254,7 +1256,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         if is_virtual(name) {
             let name = String::from_utf8_lossy(name);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Cannot unset readonly property {CLASS}::${name}"),
@@ -1337,17 +1339,17 @@ impl ObjectHandlers for Handlers {
             (Ok(None), _) | (_, Ok(None)) => return Ok(None),
             (Err(Unreadable), _) => {
                 let text = format!("Left string operand cannot be converted to {CLASS}");
-                return Err(throw(req, "ValueError", &text));
+                return Err(throw_error(req, "ValueError", &text));
             }
             (_, Err(Unreadable)) => {
                 let text = format!("Right string operand cannot be converted to {CLASS}");
-                return Err(throw(req, "ValueError", &text));
+                return Err(throw_error(req, "ValueError", &text));
             }
             (Ok(Some(n1)), Ok(Some(n2))) => (n1, n2),
         };
         if n1.scale > INT_MAX || n2.scale > INT_MAX {
             let text = format!("scale must be between 0 and {INT_MAX}");
-            return Err(throw(req, "ValueError", &text));
+            return Err(throw_error(req, "ValueError", &text));
         }
         let result = calc(req, calc_op, &n1, &n2, ScaleOf::Auto, Site::Operator)?;
         Ok(Some(made(req, result)?.object().as_value()))
@@ -1384,7 +1386,7 @@ impl ObjectHandlers for Handlers {
         };
         if n1.scale > INT_MAX || n2.scale > INT_MAX {
             let text = format!("scale must be between 0 and {INT_MAX}");
-            return Err(throw(req, "ValueError", &text));
+            return Err(throw_error(req, "ValueError", &text));
         }
         let scale = n1.num.scale().max(n2.num.scale());
         Ok(Some(num::compare(&n1.num, &n2.num, scale)))

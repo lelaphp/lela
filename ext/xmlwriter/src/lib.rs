@@ -31,7 +31,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Resolve};
 use php_ext::values::{ClassId, PhpObject, PhpString};
 use php_ext_libxml::Errors;
@@ -144,7 +144,7 @@ fn take(req: &mut Request, object: PhpObject) -> Result<Emitter, Thrown> {
     let taken = object
         .native_mut::<Intern>(req)
         .and_then(|i| i.writer.take());
-    taken.ok_or_else(|| throw(req, "Error", "Invalid or uninitialized XMLWriter object"))
+    taken.ok_or_else(|| throw_error(req, "Error", "Invalid or uninitialized XMLWriter object"))
 }
 
 /// The emitter put back on the object after a call.

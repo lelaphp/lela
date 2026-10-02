@@ -7,7 +7,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, Ref, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::Function;
 use php_ext::coerce::{callable_checked, to_long};
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw};
+use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value};
 
@@ -90,7 +90,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct CurlMultiHandle, use curl_multi_init() instead",
@@ -162,7 +162,7 @@ fn curl_multi_init(req: &mut Request) -> Result<Instance<CurlMultiHandle>, Throw
     let session = req.state::<State>().session.clone();
     let Some(multi) = Multi::init(session, object) else {
         req.release(object.as_value());
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "curl_multi_init(): Could not initialize a new cURL multi handle",

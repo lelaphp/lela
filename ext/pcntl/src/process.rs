@@ -19,7 +19,7 @@ use php_ext::coerce::{to_long, to_string};
 #[cfg(target_vendor = "apple")]
 use php_ext::raising::arity;
 #[cfg(target_vendor = "apple")]
-use php_ext::raising::throw;
+use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
@@ -766,7 +766,11 @@ pub(crate) fn pcntl_getqos_class(req: &mut Request) -> Result<QosClass, Thrown> 
         }),
         Err((class, errno)) => {
             failed(req, errno);
-            Err(throw(req, "Error", &format!("invalid QOS class {class}")))
+            Err(throw_error(
+                req,
+                "Error",
+                &format!("invalid QOS class {class}"),
+            ))
         }
     }
 }
@@ -804,7 +808,7 @@ pub(crate) fn pcntl_setqos_class(
     };
     if let Err(errno) = ffi::set_qos_class(class) {
         failed(req, errno);
-        return Err(throw(req, "Error", "pcntl_setqos_class failed"));
+        return Err(throw_error(req, "Error", "pcntl_setqos_class failed"));
     }
     Ok(())
 }

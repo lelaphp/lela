@@ -12,7 +12,7 @@ use php_ext::abi::{Callable, FromArgument, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw};
+use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, Value, ValueRef};
 
@@ -293,7 +293,7 @@ fn walk_holder(
             } else if let Some(object) = now.as_object().copied() {
                 return walk_object(req, object, callback, userdata, recursive);
             } else {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     "Iterated value is no longer an array or object",
@@ -344,7 +344,7 @@ fn visit(
             return Ok(());
         };
         if nested.is_recursive() {
-            return Err(throw(req, "Error", "Recursion detected"));
+            return Err(throw_error(req, "Error", "Recursion detected"));
         }
         req.addref(&reference.as_value());
         nested.protect();

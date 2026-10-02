@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, OrFalse, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -267,7 +267,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
             } else {
                 char::from(e.character)
             };
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(
@@ -439,12 +439,12 @@ impl DateInterval {
         let text = datetime.as_bytes();
         let shown = String::from_utf8_lossy(text).into_owned();
         match from_date_string(text) {
-            Err((at, c, message)) => Err(throw(
+            Err((at, c, message)) => Err(throw_error(
                 req,
                 "DateMalformedIntervalStringException",
                 &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
             )),
-            Ok((_, true)) => Err(throw(
+            Ok((_, true)) => Err(throw_error(
                 req,
                 "DateMalformedIntervalStringException",
                 &format!("String '{shown}' contains non-relative elements"),

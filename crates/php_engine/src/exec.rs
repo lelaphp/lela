@@ -1406,7 +1406,7 @@ impl MethodName {
             if value.tag() == TypeTag::Undef {
                 operand(req, frame, code, op.op2_type, op.op2);
             }
-            Err(crate::api::raising::throw(
+            Err(crate::api::raising::throw_error(
                 req,
                 "Error",
                 "Method name must be a string",

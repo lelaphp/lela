@@ -417,7 +417,7 @@ fn write(req: &mut Request, object: PhpObject, name: &[u8], value: Value) -> Res
 
 /// `zend_readonly_property_modification_error`.
 fn readonly_property(req: &mut Request, class: &str, name: &str) -> Thrown {
-    php_ext::raising::throw(
+    php_ext::raising::throw_error(
         req,
         "Error",
         &format!("Cannot modify readonly property {class}::${name}"),

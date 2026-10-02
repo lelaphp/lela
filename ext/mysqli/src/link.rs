@@ -9,7 +9,7 @@ use php_ext::abi::{Instance, OrFalse, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{
@@ -291,7 +291,7 @@ fn connect_from(
             Some(Link::Closed) | None
         )
     {
-        return Err(throw(req, "Error", "Cannot call constructor twice"));
+        return Err(throw_error(req, "Error", "Cannot call constructor twice"));
     }
     let link = crate::payload::<Link>(req, object).map(std::mem::take);
     Ok(Some(match link {
@@ -1159,7 +1159,7 @@ impl mysqli {
                 crate::payload_ref::<Link>(req, object),
                 Some(Link::Closed) | None
             ) {
-                return Err(throw(req, "Error", "Cannot call constructor twice"));
+                return Err(throw_error(req, "Error", "Cannot call constructor twice"));
             }
             init(req, Some(object))?;
             return Ok(());

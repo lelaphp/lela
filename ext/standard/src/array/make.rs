@@ -6,7 +6,7 @@
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
@@ -178,7 +178,7 @@ fn merge_recursive(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> Res
             (Some(a), Some(b)) if a == b && dest_entry.refcount() % 2 == 1
         );
         if thash.is_some_and(|thash| thash.is_recursive()) || same_cell {
-            return Err(throw(req, "Error", "Recursion detected"));
+            return Err(throw_error(req, "Error", "Recursion detected"));
         }
         // `convert_to_array(dest_zval)` then `SEPARATE_ZVAL`: a `null` is
         // `[null]`, a scalar `[scalar]`, and an array a copy of its own.
@@ -339,7 +339,7 @@ fn replace_recursive(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> R
             continue;
         };
         if dest_array.is_recursive() || src_array.is_recursive() {
-            return Err(throw(req, "Error", "Recursion detected"));
+            return Err(throw_error(req, "Error", "Recursion detected"));
         }
         let mut nested = dest_array.copy(req)?;
         dest_array.protect();
@@ -463,7 +463,7 @@ fn finite(req: &mut Request, position: u32, name: &str, d: f64) -> Result<f64, T
 }
 
 fn value_error_named(req: &mut Request, position: u32, name: &str, tail: &str) -> Thrown {
-    throw(
+    throw_error(
         req,
         "ValueError",
         &format!("range(): Argument #{position} (${name}) {tail}"),
@@ -738,7 +738,7 @@ fn double_range(
     let size = |req: &mut Request, high: f64, low: f64| -> Result<u32, Thrown> {
         let calc = ((high - low) / step) + 1.0;
         if calc >= limit {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 &format!(
@@ -797,7 +797,7 @@ fn long_range(
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
         if calc >= HT_MAX_SIZE - 1 {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 &format!(

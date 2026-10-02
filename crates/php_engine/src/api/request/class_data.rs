@@ -424,7 +424,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
             let class_name = self.class_name(class);
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!(
@@ -473,7 +473,7 @@ impl Request {
             return self.evaluated_class_constant(declaring, name, constant);
         }
         if data.visiting.iter().any(|held| **held == *name) {
-            return Err(crate::api::raising::throw(
+            return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!(

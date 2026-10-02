@@ -37,7 +37,9 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
+};
 use php_ext::request::{Request, Stream, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -208,7 +210,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct FTP\\Connection, use ftp_connect() or ftp_ssl_connect() instead",
@@ -335,7 +337,11 @@ fn positive_timeout(req: &mut Request, timeout: i64) -> Result<(), Thrown> {
 fn connection(req: &mut Request, session: Ftp) -> Result<Instance<Connection>, Thrown> {
     let Some(class) = lookup_class(req, b"FTP\\Connection")? else {
         session.close(req);
-        return Err(throw(req, "Error", "Class \"FTP\\Connection\" not found"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Class \"FTP\\Connection\" not found",
+        ));
     };
     let ftp: Instance<Connection> = Instance::of(new_object(req, class)?);
     **ftp.payload_mut(req)? = Conn::Open(session);
@@ -1673,7 +1679,7 @@ fn ftp_close(req: &mut Request, ftp: Instance<Connection>) -> Result<bool, Throw
         Conn::Closed => Ok(true),
         Conn::Lent => {
             **ftp.payload_mut(req)? = Conn::Lent;
-            Err(throw(
+            Err(throw_error(
                 req,
                 "Error",
                 "Cannot close FTP\\Connection while a transfer is in progress",

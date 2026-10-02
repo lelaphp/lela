@@ -30,7 +30,7 @@ use crate::api::abi::{
     ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target};
-use crate::api::raising::{Thrown, throw, throw_over_pending, warning};
+use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -92,7 +92,7 @@ impl ObjectHandlers for ClosureHandlers {
     ///   thrown in %s on line 2
     /// ```
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Instantiation of class Closure is not allowed",
@@ -669,7 +669,7 @@ impl Closure {
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Instantiation of class Closure is not allowed",
@@ -984,7 +984,11 @@ impl Closure {
     /// ```
     fn getCurrent(req: &mut Request) -> Result<Instance<Closure>, Thrown> {
         let Some(closure) = req.calling_closure() else {
-            return Err(throw(req, "Error", "Current function is not a closure"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Current function is not a closure",
+            ));
         };
         req.addref(&closure.as_value());
         Ok(Instance::of(closure))
@@ -1221,7 +1225,7 @@ pub(crate) fn const_expr_closure(
 /// not (`zend_call_known_fcc`); what it returns is the call's.
 pub(crate) fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let Some(this) = req.this() else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Closure::__invoke called with no receiver",
@@ -2146,7 +2150,7 @@ fn create_closure(
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(b"Closure") else {
-        return Err(throw(req, "Error", "Class \"Closure\" not found"));
+        return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
     };
     let bound = info.bound.map(|table| table.copy(req)).transpose()?;
     if let Some(this) = this {

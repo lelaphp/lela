@@ -4,7 +4,7 @@
 //! `pdo_sqlite_stmt_get_col`.
 
 use php_ext::coerce::{to_long, to_string, value_name};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
@@ -681,14 +681,14 @@ impl Statement for Stmt {
         }
         let Some(mode) = value.deref().as_int() else {
             let given = value_name(req, value);
-            return Err(Failure::from(throw(
+            return Err(Failure::from(throw_error(
                 req,
                 "TypeError",
                 &format!("explain mode must be of type int, {given} given"),
             )));
         };
         if !(0..=2).contains(&mode) {
-            return Err(Failure::from(throw(
+            return Err(Failure::from(throw_error(
                 req,
                 "ValueError",
                 "explain mode must be one of the Pdo\\Sqlite::EXPLAIN_MODE_* constants",

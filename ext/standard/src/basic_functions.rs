@@ -14,7 +14,7 @@ use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Unt
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, to_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{Request, ScannerFile};
 use php_ext::syntax::Scanning;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
@@ -440,7 +440,7 @@ fn time_nanosleep(
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     };
     if nanoseconds > 999_999_999 {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
@@ -1209,7 +1209,7 @@ fn error_log(
             crate::mail::php_mail(req, to, b"PHP error_log message", message, headers, None)?
         }
         LogTo::Tcp => {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "TCP/IP option is not available for error logging",
@@ -1865,7 +1865,7 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<PhpString, 
 fn captured(req: &mut Request, printed: &[u8]) -> Result<PhpString, Thrown> {
     match req.captured(|req| req.write(printed))? {
         Some(captured) => Ok(captured),
-        None => Err(throw(req, "Error", "Unable to start output handler")),
+        None => Err(throw_error(req, "Error", "Unable to start output handler")),
     }
 }
 
@@ -2236,7 +2236,7 @@ fn forward_static_call(
 ) -> Result<Value, Thrown> {
     let arguments = args.0;
     if req.scope().is_none() {
-        return Err(php_ext::raising::throw(
+        return Err(php_ext::raising::throw_error(
             req,
             "Error",
             "Cannot call forward_static_call() when no class scope is active",

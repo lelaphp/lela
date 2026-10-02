@@ -12,7 +12,7 @@ use php_unit::decl::{ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
-use crate::api::raising::{Thrown, argument_error, throw};
+use crate::api::raising::{Thrown, argument_error, throw_error};
 use crate::api::request::{Request, Strategy};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::exec::{self, Body, CallStage};
@@ -391,7 +391,7 @@ pub fn call_array(
         match key {
             Key::Int(_) => {
                 if have_named {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot use positional argument after named argument",
@@ -536,7 +536,7 @@ impl NamedRefused {
                 format!("Named parameter ${spelled} overwrites previous argument")
             }
         };
-        throw(req, "Error", &message)
+        throw_error(req, "Error", &message)
     }
 }
 
@@ -790,7 +790,7 @@ pub fn call_method(
     let class = object.class();
     let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
         let class = req.class_name(class);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!(
@@ -991,7 +991,7 @@ pub fn instantiate_named(
                 "Unknown named parameter ${}",
                 String::from_utf8_lossy(name.as_bytes())
             );
-            return Err(throw(req, "Error", &message));
+            return Err(throw_error(req, "Error", &message));
         }
         return Ok(object);
     };
@@ -1517,7 +1517,7 @@ fn global_constant(
         None => unqualified_constant(req, name),
     };
     let Some((key, value)) = found else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
@@ -1558,7 +1558,7 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     if name.eq_ignore_ascii_case(b"self") {
         return req.scope().ok_or_else(|| {
-            throw(
+            throw_error(
                 req,
                 "Error",
                 "Cannot access \"self\" when no class scope is active",
@@ -1567,14 +1567,14 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
     }
     if name.eq_ignore_ascii_case(b"parent") {
         let Some(scope) = req.scope() else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Cannot access \"parent\" when no class scope is active",
             ));
         };
         return req.class_parent(scope).ok_or_else(|| {
-            throw(
+            throw_error(
                 req,
                 "Error",
                 "Cannot access \"parent\" when current class scope has no parent",
@@ -1583,7 +1583,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
     }
     if name.eq_ignore_ascii_case(b"static") {
         return req.called_scope().ok_or_else(|| {
-            throw(
+            throw_error(
                 req,
                 "Error",
                 "Cannot access \"static\" when no class scope is active",
@@ -1596,7 +1596,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
         None => autoload(req, bare)?,
     };
     found.ok_or_else(|| {
-        throw(
+        throw_error(
             req,
             "Error",
             &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
@@ -1796,7 +1796,7 @@ fn evaluate_node(
                     named.type_name()
                 );
                 req.release(named);
-                return Err(throw(req, "TypeError", &message));
+                return Err(throw_error(req, "TypeError", &message));
             };
             req.release(named);
             class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)
@@ -1976,7 +1976,7 @@ fn class_name_node(
     let parent = class.eq_ignore_ascii_case(b"parent");
     let name = if parent || class.eq_ignore_ascii_case(b"self") {
         let Some(scope) = scope else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Cannot use \"self\" when no class scope is active",
@@ -1984,7 +1984,7 @@ fn class_name_node(
         };
         let named = if parent {
             req.class_parent(scope).ok_or_else(|| {
-                throw(
+                throw_error(
                     req,
                     "Error",
                     "Cannot use \"parent\" when current class scope has no parent",
@@ -2148,7 +2148,7 @@ fn chain_node(
             }
             if under.value.deref().as_object().is_some() {
                 req.release(under.value);
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "Cannot use [] on objects in constant expression",
@@ -2237,7 +2237,7 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
         .class_decl(instance.class())
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
     if !is_enum {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Fetching properties on non-enums in constant expressions is not allowed",
@@ -2447,7 +2447,7 @@ fn function_callable(
         req.function_named(&lowered[at + 1..])
     });
     let Some(function) = found else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!(
@@ -2503,7 +2503,7 @@ fn method_callable(
     let lowered = method.0.to_ascii_lowercase();
     let magic = req.method_named(ce, b"__callstatic").is_some();
     let magic_refused = |req: &mut Request| {
-        throw(
+        throw_error(
             req,
             "Error",
             "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
@@ -2516,7 +2516,7 @@ fn method_callable(
     }
     let Some(function) = found else {
         let shown = req.class_name(ce);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!(
@@ -2531,7 +2531,7 @@ fn method_callable(
         .is_some_and(|decl| decl.is_instance)
     {
         let shown = req.qualified_name_of(function);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Non-static method {shown}() cannot be called statically"),
@@ -2558,7 +2558,7 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
     }
     let word = if parent { "parent" } else { "self" };
     let Some(scope) = scope else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Cannot access \"{word}\" when no class scope is active"),
@@ -2568,7 +2568,7 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
         return Ok(scope);
     }
     req.class_parent(scope).ok_or_else(|| {
-        throw(
+        throw_error(
             req,
             "Error",
             "Cannot access \"parent\" when current class scope has no parent",
@@ -2606,7 +2606,7 @@ fn add_unpacked_element(
     spread: &Value,
 ) -> Result<(), Thrown> {
     let Some(source) = spread.deref().as_array().copied() else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Only arrays can be unpacked in constant expression",
@@ -2628,7 +2628,7 @@ fn add_unpacked_element(
 /// php's `Error` for a node its constant-expression walk does not
 /// evaluate.
 fn invalid_operations(req: &mut Request) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         "Constant expression contains invalid operations",

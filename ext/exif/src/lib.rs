@@ -33,7 +33,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Opening, Request, Stream, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -647,7 +647,7 @@ fn read<'r>(
         let Some(stream) = Stream::from_value(req, file) else {
             let function = req.active_function_name();
             let message = format!("{function}(): supplied resource is not a valid stream resource");
-            return Err(throw(req, "TypeError", &message));
+            return Err(throw_error(req, "TypeError", &message));
         };
         (Some(stream), false)
     } else {

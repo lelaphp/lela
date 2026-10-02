@@ -12,7 +12,7 @@ use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, Th
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -923,7 +923,7 @@ impl ObjectHandlers for Handlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "An iterator cannot be used with foreach by reference",
