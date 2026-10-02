@@ -730,6 +730,7 @@ dependencies = [
  "php_ext_simplexml",
  "php_ext_soap",
  "php_ext_sockets",
+ "php_ext_sodium",
  "php_ext_spl",
  "php_ext_sqlite3",
  "php_ext_standard",
@@ -1105,6 +1106,14 @@ dependencies = [
  "libc",
  "nix",
  "php_ext",
+]
+
+[[package]]
+name = "php_ext_sodium"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "pkg-config",
 ]
 
 [[package]]

@@ -240,6 +240,7 @@ Options:
 ├── simplexml
 ├── soap
 ├── sockets
+├── sodium
 ├── spl
 ├── sqlite3
 ├── standard
@@ -256,7 +257,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=2065a173b42b0d434067e8359d971f48a2237469b54ce1f5456c6e363a88a820 out=a80880803ed123ed472477e299e96213f1a819867f0b2373ef73e02da187facd -->
+<!-- /computed in=f83ee86c58fff4761eeb1f6eeb429b18d2284facdfa0065d604016037f092a8e out=490421faaaaebc72082af11b09ef118fc3fdb61d0fbb5e241fe021bc0c433165 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

@@ -1,0 +1,27 @@
+# ext/sodium: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_sodium"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The sodium extension, php-src/ext/sodium"
+links = "sodium"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+
+# libsodium is the library the pinned keg links, found through pkg-config
+# and never vendored; its calls are declared by hand in `src/ffi/`, no
+# bindgen (design §7.2, revision 72; #1540).
+[build-dependencies]
+pkg-config = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

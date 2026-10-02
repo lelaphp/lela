@@ -130,6 +130,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_soap::extension,
         #[cfg(feature = "gd")]
         php_ext_gd::extension,
+        #[cfg(feature = "sodium")]
+        php_ext_sodium::extension,
     ]
 }
 
