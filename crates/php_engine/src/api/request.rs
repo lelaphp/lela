@@ -17282,15 +17282,18 @@ impl Request {
     /// with its links resolved, which is the name the unit compiles under
     /// and the page `php_statpage` stats, put in `EG(included_files)`;
     /// the name as given where it expands to nothing. A source the host
-    /// `served` under a name puts the name expanded in the table and
-    /// compiles under the name as given; one named `Standard input code`,
-    /// or nothing, is in no table.
+    /// `served` under a name is the file php would have opened by it, its
+    /// name expanded into the table and compiled under, so `__FILE__` and
+    /// a diagnostic's file are the table's path (#1569); one named
+    /// `Standard input code`, or nothing, is in no table.
     ///
     /// ```php
-    /// var_dump(count(get_included_files()));
+    /// var_dump(count(get_included_files()), __FILE__ === get_included_files()[0], __FILE__);
     /// ```
     /// ```expect
     /// int(1)
+    /// bool(true)
+    /// string(%d) "%SCRATCH%/witness.php"
     /// ```
     pub(crate) fn expand_primary_file(&mut self, served: bool) {
         let script = self.description.script_name.clone();
@@ -17299,6 +17302,7 @@ impl Request {
                 && let Some(expanded) = self.expand_filepath(&script)
             {
                 let _ = self.note_included(&expanded);
+                self.description.script_name = Some(expanded);
             }
             return;
         }
