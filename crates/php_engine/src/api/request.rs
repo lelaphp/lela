@@ -11479,7 +11479,11 @@ impl Request {
         let slot = self.unserialize_slot(object, &bytes);
         if let Some(at) = slot.and_then(|at| u32::try_from(at).ok()) {
             let z = value.into_zval();
-            Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
+            let o = object.heap();
+            let plain = o.slot_bit(at, php_heap::PropBit::PlainRow);
+            Heap::object_set_slot(&mut Hooks(self), o, at, z);
+            // A plain row stays plain: php writes the table's row itself.
+            o.set_slot_bit(at, php_heap::PropBit::PlainRow, plain);
             self.release(Value::string(key));
             return Ok(true);
         }
@@ -11504,9 +11508,9 @@ impl Request {
     /// mangled name names, or the one of that name whose visibility
     /// changed since (`is_property_visibility_changed`). None where the
     /// table holds copies of the declared rows, whose rows are plain
-    /// values, not php's `IS_INDIRECT` to a slot: what
-    /// `php_zip_get_properties` leaves, and the value is written there
-    /// with no type to hold to.
+    /// values, not php's `IS_INDIRECT` to a slot, and the value is
+    /// written there with no type to hold to; a slot whose row alone is
+    /// plain ([`PhpObject::update_row`]) is written so too.
     fn unserialize_slot(&self, object: PhpObject, key: &[u8]) -> Option<usize> {
         if object.heap().declared_rows() == php_heap::DeclaredRows::Copied {
             return None;
@@ -11569,6 +11573,12 @@ impl Request {
             return Ok(());
         };
         let o = object.heap();
+        // A plain row is no `IS_INDIRECT`, so no property info is found
+        // for it and nothing is held to a type
+        // ([`PhpObject::update_row`]).
+        if o.slot_bit(index, php_heap::PropBit::PlainRow) {
+            return Ok(());
+        }
         let held = Value::of_zval(o.slot(index));
         let checked = match held.as_php_ref() {
             Some(cell) => {

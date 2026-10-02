@@ -946,6 +946,7 @@ values::PhpObject::unprotect_in
 values::PhpObject::unserialize_prop
 values::PhpObject::unserialize_verify
 values::PhpObject::unset_row
+values::PhpObject::update_row
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::convert
