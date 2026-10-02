@@ -2,12 +2,15 @@
 // dateformat_attrcpp.cpp and dateformat_format_object.cpp, the part that
 // is C++ over icu::DateFormat, narrowed to what src/dateformat.rs calls:
 // the calendar a formatter is made with, what it adopts and hands back as
-// clones, and formatObject's one-off formatter. A UDateFormat is an
+// clones, and formatObject's one-off formatter; and
+// datepatterngenerator_methods.cpp's DateTimePatternGenerator, for
+// src/datepatterngenerator.rs. A UDateFormat is an
 // icu::DateFormat, as php casts it; a calendar or a zone handed in is
 // adopted, as php adopts it.
 
 #include <unicode/calendar.h>
 #include <unicode/datefmt.h>
+#include <unicode/dtptngen.h>
 #include <unicode/gregocal.h>
 #include <unicode/locid.h>
 #include <unicode/smpdtfmt.h>
@@ -17,6 +20,7 @@
 
 using icu::Calendar;
 using icu::DateFormat;
+using icu::DateTimePatternGenerator;
 using icu::GregorianCalendar;
 using icu::Locale;
 using icu::SimpleDateFormat;
@@ -100,6 +104,40 @@ UnicodeString *php_intl_datefmt_format_object(Calendar *cal, double date, TimeZo
 	UnicodeString answer;
 	df->format(date, answer);
 	delete df;
+	return php_intl_answer(answer);
+}
+
+// DateTimePatternGenerator::createInstance(locale); null on failure.
+DateTimePatternGenerator *php_intl_dtpg_create(const char *locale, UErrorCode *status)
+{
+	DateTimePatternGenerator *dtpg = DateTimePatternGenerator::createInstance(Locale::createFromName(locale), *status);
+	if (U_FAILURE(*status)) {
+		delete dtpg;
+		return nullptr;
+	}
+	return dtpg;
+}
+
+DateTimePatternGenerator *php_intl_dtpg_clone(const DateTimePatternGenerator *dtpg) { return dtpg->clone(); }
+
+void php_intl_dtpg_delete(DateTimePatternGenerator *dtpg) { delete dtpg; }
+
+// getBestPattern over the skeleton getSkeleton cleans; where a step
+// fails, `stage` names it (1 the skeleton, 2 the pattern) and null is
+// answered.
+UnicodeString *php_intl_dtpg_best_pattern(DateTimePatternGenerator *dtpg, php_intl_text text, int32_t *stage,
+	UErrorCode *status)
+{
+	UnicodeString skeleton = dtpg->getSkeleton(php_intl_string(text), *status);
+	if (U_FAILURE(*status)) {
+		*stage = 1;
+		return nullptr;
+	}
+	UnicodeString answer = dtpg->getBestPattern(skeleton, *status);
+	if (U_FAILURE(*status)) {
+		*stage = 2;
+		return nullptr;
+	}
 	return php_intl_answer(answer);
 }
 

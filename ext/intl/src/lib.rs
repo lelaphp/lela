@@ -34,6 +34,7 @@ mod calendar;
 mod collator;
 mod common_date;
 mod dateformat;
+mod datepatterngenerator;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -342,6 +343,7 @@ pub fn extension() -> Extension {
         .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
         .class::<dateformat::IntlDateFormatter>()
+        .class::<datepatterngenerator::IntlDatePatternGenerator>()
         .class::<transliterator::Transliterator>()
         .class::<timezone::IntlTimeZone>()
         .class::<calendar::IntlCalendar>()

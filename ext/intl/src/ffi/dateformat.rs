@@ -2,18 +2,27 @@
 //! `UDateFormat` per object, each C call the unsafe line and no more;
 //! and `shim/dateformat.cpp`, where php's C++ reads the same format as
 //! an `icu::DateFormat`. The calendar `udat_getCalendar` answers is a
-//! [`Calendar`], as ICU's `UCalendar` is.
+//! [`Calendar`], as ICU's `UCalendar` is. php's `IntlDatePatternGenerator`
+//! holds an `icu::DateTimePatternGenerator`, [`Dtpg`] here.
 
 use std::ptr::NonNull;
 
 use super::calendar::{Cal, Calendar};
-use super::cpp::{CName, UStr, opaque, owner};
+use super::cpp::{CName, Text, UStr, opaque, owner};
 use super::timezone::Zone;
 use super::{Code, length, static_str};
 
 opaque!(
     /// `UDateFormat`, an `icu::DateFormat`.
-    UDateFormat
+    UDateFormat,
+    /// `icu::DateTimePatternGenerator`.
+    DateTimePatternGenerator
+);
+
+owner!(
+    /// A `DateTimePatternGenerator` of php's own.
+    Dtpg(DateTimePatternGenerator),
+    php_intl_dtpg_delete
 );
 
 owner!(
@@ -80,6 +89,15 @@ unsafe extern "C" {
         date_style: i32,
         time_style: i32,
         locale: CName,
+        stage: &mut i32,
+        status: &mut Code,
+    ) -> Option<UStr>;
+    pub(crate) safe fn php_intl_dtpg_create(locale: CName, status: &mut Code) -> Option<Dtpg>;
+    pub(crate) safe fn php_intl_dtpg_clone(dtpg: &DateTimePatternGenerator) -> Option<Dtpg>;
+    fn php_intl_dtpg_delete(dtpg: NonNull<DateTimePatternGenerator>);
+    pub(crate) safe fn php_intl_dtpg_best_pattern(
+        dtpg: &mut DateTimePatternGenerator,
+        skeleton: Text,
         stage: &mut i32,
         status: &mut Code,
     ) -> Option<UStr>;
