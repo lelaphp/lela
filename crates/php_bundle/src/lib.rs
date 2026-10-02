@@ -18,6 +18,7 @@ mod refusals;
 /// last; a person moves it when the crate declares an edge, and
 /// `api-check` names both crates until it is moved.
 #[must_use]
+#[allow(clippy::too_many_lines)] // a feature gate and an entry per extension, one pair each
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
         #[cfg(feature = "date")]
@@ -118,6 +119,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_zip::extension,
         #[cfg(feature = "gmp")]
         php_ext_gmp::extension,
+        #[cfg(feature = "sodium")]
+        php_ext_sodium::extension,
     ]
 }
 

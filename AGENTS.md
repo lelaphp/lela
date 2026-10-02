@@ -238,6 +238,7 @@ Options:
 ├── shmop
 ├── simplexml
 ├── sockets
+├── sodium
 ├── spl
 ├── sqlite3
 ├── standard
@@ -252,7 +253,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=69b43b1b82e2e8680755afb84e50bd0069a3087d733882ee9c31c928bbcfd941 out=288158db4cc57499e2340035df37bd8eae5f3c3e9db70c6031a212a499b441c2 -->
+<!-- /computed in=9360e1957a20d914ae60167c137b0146f4d2bd8258ed7b4f578e1cb8a1d473da out=9b760f2a78ee67af83643f8ec76fa2d306ff9da3f4642b9fdd6b9f4253a0c9f0 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
