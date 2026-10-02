@@ -122,7 +122,14 @@ pub fn render(
         Section::Track => (last_run(&store.log()?), TRACK),
         Section::Usage => (last_per_scope(&store.log()?, usage::INSTRUMENT), USAGE),
         Section::Permits => {
-            return permits(manifest, &readings, &store.log()?, format, session_id);
+            return permits(
+                manifest,
+                &readings,
+                &store.log()?,
+                format,
+                session_id,
+                uncut,
+            );
         }
         Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
@@ -421,21 +428,28 @@ impl Row {
             .unwrap_or_default()
     }
 
-    /// The `sessions` fact as `id=count` pairs, the session by its first
-    /// eight characters, a call without one as `-`.
-    fn sessions(&self) -> String {
+    /// The `sessions` fact as `id=count` pairs, newest first, the session
+    /// by its first eight characters, a call without one as `-`; with
+    /// `keep`, the newest `keep` and the rest counted as `+N more`, so the
+    /// cell does not grow with the append-only log (#1618).
+    fn sessions(&self, keep: Option<usize>) -> String {
         self.facts
             .get("sessions")
             .and_then(Value::as_array)
             .map(|list| {
-                list.iter()
+                let shown = keep.unwrap_or(list.len()).min(list.len());
+                let mut pairs = list[..shown]
+                    .iter()
                     .map(|s| {
                         let id = s["session"].as_str().unwrap_or("");
                         let id = if id.is_empty() { "-" } else { short(id) };
                         format!("{id}={}", s["denials"])
                     })
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                    .collect::<Vec<_>>();
+                if list.len() > shown {
+                    pairs.push(format!("+{} more", list.len() - shown));
+                }
+                pairs.join(" ")
             })
             .unwrap_or_default()
     }
@@ -811,12 +825,17 @@ fn last_per_scope(log: &Log, instrument: &str) -> Vec<Row> {
 /// then the query behind CI's §7 section: the log per instrument, its
 /// readings and failures, and whether none failed in the last fourteen
 /// days, which makes it a candidate for silent.
+///
+/// Without `uncut` a rule's `sessions` cell is its newest
+/// [`SESSIONS_SHOWN`] sessions and a count of the rest, every session
+/// one `--uncut` away and in the JSON whatever the flag.
 fn permits(
     manifest: &Manifest,
     readings: &[Reading],
     log: &Log,
     format: Format,
     this: Option<&str>,
+    uncut: bool,
 ) -> Result<String> {
     let rules = permit_rows(manifest, readings, &log.readings, this);
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
@@ -831,7 +850,7 @@ fn permits(
         }))?,
         Format::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
         Format::Md => {
-            let mut out = table(PERMITS, &rules);
+            let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules);
             let _ = writeln!(out);
             let (head, rule) = if window.is_some() {
                 (" silent |", "---|")
@@ -1519,35 +1538,43 @@ const USAGE: Columns = (
     },
 );
 
-const PERMITS: Columns = (
-    &[
-        "rule",
-        "adr",
-        "reading",
-        "at",
-        "denials",
-        "handed on",
-        "this session",
-        "sessions",
-        "message",
-    ],
-    |r| {
-        vec![
-            r.fact("rule"),
-            r.fact("adr"),
-            r.status(),
-            r.reading
-                .as_ref()
-                .map(|x| x.at.to_string())
-                .unwrap_or_default(),
-            r.fact("denials"),
-            r.fact("handed_on"),
-            r.fact("this_session"),
-            r.sessions(),
-            r.message(),
-        ]
-    },
-);
+/// The sessions a rule's `sessions` cell names without `--uncut`, the
+/// newest; the rest are one `+N more`.
+const SESSIONS_SHOWN: usize = 3;
+
+const PERMITS_HEAD: &[&str] = &[
+    "rule",
+    "adr",
+    "reading",
+    "at",
+    "denials",
+    "handed on",
+    "this session",
+    "sessions",
+    "message",
+];
+
+/// One rule's cells, its `sessions` cut to the newest `keep`, or whole.
+fn permit_cells(r: &Row, keep: Option<usize>) -> Vec<String> {
+    vec![
+        r.fact("rule"),
+        r.fact("adr"),
+        r.status(),
+        r.reading
+            .as_ref()
+            .map(|x| x.at.to_string())
+            .unwrap_or_default(),
+        r.fact("denials"),
+        r.fact("handed_on"),
+        r.fact("this_session"),
+        r.sessions(keep),
+        r.message(),
+    ]
+}
+
+const PERMITS: Columns = (PERMITS_HEAD, |r| permit_cells(r, Some(SESSIONS_SHOWN)));
+
+const PERMITS_UNCUT: Columns = (PERMITS_HEAD, |r| permit_cells(r, None));
 
 /// The rules this session fired, each with its count: the rest of each
 /// row is the local facts' `permits` section already (#1210).

@@ -933,6 +933,64 @@ fn permits_counts_denials_per_session_and_in_total() {
     );
 }
 
+/// A rule's `sessions` cell names its newest three sessions and counts
+/// the rest (#1618): the append-only log holds every session a rule ever
+/// denied, so a cell that listed them all grew with each one for good.
+/// Fifty more sessions move one number of the cell; `--uncut` and the
+/// JSON carry every session.
+#[test]
+fn the_sessions_cell_of_permits_does_not_grow_as_sessions_are_added() {
+    let root = scratch("sessions-cut");
+    let store = Store::of_workspace(&root);
+    let deny = |n: usize| {
+        let mut denial = Reading::new("permit", "harness.self");
+        denial.rule = "harness.self".into();
+        denial.status = Status::Fail;
+        denial.message = "Edit seams.toml: edited by a person.".into();
+        denial.session = format!("{n:08x}-0000-4000-8000-000000000000");
+        store.record(std::slice::from_ref(&denial)).unwrap();
+    };
+    let cell = |md: &str| {
+        let row = md.lines().find(|l| l.contains("| harness.self |")).unwrap();
+        row.split(" | ").nth(7).unwrap().to_owned()
+    };
+    for n in 1..=5 {
+        deny(n);
+    }
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let before = cell(&md);
+    assert_eq!(
+        before, "00000005=1 00000004=1 00000003=1 +2 more",
+        "the newest three, the rest counted"
+    );
+    for n in 6..=55 {
+        deny(n);
+    }
+    let (ok, md, _) = status(&root, &["--section", "permits"]);
+    assert!(ok);
+    let after = cell(&md);
+    assert_eq!(after, "00000037=1 00000036=1 00000035=1 +52 more");
+    assert_eq!(before.len() + 1, after.len(), "one digit more: {after}");
+
+    let (ok, whole, _) = status(&root, &["--section", "permits", "--uncut"]);
+    assert!(ok);
+    let whole = cell(&whole);
+    assert_eq!(whole.split(' ').count(), 55, "{whole}");
+    assert!(!whole.contains("more"), "{whole}");
+
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == "harness.self")
+        .unwrap();
+    assert_eq!(row["sessions"].as_array().unwrap().len(), 55);
+}
+
 /// permit judges by three rules of its own beside the manifest's, the
 /// region body, a build apart from the tree and a call no candidate
 /// judged, and the section carries a row for each: through the outage of
