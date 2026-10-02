@@ -1904,6 +1904,10 @@ pub struct Request {
     /// before they open one (`zend_include_or_eval`), on the request's
     /// heap ([`hash_bytes::IncludedFiles`]).
     included_files: hash_bytes::IncludedFiles,
+    /// `EG(symtable_cache)`: the rebuilt symbol tables' bytes a frame's
+    /// end cleaned and kept for the next rebuild, at most
+    /// `SYMTABLE_CACHE_SIZE`.
+    symtable_cache: Vec<hash_bytes::HashBytes>,
     /// The rows this request added to `EG(zend_constants)`, in the order
     /// it added them, each under the extension it is registered by:
     /// `Core` for what the host registers at request start
@@ -2298,6 +2302,10 @@ pub(crate) enum Symbol {
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
     entries: Vec<(Vec<u8>, Symbol)>,
+    /// What a rebuilt table holds on the request's heap
+    /// ([`Request::rebuilt_table_bytes`]); `EG(symbol_table)`'s are not
+    /// held.
+    bytes: Option<hash_bytes::HashBytes>,
 }
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
@@ -2696,6 +2704,7 @@ impl Request {
             armed: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: hash_bytes::IncludedFiles::default(),
+            symtable_cache: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
@@ -12981,6 +12990,7 @@ impl Request {
                 None => {
                     if let Some(entries) = self.table_mut(table) {
                         entries.push((name, Symbol::Indirect(frame, at)));
+                        self.table_bytes(table, true, false);
                     }
                     continue;
                 }
@@ -13027,7 +13037,8 @@ impl Request {
     /// the frame marked `ZEND_CALL_HAS_SYMBOL_TABLE`. What a function
     /// frame gets when it includes a file, so the included code reads
     /// and writes the function's variables; freed when the frame pops
-    /// (`zend_clean_and_cache_symbol_table`).
+    /// (`zend_clean_and_cache_symbol_table`). Its bytes are php's, on
+    /// the request's heap ([`Request::rebuilt_table_bytes`]).
     pub(crate) fn rebuild_symbol_table(&mut self, frame: FrameRef) -> TableId {
         if let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) {
             return table;
@@ -13042,11 +13053,14 @@ impl Request {
                     Symbol::Indirect(frame, u32::try_from(at).unwrap_or(u32::MAX)),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let last_var = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+        let bytes = self.rebuilt_table_bytes(last_var);
         let table = TableId(u32::try_from(self.tables.len()).unwrap_or(u32::MAX));
         self.tables.push(SymbolTable {
             owner: Some(frame),
             entries,
+            bytes,
         });
         if let Some(state) = self.vm.at_mut(frame) {
             state.symbol_table = Some(table);
@@ -13071,9 +13085,9 @@ impl Request {
     }
 
     /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt
-    /// the last table pops: its values released and the table gone. A
-    /// bucket still pointing at a CV points at a slot the pop is giving
-    /// up, and owns nothing.
+    /// the last table pops: its values released and the table gone, its
+    /// bytes kept in `EG(symtable_cache)`. A bucket still pointing at a
+    /// CV points at a slot the pop is giving up, and owns nothing.
     fn free_rebuilt_table(&mut self, frame: FrameRef) {
         if self
             .tables
@@ -13082,12 +13096,13 @@ impl Request {
         {
             return;
         }
-        let Some(table) = self.tables.pop() else {
+        let Some(mut table) = self.tables.pop() else {
             return;
         };
-        for (_, symbol) in table.entries {
+        for (_, symbol) in std::mem::take(&mut table.entries) {
             self.release_symbol(symbol);
         }
+        self.cache_symbol_table(table);
     }
 
     /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
@@ -13162,6 +13177,7 @@ impl Request {
             return;
         }
         entries.push((name, Symbol::Value(value)));
+        self.table_bytes(table, true, false);
     }
 
     /// One symbol deleted, `zend_hash_del`: the name gone and what it
@@ -13175,6 +13191,8 @@ impl Request {
             return;
         };
         let (_, symbol) = entries.remove(at);
+        let last = at == entries.len();
+        self.table_bytes(table, false, last);
         self.release_symbol(symbol);
     }
 
@@ -13405,15 +13423,16 @@ impl Request {
         let Some(entries) = self.table_mut(table) else {
             return Ok(None);
         };
-        let at = match entries.iter().position(|(key, _)| key == name) {
-            Some(at) => at,
+        let (at, symbol) = match entries.iter().position(|(key, _)| key == name) {
+            Some(at) => (at, entries[at].1),
             None if add => {
                 entries.push((name.to_vec(), Symbol::Value(Value::null())));
-                entries.len() - 1
+                let at = entries.len() - 1;
+                self.table_bytes(table, true, false);
+                (at, Symbol::Value(Value::null()))
             }
             None => return Ok(None),
         };
-        let symbol = entries[at].1;
         let cell = match symbol {
             Symbol::Indirect(frame, slot) => return Ok(self.attached_ptr(table, frame, slot)),
             Symbol::Held(cell) => cell,
@@ -18453,7 +18472,19 @@ impl Request {
             .get(table.0 as usize)
             .map(|table| table.entries.clone())
             .unwrap_or_default();
-        let mut array = PhpArray::new(self)?;
+        // `zend_array_dup` lays the copy down at the table's own size,
+        // which a rebuilt table taken from `EG(symtable_cache)` may have
+        // grown past eight.
+        let size = self
+            .tables
+            .get(table.0 as usize)
+            .and_then(SymbolTable::size);
+        let mut array = match size {
+            Some(size) if size > 8 => {
+                PhpArray::sized(self, size, crate::api::values::Layout::Hash)?
+            }
+            _ => PhpArray::new(self)?,
+        };
         for (name, symbol) in entries {
             let value = match symbol {
                 Symbol::Value(value) => value,
