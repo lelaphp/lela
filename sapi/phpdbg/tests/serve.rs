@@ -458,3 +458,131 @@ fn info_writes_the_execution_context_overview() {
         )
     );
 }
+
+/// What the binary wrote on stdout and stderr, and its status, for
+/// `flags` over a program of `source`, with `init` as the file `-i`
+/// names where there is one and `stdin` on its stdin: killed after ten
+/// seconds, where it has not ended, so a session that loops ends the
+/// test; the program's real path.
+struct Served {
+    out: String,
+    err: String,
+    status: Option<i32>,
+    file: String,
+}
+
+fn served(name: &str, flags: &[&str], init: Option<&str>, source: &str, stdin: &str) -> Served {
+    let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("t.php");
+    std::fs::write(&file, source).unwrap();
+    let file = std::fs::canonicalize(&file).unwrap();
+    let init_file = dir.join("init");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_phpdbg"));
+    command.args(flags);
+    if let Some(init) = init {
+        std::fs::write(&init_file, init).unwrap();
+        command.arg(format!("-i{}", init_file.display()));
+    }
+    let mut child = command
+        .arg(&file)
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let stdin = stdin.to_owned();
+    let writer = std::thread::spawn(move || {
+        let _ = input.write_all(stdin.as_bytes());
+    });
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut bytes);
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let _ = writer.join();
+    let out = out.join().unwrap();
+    let err = err.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    Served {
+        out: String::from_utf8_lossy(&out).into_owned(),
+        err: String::from_utf8_lossy(&err).into_owned(),
+        status,
+        file: file.display().to_string(),
+    }
+}
+
+/// `-v` clears quietness, so a step writes each opline the loop reaches
+/// to stderr; `set break` disables one breakpoint and `set breaks` all,
+/// and a restart starts the cycle over with the line's flags, the
+/// breakpoints on and quietness as `-v` left it, the one disabled
+/// carried enabled (the pinned phpdbg's bytes for `phpdbg -qvb -n`).
+#[test]
+fn set_breaks_and_quiet_read_as_php_writes_them_across_a_cycle() {
+    let served = served(
+        "set-quiet",
+        &["-qvb", "-n"],
+        None,
+        "<?php\nfunction f($x) {\n  $y = $x + 1;\n  return $y;\n}\necho f(1), \"\\n\";\necho \"end\\n\";\n",
+        "b f\nr\ns\nn\nset break 0 off\nset quiet\nset breaks off\nset breaks\nr\ny\nset breaks\nset quiet\ninfo break\nq\n",
+    );
+    let file = &served.file;
+    assert_eq!(
+        (served.out.as_str(), served.err.as_str(), served.status),
+        (
+            format!(
+                "[Successful compilation of {file}]\n\
+                 prompt> [Breakpoint #0 added at f]\n\
+                 prompt> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
+                 >00003:   $y = $x + 1;\n \
+                 00004:   return $y;\n \
+                 00005: }}\n\
+                 prompt> >00004:   return $y;\n \
+                 00005: }}\n \
+                 00006: echo f(1), \"\\n\";\n\
+                 prompt> >00006: echo f(1), \"\\n\";\n \
+                 00007: echo \"end\\n\";\n \
+                 00008: \n\
+                 prompt> prompt> Quietness off\n\
+                 prompt> prompt> Breakpoints off\n\
+                 prompt> Do you really want to restart execution? (type y or n): \
+                 [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
+                 >00003:   $y = $x + 1;\n \
+                 00004:   return $y;\n \
+                 00005: }}\n\
+                 prompt> Breakpoints on\n\
+                 prompt> Quietness off\n\
+                 prompt> ------------------------------------------------\n\
+                 Function Breakpoints:\n\
+                 #0\t\tf\n\
+                 prompt> "
+            )
+            .as_str(),
+            "L0003 0002 ASSIGN CV1($y) T2\n\
+             L0004 0003 RETURN CV1($y)\n\
+             L0006 0003 ECHO V0\n",
+            Some(0)
+        )
+    );
+}

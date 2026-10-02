@@ -464,6 +464,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     // the run's end to report.
     if session::with(|s| s.after_run == AfterRun::Quit).unwrap_or(false) {
         if !at.unwinding {
+            stepped_opline(req, at.frame);
             logged(req, at.frame, position, &tier::serves(req, at.frame));
         }
         return None;
@@ -518,6 +519,9 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         }
     }
     if !at.unwinding {
+        if !stop {
+            stepped_opline(req, at.frame);
+        }
         logged(req, at.frame, position, &serves);
     }
     let uncaught_here = pending.is_some() && !tier::catches(req, at.frame);
@@ -541,6 +545,58 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     // `ev` there ran has moved it.
     session::with(|s| s.last_line = line);
     flow
+}
+
+/// `phpdbg_print_opline` with the flags read: the opline written where
+/// quietness is off and the loop is stepping, every opline it reaches
+/// until the step stops, the one it stops at among them.
+///
+/// ```php
+/// function f($x) {
+///   $y = $x + 1;
+///   return $y;
+/// }
+/// echo f(1), "\n";
+/// echo "a\n";
+/// echo "b\n";
+/// ```
+/// ```request phpdbg
+/// set quiet 0
+/// b f
+/// r
+/// n
+/// n
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> [Breakpoint #0 added at f]
+/// prompt> [Breakpoint #0 in f() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   $y = $x + 1;
+///  00004:   return $y;
+///  00005: }
+/// prompt> >00004:   return $y;
+///  00005: }
+///  00006: echo f(1), "\n";
+/// prompt> >00006: echo f(1), "\n";
+///  00007: echo "a\n";
+///  00008: echo "b\n";
+/// prompt> 2
+/// a
+/// b
+/// [Script ended normally]
+/// prompt>
+/// ```
+/// ```stderr
+/// L0003 0002 ASSIGN CV1($y) T2
+/// L0004 0003 RETURN CV1($y)
+/// L0006 0003 ECHO V0
+/// ```
+fn stepped_opline(req: &Request, frame: FrameRef) {
+    if session::with(|s| !s.quiet && s.stepping).unwrap_or(false) {
+        prompt::print_opline_ex(req, frame);
+    }
 }
 
 /// `phpdbg_print_opline`'s oplog: the opline written to the oplog open

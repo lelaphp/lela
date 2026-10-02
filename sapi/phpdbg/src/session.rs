@@ -177,6 +177,9 @@ pub struct Session {
     pub vmret: i32,
     /// `PHPDBG_IS_QUIET`, which `-v` clears.
     pub quiet: bool,
+    /// Whether the line leaves quietness on, `-v` not: what each cycle
+    /// of php's main loop starts with.
+    pub line_quiet: bool,
     pub seek: Option<Seek>,
     /// `PHPDBG_G(handled_exception)`: the handle of the throwable the
     /// session last stopped on as uncaught.
@@ -256,6 +259,7 @@ impl Session {
             last_line: 0,
             vmret: 0,
             quiet: true,
+            line_quiet: true,
             seek: None,
             handled: None,
             queued: Vec::new(),

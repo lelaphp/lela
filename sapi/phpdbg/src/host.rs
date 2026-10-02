@@ -198,14 +198,16 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
         ) => {}
     }
     // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
-    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off as
-    // the line says, in the colours the last cycle left. The breakpoints
+    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off and
+    // quietness is as the line says, in the colours the last cycle left;
+    // `set breaks off` goes with the tables. The breakpoints
     // go out as `break` lines (`bp_tmp`), and the next cycle's module
     // starts with its tables empty and `bp_count` at zero
     // (`PHP_MINIT_FUNCTION(phpdbg)`, `php_phpdbg_globals_ctor`), its init
     // files numbering from there before the lines are run again.
     if cycle_ended {
         out::set_colours(s.line_colours);
+        s.quiet = s.line_quiet;
         s.carried = s.breaks.export();
         s.breaks = crate::bp::Breakpoints::default();
         s.vmret = 0;

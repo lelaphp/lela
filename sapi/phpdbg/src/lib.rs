@@ -169,6 +169,7 @@ pub fn main() -> ExitCode {
     }
     session.init_files = init::files(line.init_file.as_deref(), line.init_default);
     session.quiet = !line.verbose;
+    session.line_quiet = session.quiet;
     if line.boring {
         session.line_colours = out::Colours::Off;
     }
