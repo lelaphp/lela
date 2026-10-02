@@ -31,7 +31,6 @@ mod exec;
 mod fiber;
 mod generator;
 mod handlers;
-mod host_extension;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
@@ -65,5 +64,4 @@ pub use engine::{
     Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
     Uncaught, WebRequest,
 };
-pub use host_extension::HostExtension;
 pub use ini_syntax::{IniEvent, IniValue};

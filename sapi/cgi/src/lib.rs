@@ -34,6 +34,8 @@
     clippy::unimplemented
 )]
 
+mod natives;
+
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -44,22 +46,11 @@ use php_sapi::cgi::{Disk, HOST_INI, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{define, enabled, entry};
 use php_sapi::{
-    Aborted, Engine, HostExtension, Observables, OutputSink, RequestDescription, ResponseHead,
-    WebRequest,
+    Aborted, Engine, Observables, OutputSink, RequestDescription, ResponseHead, WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
 pub const NAME: &str = "cgi-fcgi";
-
-/// `cgi_module_entry`, which php-cgi hands `php_module_startup` to load
-/// after the bundle: the engine a CGI host serves on is built with it,
-/// and with `dl()` where a shell started php-cgi (`Z/sapi/cgi/cgi_main.c:1874`).
-#[must_use]
-pub fn extension(origin: Origin) -> HostExtension {
-    HostExtension::CgiFcgi {
-        from_shell: origin == Origin::Shell,
-    }
-}
 
 /// `OPTIONS`, `cgi_main.c:142-163`, row for row.
 const OPTIONS: &[Opt] = &[
@@ -746,20 +737,23 @@ fn print(text: &str) -> i32 {
 }
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
-/// order and `php_bundle::Tier` bound, and [`extension`] after them,
-/// started over the line's `ini` ([`php_sapi::start`]); a file's shebang
+/// order and `php_bundle::Tier` bound, and what php-cgi declares itself
+/// after them ([`natives::declare`]), started over the line's `ini`
+/// ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
 fn engine(ini: &[(String, String)], origin: Origin) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let mut builder = Engine::builder()
+    let builder = Engine::builder()
+        .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
+    let mut builder = natives::declare(builder, origin);
     if enabled(ini, "cgi.check_shebang_line", true) {
         builder = builder.skip_shebang();
     }
-    php_sapi::start(builder, ini, Some(extension(origin)))
+    php_sapi::start(builder, ini)
 }
 
 #[cfg(test)]

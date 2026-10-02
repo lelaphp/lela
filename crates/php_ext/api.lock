@@ -78,6 +78,7 @@ abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::post_startup
+abi::ExtensionBuilder::program_ended
 abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::resolve_path
@@ -475,6 +476,7 @@ request::Request::cwd
 request::Request::declared_classes
 request::Request::define_constant
 request::Request::defined_functions
+request::Request::dl
 request::Request::encodings
 request::Request::engine
 request::Request::env
@@ -484,6 +486,7 @@ request::Request::error_reporting
 request::Request::evaluated_default
 request::Request::execution
 request::Request::execution_trace
+request::Request::exit_status
 request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
@@ -493,6 +496,7 @@ request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
 request::Request::extension_version
+request::Request::finish_response
 request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::frame_args
@@ -510,6 +514,7 @@ request::Request::header_remove
 request::Request::header_remove_prefix
 request::Request::headers_list
 request::Request::headers_sent
+request::Request::host_status
 request::Request::included_files
 request::Request::info_ini_entries
 request::Request::info_ini_table
@@ -569,6 +574,7 @@ request::Request::reset_memory_peak
 request::Request::resource
 request::Request::resources
 request::Request::response_code
+request::Request::response_headers
 request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used

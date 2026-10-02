@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::{
-    Aborted, Body, Engine, HostExtension, HostValue, IniEvent, IniOrigin, OutputSink,
-    RequestDescription, ResponseHead, WebRequest,
+    Aborted, Body, Engine, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
+    ResponseHead, WebRequest,
 };
 
 use crate::access::AccessLog;
@@ -438,15 +438,7 @@ fn truth(value: &[u8]) -> bool {
 /// `php_value`s and `php_admin_value`s as `fpm_php_apply_defines` sets
 /// them, each one php does not know logged.
 fn build(ini: &[(String, String)], config: &PoolConfig, started: &str) -> Engine {
-    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let mut builder = php_sapi::prepare(
-        Engine::builder()
-            .extensions(&extensions)
-            .configure(php_bundle::CONFIGURE)
-            .tier::<php_bundle::Tier>(),
-        ini,
-        Some(HostExtension::FpmFcgi),
-    );
+    let mut builder = php_sapi::prepare(crate::builder(), ini);
     for (name, value) in &config.php_values {
         builder = builder.host_ini(name, value, IniOrigin::Value);
     }

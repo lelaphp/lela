@@ -2,8 +2,10 @@
 # under `sapi/` (ADR-0008), the binary `php-fpm`: a master that reads
 # php-fpm.conf and forks its pools' children, each serving FastCGI
 # requests on an engine of the bundle's enabled set with `cgi-fcgi` after
-# it. Three edges, php_bundle, php_sapi and php_proto for the FastCGI and
-# CGI codecs; the engine is named through the facade alone.
+# it. Four edges, php_bundle, php_sapi, php_proto for the FastCGI and
+# CGI codecs, and php_ext for the natives its own extension declares
+# (ADR-0008 as amended by #1348); the engine is named through the facade
+# alone.
 [package]
 name = "php_sapi_fpm"
 version = "0.0.0"
@@ -34,12 +36,18 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and the seven the CLI turns on, which the
-# oracle's `php-fpm -m` lists as its `php -m` does (sapi/cli's manifest
-# says why each).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
+# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
+# builds every extension outside the `cli` class for every host, so the
+# oracle's `php-fpm -m` lists every module its `php -m` does (#1477), and
+# `pcntl` and `posix` are in every host whose serving process is
+# single-threaded, as php-fpm's children are (design §7.2, revision 66).
+# The test `the_bundle_is_the_clis` holds the two lists equal.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
+# The face its `cgi_module_entry`'s natives are declared with, as an
+# extension declares its own (ADR-0008, #1348).
+php_ext = { path = "../../crates/php_ext" }
 # The process manager's system calls, safe where `nix` wraps them, and
 # `libc` in `src/ffi/` alone for the fork, the signal handlers, the
 # shared memory and the rest `nix` leaves unsafe (ADR-0008).

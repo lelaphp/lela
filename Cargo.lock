@@ -1084,6 +1084,7 @@ name = "php_sapi_cgi"
 version = "0.0.0"
 dependencies = [
  "php_bundle",
+ "php_ext",
  "php_proto",
  "php_sapi",
 ]
@@ -1094,6 +1095,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "php_bundle",
+ "php_ext",
  "php_proto",
  "php_sapi",
 ]
@@ -1105,6 +1107,7 @@ dependencies = [
  "libc",
  "nix",
  "php_bundle",
+ "php_ext",
  "php_proto",
  "php_sapi",
 ]

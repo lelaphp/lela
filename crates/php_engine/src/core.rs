@@ -23,10 +23,14 @@ use crate::interfaces::{
 use crate::weakrefs::{WeakMap, WeakReference};
 
 /// The `Core` value: the functions of `zend_builtin_functions.stub.php`
-/// ([`crate::natives::core`]); the classes as `zend_register_interfaces`,
-/// `zend_register_default_classes` and `zend_register_fiber_ce` register
-/// them, the iterator wrapper among the interfaces' as
-/// `zend_register_iterator_wrapper` makes it; and the constants
+/// ([`crate::natives::core`]); the classes in the order php's
+/// `EG(class_table)` holds them, `zend_register_default_classes`'s
+/// (`Z/Zend/zend_default_classes.c`): the interfaces, the exceptions, the
+/// iterator wrapper `zend_register_iterator_wrapper` makes, `Closure`,
+/// the generators, the weak references, the attributes, the enums' two
+/// interfaces and the fibers, then `stdClass`, which
+/// `ZEND_MINIT_FUNCTION(core)` registers after them
+/// (`Z/Zend/zend_builtin_functions.c:40`); and the constants
 /// ([`crate::constants::startup`]).
 pub(crate) fn extension() -> Extension {
     let builder = ExtensionBuilder::default()
@@ -35,30 +39,27 @@ pub(crate) fn extension() -> Extension {
         .class::<IteratorAggregate>()
         .class::<Iterator>()
         .class::<Serializable>()
-        .class::<Countable>()
-        .class::<InternalIterator>();
-    crate::interfaces::iterator_wrapper(builder)
-        .class::<Stringable>()
-        .class::<Throwable>()
         .class::<ArrayAccess>()
+        .class::<Countable>()
+        .class::<Stringable>()
+        .class::<InternalIterator>()
+        .class::<Throwable>()
         .class::<Exception>()
         .class::<ErrorException>()
         .class::<Error>()
+        .class::<CompileError>()
+        .class::<ParseError>()
         .class::<TypeError>()
+        .class::<ArgumentCountError>()
         .class::<ValueError>()
         .class::<ArithmeticError>()
         .class::<DivisionByZeroError>()
-        .class::<ArgumentCountError>()
         .class::<UnhandledMatchError>()
-        .class::<CompileError>()
-        .class::<ParseError>()
-        .class::<RequestParseBodyException>()
+        .class::<RequestParseBodyException>();
+    crate::interfaces::iterator_wrapper(builder)
         .class::<Closure>()
         .class::<Generator>()
         .class::<ClosedGeneratorException>()
-        .class::<stdClass>()
-        .class::<UnitEnum>()
-        .class::<BackedEnum>()
         .class::<WeakReference>()
         .class::<WeakMap>()
         .class::<Attribute>()
@@ -70,8 +71,11 @@ pub(crate) fn extension() -> Extension {
         .class::<Deprecated>()
         .class::<NoDiscard>()
         .class::<DelayedTargetValidation>()
+        .class::<UnitEnum>()
+        .class::<BackedEnum>()
         .class::<Fiber>()
         .class::<FiberError>()
+        .class::<stdClass>()
         .constants(crate::constants::startup::declared())
         .build("Core")
 }

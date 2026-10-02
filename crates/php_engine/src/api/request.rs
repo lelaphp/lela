@@ -6541,8 +6541,9 @@ impl Request {
 
     /// `fastcgi_finish_request()` (`Z/sapi/fpm/fpm/fpm_main.c:1494`):
     /// where the response is open, every buffer flushed, the head sent
-    /// and the host told the response ends; whether it was open.
-    pub(crate) fn finish_response(&mut self) -> bool {
+    /// and the host told the response ends; whether it was open. What
+    /// the program writes after goes nowhere.
+    pub fn finish_response(&mut self) -> bool {
         if self.closed {
             return false;
         }
@@ -6552,9 +6553,16 @@ impl Request {
         true
     }
 
-    /// What the host says of itself, `fpm_get_status()`.
-    pub(crate) fn host_status(&mut self) -> Option<crate::engine::HostValue> {
-        self.sink.get().status()
+    /// What the host says of itself, made an array of the request's, a
+    /// map's keys strings and a list's the next index: what
+    /// `fpm_get_status()` answers from the process manager's shared table
+    /// (`Z/sapi/fpm/fpm/fpm_status.c` `fpm_status_export_to_zval`);
+    /// `None` where the host says nothing.
+    pub fn host_status(&mut self) -> Result<Option<PhpArray>, Thrown> {
+        match self.sink.get().status() {
+            Some(status) => host_value(self, status).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// `php_log_err_with_severity` (`Z/main/main.c:919-990`): one entry
@@ -7438,8 +7446,9 @@ impl Request {
     }
 
     /// php's `EG(exit_status)`, what `serve` reports the request ended
-    /// with.
-    pub(crate) fn exit_status(&self) -> i32 {
+    /// with: what `exit` last wrote, or 255 after a fatal.
+    #[must_use]
+    pub fn exit_status(&self) -> i32 {
         self.exit_status
     }
 
@@ -16798,6 +16807,74 @@ impl Request {
         Ok(array)
     }
 
+    /// The header list as name and value, what a host's
+    /// `apache_response_headers()` answers (`Z/sapi/cgi/cgi_main.c:1689`,
+    /// `Z/sapi/cli/php_cli_server.c:425`): each line with a name before
+    /// its colon, the name with its trailing blanks off and the value with
+    /// its leading blanks off; a line with no colon or an empty name is
+    /// passed over.
+    pub fn response_headers(&mut self) -> Result<PhpArray, Thrown> {
+        let lines = self.output.headers().to_vec();
+        let mut array = PhpArray::new(self)?;
+        for line in lines {
+            let Some(colon) = line.iter().position(|&b| b == b':') else {
+                continue;
+            };
+            let mut end = colon;
+            while end > 0 && matches!(line[end - 1], b' ' | b'\t') {
+                end -= 1;
+            }
+            if end == 0 {
+                continue;
+            }
+            let mut start = colon + 1;
+            while matches!(line.get(start), Some(b' ' | b'\t')) {
+                start += 1;
+            }
+            let key = Key::from_string(PhpString::new(self, &line[..end])?);
+            let value = Value::string(PhpString::new(self, &line[start..])?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
+
+    /// `PHP_FUNCTION(dl)`, which php exports `PHPAPI` for each host to
+    /// name in its `additional_functions`, and `php_load_extension`'s
+    /// checks before it opens anything (`Z/ext/standard/dl.c`):
+    /// `enable_dl` off is php's warning, as is a name of `MAXPATHLEN`
+    /// bytes or more and a name with a `/` in it, since what `dl()` loads
+    /// is a file name under `extension_dir`; each answers `false`. A name
+    /// that passes is php's `php_dl` without `HAVE_LIBDL`
+    /// (`Z/ext/standard/dl.c:261`), its warning, and `false`: this engine
+    /// links its extensions at build and has no loader for a C library
+    /// built against php's extension API (`trace:dl-no-loader`).
+    pub fn dl(&mut self, extension_filename: &[u8]) -> bool {
+        if !self
+            .ini_get(b"enable_dl")
+            .is_some_and(Request::ini_parse_bool)
+        {
+            crate::api::raising::docref(
+                self,
+                Level::Warning,
+                "Dynamically loaded extensions aren't enabled",
+            );
+            return false;
+        }
+        let max = crate::virtual_cwd::MAXPATHLEN;
+        let text = if extension_filename.len() >= max {
+            format!("Filename exceeds the maximum allowed length of {max} characters")
+        } else if extension_filename.contains(&b'/') {
+            String::from("Temporary module name should contain only filename")
+        } else {
+            format!(
+                "Cannot dynamically load {} - dynamic modules are not supported",
+                String::from_utf8_lossy(extension_filename)
+            )
+        };
+        crate::api::raising::docref(self, Level::Warning, &text);
+        false
+    }
+
     // -------------------------------------------------- include
 
     /// The source an extension's `zend_compile_file` answers for `path`
@@ -18732,9 +18809,9 @@ impl Request {
         self.description.file_handles.as_ref()?.fd(standard)
     }
 
-    /// The process's title, where the host saved its area.
-    pub(crate) fn process_title(&self) -> Option<&crate::engine::ProcessTitle> {
-        self.description.process_title.as_ref()
+    /// `PHP_CLI_PROCESS_TITLE` as the host registers it.
+    pub(crate) fn process_title(&self) -> crate::engine::ProcessTitle {
+        self.description.process_title
     }
 
     /// Whether the host asked for the CLI's standard handles.
@@ -19172,36 +19249,25 @@ impl Request {
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER(constant) == module->module_number`
-    /// over `EG(zend_constants)`: the names of the constants an
-    /// extension declared through `ExtensionBuilder::constants`, in the
-    /// order it declared them, each one `api::call::constant` reads the
-    /// value of; empty for an extension that declares none. The table
-    /// holds the engine's own constants first, as
-    /// `zend_register_standard_constants` runs before any `MINIT`, then
-    /// each extension's in bundle order (`Engine::build`), the layout
-    /// [`Request::extension_functions`] reads too.
+    /// over `EG(zend_constants)`: the names of the constants registered
+    /// under an extension, in the table's order, each one
+    /// `api::call::constant` reads the value of; empty for an extension
+    /// that has none. The table holds the engine's own constants first,
+    /// as `zend_register_standard_constants` runs before any `MINIT`, with
+    /// `PHP_SAPI` before `PHP_BINARY` where `php_module_startup` registers
+    /// it, then each extension's in bundle order (`Engine::build`), then
+    /// what was registered while the request ran: a host's under `Core`,
+    /// as the CLI's `PHP_CLI_PROCESS_TITLE` and its three streams, and an
+    /// extension's under its own.
     #[must_use]
     pub fn extension_constants(&self, extension: ExtensionId) -> Vec<Name> {
-        let Some(at) = usize::try_from(extension.0).ok() else {
+        let Some(module) = self.extension_name(extension) else {
             return Vec::new();
         };
-        let start: usize = self
-            .shared
-            .extensions
-            .iter()
-            .take(at)
-            .map(|e| e.constants.len())
-            .sum();
-        let count = self
-            .extension_of(extension)
-            .map_or(0, |e| e.constants.len());
-        self.shared
-            .declared()
-            .constants
-            .iter()
-            .skip(start)
-            .take(count)
-            .map(|decl| decl.name.clone())
+        self.constant_table()
+            .into_iter()
+            .filter(|(owner, _, _)| *owner == Some(module))
+            .map(|(_, name, _)| Name(name.into()))
             .collect()
     }
 
@@ -19969,6 +20035,18 @@ impl Request {
             {
                 self.leave_pending(&thrown);
             }
+        }
+    }
+
+    /// Each extension's hook once the primary program has ended and before
+    /// the request shuts down, in bundle order
+    /// ([`ExtensionBuilder::program_ended`]).
+    ///
+    /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
+    pub(crate) fn program_ended(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared.extensions.iter().filter_map(|e| e.program_ended) {
+            hook(self);
         }
     }
 
@@ -22784,6 +22862,34 @@ pub(crate) enum ConstantFetch {
     /// while it is evaluated and refuses one it finds marked
     /// ([`Request::visited_class_constant`]).
     Lookup,
+}
+
+/// A host's value made an array of `req`'s: a map's keys strings, a
+/// list's the next index ([`Request::host_status`]).
+fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpArray, Thrown> {
+    use crate::engine::HostValue;
+    let mut array = PhpArray::new(req)?;
+    let rows: Vec<(Option<Vec<u8>>, HostValue)> = match value {
+        HostValue::Map(rows) => rows.into_iter().map(|(k, v)| (Some(k), v)).collect(),
+        HostValue::List(rows) => rows.into_iter().map(|v| (None, v)).collect(),
+        other => vec![(None, other)],
+    };
+    for (key, row) in rows {
+        let value = match row {
+            HostValue::Int(n) => Value::int(n),
+            HostValue::Float(f) => Value::float(f),
+            HostValue::Str(s) => Value::string(PhpString::new(req, &s)?),
+            nested => Value::array(host_value(req, nested)?),
+        };
+        match key {
+            Some(key) => {
+                let key = Key::from_string(PhpString::new(req, &key)?);
+                array.set(req, key, value)?;
+            }
+            None => array.append(req, value)?,
+        }
+    }
+    Ok(array)
 }
 
 #[cfg(test)]

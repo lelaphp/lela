@@ -15,9 +15,10 @@
 //! linked adapter, [`oracle::linked`], one fresh engine of `php_bundle`
 //! with every extension feature on but `pcntl` (harness §7, revision 43)
 //! under the recipe's preamble, ini and normalisation, or, for `pcntl`,
-//! which the harness does not link, through the `php` binary the witness
-//! lane builds for a fence marked `process` (revision 61) under the same
-//! recipe; that `__toString()` is the seam the `php` binary's `--re` flag
+//! which the harness does not link, and for `standard`, which the binary
+//! registers its host's natives under ([`HOSTED`]), through the `php`
+//! binary the witness lane builds for a fence marked `process` (revision
+//! 61) under the same recipe; that `__toString()` is the seam the `php` binary's `--re` flag
 //! calls once the hosts exist (design §7.1). A
 //! request that ends on a status other than zero rendered nothing, and
 //! the engine's own words for why, `ReflectionException: Extension "x"
@@ -409,8 +410,8 @@ pub fn run(
 /// What serves the engine's side of one run: the engine linked into this
 /// harness, and the `php` binary the witness lane serves a fence marked
 /// `process` through, for an extension the linked engine does not carry,
-/// which is `pcntl` (harness §8, revision 61). Both answer under the
-/// recipe, normalised as the oracle's stream is.
+/// which is `pcntl` (harness §8, revision 61), and for [`HOSTED`]. Both
+/// answer under the recipe, normalised as the oracle's stream is.
 struct Engines {
     /// What the linked engine carries.
     linked: Carried,
@@ -437,9 +438,7 @@ fn rendering(
 ) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
         let program = column.program(name);
-        let linked = manifest
-            .crate_named(&Column::Re.scope(name))
-            .is_none_or(|krate| engines.linked.carries(krate));
+        let linked = served_linked(manifest, &engines.linked, name);
         let served = if linked {
             linked::serve(&manifest.pin.recipe, None, &program)
                 .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
@@ -468,6 +467,23 @@ fn rendering(
         &manifest.pin.recipe.normalise,
         bytes,
     )))
+}
+
+/// The extension php's `php_module_startup` registers a host's
+/// `additional_functions` under (`Z/main/main.c:2359-2366`): the CLI's
+/// `dl()` and process title among `standard`'s functions in the oracle's
+/// `php --re standard`. The linked engine is built with no host, so its
+/// rendering lacks them, and the lane renders it through the `php` binary.
+pub(crate) const HOSTED: &str = "standard";
+
+/// Whether the linked engine renders `name` as the binary under test
+/// registers it: an extension it carries other than [`HOSTED`], or one the
+/// manifest has no row for; anything else the binary serves.
+pub(crate) fn served_linked(manifest: &Manifest, linked: &Carried, name: &str) -> bool {
+    name != HOSTED
+        && manifest
+            .crate_named(&Column::Re.scope(name))
+            .is_none_or(|krate| linked.carries(krate))
 }
 
 /// php's own words for a request that did not end on zero: under the

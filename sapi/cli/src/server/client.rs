@@ -404,7 +404,7 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
             .collect(),
         cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
         server: server_variables(site, client),
-        sapi_name: String::from("cli-server"),
+        sapi_name: String::from(super::NAME),
         web: Some(WebRequest {
             method: Some(Method::of(method)),
             request_uri: request.uri.clone(),
@@ -419,7 +419,6 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
             no_headers: false,
             response_code: 200,
         }),
-        process_title: crate::process_title(),
         script_name: if is_static {
             None
         } else {

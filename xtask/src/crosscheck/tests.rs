@@ -1,6 +1,6 @@
 //! The lane from inside: the verdict on two renderings, the negative
 //! control under `xtask/fixtures/crosscheck/`, and which extensions a run
-//! holds. What a run writes is held from outside, in
+//! holds and which engine serves it. What a run writes is held from outside, in
 //! `tests/crosscheck.rs`, through `run`. Nothing here spawns php.
 
 use std::fs;
@@ -373,4 +373,27 @@ fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
         kept(&store, "abc", "ctype", Column::Ri),
         PathBuf::from("/store/crosscheck/ext/ctype/abc.ri")
     );
+}
+
+/// The negative control for #1479: the linked engine, built with no host,
+/// renders `standard` without the natives the CLI registers under it, so a
+/// run holding that rendering to the oracle's `php --re standard` fails,
+/// and the lane serves `standard` through the `php` binary instead; an
+/// extension no host adds to stays the linked engine's.
+#[test]
+fn standard_is_the_binarys_since_the_linked_engine_lacks_a_hosts_natives() {
+    let recipe = Manifest::load(&crate::built_root()).unwrap().pin.recipe;
+    let served = crate::oracle::linked::serve(&recipe, None, &Column::Re.program(HOSTED)).unwrap();
+    let rendered = String::from_utf8_lossy(&served.stdout);
+    assert!(rendered.contains("function str_repeat ]"), "{rendered}");
+    for native in ["dl", "cli_set_process_title", "cli_get_process_title"] {
+        assert!(
+            !rendered.contains(&format!("function {native} ]")),
+            "{native}"
+        );
+    }
+    let manifest = Manifest::of([Crate::named("ext/standard"), Crate::named("ext/ctype")]);
+    let carried = Carried::turning_on(&[]);
+    assert!(!served_linked(&manifest, &carried, HOSTED));
+    assert!(served_linked(&manifest, &carried, "ctype"));
 }

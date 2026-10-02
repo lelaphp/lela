@@ -33,9 +33,9 @@ use std::process::ExitCode;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
-    FileHandles, HostExtension, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables,
-    OutputSink, PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
-    Uncaught, WebRequest,
+    FileHandles, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
+    PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
+    WebRequest,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
@@ -55,37 +55,27 @@ pub mod tier {
 }
 
 /// `php_module_startup` for a host: `builder`, which carries the host's
-/// extensions and tier, with the host's own extension after them where it
-/// names one, the line's `-d` entries read by the engine's INI grammar
-/// over its defaults in the order given, and what that reading wrote for
-/// `stderr` written there, as php's `ini_error` writes it during startup.
+/// name, its extensions and tier, and the extension and natives it
+/// declared itself where it has any, the line's `-d` entries read by the
+/// engine's INI grammar over its defaults in the order given, and what
+/// that reading wrote for `stderr` written there, as php's `ini_error`
+/// writes it during startup.
 #[must_use]
-pub fn start(
-    builder: EngineBuilder,
-    ini: &[(String, String)],
-    host: Option<HostExtension>,
-) -> Engine {
-    let engine = prepare(builder, ini, host).build();
+pub fn start(builder: EngineBuilder, ini: &[(String, String)]) -> Engine {
+    let engine = prepare(builder, ini).build();
     let _ = std::io::stderr()
         .lock()
         .write_all(engine.startup_errors().as_bytes());
     engine
 }
 
-/// [`start`]'s builder before it is built: the host's extension, the
-/// witness lane's trace, and the line's `-d` entries; for a host that
-/// builds more than one engine and writes the startup errors once, as
-/// php-fpm's children build theirs after the master has started.
+/// [`start`]'s builder before it is built: the witness lane's trace and
+/// the line's `-d` entries; for a host that builds more than one engine
+/// and writes the startup errors once, as php-fpm's children build theirs
+/// after the master has started.
 #[must_use]
-pub fn prepare(
-    builder: EngineBuilder,
-    ini: &[(String, String)],
-    host: Option<HostExtension>,
-) -> EngineBuilder {
+pub fn prepare(builder: EngineBuilder, ini: &[(String, String)]) -> EngineBuilder {
     let mut builder = builder;
-    if let Some(host) = host {
-        builder = builder.host_extension(host);
-    }
     #[cfg(feature = "witness-trace")]
     if let Some(path) = std::env::var_os(TRACE) {
         builder = builder.trace_natives_to(path.into());

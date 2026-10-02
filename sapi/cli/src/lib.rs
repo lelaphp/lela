@@ -43,6 +43,7 @@
 
 #[allow(unsafe_code)]
 mod ffi;
+mod natives;
 pub mod options;
 pub mod request;
 pub mod server;
@@ -53,7 +54,9 @@ use std::process::ExitCode;
 
 use std::sync::OnceLock;
 
-use php_sapi::{Engine, ProcessTitle};
+use php_sapi::Engine;
+
+use crate::natives::ProcessTitle;
 
 pub use options::{Ask, Each, Lines, Options, Program, Refused, Report, Server, usage_text};
 pub use request::Process;
@@ -62,13 +65,24 @@ pub use request::Process;
 /// what the version line carries.
 pub const NAME: &str = "cli";
 
-/// The process's title, saved once first in [`main`] (`save_ps_args`) and
-/// handed to every request the process serves.
+/// The process's title, saved once first in [`main`] (`save_ps_args`),
+/// which the process title's natives write and read for every request the
+/// process serves.
 static TITLE: OnceLock<Option<ProcessTitle>> = OnceLock::new();
 
-/// The title the requests are handed, where [`main`] saved one.
-pub(crate) fn process_title() -> Option<ProcessTitle> {
-    TITLE.get().cloned().flatten()
+/// The title, where [`main`] saved one.
+pub(crate) fn process_title() -> Option<&'static ProcessTitle> {
+    TITLE.get().and_then(Option::as_ref)
+}
+
+/// `PHP_CLI_PROCESS_TITLE` for a request of the CLI: whether [`main`]
+/// saved the area.
+pub(crate) fn title_constant() -> php_sapi::ProcessTitle {
+    if process_title().is_some() {
+        php_sapi::ProcessTitle::Saved
+    } else {
+        php_sapi::ProcessTitle::Unsaved
+    }
 }
 
 /// `php_print_version` for this host, [`php_sapi::version`] under its
@@ -172,17 +186,19 @@ fn print(text: &str) -> i32 {
 }
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
-/// order and `php_bundle::Tier` bound, the shebang line of every file
+/// order and `php_bundle::Tier` bound, the CLI's `additional_functions`
+/// under `standard` ([`natives::cli`]), the shebang line of every file
 /// passed over as `do_cli` sets `CG(skip_shebang)`, started over the
 /// line's `ini` ([`php_sapi::start`]).
 fn engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang();
-    php_sapi::start(builder, ini, Some(php_sapi::HostExtension::Cli))
+    php_sapi::start(natives::cli(builder), ini)
 }
 
 /// The built-in server's engine: the bundle as [`engine`] builds it, with
@@ -193,6 +209,7 @@ fn engine(ini: &[(String, String)]) -> Engine {
 fn server_engine(ini: &[(String, String)]) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .sapi_name(server::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
@@ -200,5 +217,5 @@ fn server_engine(ini: &[(String, String)]) -> Engine {
         .ini("html_errors", "1")
         .ini("implicit_flush", "0")
         .ini("max_execution_time", "30");
-    php_sapi::start(builder, ini, Some(php_sapi::HostExtension::CliServer))
+    php_sapi::start(natives::server(builder), ini)
 }

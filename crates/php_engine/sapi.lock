@@ -8,7 +8,6 @@ EachLine
 Engine
 EngineBuilder
 FileHandles
-HostExtension
 HostValue
 IniEvent
 IniOrigin

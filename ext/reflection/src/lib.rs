@@ -5000,6 +5000,10 @@ fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec
         .into_iter()
         .filter(|&class| req.class_extension(class) == Some(extension))
         .map(|class| (class, class_name_of(req, class)))
+        // A name that starts with `\0` is a class php keeps out of
+        // `EG(class_table)`, the iterator wrapper, as
+        // `get_declared_classes()` skips it.
+        .filter(|(_, name)| name.first() != Some(&0))
         .collect()
 }
 
@@ -8168,8 +8172,37 @@ impl ReflectionExtension {
         Ok(functions)
     }
 
-    /// `ReflectionExtension::getConstants()`: the constants the extension
-    /// declared, keyed by name, each value the constant's.
+    /// `ReflectionExtension::getConstants()`: the constants registered
+    /// under the extension, keyed by name, each value the constant's, in
+    /// the order `EG(zend_constants)` holds them: `Core`'s with `PHP_SAPI`
+    /// where `php_module_startup` registers it and what the host
+    /// registers after, the CLI's `PHP_CLI_PROCESS_TITLE` and its three
+    /// streams, phpdbg's three streams alone. `PHP_BUILD_PROVIDER` is the
+    /// build's, declared only where it named a provider, as the oracle's
+    /// did, so the fences leave it out:
+    ///
+    /// ```php
+    /// $names = array_keys((new ReflectionExtension('Core'))->getConstants());
+    /// echo implode(",", array_diff($names, ['PHP_BUILD_PROVIDER'])), "\n";
+    /// ```
+    /// ```expect process
+    /// E_ERROR,E_WARNING,E_PARSE,E_NOTICE,E_CORE_ERROR,E_CORE_WARNING,E_COMPILE_ERROR,E_COMPILE_WARNING,E_USER_ERROR,E_USER_WARNING,E_USER_NOTICE,E_STRICT,E_RECOVERABLE_ERROR,E_DEPRECATED,E_USER_DEPRECATED,E_ALL,DEBUG_BACKTRACE_PROVIDE_OBJECT,DEBUG_BACKTRACE_IGNORE_ARGS,ZEND_THREAD_SAFE,ZEND_DEBUG_BUILD,ZEND_VM_KIND,TRUE,FALSE,NULL,PHP_VERSION,PHP_MAJOR_VERSION,PHP_MINOR_VERSION,PHP_RELEASE_VERSION,PHP_EXTRA_VERSION,PHP_VERSION_ID,PHP_BUILD_DATE,PHP_ZTS,PHP_DEBUG,PHP_OS,PHP_OS_FAMILY,DEFAULT_INCLUDE_PATH,PEAR_INSTALL_DIR,PEAR_EXTENSION_DIR,PHP_EXTENSION_DIR,PHP_PREFIX,PHP_BINDIR,PHP_SBINDIR,PHP_MANDIR,PHP_LIBDIR,PHP_DATADIR,PHP_SYSCONFDIR,PHP_LOCALSTATEDIR,PHP_CONFIG_FILE_PATH,PHP_CONFIG_FILE_SCAN_DIR,PHP_SHLIB_SUFFIX,PHP_EOL,PHP_MAXPATHLEN,PHP_INT_MAX,PHP_INT_MIN,PHP_INT_SIZE,PHP_FD_SETSIZE,PHP_FLOAT_DIG,PHP_FLOAT_EPSILON,PHP_FLOAT_MAX,PHP_FLOAT_MIN,PHP_OUTPUT_HANDLER_START,PHP_OUTPUT_HANDLER_WRITE,PHP_OUTPUT_HANDLER_FLUSH,PHP_OUTPUT_HANDLER_CLEAN,PHP_OUTPUT_HANDLER_FINAL,PHP_OUTPUT_HANDLER_CONT,PHP_OUTPUT_HANDLER_END,PHP_OUTPUT_HANDLER_CLEANABLE,PHP_OUTPUT_HANDLER_FLUSHABLE,PHP_OUTPUT_HANDLER_REMOVABLE,PHP_OUTPUT_HANDLER_STDFLAGS,PHP_OUTPUT_HANDLER_STARTED,PHP_OUTPUT_HANDLER_DISABLED,PHP_OUTPUT_HANDLER_PROCESSED,UPLOAD_ERR_OK,UPLOAD_ERR_INI_SIZE,UPLOAD_ERR_FORM_SIZE,UPLOAD_ERR_PARTIAL,UPLOAD_ERR_NO_FILE,UPLOAD_ERR_NO_TMP_DIR,UPLOAD_ERR_CANT_WRITE,UPLOAD_ERR_EXTENSION,PHP_SAPI,PHP_BINARY,PHP_CLI_PROCESS_TITLE,STDIN,STDOUT,STDERR
+    /// ```
+    ///
+    /// ```php
+    /// $names = array_keys((new ReflectionExtension('Core'))->getConstants());
+    /// echo implode(",", array_diff($names, ['PHP_BUILD_PROVIDER'])), "\n";
+    /// ```
+    /// ```request phpdbg
+    /// r
+    /// q
+    /// ```
+    /// ```expect
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> E_ERROR,E_WARNING,E_PARSE,E_NOTICE,E_CORE_ERROR,E_CORE_WARNING,E_COMPILE_ERROR,E_COMPILE_WARNING,E_USER_ERROR,E_USER_WARNING,E_USER_NOTICE,E_STRICT,E_RECOVERABLE_ERROR,E_DEPRECATED,E_USER_DEPRECATED,E_ALL,DEBUG_BACKTRACE_PROVIDE_OBJECT,DEBUG_BACKTRACE_IGNORE_ARGS,ZEND_THREAD_SAFE,ZEND_DEBUG_BUILD,ZEND_VM_KIND,TRUE,FALSE,NULL,PHP_VERSION,PHP_MAJOR_VERSION,PHP_MINOR_VERSION,PHP_RELEASE_VERSION,PHP_EXTRA_VERSION,PHP_VERSION_ID,PHP_BUILD_DATE,PHP_ZTS,PHP_DEBUG,PHP_OS,PHP_OS_FAMILY,DEFAULT_INCLUDE_PATH,PEAR_INSTALL_DIR,PEAR_EXTENSION_DIR,PHP_EXTENSION_DIR,PHP_PREFIX,PHP_BINDIR,PHP_SBINDIR,PHP_MANDIR,PHP_LIBDIR,PHP_DATADIR,PHP_SYSCONFDIR,PHP_LOCALSTATEDIR,PHP_CONFIG_FILE_PATH,PHP_CONFIG_FILE_SCAN_DIR,PHP_SHLIB_SUFFIX,PHP_EOL,PHP_MAXPATHLEN,PHP_INT_MAX,PHP_INT_MIN,PHP_INT_SIZE,PHP_FD_SETSIZE,PHP_FLOAT_DIG,PHP_FLOAT_EPSILON,PHP_FLOAT_MAX,PHP_FLOAT_MIN,PHP_OUTPUT_HANDLER_START,PHP_OUTPUT_HANDLER_WRITE,PHP_OUTPUT_HANDLER_FLUSH,PHP_OUTPUT_HANDLER_CLEAN,PHP_OUTPUT_HANDLER_FINAL,PHP_OUTPUT_HANDLER_CONT,PHP_OUTPUT_HANDLER_END,PHP_OUTPUT_HANDLER_CLEANABLE,PHP_OUTPUT_HANDLER_FLUSHABLE,PHP_OUTPUT_HANDLER_REMOVABLE,PHP_OUTPUT_HANDLER_STDFLAGS,PHP_OUTPUT_HANDLER_STARTED,PHP_OUTPUT_HANDLER_DISABLED,PHP_OUTPUT_HANDLER_PROCESSED,UPLOAD_ERR_OK,UPLOAD_ERR_INI_SIZE,UPLOAD_ERR_FORM_SIZE,UPLOAD_ERR_PARTIAL,UPLOAD_ERR_NO_FILE,UPLOAD_ERR_NO_TMP_DIR,UPLOAD_ERR_CANT_WRITE,UPLOAD_ERR_EXTENSION,PHP_SAPI,PHP_BINARY,STDIN,STDOUT,STDERR
+    /// [Script ended normally]
+    /// prompt>
+    /// ```
     ///
     /// ```php
     /// var_dump((new ReflectionExtension('ctype'))->getConstants());
@@ -8269,7 +8302,16 @@ impl ReflectionExtension {
     }
 
     /// `ReflectionExtension::getClassNames()`: the same walk as
-    /// `getClasses`, the names appended in order.
+    /// `getClasses`, the names appended in order. `Core`'s are in the
+    /// order php's `EG(class_table)` holds them, and the iterator wrapper, which
+    /// php never adds to it, is not among them:
+    ///
+    /// ```php
+    /// echo implode(",", (new ReflectionExtension('Core'))->getClassNames()), "\n";
+    /// ```
+    /// ```expect process
+    /// Traversable,IteratorAggregate,Iterator,Serializable,ArrayAccess,Countable,Stringable,InternalIterator,Throwable,Exception,ErrorException,Error,CompileError,ParseError,TypeError,ArgumentCountError,ValueError,ArithmeticError,DivisionByZeroError,UnhandledMatchError,RequestParseBodyException,Closure,Generator,ClosedGeneratorException,WeakReference,WeakMap,Attribute,ReturnTypeWillChange,AllowDynamicProperties,SensitiveParameter,SensitiveParameterValue,Override,Deprecated,NoDiscard,DelayedTargetValidation,UnitEnum,BackedEnum,Fiber,FiberError,stdClass
+    /// ```
     ///
     /// ```php
     /// var_dump((new ReflectionExtension('json'))->getClassNames());

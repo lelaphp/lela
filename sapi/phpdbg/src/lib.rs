@@ -145,7 +145,7 @@ pub fn main() -> ExitCode {
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
         .skip_shebang();
-    let engine = php_sapi::start(builder, &line.ini, None);
+    let engine = php_sapi::start(builder, &line.ini);
 
     let mut session = Session::new();
     session.line_args.clone_from(&line.args);

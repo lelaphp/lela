@@ -1,8 +1,9 @@
 # sapi/cgi: php's CGI, `php-src/sapi/cgi`, one crate under `sapi/` (ADR-0008),
 # the binary `php-cgi`: the bundle's enabled set on one engine with
 # `cgi-fcgi` after it, the request the server describes in the environment.
-# Three edges, php_bundle, php_sapi and php_proto for the CGI environment's
-# codec; the engine is named through the facade alone.
+# Four edges, php_bundle, php_sapi, php_proto for the CGI environment's
+# codec, and php_ext for the natives its own extension declares (ADR-0008
+# as amended by #1348); the engine is named through the facade alone.
 [package]
 name = "php_sapi_cgi"
 version = "0.0.0"
@@ -33,10 +34,15 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and the eight the CLI turns on (sapi/cli's
-# manifest says why each): php builds its CGI with its CLI's extensions,
-# `pcntl` and `posix` among them, and the oracle's `php-cgi -m` lists all
-# eight (design §7.2, revision 35).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
+# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
+# builds an extension of the `cli` class for the CLI, CGI, embed and
+# phpdbg alike (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one
+# for every host, so the oracle's `php-cgi -m` lists every module its
+# `php -m` does (#1477). The test `the_bundle_is_the_clis` holds the two
+# lists equal.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
+# The face `cgi_module_entry`'s natives are declared with, as an extension
+# declares its own (ADR-0008, #1348).
+php_ext = { path = "../../crates/php_ext" }
