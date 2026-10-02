@@ -563,6 +563,7 @@ request::Request::parse_encoding_list
 request::Request::parse_query
 request::Request::phpinfo_as_text
 request::Request::plain_path
+request::Request::preloading
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
