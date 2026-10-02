@@ -37,6 +37,7 @@ mod ffi;
 mod formatter;
 #[allow(dead_code)]
 mod iterator;
+mod listformatter;
 mod locale;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -319,6 +320,7 @@ pub fn extension() -> Extension {
     let builder = builder
         .class::<collator::Collator>()
         .class::<formatter::NumberFormatter>()
+        .class::<listformatter::IntlListFormatter>()
         .class::<locale::Locale>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>();
