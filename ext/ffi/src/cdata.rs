@@ -950,6 +950,10 @@ impl ObjectHandlers for Handlers {
         Ok(Vec::new())
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     /// `zend_fake_get_method`.
     fn get_method(
         &self,

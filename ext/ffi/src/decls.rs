@@ -1285,6 +1285,10 @@ impl ObjectHandlers for Handlers {
         Ok(Vec::new())
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     fn get_method(
         &self,
         req: &mut Request,

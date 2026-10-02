@@ -2317,7 +2317,28 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
 /// as it is where the argument is its one owner (`ZVAL_COPY`) and copied
 /// where it is shared (`zend_array_dup`), an `ArrayObject` or `ArrayIterator` read
 /// through, and any other object's properties, each object php's
-/// deprecation first.
+/// deprecation first. An object whose class answers `get_properties`
+/// itself is refused, as `ZipArchive`'s does:
+///
+/// ```php
+/// class Z extends ZipArchive { public $x = 1; }
+/// try { $a = @new ArrayObject(new Z); } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// try { @new ArrayIterator(new ZipArchive); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { @(new ArrayObject([]))->exchangeArray(new Z); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// $f = FFI::cdef();
+/// foreach ([$f, $f->new('int'), $f->type('int'), new SensitiveParameterValue(1)] as $o) {
+///     try { @new ArrayObject($o); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// InvalidArgumentException: Overloaded object of type Z is not compatible with ArrayObject
+/// Overloaded object of type ZipArchive is not compatible with ArrayIterator
+/// Overloaded object of type Z is not compatible with ArrayObject
+/// Overloaded object of type FFI is not compatible with ArrayObject
+/// Overloaded object of type FFI\CData is not compatible with ArrayObject
+/// Overloaded object of type FFI\CType is not compatible with ArrayObject
+/// Overloaded object of type SensitiveParameterValue is not compatible with ArrayObject
+/// ```
 ///
 /// ```php
 /// $w = new ArrayObject([1]);
