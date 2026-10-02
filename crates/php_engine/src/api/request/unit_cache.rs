@@ -27,9 +27,12 @@ pub(crate) enum HandlePath {
     /// `require` over: `do_validate_timestamps` resolves it again.
     Filename,
     /// The opened path too, as `zend_stream_open` leaves it for an
-    /// `_once` include, a preload or the primary file: the stat
-    /// compares it and resolves nothing.
+    /// `_once` include or a preload: the stat compares it and resolves
+    /// nothing.
     Opened,
+    /// The primary file, opened by the host as a `FILE *` and not as a
+    /// stream: what [`HandlePath::Opened`] is, with no resource spent.
+    Host,
 }
 
 /// The unit cache for one request: [`Request::unit_cache`].
@@ -236,6 +239,9 @@ impl Request {
             Admission::KeptOut => {
                 shared.units.note_blacklisted();
                 let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
+                if handle != HandlePath::Host {
+                    self.spend_include_stream();
+                }
                 return Some(shared.compile_for(self, &source, path, SourceKind::File));
             }
             Admission::Held {
@@ -264,6 +270,7 @@ impl Request {
         {
             self.revalidated_path(written.unwrap_or(path), &full);
         }
+        let resolved = lookup == Lookup::Resolved;
         let written = match lookup {
             Lookup::AsWritten => written.and_then(|written| self.written_key(written)),
             Lookup::Resolved => None,
@@ -298,6 +305,12 @@ impl Request {
         );
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
+        }
+        // The file opened as a stream where php compiles it or resolves
+        // it to look it up by its full path, and not for a hit by the
+        // path as written.
+        if handle != HandlePath::Host && cached.is_some() && (filed != Filed::Hit || resolved) {
+            self.spend_include_stream();
         }
         cached
     }

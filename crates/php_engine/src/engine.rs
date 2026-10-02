@@ -3101,7 +3101,7 @@ impl Engine {
         }
         // `php_lint_script` compiles and drops the op array, and what
         // the compiler warned of it rendered as it compiled.
-        match self.primary(&mut req, source.as_deref(), false) {
+        match self.primary(&mut req, source.as_deref()) {
             Some(Ok(unit)) => {
                 note_compiled(&mut req, &unit, SourceKind::File);
             }
@@ -3187,10 +3187,13 @@ impl Engine {
     /// to its end; whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
+        if script {
+            req.expand_primary_file(source.is_some());
+        }
         if script && !auto_file(req, b"auto_prepend_file", self.shared.entry) {
             return false;
         }
-        let ran = match self.primary(req, source, script) {
+        let ran = match self.primary(req, source) {
             Some(Ok(unit)) => serve_unit(req, &unit, self.shared.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
@@ -3206,16 +3209,14 @@ impl Engine {
     }
 
     /// The program compiled: the source the host handed over under the
-    /// name the request gives it, or the file the request names; where `expand` says,
-    /// as `php_execute_script` and not `php_lint_script` does, the file's
-    /// path is expanded first and put in `EG(included_files)`, so the
-    /// unit and its diagnostics carry the whole path
-    /// (`Z/main/main.c:2610-2619`).
+    /// name the request gives it, or the file the request names, under
+    /// the name `php_execute_script` and not `php_lint_script` has
+    /// expanded first ([`Request::expand_primary_file`]), so the unit and
+    /// its diagnostics carry the whole path.
     fn primary(
         &self,
         req: &mut Request,
         source: Option<&[u8]>,
-        expand: bool,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         let laid = req.heap_mut().lay_interned_table();
         if let Err(thrown) = req.fatal_of(laid) {
@@ -3231,11 +3232,7 @@ impl Engine {
                     .compile_for(req, source, &script, SourceKind::File),
             );
         }
-        let script = if expand {
-            req.expand_primary_file()
-        } else {
-            req.script_name().map(<[u8]>::to_vec).unwrap_or_default()
-        };
+        let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
         self.compile_file(req, &script)
     }
 
@@ -3251,7 +3248,7 @@ impl Engine {
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => req.cached_file(path, Some(path), crate::api::request::HandlePath::Opened),
+            Ok(None) => req.cached_file(path, Some(path), crate::api::request::HandlePath::Host),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None

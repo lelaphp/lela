@@ -17065,17 +17065,35 @@ impl Request {
     }
 
     /// `php_execute_script`'s `expand_filepath` of the primary file
-    /// (`Z/main/main.c:2610-2619`): the file the request names made whole
-    /// against its working directory with its links resolved, which is
-    /// the name the unit compiles under and the page `php_statpage`
-    /// stats, put in `EG(included_files)`; the name as given where it
-    /// expands to nothing.
-    pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
-        let script = self.description.script_name.clone().unwrap_or_default();
+    /// (`Z/main/main.c:2610-2619`), before `auto_prepend_file` runs: the
+    /// file the request names made whole against its working directory
+    /// with its links resolved, which is the name the unit compiles under
+    /// and the page `php_statpage` stats, put in `EG(included_files)`;
+    /// the name as given where it expands to nothing. A source the host
+    /// `served` under a name puts the name expanded in the table and
+    /// compiles under the name as given; one named `Standard input code`,
+    /// or nothing, is in no table.
+    ///
+    /// ```php
+    /// var_dump(count(get_included_files()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    pub(crate) fn expand_primary_file(&mut self, served: bool) {
+        let script = self.description.script_name.clone();
+        if served {
+            if let Some(script) = script.filter(|name| name != b"Standard input code")
+                && let Some(expanded) = self.expand_filepath(&script)
+            {
+                let _ = self.note_included(&expanded);
+            }
+            return;
+        }
+        let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
         let _ = self.note_included(&expanded);
-        self.description.script_name = Some(expanded.clone());
-        expanded
+        self.description.script_name = Some(expanded);
     }
 
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
@@ -17191,6 +17209,59 @@ impl Request {
                 self.open_stream_failed(kind, written, &reason);
                 self.failed_opening(kind, written)
             }
+        }
+    }
+
+    /// The stream `php_stream_open_for_zend_ex` opens over a plain file
+    /// an include or `spl_autoload` compiles, or looks up by its full
+    /// path in opcache's ([`Request::cached_file`]): a `stream` resource under
+    /// the next id, freed when `zend_destroy_file_handle` closes it
+    /// before the file runs, so the id is spent and `EG(regular_list)`
+    /// grows as php's does, here from its packed table of eight to a
+    /// hash at id 8, 160 bytes more that the list keeps:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/spent.inc'; file_put_contents($f, '<?php $x = 1;');
+    /// include $f;
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, "\n";
+    /// function g($f) { $a = 1; include $f; return $a; }
+    /// $m = memory_get_usage(); g($f); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); g($f); echo memory_get_usage() - $m, " ";
+    /// echo get_resource_id(fopen('php://memory', 'r')), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// 0 160 0
+    /// 376 0 12
+    /// ```
+    ///
+    /// Under opcache the first include compiles the file and spends the
+    /// one id, and every hit after it, served by the path as written,
+    /// opens nothing:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/spent.inc'; file_put_contents($f, '<?php $x = 1;');
+    /// include $f;
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, "\n";
+    /// echo get_resource_id(fopen('php://memory', 'r')), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0 0 0
+    /// 7
+    /// ```
+    ///
+    /// A refusal has recorded the memory limit's fatal, which ends the
+    /// request.
+    fn spend_include_stream(&mut self) {
+        let kind = self.stream_type;
+        let made = self.heap_mut().resource(kind);
+        if let Ok(opened) = self.fatal_of(made) {
+            self.release(Resource::of(opened).as_value());
         }
     }
 
