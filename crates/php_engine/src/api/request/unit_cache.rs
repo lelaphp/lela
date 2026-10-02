@@ -218,12 +218,89 @@ impl Request {
         Some(held)
     }
 
+    /// `persistent_zend_resolve_path` under `include_once` and
+    /// `require_once`, the lookup by the key `written` makes having
+    /// missed: the key filed beside the full path `path` where the cache
+    /// holds that, as `zend_accel_add_key` files it, whether or not the
+    /// file was included already, so the include that follows is a hit
+    /// by the key and opens no stream. A relative include whose key is
+    /// not filed yet while its full path is held opens the file:
+    ///
+    /// ```php
+    /// function r() { return get_resource_id(fopen('php://memory', 'r')); }
+    /// $dir = sys_get_temp_dir() . '/held' . getmypid(); @mkdir($dir); chdir($dir);
+    /// foreach (['a', 'b', 'c'] as $f) { file_put_contents("$dir/$f.inc", "<?php return '$f';"); touch("$dir/$f.inc", time() - 10); }
+    /// var_dump(r(), include "$dir/a.inc", r(), include 'a.inc', r(), include 'a.inc', r());
+    /// var_dump(require "$dir/b.inc", r(), require_once './b.inc', r(), include './b.inc', r());
+    /// var_dump(opcache_compile_file("$dir/c.inc"), r(), include_once 'c.inc', r(), include 'c.inc', r());
+    /// array_map('unlink', glob("$dir/*.inc")); rmdir($dir);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(8)
+    /// string(1) "a"
+    /// int(10)
+    /// string(1) "a"
+    /// int(12)
+    /// string(1) "a"
+    /// int(13)
+    /// string(1) "b"
+    /// int(15)
+    /// bool(true)
+    /// int(16)
+    /// string(1) "b"
+    /// int(17)
+    /// bool(true)
+    /// int(19)
+    /// string(1) "c"
+    /// int(20)
+    /// string(1) "c"
+    /// int(21)
+    /// ```
+    pub(crate) fn file_once_key(&mut self, written: &[u8], path: &[u8]) {
+        let full = full_path(path, &self.cwd);
+        let as_written = matches!(
+            self.admission(&full),
+            Admission::Held {
+                lookup: Lookup::AsWritten,
+                ..
+            }
+        );
+        let shared = Arc::clone(&self.shared);
+        if as_written
+            && let Some(key) = self.written_key(written)
+            && let Some(held) = shared.units.find(&UnitKey::full(&full))
+        {
+            shared.units.add_key(key, &held);
+        }
+    }
+
     /// The unit for the file at `path`, resolved already, as
     /// `persistent_compile_file` gives it: a file the answer keeps out
     /// compiled as this request's own and counted among the blacklist
     /// misses, any other through the cache, validated as the answer
     /// says and filed under `written` too where the answer looks by the
     /// path as written.
+    ///
+    /// The file is opened as a stream, a resource id spent, wherever php
+    /// opens it: to compile it, and to resolve its path after the lookup
+    /// by the key missed, which a file read back from `opcache.file_cache`
+    /// is found after, the key filed by the next include. Served by the
+    /// binary, since the child is `PHP_BINARY`:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/kept' . getmypid(); @mkdir($dir);
+    /// file_put_contents("$dir/a.inc", '<?php return 1;'); touch("$dir/a.inc", time() - 10);
+    /// $code = 'function r() { return get_resource_id(fopen("php://memory", "r")); } echo implode(" ", [r(), include $argv[1], r(), include $argv[1], r(), include $argv[1], r()]), "\n";';
+    /// foreach ([1, 2] as $run) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', "opcache.file_cache=$dir", '-r', $code, "$dir/a.inc"], [1 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]); proc_close($p);
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// 5 1 7 1 8 1 9
+    /// 5 1 7 1 9 1 10
+    /// ```
     pub(crate) fn cached_file(
         &mut self,
         path: &[u8],
@@ -283,6 +360,11 @@ impl Request {
             Some(disk) if memory => Levels::Both(disk),
             Some(disk) => Levels::Disk(disk),
         };
+        // `persistent_compile_file` opens the file to resolve its path
+        // wherever the lookup by the key misses.
+        let by_key = written
+            .as_ref()
+            .is_some_and(|key| shared.units.find(key).is_some());
         let asked = Asked {
             path: &full,
             written,
@@ -307,9 +389,13 @@ impl Request {
             self.tell_cached(&full);
         }
         // The file opened as a stream where php compiles it or resolves
-        // it to look it up by its full path, and not for a hit by the
-        // path as written.
-        if handle != HandlePath::Host && cached.is_some() && (filed != Filed::Hit || resolved) {
+        // it to look it up by its full path, and not for a hit whose key
+        // the cache files: one by the full path, or read back from the
+        // file cache, after the key missed is opened all the same.
+        if handle != HandlePath::Host
+            && cached.is_some()
+            && (filed != Filed::Hit || resolved || !by_key)
+        {
             self.spend_include_stream();
         }
         cached

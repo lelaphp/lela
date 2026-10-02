@@ -17349,6 +17349,12 @@ impl Request {
             None => self.resolve_path(written),
         };
         if kind.once()
+            && held.is_none()
+            && let Ok(path) = &resolved
+        {
+            self.file_once_key(written, path);
+        }
+        if kind.once()
             && let Ok(path) = &resolved
             && self.included_files.contains(path)
         {
