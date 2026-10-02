@@ -257,6 +257,24 @@ pub fn deprecated(req: &mut Request, message: &str) {
 ///
 /// Deprecated: Constant TEST3 is deprecated, from another in %s on line 9
 /// ```
+///
+/// An extension's attribute arguments are strings `MINIT` made
+/// (`zend_add_global_constant_attribute`), so the first deprecation of
+/// `ASSERT_ACTIVE` or `MHASH_MD5` keeps nothing of the request's beyond
+/// the last error's message, as php's does:
+///
+/// ```php
+/// ini_set('from', 'x');
+/// function f() { @assert_options(ASSERT_ACTIVE); }
+/// $m = memory_get_usage(); f(); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); @assert_options(2); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $x = @MHASH_MD5; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 80
+/// 0
+/// 32
+/// ```
 pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
     let Some((true, user)) = req.constant_deprecation(key) else {
         return Ok(());

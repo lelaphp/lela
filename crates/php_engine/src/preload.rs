@@ -91,6 +91,10 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
+        // "don't send headers": `SG(headers_sent)` and
+        // `SG(request_info).no_headers` set once the request started, so
+        // the host is handed no head (`Z/ext/opcache/ZendAccelerator.c:4917`).
+        req.output_mut().quiet();
         req.begin_preload();
         req.enter_phase(Phase::Running);
         // `zend_compile_file(ZEND_REQUIRE)`: the script opened as a
