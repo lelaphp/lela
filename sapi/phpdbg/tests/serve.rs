@@ -274,3 +274,42 @@ fn the_init_file_runs_before_the_startup_run() {
         )
     );
 }
+
+/// Without `-b`, notices and errors are coloured whether or not stdout
+/// is a terminal, the prompt never (the pinned phpdbg's bytes for
+/// `phpdbg -qrr -n` and `phpdbg -qr -n`).
+#[test]
+fn notices_and_errors_are_coloured_unless_boring() {
+    let (out, file, init) = initialized("colours-rr", &["-qrr", "-n"], INIT, INIT_PROGRAM, "");
+    assert_eq!(
+        out,
+        format!(
+            "\x1b[0;32m[Breakpoint #0 added at {file}:3]\x1b[0m\n\
+             7\n\
+             \n\
+             \x1b[1;31m[Unrecognized command in {init}:3: nope, The command \"nope\" could not be found!]\x1b[0m\n\
+             7\n"
+        )
+    );
+    let (out, err, status) = ran(
+        "colours-throw",
+        &["-qrr", "-n"],
+        "<?php throw new Exception(\"boo\");\n",
+    );
+    assert!(
+        out.starts_with("\x1b[1;31m[Uncaught Exception in ")
+            && out.contains(" on line 1]\x1b[0m\n"),
+        "{out}"
+    );
+    assert_eq!((err.as_str(), status), ("", Some(255)));
+    let (out, file) = debugged("colours-b", "<?php\necho \"x\\n\";\n", "r\nq\n");
+    assert_eq!(
+        out,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> x\n\
+             [Script ended normally]\n\
+             prompt> "
+        )
+    );
+}

@@ -16,6 +16,7 @@ use php_sapi::tier::{FrameRef, Opcode};
 
 use crate::bp::Breakpoints;
 use crate::cmd::Command;
+use crate::out::Colours;
 use crate::watch::Watches;
 
 /// Why the request being served was started.
@@ -221,6 +222,9 @@ pub struct Session {
     /// `PHPDBG_IS_INITIALIZING`: the init files are being run, and the
     /// loop checks nothing between handlers.
     pub initializing: bool,
+    /// Whether the line has notices and errors coloured, `-b` not: what
+    /// each cycle of php's main loop starts with.
+    pub line_colours: Colours,
 }
 
 impl Session {
@@ -258,6 +262,7 @@ impl Session {
             init_files: Vec::new(),
             init_due: true,
             initializing: false,
+            line_colours: Colours::On,
         }
     }
 }

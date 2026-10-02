@@ -197,6 +197,12 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
             | Stop::RunWith(_),
         ) => {}
     }
+    // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
+    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off as
+    // the line says, in the colours the last cycle left.
+    if cycle_ended {
+        out::set_colours(s.line_colours);
+    }
 }
 
 /// What `PHP_MSHUTDOWN_FUNCTION(phpdbg)` writes where the cycle ends and

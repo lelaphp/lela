@@ -20,6 +20,7 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_sapi::tier::{self, Code, Opcode};
 
 use crate::bp::At;
+use crate::out::{self, Element};
 use crate::session::{self, Logged};
 
 /// The constants `register_phpdbg_symbols` registers: the version, and
@@ -201,36 +202,52 @@ fn phpdbg_break_function(function: PhpString) {
 }
 
 /// `phpdbg_color(int $element, string $color): void`: the element's
-/// colour, which a host run with `-b` never shows; an element that is
-/// none of the three is php's `ValueError`.
+/// colour from here, `none` for a name php's table does not hold
+/// (`phpdbg_set_color_ex`), shown while colours are on; an element that
+/// is none of the three is php's `ValueError`.
 ///
 /// ```php
 /// phpdbg_color(PHPDBG_COLOR_NOTICE, "red");
+/// phpdbg_color(PHPDBG_COLOR_ERROR, "nope");
+/// phpdbg_color(PHPDBG_COLOR_PROMPT, "blue");
 /// try { phpdbg_color(7, "red"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// echo "done\n";
 /// ```
 /// ```request phpdbg
+/// set colors on
+/// b 6
 /// r
+/// foo
+/// c
 /// q
 /// ```
 /// ```expect
 /// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> prompt> %s0;32m[Breakpoint #0 added at %SCRATCH%/witness.php:6]%s
 /// prompt> phpdbg_color(): Argument #1 ($element) must be one of PHPDBG_COLOR_PROMPT, PHPDBG_COLOR_NOTICE, or PHPDBG_COLOR_ERROR
-/// [Script ended normally]
+/// %s0;31m[Breakpoint #0 at %SCRATCH%/witness.php:6, hits: 1]%s
+/// >00006: echo "done\n";
+/// prompt> %s0;0m[The command "foo" could not be found]%s
+/// prompt> done
+/// %s0;31m[Script ended normally]%s
 /// prompt>
 /// ```
 #[php_function]
 fn phpdbg_color(req: &mut Request, element: i64, color: PhpString) -> Result<(), Thrown> {
-    let _ = color;
-    match element {
-        constants::PHPDBG_COLOR_PROMPT
-        | constants::PHPDBG_COLOR_ERROR
-        | constants::PHPDBG_COLOR_NOTICE => Ok(()),
-        _ => Err(arg_value_error(
-            req,
-            1,
-            "be one of PHPDBG_COLOR_PROMPT, PHPDBG_COLOR_NOTICE, or PHPDBG_COLOR_ERROR",
-        )),
-    }
+    let element = match element {
+        constants::PHPDBG_COLOR_PROMPT => Element::Prompt,
+        constants::PHPDBG_COLOR_ERROR => Element::Error,
+        constants::PHPDBG_COLOR_NOTICE => Element::Notice,
+        _ => {
+            return Err(arg_value_error(
+                req,
+                1,
+                "be one of PHPDBG_COLOR_PROMPT, PHPDBG_COLOR_NOTICE, or PHPDBG_COLOR_ERROR",
+            ));
+        }
+    };
+    out::set_colour_named(element, color.as_bytes());
+    Ok(())
 }
 
 /// `phpdbg_prompt(string $string): void`: the prompt's text from here,

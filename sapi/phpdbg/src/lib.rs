@@ -87,6 +87,8 @@ struct Line {
     stdin_delimiter: Option<Vec<u8>>,
     init_file: Option<Vec<u8>>,
     init_default: bool,
+    /// `-b`: colours off.
+    boring: bool,
     exec: Option<Vec<u8>>,
     args: Vec<Vec<u8>>,
 }
@@ -116,6 +118,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                         .push(php_sapi::ini::define(&String::from_utf8_lossy(&value))),
                     b's' => line.stdin_delimiter = Some(value),
                     b'I' => line.init_default = false,
+                    b'b' => line.boring = true,
                     b'i' => line.init_file = (!value.is_empty()).then_some(value),
                     _ => {}
                 }
@@ -162,6 +165,10 @@ pub fn main() -> ExitCode {
         ));
     }
     session.init_files = init::files(line.init_file.as_deref(), line.init_default);
+    if line.boring {
+        session.line_colours = out::Colours::Off;
+    }
+    out::set_colours(session.line_colours);
     if let Some(delimiter) = &line.stdin_delimiter {
         session.queued.push(Command::Params(vec![
             Param::Str(b"stdin".to_vec()),

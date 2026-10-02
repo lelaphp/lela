@@ -383,7 +383,7 @@ static ROOT: [Def; 27] = [
     def("clean", Some(b'X'), "", clean),
     def("clear", Some(b'C'), "", clear),
     def("help", Some(b'h'), "|s", help),
-    def("set", Some(b'S'), "s", unsupported),
+    with_subs("set", Some(b'S'), "s", SET, set),
     def("register", Some(b'R'), "s", register),
     def("source", Some(b'<'), "s", unsupported),
     def("export", Some(b'>'), "s", unsupported),
@@ -439,6 +439,21 @@ static INFO: &[Def] = &[
     sub(&ROOT[13], "globals", Some(b'g'), "", crate::info::globals),
     sub(&ROOT[13], "literal", Some(b'l'), "", crate::info::literal),
     sub(&ROOT[13], "memory", Some(b'm'), "", unsupported),
+];
+
+/// `phpdbg_set_commands`, whose parent is php's row 17, `clear`
+/// (`Z/sapi/phpdbg/phpdbg_set.c:28-46`).
+static SET: &[Def] = &[
+    sub(&ROOT[17], "prompt", Some(b'p'), "|s", unsupported),
+    sub(&ROOT[17], "pagination", Some(b'P'), "|b", unsupported),
+    sub(&ROOT[17], "color", Some(b'c'), "ss", set_color),
+    sub(&ROOT[17], "colors", Some(b'C'), "|b", set_colors),
+    sub(&ROOT[17], "break", Some(b'b'), "l|b", unsupported),
+    sub(&ROOT[17], "breaks", Some(b'B'), "|b", unsupported),
+    sub(&ROOT[17], "quiet", Some(b'q'), "|b", unsupported),
+    sub(&ROOT[17], "stepping", Some(b's'), "|s", unsupported),
+    sub(&ROOT[17], "refcount", Some(b'r'), "|b", unsupported),
+    sub(&ROOT[17], "lines", Some(b'l'), "|l", unsupported),
 ];
 
 /// `phpdbg_watch_commands` (`Z/sapi/phpdbg/phpdbg_watch.c:124-129`):
@@ -1748,6 +1763,98 @@ fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
         })
     {
         out::error(format!("No help topic found for {}", lossy(topic)).as_bytes());
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_COMMAND(set)`: a word no row of `set` names.
+fn set(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+    out::error(b"No set command selected!");
+    Ret::Success
+}
+
+/// `PHPDBG_SET(color)`: the element's colour by the table's name for it,
+/// the notice naming both.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set color error nope
+/// set color foo red
+/// set colors on
+/// set color notice red
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Failed to find the requested color (nope)]
+/// prompt> [Failed to find the requested element (foo)]
+/// prompt> prompt> %s[setting notice color to red (0;31)]%s
+/// prompt> x
+/// %s0;31m[Script ended normally]%s
+/// prompt>
+/// ```
+fn set_color(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    let [Param::Str(element), Param::Str(name), ..] = params else {
+        return Ret::Failure;
+    };
+    let Some(colour) = out::find_colour(name) else {
+        out::error(format!("Failed to find the requested color ({})", lossy(name)).as_bytes());
+        return Ret::Success;
+    };
+    let Some(element) = out::Element::named(element) else {
+        out::error(format!("Failed to find the requested element ({})", lossy(element)).as_bytes());
+        return Ret::Success;
+    };
+    let named = match element {
+        out::Element::Prompt => "prompt",
+        out::Element::Error => "error",
+        out::Element::Notice => "notice",
+    };
+    out::notice(format!("setting {named} color to {} ({})", colour.name, colour.code).as_bytes());
+    out::set_colour(element, colour);
+    Ret::Success
+}
+
+/// `PHPDBG_SET(colors)`: whether notices and errors are coloured, or
+/// which they are.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set colors
+/// set colors on
+/// set colors
+/// set colors off
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Colors off
+/// prompt> prompt> Colors on
+/// prompt> prompt> x
+/// [Script ended normally]
+/// prompt>
+/// ```
+fn set_colors(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        None => {
+            let shown = match out::colours() {
+                out::Colours::On => "on",
+                out::Colours::Off => "off",
+            };
+            out::writeln(format!("Colors {shown}").as_bytes());
+        }
+        Some(Param::Num(on)) => out::set_colours(if *on != 0 {
+            out::Colours::On
+        } else {
+            out::Colours::Off
+        }),
+        Some(_) => out::error(b"set colors used incorrectly: set colors <on|off>"),
     }
     Ret::Success
 }
