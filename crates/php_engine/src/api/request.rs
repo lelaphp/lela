@@ -62,6 +62,7 @@ mod class_data;
 mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
+mod hash_bytes;
 mod scanner_file;
 pub use scanner_file::ScannerFile;
 mod hold;
@@ -1900,8 +1901,9 @@ pub struct Request {
     /// `EG(included_files)`: the resolved path of every file compiled by
     /// the request, the primary one first (`php_execute_script_ex`),
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
-    /// before they open one (`zend_include_or_eval`).
-    included_files: Vec<Vec<u8>>,
+    /// before they open one (`zend_include_or_eval`), on the request's
+    /// heap ([`hash_bytes::IncludedFiles`]).
+    included_files: hash_bytes::IncludedFiles,
     /// The rows this request added to `EG(zend_constants)`, in the order
     /// it added them, each under the extension it is registered by:
     /// `Core` for what the host registers at request start
@@ -2693,7 +2695,7 @@ impl Request {
             post: post::Post::default(),
             armed: Vec::new(),
             tables: vec![SymbolTable::default()],
-            included_files: Vec::new(),
+            included_files: hash_bytes::IncludedFiles::default(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
@@ -17038,8 +17040,8 @@ impl Request {
     /// nowhere in the table, as php's `Standard input code` is not.
     pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
         if let Some(real) = self.realpath(script) {
-            self.included_files
-                .push(real.as_os_str().as_encoded_bytes().to_vec());
+            // The memory limit's fatal is recorded and ends the request.
+            let _ = self.note_included(real.as_os_str().as_encoded_bytes());
         }
     }
 
@@ -17052,7 +17054,7 @@ impl Request {
     pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
         let script = self.description.script_name.clone().unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        self.included_files.push(expanded.clone());
+        let _ = self.note_included(&expanded);
         self.description.script_name = Some(expanded.clone());
         expanded
     }
@@ -17110,7 +17112,7 @@ impl Request {
             Ok(path) => return self.include_stream(kind, written, &path),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
             Err(_) if is_wrapper_url(written) => {
-                if kind.once() && self.included_files.iter().any(|p| p == written) {
+                if kind.once() && self.included_files.contains(written) {
                     return Ok(Opened::Already);
                 }
                 return self.include_stream(kind, written, written);
@@ -17132,7 +17134,7 @@ impl Request {
             return self.failed_opening(kind, written);
         }
         if kind.once() {
-            self.included_files.push(path.clone());
+            self.note_included(&path)?;
         }
         let outer = self.including.replace((kind, self.vm.call_depth()));
         let replaced = self.compile_file_source(&path);
@@ -17145,9 +17147,7 @@ impl Request {
                     return Err(self.refused_include(&refused, &path, SourceKind::File));
                 }
             };
-            if !self.included_files.contains(&path) {
-                self.included_files.push(path);
-            }
+            self.note_included(&path)?;
             return Ok(Opened::Unit(unit));
         }
         let handle = if kind.once() {
@@ -17161,9 +17161,7 @@ impl Request {
         };
         match cached {
             Some(Ok(unit)) => {
-                if !self.included_files.contains(&path) {
-                    self.included_files.push(path);
-                }
+                self.note_included(&path)?;
                 Ok(Opened::Unit(unit))
             }
             Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
@@ -17285,7 +17283,7 @@ impl Request {
         path: &[u8],
     ) -> Result<Opened, Thrown> {
         if kind.once() {
-            self.included_files.push(path.to_vec());
+            self.note_included(path)?;
         }
         let outer = self.including.replace((kind, self.vm.call_depth()));
         let opened = ScannerFile::open(self, path);
@@ -17330,9 +17328,7 @@ impl Request {
             Ok(unit) => unit,
             Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
         };
-        if !self.included_files.iter().any(|p| p == path) {
-            self.included_files.push(path.to_vec());
-        }
+        self.note_included(path)?;
         Ok(Opened::Unit(unit))
     }
 
@@ -19223,7 +19219,7 @@ impl Request {
     /// them, the primary file's first.
     #[must_use]
     pub fn included_files(&self) -> Vec<Vec<u8>> {
-        self.included_files.clone()
+        self.included_files.paths()
     }
 
     /// `get_loaded_extensions()`: `Core`, then the bundle in `MINIT`

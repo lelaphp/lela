@@ -38,7 +38,7 @@ impl Request {
         if self.included_files.contains(&path) {
             return Ok(false);
         }
-        self.included_files.push(path.clone());
+        self.note_included(&path)?;
         if super::is_wrapper_url(&path) {
             let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
             let super::Opened::Unit(unit) = opened else {
