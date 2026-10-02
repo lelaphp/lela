@@ -20,24 +20,44 @@
 //! process a test forked is not among them, and what only it touched is
 //! left standing.
 //!
-//! **What is never removed.** An object the kernel names no process on: a
-//! queue nobody sent to or read from, a semaphore set nobody operated on,
-//! or one whose semaphores this user may not read. Nothing tells the run's
-//! from another program's, so it stays, and the run counts it.
+//! **An object that names no process.** A queue nobody sent to or read
+//! from, as php's `msg_get_queue(0)` leaves one of mode 0 that nobody can
+//! use, a semaphore set nobody operated on, or one whose semaphores this
+//! user may not read: the kernel names no process on it. Such an object is
+//! the run's, and removed, when all three of these hold, as Mitchell ruled
+//! on #1469 (#1482): its creator is the runner's own user; its key is
+//! `IPC_PRIVATE`, which no database or other program can look up; and the
+//! kernel's whole-second `CTIME` falls inside the run of one of the
+//! subset's own programs, the oracle's or the engine's, from spawn to exit
+//! rounded out to whole seconds. The only object of another program the
+//! rule can take is one of this user's, private, made in the same second
+//! as one of the subset's programs ran, which nothing but its maker could
+//! ever address. Any other new object that names no process stands, and
+//! the run counts it apart from those it removed.
+//!
+//! **On Linux.** The System V subsets run in a private IPC namespace where
+//! `unshare` permits, so nothing they make outlives its program, and the
+//! sweep there is a check that finds nothing ([`Namespace`]).
 //!
 //! **How the kernel is read.** `ipcs -a` lists the objects with their
-//! processes, and `ipcrm` removes them; neither prints a semaphore's
-//! process, so `perl`'s `semctl(GETPID)` reads it. A machine without them
-//! reads no object, and the subset's sweep says so rather than failing the
-//! run.
+//! processes, keys, creators and `CTIME`, and `ipcrm` removes them;
+//! neither prints a semaphore's process, so `perl`'s `semctl(GETPID)`
+//! reads it. `ipcs` prints `CTIME` as the local time of day alone, so the
+//! sweep reads the zone's offset from `date +%z` and takes the latest such
+//! second not after now, the object being new since the subset began. A
+//! machine without them reads no object, and the subset's sweep says so
+//! rather than failing the run.
 //!
 //! [`Oracle`]: crate::oracle::Oracle
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+
+use crate::oracle::{Programs, Ran};
 
 /// One kind of System V object, as `ipcs` letters it and `ipcrm` takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,6 +111,13 @@ pub(crate) struct Object {
     pub named: BTreeSet<u32>,
     /// The processes attached to a segment; none for the other kinds.
     pub attached: u64,
+    /// The key it was made under; `IPC_PRIVATE` is 0.
+    pub key: u64,
+    /// The user who made it, as `ipcs` prints the creator: a name, or the
+    /// number where the user database has none.
+    pub creator: String,
+    /// When it was made or last set, as the local second of the day.
+    pub ctime: Option<u32>,
 }
 
 /// The objects standing on the machine at one moment.
@@ -134,7 +161,8 @@ impl Standing {
     /// object's processes are a segment's `CPID` and a queue's `LSPID` and
     /// `LRPID`, its attached count a segment's `NATTCH`; a semaphore set
     /// names none here, `ipcs` printing none, until [`Standing::now`]
-    /// reads them. A line of no section is not an object.
+    /// reads them. Every kind's `KEY`, `CREATOR` and `CTIME` are read
+    /// alike. A line of no section is not an object.
     pub(crate) fn parse(ipcs: &str) -> Standing {
         let mut header: Vec<&str> = Vec::new();
         let mut objects = Vec::new();
@@ -153,9 +181,24 @@ impl Standing {
                             .and_then(|at| fields.get(at))
                             .and_then(|v| v.parse::<u64>().ok())
                     };
+                    let text = |name: &str| {
+                        header
+                            .iter()
+                            .position(|h| *h == name)
+                            .and_then(|at| fields.get(at))
+                            .copied()
+                    };
                     let Some(id) = column("ID") else {
                         continue;
                     };
+                    let key = text("KEY")
+                        .and_then(|k| u64::from_str_radix(k.trim_start_matches("0x"), 16).ok())
+                        .unwrap_or(u64::MAX);
+                    let creator = text("CREATOR").unwrap_or_default().to_owned();
+                    // `CTIME` is the last column, and a time `ipcs` leaves
+                    // unset is the one word `no-entry`, so the field is the
+                    // line's last.
+                    let ctime = fields.last().and_then(|t| second_of_day(t));
                     let (named, attached): (&[&str], _) = match kind {
                         Kind::Memory => (&["CPID"], column("NATTCH").unwrap_or(0)),
                         Kind::Queue => (&["LSPID", "LRPID"], 0),
@@ -172,6 +215,9 @@ impl Standing {
                         id,
                         named,
                         attached,
+                        key,
+                        creator,
+                        ctime,
                     });
                 }
                 None => {}
@@ -230,11 +276,154 @@ pub(crate) fn left<'a>(
         .collect()
 }
 
-/// What one sweep did: the objects it removed by kind, and the new ones it
-/// left because the kernel names no process on them.
+/// `H:MM:SS` as the second of the day it names; anything else, `ipcs`'s
+/// `no-entry` among it, none.
+fn second_of_day(time: &str) -> Option<u32> {
+    let mut parts = time.split(':').map(str::parse::<u32>);
+    let (Some(Ok(h)), Some(Ok(m)), Some(Ok(s)), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    (h < 24 && m < 60 && s < 61).then_some(h * 3600 + m * 60 + s)
+}
+
+/// The user the run runs as: who an object without a process must have
+/// been made by to be the run's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Runner {
+    pub name: String,
+    pub uid: u32,
+}
+
+impl Runner {
+    /// The user this process runs as.
+    pub(crate) fn now() -> Runner {
+        let uid = nix::unistd::getuid();
+        let name = nix::unistd::User::from_uid(uid)
+            .ok()
+            .flatten()
+            .map(|user| user.name)
+            .unwrap_or_default();
+        Runner {
+            name,
+            uid: uid.as_raw(),
+        }
+    }
+
+    /// Whether `ipcs`'s creator is this user, by name or by number.
+    fn made(&self, creator: &str) -> bool {
+        (!self.name.is_empty() && creator == self.name) || creator == self.uid.to_string()
+    }
+}
+
+/// The wall clock when the machine was read, and the zone `ipcs` prints
+/// its times in, as seconds east of UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Clock {
+    pub now: i64,
+    pub east: i64,
+}
+
+impl Clock {
+    /// Now, in the zone `date +%z` names, which is the one `ipcs` prints
+    /// in: both read this process's environment.
+    pub(crate) fn now() -> Result<Clock> {
+        let zone = Command::new("date")
+            .arg("+%z")
+            .output()
+            .context("running date +%z")?;
+        let zone = String::from_utf8_lossy(&zone.stdout);
+        let east =
+            offset(zone.trim()).with_context(|| format!("date +%z printed {:?}", zone.trim()))?;
+        Ok(Clock {
+            now: seconds(SystemTime::now(), false),
+            east,
+        })
+    }
+
+    /// The latest instant, as seconds since the epoch, not after now
+    /// whose local time of day is `second`.
+    fn when(&self, second: u32) -> i64 {
+        let local = self.now + self.east;
+        let mut made = local - local.rem_euclid(86_400) + i64::from(second);
+        if made > local {
+            made -= 86_400;
+        }
+        made - self.east
+    }
+}
+
+/// `+HHMM` or `-HHMM` as seconds east of UTC.
+fn offset(zone: &str) -> Option<i64> {
+    let (sign, digits) = match zone.split_at_checked(1)? {
+        ("+", digits) => (1, digits),
+        ("-", digits) => (-1, digits),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let minutes: i64 = digits[2..].parse().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// `time` as whole seconds since the epoch, rounded down or, with `up`,
+/// up.
+fn seconds(time: SystemTime, up: bool) -> i64 {
+    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let whole = i64::try_from(since.as_secs()).unwrap_or(i64::MAX);
+    if up && since.subsec_nanos() > 0 {
+        whole + 1
+    } else {
+        whole
+    }
+}
+
+/// The objects of `after` that name no process and are the run's by the
+/// rule Mitchell ruled on #1469 (#1482): new since `before`, nothing
+/// attached, made by `runner` under `IPC_PRIVATE`, at a second inside one
+/// of `runs`, each rounded out to whole seconds, a run not seen to end
+/// lasting until `clock`'s now.
+pub(crate) fn unnamed_left<'a>(
+    before: &Standing,
+    after: &'a Standing,
+    runs: &[Ran],
+    (runner, clock): (&Runner, &Clock),
+) -> Vec<&'a Object> {
+    let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
+    let windows: Vec<(i64, i64)> = runs
+        .iter()
+        .map(|ran| {
+            let to = ran.to.map_or(clock.now, |to| seconds(to, true));
+            (seconds(ran.from, false), to)
+        })
+        .collect();
+    after
+        .0
+        .iter()
+        .filter(|o| !stood.contains(&(o.kind, o.id)))
+        .filter(|o| o.named.is_empty() && o.attached == 0)
+        .filter(|o| o.key == 0 && runner.made(&o.creator))
+        .filter(|o| {
+            o.ctime.is_some_and(|second| {
+                let made = clock.when(second);
+                windows
+                    .iter()
+                    .any(|(from, to)| *from <= made && made <= *to)
+            })
+        })
+        .collect()
+}
+
+/// What one sweep did: the objects it removed by kind, how many of those
+/// named no process, and the new ones it left because the kernel names no
+/// process on them and the rule for those does not take them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Swept {
     pub removed: BTreeMap<Kind, usize>,
+    pub unnamed_removed: usize,
     pub unnamed: usize,
 }
 
@@ -262,6 +451,13 @@ impl fmt::Display for Swept {
         if !kinds.is_empty() {
             write!(f, " ({})", kinds.join(", "))?;
         }
+        if self.unnamed_removed > 0 {
+            write!(
+                f,
+                ", {} of them naming no process, the runner's, private and made while one of the subset's programs ran",
+                self.unnamed_removed
+            )?;
+        }
         if self.unnamed > 0 {
             write!(
                 f,
@@ -276,11 +472,13 @@ impl fmt::Display for Swept {
     }
 }
 
-/// Remove what the processes of `spawned` left since `before`, read again
+/// Remove what the programs of `spawned` left since `before`, read again
 /// now, and say what was done.
-pub(crate) fn sweep(before: &Standing, spawned: &BTreeSet<u32>) -> Result<Swept> {
+pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
+    let clock = Clock::now()?;
     let after = Standing::now()?;
-    let gone = left(before, &after, spawned, alive);
+    let mut gone = left(before, &after, &spawned.pids, alive);
+    let unnamed_gone = unnamed_left(before, &after, &spawned.runs, (&Runner::now(), &clock));
     let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
     let unnamed = after
         .0
@@ -288,9 +486,11 @@ pub(crate) fn sweep(before: &Standing, spawned: &BTreeSet<u32>) -> Result<Swept>
         .filter(|o| o.named.is_empty() && !stood.contains(&(o.kind, o.id)))
         .count();
     let mut swept = Swept {
-        unnamed,
+        unnamed_removed: unnamed_gone.len(),
+        unnamed: unnamed - unnamed_gone.len(),
         ..Swept::default()
     };
+    gone.extend(unnamed_gone);
     if gone.is_empty() {
         return Ok(swept);
     }
@@ -312,9 +512,104 @@ pub(crate) fn sweep(before: &Standing, spawned: &BTreeSet<u32>) -> Result<Swept>
     Ok(swept)
 }
 
+/// The subsets whose tests make System V objects, the four extensions of
+/// System V IPC.
+pub(crate) const SUBSETS: [&str; 4] = ["ext/shmop", "ext/sysvmsg", "ext/sysvsem", "ext/sysvshm"];
+
+/// The private IPC namespace a System V subset's programs run in on Linux
+/// where `unshare` permits (#1482): each program in one of its own, made
+/// by `unshare` around the binary, so whatever it makes goes with it and
+/// what a test forks is in it too. Tried first as it is, which a root
+/// user or a container may, then in a user namespace of its own mapped to
+/// the runner's own user, which an unprivileged user may where the kernel
+/// allows it; the runner's user, and not root, since php's tests read
+/// who runs them. None elsewhere, and none where neither is permitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Namespace(pub Vec<String>);
+
+impl Namespace {
+    /// The namespace `scope` runs in, where it is a System V subset and
+    /// this machine has one to give.
+    pub(crate) fn of(scope: &str) -> Option<Namespace> {
+        if !SUBSETS.contains(&scope) {
+            return None;
+        }
+        Namespace::here()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn here() -> Option<Namespace> {
+        static HERE: std::sync::OnceLock<Option<Namespace>> = std::sync::OnceLock::new();
+        HERE.get_or_init(|| {
+            let unshare = std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("unshare"))
+                    .find(|candidate| candidate.is_file())
+            })?;
+            let unshare = unshare.to_string_lossy().into_owned();
+            Namespace::tries(&unshare)
+                .into_iter()
+                .find(Namespace::permitted)
+        })
+        .clone()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn here() -> Option<Namespace> {
+        None
+    }
+
+    /// The two ways `unshare` at `path` may make one, in the order tried.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn tries(path: &str) -> [Namespace; 2] {
+        let words = |flags: &[&str]| {
+            let mut words = vec![path.to_owned()];
+            words.extend(flags.iter().map(|flag| (*flag).to_owned()));
+            words.push("--".to_owned());
+            Namespace(words)
+        };
+        [
+            words(&["--ipc"]),
+            words(&["--user", "--map-current-user", "--ipc"]),
+        ]
+    }
+
+    /// Whether `true` runs under it.
+    #[cfg(target_os = "linux")]
+    fn permitted(&self) -> bool {
+        let Some((program, args)) = self.0.split_first() else {
+            return false;
+        };
+        Command::new(program)
+            .args(args)
+            .arg("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let flags: Vec<&str> = self
+            .0
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .filter(|word| *word != "--")
+            .collect();
+        write!(
+            f,
+            "each program runs in a private IPC namespace (unshare {})",
+            flags.join(" ")
+        )
+    }
+}
+
 /// Whether a process runs under this id now, as `kill(pid, 0)` answers: one
 /// this user may not signal runs too.
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };

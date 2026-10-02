@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{Kind, Object, Standing, Swept, left};
+use super::{
+    Clock, Kind, Namespace, Object, Runner, Standing, Swept, left, offset, second_of_day,
+    unnamed_left,
+};
+use crate::oracle::Ran;
 
 /// `ipcs -a` as macOS printed it on 2026-10-01, cut to one object or two
 /// of each kind: a database's segment and semaphores, and what the
@@ -29,21 +34,52 @@ fn object(kind: Kind, id: u64, named: &[u32], attached: u64) -> Object {
         id,
         named: named.iter().copied().collect(),
         attached,
+        key: 0,
+        creator: "mitchell".to_owned(),
+        ctime: None,
+    }
+}
+
+/// An object as `ipcs` prints one: its key, its creator and its `CTIME`.
+fn made(kind: Kind, id: u64, named: &[u32], key: u64, creator: &str, ctime: &str) -> Object {
+    Object {
+        key,
+        creator: creator.to_owned(),
+        ctime: second_of_day(ctime),
+        ..object(kind, id, named, 0)
     }
 }
 
 #[test]
 fn ipcs_is_read_by_each_sections_header() {
     let standing = Standing::parse(IPCS);
+    let m = |id, named, key, ctime| made(Kind::Memory, id, named, key, "mitchell", ctime);
     assert_eq!(
         standing.0,
         [
-            object(Kind::Queue, 7_536_640, &[], 0),
-            object(Kind::Queue, 1_441_795, &[4242, 4243], 0),
-            object(Kind::Memory, 65_536, &[824], 6),
-            object(Kind::Memory, 6_750_211, &[77_085], 0),
-            object(Kind::Semaphores, 65_539, &[], 0),
-            object(Kind::Semaphores, 131_082, &[], 0),
+            made(Kind::Queue, 7_536_640, &[], 0, "mitchell", "23:42:09"),
+            made(
+                Kind::Queue,
+                1_441_795,
+                &[4242, 4243],
+                1,
+                "mitchell",
+                "23:48:10"
+            ),
+            Object {
+                attached: 6,
+                ..m(65_536, &[824], 0x042e_2346, "20:45:10")
+            },
+            m(6_750_211, &[77_085], 0, "23:48:08"),
+            made(
+                Kind::Semaphores,
+                65_539,
+                &[],
+                0x042e_2347,
+                "mitchell",
+                "20:45:10"
+            ),
+            made(Kind::Semaphores, 131_082, &[], 0, "mitchell", "1:46:23"),
         ]
     );
 }
@@ -91,14 +127,152 @@ fn only_what_the_runs_own_processes_left_is_removed() {
 fn the_sweep_says_how_many_it_removed_of_each_kind_and_what_it_kept() {
     let swept = Swept {
         removed: BTreeMap::from([(Kind::Memory, 2), (Kind::Queue, 1)]),
+        unnamed_removed: 1,
         unnamed: 1,
     };
     assert_eq!(
         swept.to_string(),
-        "removed 3 System V objects its tests left (2 shared memory segments, 1 message queue); 1 new one names no process and stands, since nothing tells the run's from another program's"
+        "removed 3 System V objects its tests left (2 shared memory segments, 1 message queue), 1 of them naming no process, the runner's, private and made while one of the subset's programs ran; 1 new one names no process and stands, since nothing tells the run's from another program's"
     );
     assert_eq!(
         Swept::default().to_string(),
         "removed 0 System V objects its tests left"
     );
+}
+
+/// 2026-10-01 23:00:00 in a zone two hours east of UTC, as seconds since
+/// the epoch, and the clock a sweep read then.
+const AT_2300: i64 = 1_759_352_400;
+
+fn clock() -> Clock {
+    Clock {
+        now: AT_2300 + 3600,
+        east: 7200,
+    }
+}
+
+/// A program's run from `from` milliseconds past 23:00 local to `to`.
+fn ran(from: u64, to: u64) -> Ran {
+    let at = |ms: u64| {
+        UNIX_EPOCH
+            + Duration::from_secs(u64::try_from(AT_2300).unwrap())
+            + Duration::from_millis(ms)
+    };
+    Ran::between(at(from), Some(at(to)))
+}
+
+fn runner() -> Runner {
+    Runner {
+        name: "mitchell".to_owned(),
+        uid: 501,
+    }
+}
+
+/// The rule Mitchell ruled on #1469 (#1482), one counterexample per
+/// clause: an object naming no process is the run's only when it is new
+/// since the subset began, the runner's, made under `IPC_PRIVATE`, and
+/// made in a second one of the subset's programs ran in, each program's
+/// run rounded out to whole seconds. Without the rule the first two
+/// stand, as the process-named sweep leaves them.
+#[test]
+fn a_private_object_of_the_runners_made_while_a_program_ran_is_removed_and_nothing_else() {
+    let before = Standing(vec![
+        // Made under the same key by the runner a day before, at the same
+        // second of the day: it stood before the subset began.
+        made(Kind::Queue, 1, &[], 0, "mitchell", "23:00:05"),
+    ]);
+    let q = |id, key, creator, ctime| made(Kind::Queue, id, &[], key, creator, ctime);
+    let after = Standing(vec![
+        q(1, 0, "mitchell", "23:00:05"),
+        // php's msg_get_queue(0) in a test, mode 0, nobody's sender.
+        q(2, 0, "mitchell", "23:00:05"),
+        // The same by number, where the user database names nobody.
+        q(3, 0, "501", "23:00:12"),
+        // A semaphore set a test made and nobody operated on.
+        made(Kind::Semaphores, 4, &[], 0, "mitchell", "23:00:06"),
+        // Made under IPC_PRIVATE by a process outside the subset before
+        // its first program started.
+        q(5, 0, "mitchell", "23:00:02"),
+        // A keyed queue the runner's own user made while a test ran.
+        q(6, 0x5a00_0001, "mitchell", "23:00:05"),
+        // Another user's private queue of the same second.
+        q(7, 0, "postgres", "23:00:05"),
+        // Made between two programs, a whole second from either.
+        q(8, 0, "mitchell", "23:00:09"),
+        // A segment something still holds.
+        Object {
+            attached: 1,
+            ..made(Kind::Memory, 9, &[], 0, "mitchell", "23:00:05")
+        },
+        // A queue that names a process is the other rule's.
+        made(Kind::Queue, 10, &[77], 0, "mitchell", "23:00:05"),
+    ]);
+    // Two programs, from 23:00:04.5 to 23:00:06.2 and from 23:00:11 to
+    // 23:00:11.5, and one not seen to end, from 23:00:20.
+    let mut runs = vec![ran(4_500, 6_200), ran(11_000, 11_500)];
+    runs.push(Ran::between(
+        UNIX_EPOCH + Duration::from_secs(u64::try_from(AT_2300).unwrap() + 20),
+        None,
+    ));
+    let gone: Vec<(Kind, u64)> = unnamed_left(&before, &after, &runs, (&runner(), &clock()))
+        .into_iter()
+        .map(|o| (o.kind, o.id))
+        .collect();
+    assert_eq!(
+        gone,
+        [(Kind::Queue, 2), (Kind::Queue, 3), (Kind::Semaphores, 4)]
+    );
+    // The control: without a program's run there is no second to hold it
+    // to, and nothing that names no process is taken.
+    assert!(unnamed_left(&before, &after, &[], (&runner(), &clock())).is_empty());
+}
+
+/// `ipcs` prints the local time of day, which is the latest such second
+/// not after the sweep: before midnight on the day before when the clock
+/// has passed it.
+#[test]
+fn a_time_of_day_is_the_latest_such_second_not_after_now() {
+    let clock = clock();
+    assert_eq!(clock.when(23 * 3600), AT_2300);
+    // 00:30 local is past the clock's 00:00 and so the day before's.
+    let past_midnight = Clock {
+        now: AT_2300 + 3600,
+        east: 7200,
+    };
+    assert_eq!(past_midnight.when(1800), AT_2300 + 1800 - 86_400 + 3600);
+    assert_eq!(offset("+0200"), Some(7200));
+    assert_eq!(offset("-0530"), Some(-19_800));
+    assert_eq!(offset("CEST"), None);
+    assert_eq!(second_of_day("1:46:23"), Some(6383));
+    assert_eq!(second_of_day("no-entry"), None);
+    let now = SystemTime::now();
+    assert!(Clock::now().is_ok_and(
+        |c| c.now >= i64::try_from(now.duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap()
+    ));
+}
+
+/// The two namespaces tried on Linux, the bare one first and then one in
+/// the runner's own user namespace, and what the run's line says of one.
+#[test]
+fn the_namespace_is_unshare_around_the_binary() {
+    let [bare, user] = Namespace::tries("/usr/bin/unshare");
+    assert_eq!(bare.0, ["/usr/bin/unshare", "--ipc", "--"]);
+    assert_eq!(
+        user.0,
+        [
+            "/usr/bin/unshare",
+            "--user",
+            "--map-current-user",
+            "--ipc",
+            "--"
+        ]
+    );
+    assert_eq!(
+        bare.to_string(),
+        "each program runs in a private IPC namespace (unshare --ipc)"
+    );
+    assert_eq!(Namespace::of("ext/standard"), None);
+    if cfg!(not(target_os = "linux")) {
+        assert_eq!(Namespace::of("ext/sysvmsg"), None);
+    }
 }

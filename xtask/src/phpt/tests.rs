@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::{Promise, Runner};
+use crate::oracle::{Program, Promise, Runner};
 use crate::reading::Status;
 use crate::scratch::Tree;
 
@@ -1565,5 +1565,129 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
         .0;
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+/// A run's database is named in the DSN as in the two variables php's
+/// suites read (#1546), and a database of the runs' is dropped only once
+/// the process its name carries is gone; one of another name never.
+#[test]
+fn a_runs_database_is_named_to_its_programs_and_a_dead_runs_is_dropped() {
+    assert_eq!(
+        server::with_database("mysql:host=127.0.0.1;dbname=test", "xtask_phpt_7_0"),
+        "mysql:host=127.0.0.1;dbname=xtask_phpt_7_0"
+    );
+    assert_eq!(
+        server::with_database("mysql:host=127.0.0.1;port=3306", "x"),
+        "mysql:host=127.0.0.1;port=3306;dbname=x"
+    );
+    let listed = "xtask_phpt_100_0\nxtask_phpt_200_3\nxtask_phpt_x_1\ntest\nxtask_phpt_300_0b\n";
+    assert_eq!(server::left(listed, |pid| pid == 200), ["xtask_phpt_100_0"]);
+}
+
+/// Each run of a `MySQL` subset runs in a database of its own on the
+/// server (#1546): made before the subset, the one its programs connect
+/// to through `connect.inc`'s and `inc/config.inc`'s variables, and gone
+/// after; a database a run that is gone left is dropped by the next. The
+/// control: the run's own pin, with no database laid over it, names
+/// `test`, which every run would share.
+#[test]
+fn a_mysql_subset_runs_in_a_database_of_its_own() {
+    if oracle().is_none() {
+        return;
+    }
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    if server::version(&oracle, "ext/mysqli").is_err() {
+        eprintln!("skipped: the MySQL server the recipe names does not answer");
+        return;
+    }
+    let ask = "$dsn = getenv('PDO_MYSQL_TEST_DSN');
+        $db = new PDO($dsn, getenv('PDO_MYSQL_TEST_USER') ?: 'root', getenv('PDO_MYSQL_TEST_PASS') ?: '');
+        echo getenv('MYSQL_TEST_DB') ?: 'test', ' ', $db->query('SELECT DATABASE()')->fetchColumn(), ' ',
+            implode(',', $db->query(\"SHOW DATABASES LIKE 'xtask\\\\_phpt\\\\_%'\")->fetchAll(PDO::FETCH_COLUMN));";
+    let said = |oracle: &crate::oracle::Oracle<'_>| {
+        let seen = oracle.run(Program::Snippet(ask), None).unwrap();
+        String::from_utf8_lossy(&seen.stdout).trim().to_owned()
+    };
+    // A run that is gone: a process that has exited, whose number its
+    // database carries.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    let left = format!("xtask_phpt_{dead}_0");
+    let made = oracle
+        .run(
+            Program::Snippet(&format!(
+                "$db = new PDO(getenv('PDO_MYSQL_TEST_DSN'), 'root', ''); $db->exec('CREATE DATABASE IF NOT EXISTS `{left}`');"
+            )),
+            None,
+        )
+        .unwrap();
+    assert_eq!(made.exit, Some(0), "{made:?}");
+    let name = {
+        let database = server::Database::made(&oracle, "ext/mysqli").unwrap();
+        let mut pin = manifest.pin.clone();
+        database.lay_over(&mut pin);
+        let beside = oracle.beside(&pin);
+        let seen = said(&beside);
+        let mut words = seen.split(' ');
+        assert_eq!(words.next(), Some(database.name.as_str()), "{seen}");
+        assert_eq!(words.next(), Some(database.name.as_str()), "{seen}");
+        let listed: Vec<&str> = words.next().unwrap_or("").split(',').collect();
+        assert!(listed.contains(&database.name.as_str()), "{seen}");
+        assert!(!listed.contains(&left.as_str()), "{left} stands: {seen}");
+        let control = said(&oracle);
+        assert!(control.starts_with("test test "), "{control}");
+        database.name.clone()
+    };
+    let after = said(&oracle);
+    assert!(!after.contains(&name), "{name} was not dropped: {after}");
+}
+
+/// An `--EXPECTREGEX--` is matched as run-tests.php matches it, by the
+/// pinned php's `preg_match` (#1543): `ext/zip/tests/bug76524.phpt`'s
+/// negative lookahead meets what has no leak line after `ok` and misses
+/// what has one, a back-reference is PCRE's, a pattern PCRE does not
+/// compile is an error naming the section, and a test carrying the
+/// lookahead passes. The control: the RE2 engine takes no look-around.
+#[test]
+fn an_expectregex_is_matched_as_pcre_matches_it() {
+    use crate::oracle::expect::Expectation;
+    if oracle().is_none() {
+        return;
+    }
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    let leak = Expectation::Pattern("ok((?!memory leaks detected).)*".to_owned());
+    assert!(leak.met(b"ok").is_err(), "the RE2 engine took a lookahead");
+    assert!(leak.met_under(&oracle, b"ok").unwrap());
+    assert!(
+        leak.met_under(&oracle, b"ok\nwarning: libzip says so")
+            .unwrap()
+    );
+    assert!(
+        !leak
+            .met_under(
+                &oracle,
+                b"ok\n[Fri] Script:  '-'\n=== Total 1 memory leaks detected ==="
+            )
+            .unwrap()
+    );
+    let anchored = Expectation::Pattern("o.".to_owned());
+    assert!(!anchored.met_under(&oracle, b"xok").unwrap(), "unanchored");
+    assert!(anchored.met_under(&oracle, b"o\n").unwrap(), "no s flag");
+    let backref = Expectation::Pattern(r"(a)\1".to_owned());
+    assert!(backref.met_under(&oracle, b"aa").unwrap());
+    let broken = Expectation::Pattern("(".to_owned());
+    let error = broken.met_under(&oracle, b"(").unwrap_err().to_string();
+    assert!(error.contains("EXPECTREGEX"), "{error}");
+    let exact = Expectation::Exact(b"ok".to_vec());
+    assert!(exact.met_under(&oracle, b"ok").unwrap());
+    let (_root, subset) = rooted(
+        "lookahead",
+        "--TEST--\nlookahead\n--FILE--\n<?php echo 'ok';\n--EXPECTREGEX--\nok((?!memory leaks detected).)*\n",
+    );
+    let tally = run_on(&subset, 1, 10);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
