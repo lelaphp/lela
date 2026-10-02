@@ -249,6 +249,10 @@ const LONG_DOUBLE: (usize, u32) = (16, 16);
 #[derive(Debug, Clone)]
 pub(crate) struct Types {
     all: Vec<Type>,
+    /// The types a declaration made and php's `zend_ffi_type_dtor`
+    /// freed before the declarations were done, which
+    /// [`Types::emallocs`] does not count.
+    freed: std::collections::HashSet<TypeId>,
 }
 
 impl Default for Types {
@@ -277,6 +281,7 @@ impl Default for Types {
                 plain(Kind::LongDouble, LONG_DOUBLE.0, LONG_DOUBLE.1),
                 plain(Kind::Pointer(TypeId::VOID), 8, 8),
             ],
+            freed: std::collections::HashSet::new(),
         }
     }
 }
@@ -380,7 +385,13 @@ impl Types {
     pub(crate) fn emallocs(&self, from: usize) -> Vec<usize> {
         const TYPE: usize = 88;
         let mut sizes = Vec::new();
-        for ty in self.all.iter().skip(from) {
+        for (at, ty) in self.all.iter().enumerate().skip(from) {
+            if self
+                .freed
+                .contains(&TypeId(u32::try_from(at).unwrap_or(u32::MAX)))
+            {
+                continue;
+            }
             sizes.push(TYPE);
             match &ty.kind {
                 Kind::Func(f) if f.args.as_ref().is_some_and(|args| !args.is_empty()) => {
@@ -401,6 +412,13 @@ impl Types {
             }
         }
         sizes
+    }
+
+    /// `zend_ffi_type_dtor` over a type a declaration owned and did not
+    /// keep: still in the arena, which never shrinks, and no longer
+    /// counted as php's heap.
+    pub(crate) fn free(&mut self, id: TypeId) {
+        self.freed.insert(id);
     }
 
     /// A new type, `emalloc(sizeof(zend_ffi_type))` filled in.

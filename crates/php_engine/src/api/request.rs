@@ -2208,6 +2208,11 @@ pub struct Request {
     /// `php_output_direct`, as php displays what it raises while the
     /// engine starts ([`crate::api::raising::startup`]).
     display_direct: bool,
+    /// `PG(display_errors)` where a native wrote it past the ini table
+    /// ([`Request::set_display_errors`]), `None` while it is what the
+    /// entry's value reads as; the entry's next change sets it again, as
+    /// `OnUpdateDisplayErrors` writes the word.
+    display_errors_word: Option<u8>,
     /// Where the request stands in `php_request_startup`,
     /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
     /// names a diagnostic's origin by when no function is active.
@@ -2820,6 +2825,7 @@ impl Request {
             left_in_log: false,
             in_error_log: false,
             display_direct: false,
+            display_errors_word: None,
             phase: Phase::Startup,
             shutdown_walk_ended: false,
             returned: Value::null(),
@@ -7500,11 +7506,29 @@ impl Request {
         {
             return Display::Off;
         }
-        match display_errors_mode_of(self.ini_get(b"display_errors")) {
+        let mode = self
+            .display_errors_word
+            .unwrap_or_else(|| display_errors_mode_of(self.ini_get(b"display_errors")));
+        match mode {
             0 => Display::Off,
             DISPLAY_ERRORS_STDERR if self.host_writes_stderr() => Display::Stderr,
             _ => Display::Body,
         }
+    }
+
+    /// `PG(display_errors) = word`, the word written past the ini
+    /// table, as `SOAP_SERVER_BEGIN_CODE` turns diagnostics off around a
+    /// call (`Z/ext/soap/soap.c:1909-1959`): no entry is altered, so
+    /// nothing joins `EG(modified_ini_directives)`, no string is held and
+    /// `ini_get('display_errors')` reads as before. The word in force
+    /// before, read as `php_get_display_errors_mode` reads the entry, is
+    /// returned for the caller to write back.
+    pub fn set_display_errors(&mut self, word: u8) -> u8 {
+        let before = self
+            .display_errors_word
+            .unwrap_or_else(|| display_errors_mode_of(self.ini_get(b"display_errors")));
+        self.display_errors_word = Some(word);
+        before
     }
 
     /// Whether the host is one php writes `display_errors=stderr` to
@@ -20928,6 +20952,7 @@ impl Request {
             b"zend.enable_gc" => {
                 self.heap.gc_enable(ini_truth(value));
             }
+            b"display_errors" => self.display_errors_word = None,
             _ => {}
         }
         Ok(Some(previous))
@@ -23520,19 +23545,34 @@ pub(crate) fn escape_html(message: &str) -> String {
 }
 
 /// The bytes `php_escape_html_entities_ex` asks for the string
-/// [`escape_html`] writes: `zend_string_alloc(maxlen)` with `maxlen` 128
-/// for a message under 64 bytes and twice its length otherwise, grown
-/// by 128 before each character that finds fewer than 40 bytes left.
+/// [`escape_html`] writes, once grown ([`escaped_html_sizes`]).
 fn escaped_html_size(message: &str) -> usize {
+    escaped_html_sizes(message)
+        .last()
+        .copied()
+        .unwrap_or(24 + 128 + 1)
+}
+
+/// Each size `php_escape_html_entities_ex` asks for the string
+/// [`escape_html`] writes, in turn (`Z/ext/standard/html.c:1173-1194`):
+/// `zend_string_alloc(maxlen)` with `maxlen` 128 for a message under 64
+/// bytes and twice its length otherwise, then each
+/// `zend_string_safe_realloc` by 128 before a character that finds
+/// fewer than 40 bytes left, every one `_ZSTR_STRUCT_SIZE(maxlen)`.
+pub(crate) fn escaped_html_sizes(message: &str) -> Vec<usize> {
+    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
+    let size = |maxlen: usize| 24 + maxlen + 1;
     let mut maxlen = if message.len() < 64 {
         128
     } else {
         message.len() * 2
     };
+    let mut sizes = vec![size(maxlen)];
     let mut len = 0;
     for letter in message.chars() {
         if len > maxlen - 40 {
             maxlen += 128;
+            sizes.push(size(maxlen));
         }
         len += match letter {
             '&' => 5,
@@ -23541,8 +23581,7 @@ fn escaped_html_size(message: &str) -> usize {
             _ => letter.len_utf8(),
         };
     }
-    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
-    24 + maxlen + 1
+    sizes
 }
 
 /// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte
