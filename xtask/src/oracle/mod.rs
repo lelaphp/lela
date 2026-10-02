@@ -175,6 +175,11 @@ pub struct Pin {
     /// [`Pin::digest`]: set by [`Pin::parse`], not a value of the file.
     #[serde(skip)]
     digest: String,
+    /// The command every program's binary is run under, before it and its
+    /// arguments: none from the file, and `unshare` for a System V subset
+    /// on Linux (#1482), set by [`Pin::wrapped`].
+    #[serde(skip)]
+    wrapper: Vec<String>,
 }
 
 /// `[sapi]`: the binaries upstream's run-tests.php finds beside `php` for
@@ -464,6 +469,16 @@ impl Pin {
     #[must_use]
     pub fn on_this_machine(mut self, named: Option<PathBuf>) -> Pin {
         self.source.named = named;
+        self
+    }
+
+    /// The pin with every program run under `wrapper`, a command that ends
+    /// in the binary and its arguments, as `unshare --ipc --` runs one in a
+    /// namespace of its own (#1482). The digest is the file's still: what
+    /// the reading records is the recipe, and the wrapper is the run's.
+    #[must_use]
+    pub(crate) fn wrapped(mut self, wrapper: Vec<String>) -> Pin {
+        self.wrapper = wrapper;
         self
     }
 
@@ -828,21 +843,83 @@ pub struct Oracle<'a> {
 /// The processes the programs of one run were spawned as, each the leader
 /// of its group, kept until a lane takes them: the one record of which
 /// processes are the run's, which is how what they left of System V IPC
-/// is told from what any other process on the machine holds (#1412).
+/// is told from what any other process on the machine holds (#1412), and
+/// of when each ran, from spawn to exit, which is how an object the
+/// kernel names no process on is told as made during one of them (#1482).
 #[derive(Debug, Default)]
-pub(crate) struct Spawned(Mutex<BTreeSet<u32>>);
+pub(crate) struct Spawned(Mutex<Programs>);
+
+/// What [`Spawned`] kept since the last take: each program's process, and
+/// each program's run as the wall clock read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Programs {
+    pub pids: BTreeSet<u32>,
+    pub runs: Vec<Ran>,
+    /// The number the next program is given, so its exit finds its own
+    /// run whatever was taken in between.
+    next: u64,
+}
+
+/// One program's run by the wall clock: from just before its spawn to
+/// just after its exit, the exit none where the run ended in an error
+/// before the program was seen to exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ran {
+    pub from: SystemTime,
+    pub to: Option<SystemTime>,
+    number: u64,
+}
+
+impl Ran {
+    /// A run from `from` to `to`, as a lane's test writes one.
+    #[cfg(test)]
+    pub(crate) fn between(from: SystemTime, to: Option<SystemTime>) -> Ran {
+        Ran {
+            from,
+            to,
+            number: 0,
+        }
+    }
+}
 
 impl Spawned {
-    fn add(&self, pid: u32) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(pid);
+    /// One program spawned as `pid` at `from`; the number
+    /// [`Spawned::ended`] closes its run by.
+    fn add(&self, pid: u32, from: SystemTime) -> u64 {
+        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let number = programs.next;
+        programs.next += 1;
+        programs.pids.insert(pid);
+        programs.runs.push(Ran {
+            from,
+            to: None,
+            number,
+        });
+        number
     }
 
-    /// The processes spawned since the last take, and none kept after.
-    fn take(&self) -> BTreeSet<u32> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    /// The program numbered `number` seen to exit now; one a take has
+    /// forgotten since is not looked for.
+    fn ended(&self, number: u64) {
+        let now = SystemTime::now();
+        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(ran) = programs.runs.iter_mut().rev().find(|r| r.number == number) {
+            ran.to = Some(now);
+        }
+    }
+
+    /// The programs spawned since the last take, and none kept after but
+    /// the count, so a number is never given twice.
+    fn take(&self) -> Programs {
+        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let next = programs.next;
+        std::mem::replace(
+            &mut *programs,
+            Programs {
+                next,
+                ..Programs::default()
+            },
+        )
     }
 }
 
@@ -853,10 +930,26 @@ impl<'a> Oracle<'a> {
         self.pin
     }
 
+    /// The same run under `pin`, a copy of this one's pin that differs in
+    /// what a subset changes, its environment or its wrapper: the digest
+    /// as this one asserted it, so the binary is not hashed again, and
+    /// the programs it spawns its own to take.
+    pub(crate) fn beside<'b>(&self, pin: &'b Pin) -> Oracle<'b> {
+        let digest = OnceLock::new();
+        if let Some(found) = self.digest.get() {
+            let _ = digest.set(found.clone());
+        }
+        Oracle {
+            pin,
+            digest,
+            spawned: Spawned::default(),
+        }
+    }
+
     /// The processes this run's programs were spawned as since the last
-    /// call: each program's own, the leader of its group, and not what it
-    /// forked.
-    pub(crate) fn take_spawned(&self) -> BTreeSet<u32> {
+    /// call, each program's own, the leader of its group, and not what it
+    /// forked, and when each program ran.
+    pub(crate) fn take_spawned(&self) -> Programs {
         self.spawned.take()
     }
 
@@ -884,7 +977,14 @@ impl<'a> Oracle<'a> {
         let recipe = &pin.recipe;
 
         let scratch = Scratch::for_program(recipe, call.program)?;
-        let mut cmd = Command::new(call.binary);
+        let mut cmd = match pin.wrapper.split_first() {
+            Some((wrapper, before)) => {
+                let mut cmd = Command::new(wrapper);
+                cmd.args(before).arg(call.binary);
+                cmd
+            }
+            None => Command::new(call.binary),
+        };
         cmd.args(&recipe.args);
         for ini in recipe
             .ini
@@ -921,17 +1021,19 @@ impl<'a> Oracle<'a> {
         cmd.stdin(stdin_of(&streams, call.stdin)?);
 
         let started = Instant::now();
+        let from = SystemTime::now();
         let spawned = cmd.spawn();
         // The command holds the pipes' writing ends until it drops, and a
         // pipe ends only when its last writer closes it.
         drop(cmd);
         let mut child = spawned.with_context(|| format!("running {}", call.binary.display()))?;
-        self.spawned.add(child.id());
+        let run = self.spawned.add(child.id(), from);
         let group = Group::of(&child)?;
         let feeding = fed(call.stdin, &mut child);
         let limit = Duration::from_secs(recipe.limits.timeout_s);
         let status = loop {
             if let Some(status) = child.try_wait().context("waiting for php")? {
+                self.spawned.ended(run);
                 break status;
             }
             if started.elapsed() > limit {
@@ -940,6 +1042,7 @@ impl<'a> Oracle<'a> {
                 // gone and not a zombie when the caller hears of it.
                 drop(group);
                 child.wait().context("reaping php past the limit")?;
+                self.spawned.ended(run);
                 return Err(PastLimit {
                     binary: call.binary.to_path_buf(),
                     script: scratch.script.clone(),

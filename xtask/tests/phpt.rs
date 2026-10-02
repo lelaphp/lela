@@ -749,9 +749,13 @@ fn ipcs_ids(kind: &str) -> Vec<String> {
 /// A run removes what its own tests leave of System V IPC (#1412): a
 /// shared memory segment, a semaphore set and a message queue a test
 /// creates and leaves are gone after the run, and the reading counts them,
-/// while a segment another process creates while the test runs, `perl`
-/// here, stands. The control: a runner that removes every object new
-/// since the run began with nothing attached removes that one too.
+/// as is a private queue the test makes and never uses, which names no
+/// process, as php's `msg_get_queue(0)` leaves one (#1482); while a
+/// segment another process creates while the test runs, `perl` here,
+/// stands, and so does a keyed queue `perl` makes then as the runner's own
+/// user, naming no process either. The control: a runner that removes
+/// every object new since the run began with nothing attached removes
+/// those two too.
 #[test]
 fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     if oracle().is_none() {
@@ -764,7 +768,7 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     let marks = Tree::new("phpt-sysv-marks").unwrap();
     let (started, made) = (marks.join("started"), marks.join("made"));
     let leaves = format!(
-        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\ntouch('{}');\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\n$m = shmop_open(0, \"c\", 0600, 64);\n$s = sem_get(0, 1);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid());\nmsg_send($q, 1, \"x\");\necho \"left\";\n--EXPECT--\nleft\n",
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\ntouch('{}');\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\n$m = shmop_open(0, \"c\", 0600, 64);\n$s = sem_get(0, 1);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid());\nmsg_send($q, 1, \"x\");\n$unused = msg_get_queue(0);\necho \"left\";\n--EXPECT--\nleft\n",
         started.display(),
         made.display()
     );
@@ -781,7 +785,7 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
         let made_by_perl = Command::new("perl")
             .args([
                 "-e",
-                "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600)",
+                "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600), ' ', msgget(0x5b000000 + $$, IPC_CREAT | 0600)",
             ])
             .output()
             .unwrap();
@@ -790,14 +794,23 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     });
     let reading = scratch.run(&registry(""), &scratch.engine);
     let outside = outside.join().unwrap();
-    let standing = ipcs_ids("m");
-    let _ = Command::new("ipcrm").args(["-m", &outside]).status();
-    assert!(!outside.is_empty(), "perl made no segment");
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(count(&reading, "sysv_removed"), 3, "{reading:#?}");
+    let (segment, keyed) = outside.split_once(' ').unwrap_or((&outside, ""));
+    let (segments, queues) = (ipcs_ids("m"), ipcs_ids("q"));
+    let _ = Command::new("ipcrm").args(["-m", segment]).status();
+    let _ = Command::new("ipcrm").args(["-q", keyed]).status();
     assert!(
-        standing.contains(&outside),
-        "the segment perl made, {outside}, was removed: {standing:?}"
+        !segment.is_empty() && !keyed.is_empty(),
+        "perl made {outside:?}"
+    );
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "sysv_removed"), 4, "{reading:#?}");
+    assert!(
+        segments.iter().any(|id| id == segment),
+        "the segment perl made, {segment}, was removed: {segments:?}"
+    );
+    assert!(
+        queues.iter().any(|id| id == keyed),
+        "the keyed queue perl made, {keyed}, was removed: {queues:?}"
     );
 }
 

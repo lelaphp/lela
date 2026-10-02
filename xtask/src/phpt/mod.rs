@@ -91,8 +91,11 @@
 //! a queue a test creates and leaves outlives its process, and the
 //! kernel's tables are small; after each subset the objects the run's own
 //! processes left are removed, told by the processes the kernel names on
-//! them and never by key, and the reading counts them as `sysv_removed`
-//! (the `sysv` module, #1412).
+//! them, and one that names none by its maker, its private key and the
+//! second it was made in, inside one of the subset's programs' runs; the
+//! reading counts them as `sysv_removed` (the `sysv` module, #1412,
+//! #1482). On Linux a System V subset's programs run in a private IPC
+//! namespace where `unshare` permits, and the run's line says so.
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
@@ -875,11 +878,13 @@ pub fn run(
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     for subset in &subsets {
         let scope = subset.scope(&runner, ask.lane);
-        let served = server::served(&oracle, subset, copy.is_some())?;
-        let under = under.serving(served.as_deref());
-        let within = copy.as_ref().map(|copy| subset.rooted(copy));
-        let ((tally, waited), removed) = swept_around(&oracle, &scope, copy.is_some(), || {
-            run_subset(&oracle, registry, within.as_ref().unwrap_or(subset), under)
+        let own = Own::of(&oracle, subset, &scope, copy.is_some())?;
+        let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
+        let oracle = beside.as_ref().unwrap_or(&oracle);
+        let under = under.serving(own.served.as_deref());
+        let ((tally, waited), removed) = swept_around(oracle, &scope, copy.is_some(), || {
+            let within = copy.as_ref().map(|copy| subset.rooted(copy));
+            run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
         around(&mut reading, &runner, removed, waited)?;
@@ -921,6 +926,28 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// What one subset runs with beside the run: the `MySQL` server's version
+/// where it needs the server and its tests run (the `server` module), and
+/// where it runs its programs otherwise than the run does, a pin of its
+/// own beside the run's: a System V one in a namespace (#1482), said on
+/// its own line.
+struct Own {
+    served: Option<String>,
+    pin: Option<Pin>,
+}
+
+impl Own {
+    fn of(oracle: &Oracle<'_>, subset: &Subset, scope: &str, runs: bool) -> Result<Own> {
+        let served = server::served(oracle, subset, runs)?;
+        let namespace = sysv::Namespace::of(&subset.scope).filter(|_| runs);
+        let pin = namespace.map(|namespace| {
+            println!("phpt: {scope}: {namespace}");
+            oracle.pin().clone().wrapped(namespace.0)
+        });
+        Ok(Own { served, pin })
+    }
 }
 
 /// One subset run by `run`, and where its tests run, what its processes
