@@ -11362,7 +11362,7 @@ impl Request {
             self.release(Value::string(key));
             return Ok(false);
         }
-        let slot = self.unserialize_slot(class, &bytes);
+        let slot = self.unserialize_slot(object, &bytes);
         if let Some(at) = slot.and_then(|at| u32::try_from(at).ok()) {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
@@ -11388,8 +11388,16 @@ impl Request {
     /// The declared slot a serialized key places its value in, by its
     /// index among [`Request::placed_properties`]: the property the
     /// mangled name names, or the one of that name whose visibility
-    /// changed since (`is_property_visibility_changed`).
-    fn unserialize_slot(&self, class: ClassId, key: &[u8]) -> Option<usize> {
+    /// changed since (`is_property_visibility_changed`). None where the
+    /// table holds copies of the declared rows, whose rows are plain
+    /// values, not php's `IS_INDIRECT` to a slot: what
+    /// `php_zip_get_properties` leaves, and the value is written there
+    /// with no type to hold to.
+    fn unserialize_slot(&self, object: PhpObject, key: &[u8]) -> Option<usize> {
+        if object.heap().declared_rows() == php_heap::DeclaredRows::Copied {
+            return None;
+        }
+        let class = object.class();
         let (mangled_class, name) = match key.strip_prefix(b"\0") {
             Some(rest) => match rest.iter().position(|b| *b == 0) {
                 Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
@@ -11432,7 +11440,7 @@ impl Request {
         object: PhpObject,
         key: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(at) = self.unserialize_slot(object.class(), key) else {
+        let Some(at) = self.unserialize_slot(object, key) else {
             return Ok(());
         };
         let placed = self.placed_properties(object.class());
