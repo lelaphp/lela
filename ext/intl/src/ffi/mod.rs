@@ -38,6 +38,7 @@ pub(crate) mod enumeration;
 pub(crate) mod grapheme;
 pub(crate) mod idn;
 pub(crate) mod normalizer;
+pub(crate) mod uchar;
 
 mod sys {
     use std::ffi::c_char;

@@ -108,3 +108,25 @@ pub(crate) fn forward(s: &[u8], i: &mut usize) {
         *i += 1;
     }
 }
+
+/// `U8_APPEND_UNSAFE`: the code point's bytes, a surrogate's three as
+/// ICU writes them.
+pub(crate) fn encode(c: i32) -> Vec<u8> {
+    let c = u32::try_from(c).unwrap_or(0);
+    let byte = |v: u32| u8::try_from(v & 0xff).unwrap_or(0);
+    match c {
+        0..0x80 => vec![byte(c)],
+        0x80..0x800 => vec![byte((c >> 6) | 0xc0), byte((c & 0x3f) | 0x80)],
+        0x800..0x10000 => vec![
+            byte((c >> 12) | 0xe0),
+            byte(((c >> 6) & 0x3f) | 0x80),
+            byte((c & 0x3f) | 0x80),
+        ],
+        _ => vec![
+            byte((c >> 18) | 0xf0),
+            byte(((c >> 12) & 0x3f) | 0x80),
+            byte(((c >> 6) & 0x3f) | 0x80),
+            byte((c & 0x3f) | 0x80),
+        ],
+    }
+}

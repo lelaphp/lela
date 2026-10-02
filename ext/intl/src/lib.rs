@@ -38,6 +38,7 @@ mod idn;
 #[allow(dead_code)]
 mod iterator;
 mod normalizer;
+mod uchar;
 mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -317,7 +318,9 @@ pub fn extension() -> Extension {
     let builder = builder
         .class::<normalizer::Normalizer>()
         .class::<IntlException>()
-        .class::<iterator::IntlIterator>();
+        .class::<iterator::IntlIterator>()
+        .class::<uchar::IntlChar>()
+        .class_constants(b"IntlChar", uchar::constants());
     builder
         .request_state::<State>()
         .info(intl_info)
