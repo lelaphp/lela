@@ -2405,6 +2405,12 @@ enum Traced {
     /// code, which php names `unknown` (`ZEND_STR_UNKNOWN`): what a
     /// host's evaluation in a frame is ([`crate::tier::evaluate`]).
     Unknown,
+    /// A code frame no `INCLUDE_OR_EVAL` pushed and that stands over no
+    /// user code, the main op array's above all: php lays its row down,
+    /// `zend_new_array(8)` and `zend_hash_real_init_mixed`, before its
+    /// default arm finds nothing to name it by and destroys it, so the
+    /// trace has no row for it and the walk's peak has the row's bytes.
+    Dropped,
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -5412,6 +5418,24 @@ impl Request {
     /// method's receiver between `class` and `type`, where php adds it,
     /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`; and `limit`
     /// rows at most, none meaning every row.
+    ///
+    /// The walk lays a row down for every link before it knows whether
+    /// to keep it, so the main frame's, which it destroys, is in the
+    /// peak, and a walk cut short by `limit` lays down no row past it:
+    ///
+    /// ```php
+    /// function d($a) { return debug_backtrace(); }
+    /// function e() { return d(1); }
+    /// e(); $s = memory_get_usage(); memory_reset_peak_usage(); $t = e();
+    /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+    /// function d2() { return debug_backtrace(0, 1); }
+    /// d2(); unset($t); $s = memory_get_usage(); memory_reset_peak_usage(); $t = d2();
+    /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+    /// ```
+    /// ```expect
+    /// 1560 1216
+    /// 592 592
+    /// ```
     pub(crate) fn fetch_debug_backtrace(
         &mut self,
         skip_last: bool,
@@ -5423,10 +5447,18 @@ impl Request {
         // of it is one a later row reads back.
         let skipped = usize::from(skip_last).min(chain.len());
         let mut links = self.trace_rows(&chain[skipped..]);
+        // `frameno < limit`: the walk stops once `limit` rows are in,
+        // before it lays down the next, and a dropped row is no row.
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
+            && let Some(cut) = links
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| !matches!(row.0, Traced::Dropped))
+                .nth(limit - 1)
+                .map(|(at, _)| at + 1)
         {
-            links.truncate(limit);
+            links.truncate(cut);
         }
         self.render_trace(links, options)
     }
@@ -5536,7 +5568,9 @@ impl Request {
         let mut trace = PhpArray::new(self)?;
         self.constant_expression_row(&mut trace)?;
         for (traced, this, scope, arguments, named, site) in links {
-            let mut row = PhpArray::new(self)?;
+            // `zend_new_array(8)` and `zend_hash_real_init_mixed`: every
+            // row is a hash laid down before its first key.
+            let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?;
             if let Some((file, line)) = site {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of the interned string.
@@ -5584,6 +5618,11 @@ impl Request {
                 Traced::Unknown => {
                     let name = Value::string(PhpString::new(self, b"unknown")?);
                     self.set_string_key(&mut row, b"function", name)?;
+                }
+                Traced::Dropped => {
+                    // `zend_array_destroy(stack_frame)`.
+                    self.release(Value::array(row));
+                    continue;
                 }
             }
             trace.append(self, Value::array(row))?;
@@ -5877,16 +5916,12 @@ impl Request {
                             // a dummy frame is skipped where it holds no
                             // file and line, and named `unknown` where
                             // it stands over user code.
-                            if site.is_some() {
-                                rows.push((
-                                    Traced::Unknown,
-                                    None,
-                                    None,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    site,
-                                ));
-                            }
+                            let traced = if site.is_some() {
+                                Traced::Unknown
+                            } else {
+                                Traced::Dropped
+                            };
+                            rows.push((traced, None, None, Vec::new(), Vec::new(), site));
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
@@ -14723,6 +14758,14 @@ impl Request {
     /// Warning: g(): Unable to create filter (f) in %s on line 4
     /// Undefined constant "NOPE"
     /// ```
+    /// Whether the native being served is a method, whose name
+    /// `get_active_function_or_method_name` makes as a member string
+    /// (`zend_create_member_string`) where a function's is its own.
+    pub(crate) fn active_native_is_method(&self) -> bool {
+        self.active_native_function()
+            .is_some_and(|function| self.method_class(function).is_some())
+    }
+
     pub(crate) fn active_native(&self) -> String {
         if let Some((kind, _)) = self.including
             && self.serving_include()

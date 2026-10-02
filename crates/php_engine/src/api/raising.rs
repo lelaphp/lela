@@ -618,11 +618,38 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// object(SensitiveParameterValue)#2 (0) {
 /// }
 /// ```
+///
+/// The message's string is made before the object, as
+/// `zend_throw_exception` makes it, so a throw and a catch peak where
+/// php's do: the message, the object, the trace's rows and the row the
+/// walk lays down for the main frame and destroys, and, for a native's
+/// argument error, the two buffers its sentence was printed into.
+///
+/// ```php
+/// function h() { try { array_chunk([], 0); } catch (ValueError $e) {} }
+/// h(); $s = memory_get_usage(); memory_reset_peak_usage(); h();
+/// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+/// function n() { try { throw new Exception("m"); } catch (Exception $x) {} }
+/// n(); $s = memory_get_usage(); memory_reset_peak_usage(); n();
+/// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+/// ```
+/// ```expect
+/// 2328 32
+/// 1128 0
+/// ```
 pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
-    let object = req.new_object_of(class)?;
-    let name = PhpString::new(req, b"message")?;
+    // `zend_throw_exception` makes the message's string before the
+    // object (`zend_string_init`), so it stands across the trace.
     let message = message.split('\0').next().unwrap_or_default();
     let message = PhpString::new(req, message.as_bytes())?;
+    let object = match req.new_object_of(class) {
+        Ok(object) => object,
+        Err(refused) => {
+            req.release(Value::string(message));
+            return Err(refused);
+        }
+    };
+    let name = PhpString::new(req, b"message")?;
     object.set_prop(req, name, Value::string(message))?;
     if !crate::classes::records_throw_site(req.handlers_of(object.class())) {
         req.note_throw_site(object)?;
@@ -650,7 +677,75 @@ pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Va
 /// ```
 pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
-    throw(req, "TypeError", &message)
+    throw_argument_error(req, "TypeError", tail, &message)
+}
+
+/// `zend_argument_error_variadic` (`Z/Zend/zend_API.c:398`) around the
+/// throw of `message`: the function's name, a member string made for
+/// the call where the native is a method
+/// (`get_active_function_or_method_name`), `zend_vspprintf`'s buffer of
+/// the `tail`, and `zend_throw_error`'s buffer of the whole sentence
+/// stand while the throwable is made, and go after it, so a throw's
+/// peak has them as php's has.
+///
+/// A method's name is the member string, one allocation more than a
+/// function's:
+///
+/// ```php
+/// function m() { try { (new ArrayObject([]))->setFlags('x'); } catch (TypeError $e) {} }
+/// m(); $s = memory_get_usage(); memory_reset_peak_usage(); m();
+/// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+/// ```
+/// ```expect
+/// 2608 32
+/// ```
+fn throw_argument_error(req: &mut Request, class: &str, tail: &str, message: &str) -> Thrown {
+    let name = if req.active_native_is_method() {
+        match PhpString::new(req, req.active_native().as_bytes()) {
+            Ok(name) => Some(name),
+            Err(refused) => return refused,
+        }
+    } else {
+        None
+    };
+    let buffers = printf_buffer(req, tail.len()).and_then(|formatted| {
+        match printf_buffer(req, message.len()) {
+            Ok(sentence) => Ok((formatted, sentence)),
+            Err(refused) => {
+                req.heap_mut().free_block(formatted);
+                Err(refused)
+            }
+        }
+    });
+    let thrown = match buffers {
+        Ok((formatted, sentence)) => {
+            let thrown = throw(req, class, message);
+            req.heap_mut().free_block(sentence);
+            req.heap_mut().free_block(formatted);
+            thrown
+        }
+        Err(refused) => refused,
+    };
+    if let Some(name) = name {
+        req.release(Value::string(name));
+    }
+    thrown
+}
+
+/// `zend_vspprintf`'s buffer over `len` bytes of text: a
+/// `smart_string`, laid down at its 255-byte start and grown to the
+/// page past the text and its terminator (`_smart_string_alloc`), the
+/// `char *` php frees once the text is used.
+fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Thrown> {
+    // `SMART_STRING_START_LEN` and `SMART_STRING_PAGE`; a buffer grows
+    // where the text reaches its size, so 255 bytes fill the first.
+    let size = if len < 255 {
+        256
+    } else {
+        len.saturating_add(1).next_multiple_of(4096)
+    };
+    let block = req.heap_mut().block(size);
+    req.fatal_of(block)
 }
 
 /// `zend_argument_value_error`: `ValueError` for the argument at
@@ -660,7 +755,7 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// `a_value_error_names_the_parameter` below.
 pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
-    throw(req, "ValueError", &message)
+    throw_argument_error(req, "ValueError", tail, &message)
 }
 
 /// `zend_argument_error`: a throwable of `class` for the argument at
@@ -678,7 +773,7 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, "");
     let message = format!("{}{tail}", message.trim_end_matches("must "));
-    throw(req, class, &message)
+    throw_argument_error(req, class, tail, &message)
 }
 
 /// `ArgumentCountError`: `fn() expects <tail>`.
