@@ -18817,8 +18817,8 @@ impl Request {
         self.description.file_handles.as_ref()?.fd(standard)
     }
 
-    /// Whether the host saved the area its process title is written over.
-    pub(crate) fn holds_process_title(&self) -> bool {
+    /// `PHP_CLI_PROCESS_TITLE` as the host registers it.
+    pub(crate) fn process_title(&self) -> crate::engine::ProcessTitle {
         self.description.process_title
     }
 
@@ -19257,36 +19257,25 @@ impl Request {
     }
 
     /// `ZEND_CONSTANT_MODULE_NUMBER(constant) == module->module_number`
-    /// over `EG(zend_constants)`: the names of the constants an
-    /// extension declared through `ExtensionBuilder::constants`, in the
-    /// order it declared them, each one `api::call::constant` reads the
-    /// value of; empty for an extension that declares none. The table
-    /// holds the engine's own constants first, as
-    /// `zend_register_standard_constants` runs before any `MINIT`, then
-    /// each extension's in bundle order (`Engine::build`), the layout
-    /// [`Request::extension_functions`] reads too.
+    /// over `EG(zend_constants)`: the names of the constants registered
+    /// under an extension, in the table's order, each one
+    /// `api::call::constant` reads the value of; empty for an extension
+    /// that has none. The table holds the engine's own constants first,
+    /// as `zend_register_standard_constants` runs before any `MINIT`, with
+    /// `PHP_SAPI` before `PHP_BINARY` where `php_module_startup` registers
+    /// it, then each extension's in bundle order (`Engine::build`), then
+    /// what was registered while the request ran: a host's under `Core`,
+    /// as the CLI's `PHP_CLI_PROCESS_TITLE` and its three streams, and an
+    /// extension's under its own.
     #[must_use]
     pub fn extension_constants(&self, extension: ExtensionId) -> Vec<Name> {
-        let Some(at) = usize::try_from(extension.0).ok() else {
+        let Some(module) = self.extension_name(extension) else {
             return Vec::new();
         };
-        let start: usize = self
-            .shared
-            .extensions
-            .iter()
-            .take(at)
-            .map(|e| e.constants.len())
-            .sum();
-        let count = self
-            .extension_of(extension)
-            .map_or(0, |e| e.constants.len());
-        self.shared
-            .declared()
-            .constants
-            .iter()
-            .skip(start)
-            .take(count)
-            .map(|decl| decl.name.clone())
+        self.constant_table()
+            .into_iter()
+            .filter(|(owner, _, _)| *owner == Some(module))
+            .map(|(_, name, _)| Name(name.into()))
             .collect()
     }
 

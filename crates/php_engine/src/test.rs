@@ -196,6 +196,7 @@ impl Engine {
             source: Some(source.as_bytes().to_vec()),
             cwd: dir.to_path_buf(),
             file_handles: Some(piped()),
+            process_title: crate::engine::ProcessTitle::Unsaved,
             ..RequestDescription::default()
         };
         // The CLI host's dump of the op arrays where

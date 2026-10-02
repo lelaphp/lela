@@ -75,6 +75,16 @@ pub(crate) fn process_title() -> Option<&'static ProcessTitle> {
     TITLE.get().and_then(Option::as_ref)
 }
 
+/// `PHP_CLI_PROCESS_TITLE` for a request of the CLI: whether [`main`]
+/// saved the area.
+pub(crate) fn title_constant() -> php_sapi::ProcessTitle {
+    if process_title().is_some() {
+        php_sapi::ProcessTitle::Saved
+    } else {
+        php_sapi::ProcessTitle::Unsaved
+    }
+}
+
 /// `php_print_version` for this host, [`php_sapi::version`] under its
 /// name.
 #[must_use]

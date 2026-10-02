@@ -2943,8 +2943,8 @@ impl Ops for HostFd {
 impl Request {
     /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
     /// `php_request_startup` as whether `cli_set_process_title` can set
-    /// the title, which is whether the host saved the area `ps` shows
-    /// (`RequestDescription::process_title`), then
+    /// the title, for a host that registers it
+    /// ([`crate::engine::ProcessTitle`]), then
     /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
     /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`,
     /// and the three constants on them, each holding its stream's one
@@ -2985,8 +2985,14 @@ impl Request {
         if !self.registers_file_handles() {
             return Ok(());
         }
-        let titled = self.holds_process_title();
-        self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(titled));
+        let titled = match self.process_title() {
+            crate::engine::ProcessTitle::Unregistered => None,
+            crate::engine::ProcessTitle::Unsaved => Some(false),
+            crate::engine::ProcessTitle::Saved => Some(true),
+        };
+        if let Some(titled) = titled {
+            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(titled));
+        }
         let mut opened = Vec::with_capacity(3);
         for (path, mode) in [
             (&b"php://stdin"[..], &b"rb"[..]),

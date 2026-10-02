@@ -17,6 +17,7 @@ Observables
 OutputSink
 PHP_VERSION
 Primary
+ProcessTitle
 RequestDescription
 ResponseHead
 Routed

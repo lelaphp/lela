@@ -75,10 +75,8 @@ pub struct RequestDescription {
     /// `php_request_startup` and php's other hosts have none of; `None`
     /// registers nothing.
     pub file_handles: Option<FileHandles>,
-    /// Whether the host saved the area `ps` shows the command line from
-    /// (`save_ps_args`), which its `cli_set_process_title` writes: what
-    /// `PHP_CLI_PROCESS_TITLE` says.
-    pub process_title: bool,
+    /// `PHP_CLI_PROCESS_TITLE`, which php's CLI alone registers.
+    pub process_title: ProcessTitle,
     /// The entries the host sets before the request starts, each as its
     /// [`IniOrigin`] says, in the order given: php-fpm's `PHP_VALUE` and
     /// `PHP_ADMIN_VALUE` and the lines of the request's `.user.ini` files.
@@ -150,6 +148,22 @@ pub enum HostValue {
     Map(Vec<(Vec<u8>, HostValue)>),
     /// An array keyed 0, 1, and on.
     List(Vec<HostValue>),
+}
+
+/// `PHP_CLI_PROCESS_TITLE` for a request: which `do_cli` registers under
+/// `Core` after `php_request_startup` as whether `cli_set_process_title`
+/// can set the title, that is whether the host saved the area `ps` shows
+/// the command line from (`save_ps_args`, `Z/sapi/cli/php_cli.c:928`), and
+/// which no other host of php's registers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcessTitle {
+    /// Not registered: every host but the CLI.
+    #[default]
+    Unregistered,
+    /// `false`: the CLI saved no area.
+    Unsaved,
+    /// `true`: the CLI saved the area.
+    Saved,
 }
 
 /// One request of the web as its host received it, php's
