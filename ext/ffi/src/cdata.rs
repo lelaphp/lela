@@ -64,11 +64,68 @@ pub(crate) fn free(req: &mut Request, addr: usize) {
 /// `FFI\CType`: [`crate::types::Types::emallocs`].
 pub(crate) fn hold_types(req: &mut Request, from: usize) -> Result<Box<[usize]>, Thrown> {
     let sizes = types(req).emallocs(from);
+    hold(req, &sizes)
+}
+
+/// One block of each of `sizes` on the request's heap, held until
+/// [`free_types`] gives them back.
+pub(crate) fn hold(req: &mut Request, sizes: &[usize]) -> Result<Box<[usize]>, Thrown> {
     let mut held = Vec::with_capacity(sizes.len());
     for size in sizes {
-        held.push(alloc(req, size, false)?);
+        held.push(alloc(req, *size, false)?);
     }
     Ok(held.into_boxed_slice())
+}
+
+/// `FFI_G(weak_types)`: the table `zend_ffi_remember_type` allocates
+/// at its first use, by the address [`alloc`] gave its packed buckets,
+/// and how many rows it has room for and holds. What it keeps stays on
+/// the request's heap until `RSHUTDOWN`.
+#[derive(Debug)]
+pub(crate) struct WeakTypes {
+    data: usize,
+    slots: usize,
+    count: usize,
+}
+
+/// `HT_PACKED_SIZE_EX(slots, HT_MIN_MASK)`: a `zval` a slot and the two
+/// `uint32_t` hash slots of the smallest mask.
+fn packed_size(slots: usize) -> usize {
+    slots * 16 + 2 * 4
+}
+
+/// `zend_ffi_remember_type`: one row of `FFI_G(weak_types)` for a type
+/// whose owner hands it on, its held blocks never given back, the table
+/// (`emalloc(sizeof(HashTable))` and `zend_hash_init(..., 0, ...)`) made
+/// at the first, its packed buckets laid at its first insert and
+/// doubled, `zend_hash_packed_grow`, when full.
+pub(crate) fn remember(req: &mut Request) -> Result<(), Thrown> {
+    let mut weak = if let Some(weak) = req.state::<State>().weak_types.take() {
+        weak
+    } else {
+        alloc(req, 56, false)?;
+        WeakTypes {
+            data: alloc(req, packed_size(8), false)?,
+            slots: 8,
+            count: 0,
+        }
+    };
+    if weak.count == weak.slots {
+        match alloc(req, packed_size(weak.slots * 2), false) {
+            Ok(data) => {
+                free(req, weak.data);
+                weak.data = data;
+                weak.slots *= 2;
+            }
+            Err(thrown) => {
+                req.state::<State>().weak_types = Some(weak);
+                return Err(thrown);
+            }
+        }
+    }
+    weak.count += 1;
+    req.state::<State>().weak_types = Some(weak);
+    Ok(())
 }
 
 /// The types a value held given back with it.

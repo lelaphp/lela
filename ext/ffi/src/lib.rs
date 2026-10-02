@@ -72,6 +72,7 @@ struct State {
     classes: Option<Classes>,
     imported: Vec<(Vec<u8>, parse::Scope)>,
     heap: HashMap<usize, Emalloc>,
+    weak_types: Option<cdata::WeakTypes>,
 }
 
 /// The classes the extension declares, looked up once per request.
