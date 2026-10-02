@@ -744,7 +744,9 @@ pub(super) fn render(
         let Some(decl) = req.class_decl(object.class()) else {
             return Ok(());
         };
-        let (name, kind, backing) = (decl.name.0.to_vec(), decl.kind, decl.backing);
+        let (kind, backing) = (decl.kind, decl.backing);
+        // `Z_OBJ_HANDLER_P(expr, get_class_name)`.
+        let name = object.handlers(req).get_class_name(req, *object);
         // `smart_str_appends(buf, ZSTR_VAL(class_name))`: up to the NUL
         // of an anonymous class's name.
         out.extend_from_slice(name.split(|b| *b == 0).next().unwrap_or_default());

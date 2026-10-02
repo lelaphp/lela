@@ -188,7 +188,7 @@ impl ObjectHandlers for Handlers {
         let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
         req.release(Value::string(name));
         req.release(value);
-        let class = Std.get_class_name(req, object);
+        let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
         let message = format!("Cannot write read-only property {class}::${shown}");
         Err(throw(req, "Error", &message))
     }

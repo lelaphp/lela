@@ -6444,7 +6444,7 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn trace_arguments(&self, arguments: &[(Key, Value)]) -> String {
+    fn trace_arguments(&mut self, arguments: &[(Key, Value)]) -> String {
         let mut out = String::new();
         for (i, (key, argument)) in arguments.iter().enumerate() {
             if i > 0 {
@@ -6463,7 +6463,7 @@ impl Request {
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c`): a reference
     /// followed, `ZVAL_DEREF`, then [`Request::zval_text`], and where
     /// that has no text, `Array`, `Object(ClassName)` or `Resource id #N`.
-    fn trace_argument(&self, out: &mut String, argument: &Value) {
+    fn trace_argument(&mut self, out: &mut String, argument: &Value) {
         let argument = argument.deref();
         if let Some(text) = self.zval_text(&argument, self.exception_string_param_max_len()) {
             out.push_str(&text);
@@ -6472,13 +6472,13 @@ impl Request {
         match argument.as_ref() {
             ValueRef::Array(_) => out.push_str("Array"),
             ValueRef::Object(object) => {
+                // `Z_OBJ_HANDLER_P(arg, get_class_name)`, then
                 // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
                 // the NUL of an anonymous class's name.
-                let class = self
-                    .class_decl(object.class())
-                    .map_or_else(String::new, |decl| {
-                        php_unit::decl::shown(&decl.name.0).into_owned()
-                    });
+                let object = *object;
+                let table = self.object_handlers(object.heap());
+                let name = table.get_class_name(self, object);
+                let class = php_unit::decl::shown(&name).into_owned();
                 out.push_str("Object(");
                 out.push_str(&class);
                 out.push(')');

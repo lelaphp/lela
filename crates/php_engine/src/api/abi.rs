@@ -1817,9 +1817,13 @@ pub trait ObjectHandlers: Send + Sync {
         req.constructor_of(object)
     }
 
-    /// `get_class_name`, `zend_std_get_class_name` at `Std`: `ce->name`.
-    fn get_class_name(&self, req: &mut Request, object: PhpObject) -> String {
-        req.class_name(object.class())
+    /// `get_class_name`, `zend_std_get_class_name` at `Std`: `ce->name`,
+    /// its bytes as they stand. What `var_dump`, `debug_zval_dump` and
+    /// `print_r` print an object's class as, which `FFI\CData` answers
+    /// with its C type after the class's name
+    /// (`zend_ffi_cdata_get_class_name`).
+    fn get_class_name(&self, req: &mut Request, object: PhpObject) -> Vec<u8> {
+        req.class_name_bytes(object.class())
     }
 
     /// `cast_object`, `zend_std_cast_object_tostring` at `Std`: the
