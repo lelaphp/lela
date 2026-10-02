@@ -8,7 +8,9 @@
 use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
@@ -170,10 +172,11 @@ fn extract(
         return Err(arg_value_error(req, 2, "be a valid extract type"));
     }
     if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
-        return Err(throw_error(
+        return Err(argument_error(
             req,
             "ValueError",
-            "extract(): Argument #3 ($prefix) is required when using this extract type",
+            3,
+            "is required when using this extract type",
         ));
     }
     if let Some(prefix) = &prefix

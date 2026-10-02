@@ -30,7 +30,9 @@ use php_unit::decl::{ClassKind, Type, Visibility};
 
 use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Variadic};
 use crate::api::coerce::to_string;
-use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
+use crate::api::raising::{
+    Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
+};
 use crate::api::request::Request;
 use crate::api::values::{
     ClassId, Key, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
@@ -916,6 +918,17 @@ fn strlen(string: PhpString) -> i64 {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A class constant's name is `zend_argument_value_error`'s, and peaks
+/// where php's does:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { define('A::B', 1); } catch (ValueError $e) {} });
+/// ```
+/// ```expect
+/// 2920 32
+/// ```
 #[php_function]
 fn define(
     req: &mut Request,
@@ -925,10 +938,11 @@ fn define(
 ) -> Result<bool, Thrown> {
     let bytes = constant_name.as_bytes();
     if bytes.windows(2).any(|pair| pair == b"::") {
-        return Err(throw_error(
+        return Err(argument_error(
             req,
             "ValueError",
-            "define(): Argument #1 ($constant_name) cannot be a class constant",
+            1,
+            "cannot be a class constant",
         ));
     }
     if case_insensitive {
@@ -941,10 +955,11 @@ fn define(
         && value.is_refcounted()
     {
         if !constant_array_is_acyclic(req, *array)? {
-            return Err(throw_error(
+            return Err(argument_error(
                 req,
                 "ValueError",
-                "define(): Argument #2 ($value) cannot be a recursive array",
+                2,
+                "cannot be a recursive array",
             ));
         }
         Value::array(copy_constant_array(req, *array)?)

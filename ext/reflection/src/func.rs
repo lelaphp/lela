@@ -16,7 +16,9 @@ use php_ext::call::{
 };
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, deprecated, fatal, throw, throw_error};
+use php_ext::raising::{
+    Thrown, arg_count_error, argument_error, deprecated, fatal, throw, throw_error,
+};
 use php_ext::request::{Execution, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -2041,6 +2043,21 @@ impl ReflectionMethod {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// A name with no `::` is `zend_argument_error`'s, so the method's
+    /// member string and the two printed buffers stand across the throw
+    /// and it peaks where php's does; the deprecation is silenced, as
+    /// what its display lays down is not this throw's:
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { try { @new ReflectionMethod('a'); } catch (ReflectionException $e) {} });
+    /// pk(function () { try { ReflectionMethod::createFromMethodName('a'); } catch (ReflectionException $e) {} });
+    /// ```
+    /// ```expect
+    /// 3120 32
+    /// 3016 0
+    /// ```
     #[php(arity = manual)]
     fn __construct(
         req: &mut Request,
@@ -2066,21 +2083,22 @@ impl ReflectionMethod {
         let (class, method_name) = match (first, second) {
             (Union::A(object), Some(name)) => (object.class(), name),
             (Union::A(_), None) => {
-                // `zend_argument_value_error` with no `must`.
-                return Err(throw_error(
+                return Err(argument_error(
                     req,
                     "ValueError",
-                    "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
+                    2,
+                    "cannot be null when argument #1 ($objectOrMethod) is an object",
                 ));
             }
             (Union::B(class), Some(name)) => (class_named(req, class.as_bytes())?, name),
             (Union::B(given), None) => {
                 let given = given.as_bytes();
                 let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
-                    return Err(throw(
+                    return Err(argument_error(
                         req,
                         "ReflectionException",
-                        "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name",
+                        1,
+                        "must be a valid method name",
                     ));
                 };
                 let class = class_named(req, &given[..at])?;
@@ -2152,10 +2170,11 @@ impl ReflectionMethod {
     fn createFromMethodName(req: &mut Request, method: PhpString) -> Result<Static, Thrown> {
         let given = method.as_bytes();
         let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
-            return Err(throw(
+            return Err(argument_error(
                 req,
                 "ReflectionException",
-                "ReflectionMethod::createFromMethodName(): Argument #1 ($method) must be a valid method name",
+                1,
+                "must be a valid method name",
             ));
         };
         let class = class_named(req, &given[..at])?;
@@ -2452,10 +2471,11 @@ impl ReflectionMethod {
             return fake_closure(req, scope, &name, None);
         }
         let Some(object) = object else {
-            return Err(throw_error(
+            return Err(argument_error(
                 req,
                 "ValueError",
-                "ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods",
+                1,
+                "cannot be null for non-static methods",
             ));
         };
         if !object.instance_of(req, scope) {

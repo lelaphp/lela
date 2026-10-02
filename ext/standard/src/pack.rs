@@ -10,7 +10,7 @@
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -621,13 +621,11 @@ fn unpack(
                 b'h' | b'H' => {
                     if size > INT_MAX / 2 {
                         req.release(Value::array(array));
-                        return Err(throw_error(
+                        return Err(argument_error(
                             req,
                             "ValueError",
-                            &format!(
-                                "unpack(): Argument #1 ($format) repeater must be less than or equal to {}",
-                                INT_MAX / 2
-                            ),
+                            1,
+                            &format!("repeater must be less than or equal to {}", INT_MAX / 2),
                         ));
                     }
                     let mut len = rest * 2;

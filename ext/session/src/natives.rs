@@ -100,10 +100,11 @@ fn session_module_name(
     };
     if crate::c_str(&name).eq_ignore_ascii_case(b"user") {
         req.release(Value::string(current));
-        return Err(throw_error(
+        return Err(php_ext::raising::argument_error(
             req,
             "ValueError",
-            "session_module_name(): Argument #1 ($module) cannot be \"user\"",
+            1,
+            "cannot be \"user\"",
         ));
     }
     if Module::find(&name).is_none() {
@@ -368,10 +369,11 @@ fn session_create_id(
     let prefix = prefix.0.as_bytes().to_vec();
     if !prefix.is_empty() {
         if prefix.len() > 256 {
-            return Err(throw_error(
+            return Err(php_ext::raising::argument_error(
                 req,
                 "ValueError",
-                "session_create_id(): Argument #1 ($prefix) cannot be longer than 256 characters",
+                1,
+                "cannot be longer than 256 characters",
             ));
         }
         if !session::valid_key(&prefix) {

@@ -54,7 +54,7 @@ use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
-    throw_error, throw_value,
+    throw_value,
 };
 use php_ext::request::{Input, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
@@ -557,12 +557,8 @@ const BOTH_FAILURES: &str = "cannot use both FILTER_NULL_ON_FAILURE and FILTER_T
 /// `zend_argument_value_error(n, "...")` over the `$options` parameter
 /// with a sentence that does not open with `must`, which
 /// `arg_value_error` supplies.
-fn options_error(req: &mut Request, native: &str, position: u32, tail: &str) -> Thrown {
-    throw_error(
-        req,
-        "ValueError",
-        &format!("{native}(): Argument #{position} ($options) {tail}"),
-    )
+fn options_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
+    php_ext::raising::argument_error(req, "ValueError", position, tail)
 }
 
 /// `zend_throw_exception(php_filter_failed_exception_ce, message, 0)`.
@@ -860,7 +856,7 @@ fn filter_call(
     }
     if flags & FILTER_NULL_ON_FAILURE != 0 && flags & FILTER_THROW_ON_FAILURE != 0 {
         req.release(value);
-        return Err(options_error(req, native, options_position, BOTH_FAILURES));
+        return Err(options_error(req, options_position, BOTH_FAILURES));
     }
     let run = Run {
         flags,
@@ -928,7 +924,7 @@ fn array_handler(
             Key::Str(name) if !name.is_empty() => name,
             Key::Str(_) => {
                 req.release(out.to_value());
-                return Err(options_error(req, native, 2, "cannot contain empty keys"));
+                return Err(options_error(req, 2, "cannot contain empty keys"));
             }
             Key::Int(_) => {
                 req.release(out.to_value());
@@ -1103,7 +1099,7 @@ fn filter_input(
         }
     };
     if flags & FILTER_NULL_ON_FAILURE != 0 && flags & FILTER_THROW_ON_FAILURE != 0 {
-        return Err(options_error(req, "filter_input", 4, BOTH_FAILURES));
+        return Err(options_error(req, 4, BOTH_FAILURES));
     }
     if flags & FILTER_THROW_ON_FAILURE != 0 {
         return Err(throw_failed(

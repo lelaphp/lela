@@ -6,7 +6,7 @@
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, call_stack_end, docref, throw_error};
+use php_ext::raising::{Level, Thrown, argument_error, call_stack_end, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
@@ -401,7 +401,7 @@ fn range_input(
 ) -> Result<(Bound, u8), Thrown> {
     match given {
         Union::B(Union::A(n)) => Ok((Bound::Long(n), 0)),
-        Union::B(Union::B(d)) => finite(req, position, name, d).map(|d| (Bound::Double(d), 0)),
+        Union::B(Union::B(d)) => finite(req, position, d).map(|d| (Bound::Double(d), 0)),
         Union::A(s) => {
             let bytes = s.as_bytes();
             if bytes.is_empty() {
@@ -415,7 +415,7 @@ fn range_input(
             match numeric_string(bytes) {
                 Some(number) if number.as_float().is_some() => {
                     let d = number.as_float().unwrap_or(0.0);
-                    finite(req, position, name, d).map(|d| (Bound::Double(d), bytes[0]))
+                    finite(req, position, d).map(|d| (Bound::Double(d), bytes[0]))
                 }
                 Some(number) => {
                     let n = number.as_int().unwrap_or(0);
@@ -442,32 +442,24 @@ fn range_input(
     }
 }
 
-fn finite(req: &mut Request, position: u32, name: &str, d: f64) -> Result<f64, Thrown> {
+fn finite(req: &mut Request, position: u32, d: f64) -> Result<f64, Thrown> {
     if d.is_infinite() {
-        return Err(value_error_named(
+        return Err(argument_error(
             req,
+            "ValueError",
             position,
-            name,
             "must be a finite number, INF provided",
         ));
     }
     if d.is_nan() {
-        return Err(value_error_named(
+        return Err(argument_error(
             req,
+            "ValueError",
             position,
-            name,
             "must be a finite number, NAN provided",
         ));
     }
     Ok(d)
-}
-
-fn value_error_named(req: &mut Request, position: u32, name: &str, tail: &str) -> Thrown {
-    throw_error(
-        req,
-        "ValueError",
-        &format!("range(): Argument #{position} (${name}) {tail}"),
-    )
 }
 
 /// `range(string|int|float $start, string|int|float $end, int|float $step
@@ -558,18 +550,18 @@ fn range(
         match given {
             Union::B(d) => {
                 if d.is_infinite() {
-                    return Err(value_error_named(
+                    return Err(argument_error(
                         req,
+                        "ValueError",
                         3,
-                        "step",
                         "must be a finite number, INF provided",
                     ));
                 }
                 if d.is_nan() {
-                    return Err(value_error_named(
+                    return Err(argument_error(
                         req,
+                        "ValueError",
                         3,
-                        "step",
                         "must be a finite number, NAN provided",
                     ));
                 }
@@ -588,10 +580,10 @@ fn range(
                 step = n;
                 if step < 0 {
                     if step == i64::MIN {
-                        return Err(value_error_named(
+                        return Err(argument_error(
                             req,
+                            "ValueError",
                             3,
-                            "step",
                             &format!("must be greater than {}", i64::MIN),
                         ));
                     }
@@ -606,7 +598,7 @@ fn range(
         }
         #[allow(clippy::float_cmp)]
         if step_double == 0.0 {
-            return Err(value_error_named(req, 3, "step", "cannot be 0"));
+            return Err(argument_error(req, "ValueError", 3, "cannot be 0"));
         }
     }
     let (mut start, low) = range_input(req, user_start, 1, "start")?;
@@ -656,19 +648,19 @@ fn range(
 }
 
 fn boundary_error(req: &mut Request) -> Thrown {
-    value_error_named(
+    argument_error(
         req,
+        "ValueError",
         3,
-        "step",
         "must be less than the range spanned by argument #1 ($start) and argument #2 ($end)",
     )
 }
 
 fn negative_step_error(req: &mut Request) -> Thrown {
-    value_error_named(
+    argument_error(
         req,
+        "ValueError",
         3,
-        "step",
         "must be greater than 0 for increasing ranges",
     )
 }

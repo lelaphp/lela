@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, OrFalse, Ref, This, True, Union, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{FieldType, Mysqlnd, Stmt, StmtAttr, StmtFetch, StmtStatus};
@@ -182,14 +182,14 @@ pub(crate) fn bind_param(
             return Err(arg_value_error(req, on.at(2), "not be empty"));
         }
         if types.len() != vars.len() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ArgumentCountError",
                 "The number of elements in the type definition string must match the number of bind variables",
             ));
         }
         if types.len() != s.stmt.parameter_count() as usize {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ArgumentCountError",
                 "The number of variables must match the number of parameters in the prepared statement",
@@ -219,7 +219,7 @@ pub(crate) fn bind_param(
 pub(crate) fn bind_result(req: &mut Request, on: On, vars: &[Ref<Value>]) -> Result<bool, Thrown> {
     with_stmt(req, on.object, Need::Open, |req, s| {
         if vars.len() != s.stmt.field_count() as usize {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ArgumentCountError",
                 "Number of bind variables doesn't match number of fields in prepared statement",

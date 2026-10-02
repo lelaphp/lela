@@ -14,7 +14,8 @@ use php_ext::coerce::{
     BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string,
 };
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw_error, warning,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, deprecated, docref,
+    throw_error, warning,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, Layout, PhpArray, PhpString, Value, ValueRef};
@@ -587,6 +588,17 @@ fn array_change_key_case(
 /// array_fill(): Argument #2 ($count) is too large
 /// Cannot add element to the array as the next element is already occupied
 /// ```
+///
+/// The count too large is `zend_argument_value_error`'s, so its two
+/// printed buffers stand across the throw and it peaks where php's does:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { array_fill(0, PHP_INT_MAX, 1); } catch (ValueError $e) {} });
+/// ```
+/// ```expect
+/// 2904 32
+/// ```
 #[php_function]
 fn array_fill(
     req: &mut Request,
@@ -602,11 +614,7 @@ fn array_fill(
         return Ok(PhpArray::empty());
     }
     if count > i64::from(i32::MAX) {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "array_fill(): Argument #2 ($count) is too large",
-        ));
+        return Err(argument_error(req, "ValueError", 2, "is too large"));
     }
     if start > i64::MAX - count + 1 {
         return Err(throw_error(
@@ -908,10 +916,11 @@ fn array_chunk(
 #[php_function]
 fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<PhpArray, Thrown> {
     if keys.len() != values.len() {
-        return Err(throw_error(
+        return Err(argument_error(
             req,
             "ValueError",
-            "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements",
+            1,
+            "and argument #2 ($values) must have the same number of elements",
         ));
     }
     if keys.is_empty() {
