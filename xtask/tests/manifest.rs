@@ -277,9 +277,10 @@ fn a_crate_row_names_the_phpt_subsets_the_crate_owns() {
         subsets("php_engine"),
         [Path::new("Zend/tests"), Path::new("tests")]
     );
-    // An extension's subset is its own by the design (§12, ext/AGENTS.md),
-    // so its row says nothing; a row that names subsets is what it owns.
-    assert_eq!(subsets("ext/pcre"), [Path::new("ext/pcre/tests")]);
+    // An extension's subset is its own by the design (§12, ext/AGENTS.md):
+    // every `.phpt` under its directory (#1590), so its row says nothing;
+    // a row that names subsets is what it owns.
+    assert_eq!(subsets("ext/pcre"), [Path::new("ext/pcre")]);
     assert_eq!(
         subsets("ext/spl"),
         [

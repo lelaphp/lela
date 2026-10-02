@@ -191,6 +191,28 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "run"), 1);
 }
 
+/// An extension's derived subset is every `.phpt` under `ext/<name>`, as
+/// run-tests.php walks the directory, so a test in a directory beside
+/// `tests/`, as `ext/intl/uchar/tests` stands beside `ext/intl/tests`, is
+/// the extension's with no `phpt` key in its row (#1590, #1598).
+#[test]
+fn a_nested_test_directory_is_held_in_the_extensions_derived_subset() {
+    if oracle().is_none() {
+        return;
+    }
+    let pass = "--TEST--\nHeld\n--FILE--\n<?php echo \"ok\";\n--EXPECT--\nok\n";
+    let scratch = Scratch::new("nested", &[("top.phpt", pass)]);
+    let nested = scratch.root.join("corpus/ext/fixture/uchar/tests");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("nested.phpt"), pass).unwrap();
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(reading.scope, "ext/fixture");
+    assert_eq!(count(&reading, "tests"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "files"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 2, "{reading:#?}");
+}
+
 #[test]
 fn the_same_missed_expectation_passes_under_an_accepted_divergence_row() {
     if oracle().is_none() {

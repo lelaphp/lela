@@ -6,7 +6,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 - One entry, `extension()`; anything `pub` beyond it is printed by `api-check` and is a row of the design's list of surfaces (§4.10): what the php header a dependent extension includes declares `PHPAPI`, item by item, and nothing more.
 - State is on the value: request-scoped or immutable; no lock or cell (ADR-0005, `ext.no-locks`). Cross-request caching is `api::Cache`.
 - Tests go through `Capture`; every native carries its witness in rustdoc, with `exit=` written by `xtask witness --accept` only.
-- The phpt subset is `php-src/ext/<name>/tests`, run with `xtask phpt --subset`.
+- The phpt subset is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory (`ext/intl/uchar/tests` is `ext/intl`'s), run with `xtask phpt --subset`.
 
 <!-- computed tree src=. depth=1 dirs name=extensions | do not edit; run computed -->
 ```

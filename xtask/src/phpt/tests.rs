@@ -682,18 +682,58 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
         let subset = resolve(&manifest, name).unwrap();
         assert_eq!(subset.scope, "ext/pcre");
         assert_eq!(subset.dirs.len(), 1, "{subset:#?}");
-        assert_eq!(subset.dirs[0].under, Path::new("ext/pcre/tests"));
+        assert_eq!(subset.dirs[0].under, Path::new("ext/pcre"));
         assert_eq!(
             subset.dirs[0].dir,
-            tree.join("ext/pcre/tests"),
+            tree.join("ext/pcre"),
             "the subset is the tree's the variable names"
         );
         assert_eq!(
-            subset.id(&subset.dirs[0].dir.join("preg_match_basic.phpt")),
+            subset.id(&subset.dirs[0].dir.join("tests/preg_match_basic.phpt")),
             "phpt:php-src/ext/pcre/tests/preg_match_basic.phpt",
             "the divergence key names the corpus, not this machine"
         );
     }
+}
+
+/// The nightly lane's corpus holds what the rows derive: an extension's
+/// subset is `ext/<name>` whole, a nested test directory in it, and an
+/// extension with no `.phpt` is no subset of it (#1590, #1598).
+#[test]
+fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
+    let tree = fixture_tree();
+    for (under, file) in [
+        ("Zend/tests", "a.phpt"),
+        ("ext/pcre/tests", "b.phpt"),
+        ("ext/nested/tests", "c.phpt"),
+        ("ext/nested/uchar/tests", "d.phpt"),
+        ("ext/hollow/src", "hollow.c"),
+        ("sapi/cli/tests", "e.phpt"),
+    ] {
+        fs::create_dir_all(tree.join(under)).unwrap();
+        fs::write(tree.join(under).join(file), "").unwrap();
+    }
+    let corpus = Subset::corpus(&tree);
+    let scopes: Vec<&str> = corpus.iter().map(|s| s.scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        ["Zend/tests", "ext/nested", "ext/pcre", "sapi/cli/tests"],
+        "{corpus:#?}"
+    );
+    let nested = &corpus[1];
+    let manifest = manifest_of([Crate::named("ext/nested")], &tree);
+    assert_eq!(
+        *nested,
+        resolve(&manifest, "ext/nested").unwrap(),
+        "the nightly lane's subset is the one the row derives"
+    );
+    let names: Vec<String> = nested
+        .tests()
+        .unwrap()
+        .iter()
+        .map(|test| nested.name(test))
+        .collect();
+    assert_eq!(names, ["tests/c.phpt", "uchar/tests/d.phpt"]);
 }
 
 #[test]
@@ -724,7 +764,7 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
     assert_eq!(corpus.scope, "Zend/tests");
     assert_eq!(corpus.dirs[0].dir, tree.join("Zend/tests"));
     let extension = resolve(&manifest, "pcre").unwrap();
-    assert_eq!(extension.dirs[0].dir, tree.join("ext/pcre/tests"));
+    assert_eq!(extension.dirs[0].dir, tree.join("ext/pcre"));
     assert_eq!(extension.absent(), Vec::<&Path>::new(), "{extension:#?}");
 }
 
@@ -790,9 +830,10 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
 }
 
-/// An extension's row derives its subset, `ext/<name>/tests`, and where the
-/// pinned tree has no such directory the extension has no tests of its
-/// own, as `ext/lexbor` has none: its reading, asked for by name and in
+/// An extension's row derives its subset, `ext/<name>`, and where the
+/// pinned tree has no such directory, or no `.phpt` under it, the
+/// extension has no tests of its own, as `ext/lexbor` has none
+/// (#1598): its reading, asked for by name and in
 /// the lane alike, is a skip naming the directory, not the standing fail
 /// a row that names a directory the tree has not earns. A subset named on
 /// the command line that is no crate and no directory is still refused,
@@ -800,25 +841,47 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
 #[test]
 fn an_extension_with_no_test_directory_reads_as_a_skip_and_a_name_that_is_nothing_fails() {
     let tree = fixture_tree();
-    let manifest = manifest_of([Crate::named("ext/testless")], &tree);
+    // `ext/hollow` stands in the tree with no `.phpt` under it, as
+    // `ext/lexbor` does in php-src; `ext/testless` is not there at all.
+    fs::create_dir_all(tree.join("ext/hollow/src")).unwrap();
+    fs::write(tree.join("ext/hollow/src/hollow.c"), "").unwrap();
+    let manifest = manifest_of(
+        [Crate::named("ext/testless"), Crate::named("ext/hollow")],
+        &tree,
+    );
     let registry = registry("");
-    for subset in [Some("ext/testless".to_owned()), None] {
+    for (subset, has) in [
+        (Some("ext/testless"), "has no such directory"),
+        (Some("ext/hollow"), "holds no .phpt under it"),
+        (None, ""),
+    ] {
         let ask = Ask {
-            subset,
+            subset: subset.map(str::to_owned),
             jobs: NonZeroUsize::new(1),
             ..Ask::default()
         };
         let readings = super::run(&workspace(), &manifest, &registry, &ask).unwrap();
-        assert_eq!(readings.len(), 1, "{readings:#?}");
-        let reading = &readings[0];
-        assert_eq!(reading.scope, "ext/testless", "{reading:#?}");
-        assert_eq!(reading.status, Status::Skip, "{reading:#?}");
-        assert!(
-            reading.message.contains("ext/testless/tests")
-                && reading.message.contains("no tests of its own"),
-            "{}",
-            reading.message
+        assert_eq!(
+            readings.len(),
+            if subset.is_some() { 1 } else { 2 },
+            "{readings:#?}"
         );
+        for reading in &readings {
+            assert!(
+                ["ext/testless", "ext/hollow"].contains(&reading.scope.as_str()),
+                "{reading:#?}"
+            );
+            assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+            assert!(
+                reading
+                    .message
+                    .contains(&format!("derives {}", reading.scope))
+                    && reading.message.contains(has)
+                    && reading.message.contains("no tests of its own"),
+                "{}",
+                reading.message
+            );
+        }
     }
     let ask = Ask {
         subset: Some("ext/nosuch".to_owned()),

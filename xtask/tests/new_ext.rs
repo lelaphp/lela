@@ -161,7 +161,7 @@ fn the_crate_laid_down_has_the_template_topology() {
          the diff reads no exit= in it (witness.exit-authored): {lib}"
     );
     assert!(
-        lib.contains("php-src/ext/demo/tests"),
+        lib.contains("under `php-src/ext/demo`"),
         "the phpt subset is named: {lib}"
     );
 
@@ -172,7 +172,10 @@ fn the_crate_laid_down_has_the_template_topology() {
         .iter()
         .find(|n| n.starts_with("phpt subset:"))
         .unwrap_or_else(|| panic!("{:#?}", laid.notes));
-    assert!(note.contains("php-src/ext/demo/tests"), "{note}");
+    assert!(
+        note.contains("php-src/ext/demo") && !note.contains("php-src/ext/demo/tests"),
+        "the subset is the extension's directory whole (#1590): {note}"
+    );
 
     // Tests through the capture sink (design §4.10).
     let tests = read(&root, "ext/demo/tests/capture.rs");
