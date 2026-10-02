@@ -27,7 +27,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::common_date::{
     DateTime, ZoneArg, convert_datetimezone, convert_to_datetimezone, gmt, now,
-    process_timezone_argument,
+    process_timezone_argument, zone_held, zone_sorted,
 };
 use crate::error::{self, Carrier, IntlError, Outside, or_false};
 use crate::ffi::calendar::{self as cal, Cal, Calendar, LOCALE_CAPACITY};
@@ -502,9 +502,10 @@ impl IntlCalendar {
     #[php(tentative)]
     fn createInstance(
         req: &mut Request,
-        #[php(default = null)] timezone: ZoneArg,
+        #[php(default = null)] timezone: Raw<ZoneArg>,
         #[php(default = null)] locale: Option<PhpString>,
     ) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+        let timezone = zone_raw(req, &timezone, 1)?;
         create_instance(req, timezone, locale)
     }
 
@@ -929,16 +930,27 @@ impl IntlCalendar {
     /// ```php
     /// $c = IntlCalendar::createInstance('UTC');
     /// var_dump($c->setTimeZone(null), $c->getTimeZone()->getID(), $c->setTimeZone(new DateTimeZone('+01:00')), $c->getTimeZone()->getID());
+    /// try { $c->setTimeZone([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->setTimeZone(new stdClass); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// try { intlcal_create_instance([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// bool(true)
     /// string(3) "UTC"
     /// bool(true)
     /// string(9) "GMT+01:00"
+    /// IntlCalendar::setTimeZone(): Argument #1 ($timezone) must be of type object|string|null, array given
+    /// Error: Object of class stdClass could not be converted to string
+    /// intlcal_create_instance(): Argument #1 ($timezone) must be of type object|string|null, array given
     /// ```
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn setTimeZone(req: &mut Request, this: This<Self>, timezone: ZoneArg) -> Result<bool, Thrown> {
+    fn setTimeZone(
+        req: &mut Request,
+        this: This<Self>,
+        timezone: Raw<ZoneArg>,
+    ) -> Result<bool, Thrown> {
+        let timezone = zone_raw(req, &timezone, 1)?;
         set_time_zone(req, Of::method(this), timezone)
     }
 
@@ -1711,6 +1723,13 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
     Ok(true)
 }
 
+/// A `$timezone` argument held as `Z_PARAM_OBJ_OR_STR_OR_NULL` holds it
+/// and sorted as `timezone_process_timezone_argument` sorts it.
+fn zone_raw(req: &mut Request, zone: &Raw<ZoneArg>, position: u32) -> Result<ZoneArg, Thrown> {
+    let held = zone_held(req, zone.value(), position)?;
+    zone_sorted(req, held)
+}
+
 /// The zone argument `Z_PARAM_OBJ_OR_STR_OR_NULL` took, sorted into an
 /// `IntlTimeZone`, a `DateTimeZone` or a string, another object by its
 /// string cast.
@@ -1850,9 +1869,10 @@ fn gregorian_create_instance(
 #[php_function]
 fn intlcal_create_instance(
     req: &mut Request,
-    #[php(default = null)] timezone: ZoneArg,
+    #[php(default = null)] timezone: Raw<ZoneArg>,
     #[php(default = null)] locale: Option<PhpString>,
 ) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+    let timezone = zone_raw(req, &timezone, 1)?;
     create_instance(req, timezone, locale)
 }
 
@@ -1993,8 +2013,9 @@ fn intlcal_add(
 fn intlcal_set_time_zone(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
-    timezone: ZoneArg,
+    timezone: Raw<ZoneArg>,
 ) -> Result<bool, Thrown> {
+    let timezone = zone_raw(req, &timezone, 2)?;
     set_time_zone(req, Of::function(calendar), timezone)
 }
 
