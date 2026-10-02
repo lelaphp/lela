@@ -766,23 +766,17 @@ impl ObjectHandlers for TokenListHandlers {
 /// `dom_validate_tokens_varargs` over the tokens as passed:
 /// `Z_PARAM_VARIADIC('*')` coerces nothing, so a token that is no string
 /// is php's `TypeError`, which names no parameter.
-fn varargs(
-    req: &mut Request,
-    tokens: &[Raw<PhpString>],
-    method: &str,
-) -> Result<Vec<Vec<u8>>, Thrown> {
+fn varargs(req: &mut Request, tokens: &[Raw<PhpString>]) -> Result<Vec<Vec<u8>>, Thrown> {
     let mut out = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
         let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
         let arg = token.value();
         let Some(bytes) = arg.as_str_bytes().map(<[u8]>::to_vec) else {
             let given = php_ext::coerce::value_name(req, &arg);
-            return Err(throw_error(
+            return Err(php_ext::raising::arg_type_error(
                 req,
-                "TypeError",
-                &format!(
-                    "Dom\\TokenList::{method}(): Argument #{position} must be of type string, {given} given"
-                ),
+                position,
+                &format!("be of type string, {given} given"),
             ));
         };
         if bytes.contains(&0) {
@@ -891,7 +885,7 @@ impl TokenList {
         this: This<Self>,
         tokens: Variadic<Raw<PhpString>>,
     ) -> Result<(), Thrown> {
-        let added = varargs(req, &tokens.0, "add")?;
+        let added = varargs(req, &tokens.0)?;
         let this = this.object();
         with_set(req, this, |set| {
             for token in added {
@@ -910,7 +904,7 @@ impl TokenList {
         this: This<Self>,
         tokens: Variadic<Raw<PhpString>>,
     ) -> Result<(), Thrown> {
-        let removed = varargs(req, &tokens.0, "remove")?;
+        let removed = varargs(req, &tokens.0)?;
         let this = this.object();
         with_set(req, this, |set| {
             for bucket in &mut set.buckets {

@@ -53,7 +53,7 @@ use std::os::unix::fs::PermissionsExt;
 use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::process;
-use php_ext::raising::{Level, Thrown, docref, throw_error};
+use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::{Request, UrlStat, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -1140,12 +1140,11 @@ fn touch(
         (None, None) => None,
         (Some(mtime), None) => Some((mtime, mtime)),
         (None, Some(_)) => {
-            // `zend_argument_value_error`, whose message carries no
-            // `must` of its own.
-            return Err(throw_error(
+            return Err(argument_error(
                 req,
                 "ValueError",
-                "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer",
+                2,
+                "cannot be null when argument #3 ($atime) is an integer",
             ));
         }
         (Some(mtime), Some(atime)) => Some((mtime, atime)),

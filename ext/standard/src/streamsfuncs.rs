@@ -92,7 +92,8 @@ use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, arity, deprecated, docref, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, deprecated, docref,
+    throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
@@ -713,22 +714,23 @@ fn stream_context_set_option(
         Passed::Given(value) => Some(value),
         Passed::Omitted => None,
     };
-    let refuse = |req: &mut Request, text: &str| {
-        let message = format!("stream_context_set_option(): {text}");
-        Err(throw_error(req, "ValueError", &message))
+    let refuse = |req: &mut Request, position: u32, tail: &str| {
+        Err(argument_error(req, "ValueError", position, tail))
     };
     match wrapper_or_options {
         Union::A(options) => {
             if option.is_some() {
                 return refuse(
                     req,
-                    "Argument #3 ($option_name) must be null when argument #2 ($wrapper_or_options) is an array",
+                    3,
+                    "must be null when argument #2 ($wrapper_or_options) is an array",
                 );
             }
             if value.is_some() {
                 return refuse(
                     req,
-                    "Argument #4 ($value) cannot be provided when argument #2 ($wrapper_or_options) is an array",
+                    4,
+                    "cannot be provided when argument #2 ($wrapper_or_options) is an array",
                 );
             }
             parse_options(req, res, options)?;
@@ -737,13 +739,15 @@ fn stream_context_set_option(
             let Some(option) = option else {
                 return refuse(
                     req,
-                    "Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string",
+                    3,
+                    "cannot be null when argument #2 ($wrapper_or_options) is a string",
                 );
             };
             let Some(value) = value else {
                 return refuse(
                     req,
-                    "Argument #4 ($value) must be provided when argument #2 ($wrapper_or_options) is a string",
+                    4,
+                    "must be provided when argument #2 ($wrapper_or_options) is a string",
                 );
             };
             set_option(req, res, wrapper.as_bytes(), option.as_bytes(), &value)?;

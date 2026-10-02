@@ -13,7 +13,7 @@
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -326,15 +326,12 @@ fn php_setcookie(
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if strpbrk(name, b"=,; \t\r\n\x0b\x0c") {
-        let text = format!(
-            "{function}(): Argument #1 ($name) cannot contain \"=\", {ILLEGAL_COOKIE_CHARACTER}"
-        );
-        return refuse(req, text);
+        let text = format!("cannot contain \"=\", {ILLEGAL_COOKIE_CHARACTER}");
+        return Err(argument_error(req, "ValueError", 1, &text));
     }
     if !url_encode && value.is_some_and(|v| strpbrk(v, b",; \t\r\n\x0b\x0c")) {
-        let text =
-            format!("{function}(): Argument #2 ($value) cannot contain {ILLEGAL_COOKIE_CHARACTER}");
-        return refuse(req, text);
+        let text = format!("cannot contain {ILLEGAL_COOKIE_CHARACTER}");
+        return Err(argument_error(req, "ValueError", 2, &text));
     }
     for (what, field) in [("path", &cookie.path), ("domain", &cookie.domain)] {
         if field

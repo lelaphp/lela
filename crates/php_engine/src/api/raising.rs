@@ -745,12 +745,13 @@ pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Va
 /// ```
 pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
-    throw_argument_error(req, "TypeError", tail, &message)
+    let member = active_member(req);
+    throw_argument_error(req, member.as_deref(), "TypeError", tail, &message)
 }
 
 /// `zend_argument_error_variadic` (`Z/Zend/zend_API.c:398`) around the
-/// throw of `message`: the function's name, a member string made for
-/// the call where the native is a method
+/// throw of `message`: the function's name, the member string `member`
+/// names, made for the call where the function is a method
 /// (`get_active_function_or_method_name`), `zend_vspprintf`'s buffer of
 /// the `tail`, and `zend_throw_error`'s buffer of the whole sentence
 /// stand while the throwable is made, and go after it, so a throw's
@@ -767,17 +768,20 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// ```expect
 /// 2608 32
 /// ```
-fn throw_argument_error(req: &mut Request, class: &str, tail: &str, message: &str) -> Thrown {
-    let member = active_member(req);
-    under_name(req, member.as_deref(), |req| {
-        match printf_buffer(req, tail.len()) {
-            Ok(formatted) => {
-                let thrown = throw_error(req, class, message);
-                req.heap_mut().free_block(formatted);
-                thrown
-            }
-            Err(refused) => refused,
+pub(crate) fn throw_argument_error(
+    req: &mut Request,
+    member: Option<&str>,
+    class: &str,
+    tail: &str,
+    message: &str,
+) -> Thrown {
+    under_name(req, member, |req| match printf_buffer(req, tail.len()) {
+        Ok(formatted) => {
+            let thrown = throw_error(req, class, message);
+            req.heap_mut().free_block(formatted);
+            thrown
         }
+        Err(refused) => refused,
     })
 }
 
@@ -831,7 +835,8 @@ fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::Block, Throw
 /// `a_value_error_names_the_parameter` below.
 pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
-    throw_argument_error(req, "ValueError", tail, &message)
+    let member = active_member(req);
+    throw_argument_error(req, member.as_deref(), "ValueError", tail, &message)
 }
 
 /// `zend_argument_error`: a throwable of `class` for the argument at
@@ -849,7 +854,8 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, "");
     let message = format!("{}{tail}", message.trim_end_matches("must "));
-    throw_argument_error(req, class, tail, &message)
+    let member = active_member(req);
+    throw_argument_error(req, member.as_deref(), class, tail, &message)
 }
 
 /// `zend_wrong_parameters_count_error`'s `ArgumentCountError`, `fn()

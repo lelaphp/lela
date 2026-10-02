@@ -541,11 +541,12 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
         // `zend_argument_error` with `ReflectionException` as its class.
         _ => {
             let given = value_name(req, &first);
-            return Err(throw(
+            return Err(php_ext::raising::argument_error(
                 req,
                 "ReflectionException",
+                1,
                 &format!(
-                    "ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {given} given"
+                    "must be a string, an array(class, method), or a callable object, {given} given"
                 ),
             ));
         }
@@ -580,10 +581,11 @@ fn construct_offset(
         }
         Union::A(position) => {
             if position < 0 {
-                return Err(throw_error(
+                return Err(php_ext::raising::argument_error(
                     req,
                     "ValueError",
-                    "ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0",
+                    2,
+                    "must be greater than or equal to 0",
                 ));
             }
             let position = usize::try_from(position).unwrap_or(usize::MAX);

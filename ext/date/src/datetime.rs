@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use php_ext::abi::{Class, Instance, ObjectHandlers as _, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -179,13 +179,14 @@ fn from_timestamp(sec: i64, usec: i64) -> Time {
 /// `php_date_initialize_from_ts_double`: the seconds and the rounded
 /// microseconds, or the `DateRangeError` for a number no timestamp is.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn from_float(req: &mut Request, method: &str, ts: f64) -> Result<Time, Thrown> {
+fn from_float(req: &mut Request, ts: f64) -> Result<Time, Thrown> {
     let range = |req: &mut Request| {
-        throw(
+        argument_error(
             req,
             "DateRangeError",
+            1,
             &format!(
-                "{method}(): Argument #1 ($timestamp) must be a finite number between {} and {}.999999, {} given",
+                "must be a finite number between {} and {}.999999, {} given",
                 i64::MIN,
                 i64::MAX,
                 php_g(ts)
@@ -325,12 +326,11 @@ fn create_from(req: &mut Request, from: PhpObject, fallback: &str) -> Result<Php
 fn create_from_timestamp(
     req: &mut Request,
     timestamp: Union<i64, f64>,
-    method: &str,
     fallback: &str,
 ) -> Result<Static, Thrown> {
     let time = match timestamp {
         Union::A(n) => from_timestamp(n, 0),
-        Union::B(f) => from_float(req, method, f)?,
+        Union::B(f) => from_float(req, f)?,
     };
     let class = called_or(req, fallback)?;
     new_date(req, class, time).map(Static)
@@ -596,14 +596,15 @@ fn timestamp_set(req: &mut Request, object: PhpObject, timestamp: i64) -> Result
 }
 
 /// `setMicrosecond`'s range, php's `DateRangeError` outside it.
-fn microsecond_in_range(req: &mut Request, method: &str, us: i64) -> Result<(), Thrown> {
+fn microsecond_in_range(req: &mut Request, us: i64) -> Result<(), Thrown> {
     if (0..=999_999).contains(&us) {
         return Ok(());
     }
-    Err(throw(
+    Err(argument_error(
         req,
         "DateRangeError",
-        &format!("{method}(): Argument #1 ($microsecond) must be between 0 and 999999, {us} given"),
+        1,
+        &format!("must be between 0 and 999999, {us} given"),
     ))
 }
 
@@ -1606,7 +1607,7 @@ impl DateTime {
         req: &mut Request,
         timestamp: Union<i64, f64>,
     ) -> Result<Static, Thrown> {
-        create_from_timestamp(req, timestamp, "DateTime::createFromTimestamp", "DateTime")
+        create_from_timestamp(req, timestamp, "DateTime")
     }
 
     /// `DateTime::getLastErrors(): array|false`, `date_get_last_errors`'
@@ -1801,7 +1802,7 @@ impl DateTime {
         this: This<Self>,
         microsecond: i64,
     ) -> Result<Static, Thrown> {
-        microsecond_in_range(req, "DateTime::setMicrosecond", microsecond)?;
+        microsecond_in_range(req, microsecond)?;
         let object = this.object();
         let mut time = time_of(req, object)?;
         time.us = microsecond;
@@ -1931,12 +1932,7 @@ impl DateTimeImmutable {
         req: &mut Request,
         timestamp: Union<i64, f64>,
     ) -> Result<Static, Thrown> {
-        create_from_timestamp(
-            req,
-            timestamp,
-            "DateTimeImmutable::createFromTimestamp",
-            "DateTimeImmutable",
-        )
+        create_from_timestamp(req, timestamp, "DateTimeImmutable")
     }
 
     #[php(tentative, implementation = DateTime::getLastErrors)]
@@ -2197,7 +2193,7 @@ impl DateTimeImmutable {
         this: This<Self>,
         microsecond: i64,
     ) -> Result<Static, Thrown> {
-        microsecond_in_range(req, "DateTimeImmutable::setMicrosecond", microsecond)?;
+        microsecond_in_range(req, microsecond)?;
         let object = this.object();
         let mut time = time_of(req, object)?;
         time.us = microsecond;

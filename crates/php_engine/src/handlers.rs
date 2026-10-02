@@ -4295,6 +4295,25 @@ pub(crate) fn callable_convert<T: Tier>(
 /// {closure:%s:6}(): Argument #1 ($x) must be of type int, string given
 /// {closure:%s:7}(): Argument #1 ($c) must be of type int, string given, called in %s on line 8
 /// ```
+///
+/// It is `zend_argument_type_error`'s, so the type's string where it
+/// names more than one, a method's member string and the two printed
+/// buffers stand across the throw, and it peaks where php's does:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// function u(int $x) {}
+/// class K { function m(int $x) {} static function s(int|string $x) {} }
+/// $u = new ReflectionFunction('u'); $m = new ReflectionMethod('K', 'm'); $s = new ReflectionMethod('K', 's'); $k = new K;
+/// pk(function () use ($u) { try { $u->invoke("x"); } catch (TypeError $e) {} });
+/// pk(function () use ($m, $k) { try { $m->invoke($k, "x"); } catch (TypeError $e) {} });
+/// pk(function () use ($s) { try { $s->invoke(null, []); } catch (TypeError $e) {} });
+/// ```
+/// ```expect
+/// 3496 32
+/// 3544 0
+/// 3584 0
+/// ```
 fn arg_type_error(
     req: &mut Request,
     frame: FrameRef,
@@ -4324,16 +4343,24 @@ fn arg_type_error(
         .unwrap_or_default();
     let declared = resolved_type_name(req, frame, ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
-    let caller = call_site(req, frame);
-    let message = match caller {
-        Some((file, line)) => format!(
-            "{name}(): Argument #{number}{parameter} must be of type {declared}, {given} given, called in {file} on line {line}"
-        ),
-        None => format!(
-            "{name}(): Argument #{number}{parameter} must be of type {declared}, {given} given"
-        ),
+    let tail = match call_site(req, frame) {
+        Some((file, line)) => {
+            format!("must be of type {declared}, {given} given, called in {file} on line {line}")
+        }
+        None => format!("must be of type {declared}, {given} given"),
     };
-    crate::api::raising::throw_error(req, "TypeError", &message)
+    let message = format!("{name}(): Argument #{number}{parameter} {tail}");
+    // `zend_type_to_string_resolved`'s `need_msg`, a string made for
+    // a type of more than one name, and `zend_argument_type_error`'s
+    // member string for a method, stand across the throw.
+    let need = declared
+        .contains(['|', '&', '?'])
+        .then_some(declared.as_str());
+    let member = req.frame_function_name(frame);
+    let member = member.contains("::").then_some(member.as_str());
+    crate::api::raising::under_name(req, need, |req| {
+        crate::api::raising::throw_argument_error(req, member, "TypeError", &tail, &message)
+    })
 }
 
 /// `EX(prev_execute_data)` as php's two argument diagnostics read it,
