@@ -468,7 +468,7 @@ fn assert_options(req: &mut Request, option: i64, value: Passed<Value>) -> Resul
     if let Some(value) = value {
         let text = to_string(req, &value)?;
         req.state::<crate::State>().assert.assert_options = true;
-        let set = req.ini_set(entry, text.as_bytes());
+        let set = req.ini_set_string(entry, text);
         req.state::<crate::State>().assert.assert_options = false;
         req.release(Value::string(text));
         set?;

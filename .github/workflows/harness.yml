@@ -209,7 +209,7 @@ jobs:
       - name: the summary
         if: always()
         run: |
-          cargo xtask status --section permits > permits.md
+          cargo xtask status --section permits --uncut > permits.md
           cat permits.md
           cat permits.md >> "$GITHUB_STEP_SUMMARY"
       - name: the reading store, the only upload

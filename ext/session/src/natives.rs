@@ -64,7 +64,7 @@ fn session_name(
     let current = ini(req, b"session.name");
     let current = PhpString::new(req, &current)?;
     if let Some(name) = name {
-        crate::ini::alter(req, b"session.name", name.0.as_bytes())?;
+        crate::ini::alter_string(req, b"session.name", name.0)?;
     }
     Ok(OrFalse::Value(current))
 }
@@ -121,7 +121,9 @@ fn session_module_name(
     }
     session::close(req)?;
     req.state::<State>().files = None;
-    crate::ini::alter(req, b"session.save_handler", &name)?;
+    if let Some(module) = module {
+        crate::ini::alter_string(req, b"session.save_handler", module)?;
+    }
     answer(req, OrFalse::Value(current))
 }
 
@@ -146,7 +148,7 @@ fn session_save_path(
     let current = ini(req, b"session.save_path");
     let current = PhpString::new(req, &current)?;
     if let Some(path) = path {
-        crate::ini::alter(req, b"session.save_path", path.0.as_bytes())?;
+        crate::ini::alter_string(req, b"session.save_path", path.0)?;
     }
     Ok(OrFalse::Value(current))
 }
@@ -451,7 +453,7 @@ fn session_cache_limiter(
     let current = ini(req, b"session.cache_limiter");
     let current = PhpString::new(req, &current)?;
     if let Some(limiter) = value {
-        crate::ini::alter(req, b"session.cache_limiter", limiter.as_bytes())?;
+        crate::ini::alter_string(req, b"session.cache_limiter", limiter)?;
     }
     Ok(OrFalse::Value(current))
 }
@@ -489,7 +491,8 @@ fn session_cache_expire(
         return Ok(OrFalse::False);
     }
     if let Some(expires) = expires {
-        crate::ini::alter(req, b"session.cache_expire", expires.to_string().as_bytes())?;
+        let expires = php_ext::coerce::int_to_string(req, expires)?;
+        crate::ini::alter_made(req, b"session.cache_expire", expires)?;
     }
     Ok(OrFalse::Value(current))
 }
@@ -649,11 +652,9 @@ fn session_start(
             continue;
         }
         let text = to_string(req, &value)?;
-        let text_bytes = text.as_bytes().to_vec();
-        req.release(Value::string(text));
         let mut entry = b"session.".to_vec();
         entry.extend_from_slice(&name);
-        if !crate::ini::alter(req, &entry, &text_bytes)? {
+        if !crate::ini::alter_made(req, &entry, text)? {
             docref(
                 req,
                 Level::Warning,
@@ -854,6 +855,22 @@ fn session_get_cookie_params(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// Warning: session_set_cookie_params(): Session cookie parameters cannot be changed after headers have already been sent (sent from %s on line 2) in %s on line 6
 /// bool(false)
 /// ```
+///
+/// Each entry keeps the string it is handed: an argument's or an
+/// option's one more owner, a number's or a boolean's a new one
+/// (`Z/ext/session/session.c:1907-1970`):
+///
+/// ```php
+/// ob_start(); ini_set('from', 'x');
+/// $v = str_repeat('/', 40); $m = memory_get_usage(); session_set_cookie_params(['path' => $v, 'lifetime' => 100, 'secure' => true]); unset($v); echo memory_get_usage() - $m, "\n";
+/// $v = str_repeat('/', 40); $m = memory_get_usage(); session_set_cookie_params(5, $v); unset($v); echo memory_get_usage() - $m, "\n";
+/// $v = str_repeat('a', 40); $m = memory_get_usage(); session_name($v); session_cache_expire(100); unset($v); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 64
+/// -112
+/// 32
+/// ```
 #[allow(clippy::too_many_lines)] // php's function
 #[php_function]
 fn session_set_cookie_params(
@@ -868,8 +885,8 @@ fn session_set_cookie_params(
         Union::A(array) => (Some(array), 0),
         Union::B(lifetime) => (None, lifetime),
     };
-    let mut path = path.map(|path| path.as_bytes().to_vec());
-    let mut domain = domain.map(|domain| domain.as_bytes().to_vec());
+    let mut path = path.map(Cookie::Held);
+    let mut domain = domain.map(Cookie::Held);
     let (mut secure, mut httponly) = (secure, httponly);
     if !ini_bool(req, b"session.use_cookies") {
         docref(
@@ -920,20 +937,38 @@ fn session_set_cookie_params(
                 continue;
             };
             let key = key.as_bytes().to_ascii_lowercase();
-            let text = |req: &mut Request| -> Result<Vec<u8>, Thrown> {
-                let s = to_string(req, &value)?;
-                let bytes = s.as_bytes().to_vec();
-                req.release(Value::string(s));
-                Ok(bytes)
+            let made = match key.as_slice() {
+                b"lifetime" | b"path" | b"domain" | b"samesite" => match to_string(req, &value) {
+                    Ok(made) => Some(Cookie::Made(made)),
+                    Err(thrown) => {
+                        for set in [lifetime, path, domain, samesite].into_iter().flatten() {
+                            set.release(req);
+                        }
+                        return Err(thrown);
+                    }
+                },
+                _ => None,
             };
+            let slot = match key.as_slice() {
+                b"lifetime" => Some(&mut lifetime),
+                b"path" => Some(&mut path),
+                b"domain" => Some(&mut domain),
+                b"samesite" => Some(&mut samesite),
+                _ => None,
+            };
+            if let (Some(slot), Some(made)) = (slot, made) {
+                // A key given twice keeps the last; php overwrites the
+                // first without releasing it, which is released here.
+                if let Some(before) = slot.replace(made) {
+                    before.release(req);
+                }
+                found += 1;
+                continue;
+            }
             match key.as_slice() {
-                b"lifetime" => lifetime = Some(text(req)?),
-                b"path" => path = Some(text(req)?),
-                b"domain" => domain = Some(text(req)?),
                 b"secure" => secure = Some(truthy(req, &value)),
                 b"partitioned" => partitioned = Some(truthy(req, &value)),
                 b"httponly" => httponly = Some(truthy(req, &value)),
-                b"samesite" => samesite = Some(text(req)?),
                 _ => {
                     docref(
                         req,
@@ -952,10 +987,13 @@ fn session_set_cookie_params(
             return Err(arg_value_error(req, 1, "contain at least 1 valid key"));
         }
     } else {
-        lifetime = Some(lifetime_long.to_string().into_bytes());
+        lifetime = Some(Cookie::Made(php_ext::coerce::int_to_string(
+            req,
+            lifetime_long,
+        )?));
     }
-    let flag = |b: bool| if b { b"1".to_vec() } else { b"0".to_vec() };
-    let settings: [(&[u8], Option<Vec<u8>>); 7] = [
+    let flag = |b: bool| Cookie::Chars(if b { b"1" } else { b"0" });
+    let settings: [(&[u8], Option<Cookie>); 7] = [
         (b"session.cookie_lifetime", lifetime),
         (b"session.cookie_path", path),
         (b"session.cookie_domain", domain),
@@ -964,14 +1002,42 @@ fn session_set_cookie_params(
         (b"session.cookie_httponly", httponly.map(flag)),
         (b"session.cookie_samesite", samesite),
     ];
+    // php's `cleanup`: every string made for the call released, whether
+    // an entry refused its value or not.
+    let mut result = Ok(true);
     for (entry, value) in settings {
-        if let Some(value) = value
-            && !crate::ini::alter(req, entry, &value)?
-        {
-            return Ok(false);
+        let Some(value) = value else { continue };
+        if matches!(result, Ok(true)) {
+            result = match value {
+                Cookie::Held(string) | Cookie::Made(string) => {
+                    crate::ini::alter_string(req, entry, string)
+                }
+                Cookie::Chars(bytes) => crate::ini::alter(req, entry, bytes),
+            };
+        }
+        value.release(req);
+    }
+    result
+}
+
+/// One value `session_set_cookie_params()` hands `zend_alter_ini_entry`:
+/// an argument's string, which stays the caller's, one `zval_get_string`
+/// or `zend_long_to_str` made, released after, or the bytes
+/// `zend_alter_ini_entry_chars` makes a string of.
+#[derive(Clone, Copy)]
+enum Cookie {
+    Held(PhpString),
+    Made(PhpString),
+    Chars(&'static [u8]),
+}
+
+impl Cookie {
+    /// The string made for the call released; an argument's stays.
+    fn release(self, req: &mut Request) {
+        if let Cookie::Made(string) = self {
+            req.release(Value::string(string));
         }
     }
-    Ok(true)
 }
 
 /// `session_write_close(): bool` and its alias `session_commit()`: the
@@ -1150,7 +1216,9 @@ fn handler_changeable(req: &mut Request) -> bool {
 /// which only this may do.
 fn user_ini(req: &mut Request) -> Result<(), Thrown> {
     req.state::<State>().set_handler = true;
-    let set = crate::ini::alter(req, b"session.save_handler", b"user");
+    // `ZSTR_KNOWN(ZEND_STR_USER)`, which costs nothing.
+    let user = PhpString::existing_interned(req, b"user")?;
+    let set = crate::ini::alter_made(req, b"session.save_handler", user);
     req.state::<State>().set_handler = false;
     set.map(|_| ())
 }

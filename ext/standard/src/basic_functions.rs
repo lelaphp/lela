@@ -466,13 +466,27 @@ fn time_nanosleep(
 /// string(6) "/three"
 /// string(6) "/three"
 /// ```
+///
+/// The entry is one more owner of the string it is handed
+/// (`Z/ext/standard/basic_functions.c:2068`), so a variable's string
+/// outlives the variable, and the one it held before is released:
+///
+/// ```php
+/// ini_set('from', 'x');
+/// $v = str_repeat('a', 40); $m = memory_get_usage(); set_include_path($v); unset($v); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); set_include_path(str_repeat('b', 2)); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 0
+/// -40
+/// ```
 #[php_function]
 fn set_include_path(req: &mut Request, include_path: Path) -> Result<OrFalse<PhpString>, Thrown> {
     let Path(path) = include_path;
     let Some(old) = req.ini_get(b"include_path").map(<[u8]>::to_vec) else {
         return Ok(OrFalse::False);
     };
-    if path.is_empty() || req.ini_set(b"include_path", path.as_bytes())?.is_none() {
+    if path.is_empty() || req.ini_set_string(b"include_path", path)?.is_none() {
         return Ok(OrFalse::False);
     }
     PhpString::new(req, &old).map(OrFalse::Value)

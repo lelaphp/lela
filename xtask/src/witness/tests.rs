@@ -241,15 +241,16 @@ fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
     // The linked adapter serves the snippet under the recipe's
     // `script_name`, so a diagnostic's `in %s on line %d` names the file
     // the fresh-process adapter runs it as, and not `Standard input
-    // code`, `serve_capture`'s name for a piped source (#293). The name
-    // is read off the linked run alone: the oracle names the file by its
-    // scratch path, so a fence both runs meet writes `%s` (#783).
+    // code`, `serve_capture`'s name for a piped source (#293). The engine
+    // compiles a served source under its name expanded, as php compiles
+    // its primary file (#1569), so the name is the scratch path the
+    // normaliser writes `%SCRATCH%` for, as the oracle's is.
     let recipe = manifest().pin.recipe;
     let snippet = "ini_set('display_errors', 'stderr');\necho $u, 'to the first';";
     let served = crate::oracle::linked::serve(&recipe, None, snippet).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&served.stderr),
-        "Warning: Undefined variable $u in witness.php on line 3"
+        "Warning: Undefined variable $u in %SCRATCH%/witness.php on line 3"
     );
 }
 
