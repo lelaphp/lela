@@ -293,15 +293,20 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     let reading = run(&root, &registry(&accepted("echo 1;")), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
 
-    // A fence the oracle meets and the engine misses: the oracle runs the
-    // snippet by its scratch path, which the recipe normalises to its
-    // token, and the linked engine names it `witness.php` (#293).
+    // A fence the oracle meets and the engine misses: the oracle carries
+    // pcntl and the bundle the harness links does not. `__FILE__` was the
+    // difference once, until the engine compiled a served source under
+    // its name expanded, as the oracle does (#1569).
     let root = scratch(
         "diverged",
-        "/// ```php\n/// echo __FILE__;\n/// ```\n/// ```expect\n/// %s/witness.php\n/// ```\npub fn native() {}\n",
+        "/// ```php\n/// var_dump(function_exists('pcntl_fork'));\n/// ```\n/// ```expect\n/// bool(true)\n/// ```\npub fn native() {}\n",
     );
     assert_eq!(run(&root, &registry(""), false).status, Status::Fail);
-    let reading = run(&root, &registry(&accepted("echo __FILE__;")), false);
+    let reading = run(
+        &root,
+        &registry(&accepted("var_dump(function_exists('pcntl_fork'));")),
+        false,
+    );
     assert_eq!(
         reading.status,
         Status::Pass,
