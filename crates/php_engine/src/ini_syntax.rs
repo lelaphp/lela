@@ -36,12 +36,25 @@ pub enum IniScanner {
 }
 
 /// A value the grammar builds: php's `zval`, with `Z_EXTRA`'s one bit,
-/// `INI_ZVAL_IS_NUMBER`, beside it.
+/// `INI_ZVAL_IS_NUMBER`, beside it, and the string the host holds for
+/// it where it keeps an account of the parse's strings ([`Host::hold`]).
 #[derive(Clone, Debug)]
-struct Val {
-    value: IniValue,
+pub(crate) struct Val {
+    pub(crate) value: IniValue,
     number: bool,
+    pub(crate) held: Option<Held>,
 }
+
+/// One string a [`Host`] holds for the grammar, php's `zend_string`
+/// behind a token's or a value's `zval`: made by [`Host::hold`], grown by
+/// [`Host::extend`], and given up by [`Host::free`] or with the event
+/// that carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held(pub(crate) usize);
+
+/// `STACK_BLOCK_SIZE`: the slots `zend_stack_push` grows the scanner's
+/// state stack by.
+const STACK_BLOCK: usize = 16;
 
 /// What an entry's value, its label or its offset holds: a string
 /// everywhere but the typed scanner's values.
@@ -59,18 +72,36 @@ impl Val {
         Val {
             value: IniValue::Str(bytes.to_vec()),
             number: false,
+            held: None,
         }
     }
 }
 
 /// One call of the parser's callback: `ZEND_INI_PARSER_SECTION`,
 /// `_ENTRY` (a bare label has no value) and `_POP_ENTRY`, the label,
-/// the value and the offset in that order.
+/// the value and the offset in that order; each an [`IniValue`] where
+/// the parse keeps no strings, and a request's value where it does
+/// ([`crate::api::syntax::parse_ini`]).
 #[derive(Clone, Debug, PartialEq)]
-pub enum IniEvent {
-    Section(IniValue),
-    Entry(IniValue, Option<IniValue>),
-    PopEntry(IniValue, IniValue, IniValue),
+pub enum IniEvent<V = IniValue> {
+    Section(V),
+    Entry(V, Option<V>),
+    PopEntry(V, V, V),
+}
+
+impl<V> IniEvent<V> {
+    /// The event with each of its values mapped.
+    pub(crate) fn map<W>(self, mut f: impl FnMut(V) -> W) -> IniEvent<W> {
+        match self {
+            IniEvent::Section(name) => IniEvent::Section(f(name)),
+            IniEvent::Entry(label, value) => IniEvent::Entry(f(label), value.map(f)),
+            IniEvent::PopEntry(label, value, offset) => {
+                let label = f(label);
+                let value = f(value);
+                IniEvent::PopEntry(label, value, f(offset))
+            }
+        }
+    }
 }
 
 /// Where the grammar runs: what `zend_ini_get_constant` and
@@ -89,8 +120,26 @@ pub(crate) trait Host {
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>>;
     /// `convert_to_string` of a double.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error>;
-    /// The callback.
-    fn event(&mut self, event: IniEvent);
+    /// The callback, after which the event's strings are the host's to
+    /// give up, as the grammar's actions release them.
+    fn event(&mut self, event: IniEvent<Val>) -> Result<(), Self::Error>;
+    /// `zend_string_init` of `size` bytes holding `bytes`, the string
+    /// `zend_ini_copy_value` and the lookups make; `None` where the host
+    /// keeps no account of the parse's strings.
+    fn hold(&mut self, _bytes: &[u8], _size: usize) -> Result<Option<Held>, Self::Error> {
+        Ok(None)
+    }
+    /// `zend_string_extend` of `held` to hold `bytes`.
+    fn extend(&mut self, _held: Held, _bytes: &[u8]) -> Result<Option<Held>, Self::Error> {
+        Ok(None)
+    }
+    /// `zend_string_release` of `held`.
+    fn free(&mut self, _held: Held) {}
+    /// `zend_stack_push`'s `erealloc` of the scanner's state stack to
+    /// `slots` ints.
+    fn stack(&mut self, _slots: usize) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// The scanner's states.
@@ -209,11 +258,23 @@ struct Scanner<'a> {
     at: usize,
     state: State,
     stack: Vec<State>,
+    /// The deepest the state stack has been, which its allocation
+    /// follows.
+    deepest: usize,
+    /// The length `zend_ini_escape_string` asked for the last quoted
+    /// string, its text before the escapes were read.
+    escaped: Option<usize>,
     lineno: u32,
     mode: IniScanner,
 }
 
 impl Scanner<'_> {
+    /// `yy_push_state`.
+    fn push_state(&mut self, state: State) {
+        self.stack.push(state);
+        self.deepest = self.deepest.max(self.stack.len());
+    }
+
     fn byte(&self, i: usize) -> u8 {
         self.buf.get(i).copied().unwrap_or(0)
     }
@@ -612,13 +673,13 @@ impl Scanner<'_> {
                     return (Tok::Char(b']'), none);
                 }
                 6 => {
-                    self.stack.push(self.state);
+                    self.push_state(self.state);
                     self.state = S::VarName;
                     return (Tok::DollarCurly, none);
                 }
                 7 => {
                     self.state = self.stack.pop().unwrap_or(S::Initial);
-                    self.stack.push(self.state);
+                    self.push_state(self.state);
                     self.state = S::VarFallback;
                     return (Tok::Fallback, none);
                 }
@@ -628,7 +689,7 @@ impl Scanner<'_> {
                     if self.byte(self.at) == b':' && self.byte(self.at + 1) == b'-' {
                         self.at += 1;
                         self.state = self.stack.pop().unwrap_or(S::Initial);
-                        self.stack.push(self.state);
+                        self.push_state(self.state);
                         self.state = S::VarFallback;
                         return (Tok::Fallback, none);
                     }
@@ -686,7 +747,7 @@ impl Scanner<'_> {
                 }
                 23..=25 => return (Tok::Str, self.token_value(Tok::Str, &text)),
                 26 => {
-                    self.stack.push(self.state);
+                    self.push_state(self.state);
                     self.state = S::DoubleQuotes;
                     return (Tok::Char(b'"'), none);
                 }
@@ -728,6 +789,7 @@ impl Scanner<'_> {
             return Val {
                 value,
                 number: false,
+                held: None,
             };
         }
         Val::string(bytes)
@@ -825,6 +887,7 @@ impl Scanner<'_> {
             }
             i += 1;
         }
+        self.escaped = Some(raw.len());
         (Tok::QuotedString, Val::string(&out))
     }
 }
@@ -856,16 +919,59 @@ struct Parser<'a, 'h, H: Host> {
     tok: Tok,
     val: Val,
     host: &'h mut H,
+    /// The state stack's slots, as `zend_stack` has allocated them.
+    stack_slots: usize,
 }
 
 /// What a syntax error stops the parse with: bison's message.
 struct Syntax(String);
 
 impl<H: Host> Parser<'_, '_, H> {
-    fn advance(&mut self) {
-        let (tok, val) = self.scanner.lex();
+    /// The next token, its string held as `RETURN_TOKEN`'s
+    /// `zend_ini_copy_value` (or `zend_ini_escape_string`'s) makes it,
+    /// after the state stack grew where the scanner pushed past it.
+    fn advance(&mut self) -> Result<(), H::Error> {
+        self.scanner.escaped = None;
+        let (tok, mut val) = self.scanner.lex();
+        while self.scanner.deepest > self.stack_slots {
+            self.stack_slots += STACK_BLOCK;
+            self.host.stack(self.stack_slots)?;
+        }
+        let valued = !matches!(
+            tok,
+            Tok::End
+                | Tok::Section
+                | Tok::DollarCurly
+                | Tok::Fallback
+                | Tok::EndOfLine
+                | Tok::Char(_)
+        );
+        if valued && let IniValue::Str(bytes) = &val.value {
+            let size = self.scanner.escaped.unwrap_or(bytes.len());
+            val.held = self.host.hold(bytes, size)?;
+        }
         self.tok = tok;
         self.val = val;
+        Ok(())
+    }
+
+    /// The lookahead's value, taken: whoever takes it owns its string.
+    fn take(&mut self) -> Val {
+        std::mem::replace(&mut self.val, Val::string(b""))
+    }
+
+    /// `zval_ini_dtor` and `zend_string_free`: the value's string given up.
+    fn free(&mut self, val: &Val) {
+        if let Some(held) = val.held {
+            self.host.free(held);
+        }
+    }
+
+    /// A string the grammar makes, `zend_string_init` of `bytes`.
+    fn made(&mut self, bytes: &[u8]) -> Result<Val, H::Error> {
+        let mut val = Val::string(bytes);
+        val.held = self.host.hold(bytes, bytes.len())?;
+        Ok(val)
     }
 
     /// bison's verbose message for the lookahead in a state whose
@@ -881,12 +987,12 @@ impl<H: Host> Parser<'_, '_, H> {
         Syntax(msg)
     }
 
-    fn expect(&mut self, tok: Tok) -> Result<(), Syntax> {
+    fn expect(&mut self, tok: Tok) -> Result<Result<(), Syntax>, H::Error> {
         if self.tok == tok {
-            self.advance();
-            Ok(())
+            self.advance()?;
+            Ok(Ok(()))
         } else {
-            Err(self.error(&[tok]))
+            Ok(Err(self.error(&[tok])))
         }
     }
 
@@ -902,14 +1008,22 @@ impl<H: Host> Parser<'_, '_, H> {
         })
     }
 
-    /// `zend_ini_add_string(result, op1, op2)`: the two as one string,
-    /// `op1`'s number bit kept.
+    /// `zend_ini_add_string(result, op1, op2)` and the
+    /// `zend_string_free(op2)` every rule that calls it makes: the two as
+    /// one string, `op1`'s grown in place (a new one where it was
+    /// interned) and `op1`'s number bit kept, then `op2`'s given up.
     fn add(&mut self, a: &Val, b: &Val) -> Result<Val, H::Error> {
         let mut bytes = self.as_bytes(a)?;
         bytes.extend_from_slice(&self.as_bytes(b)?);
+        let held = match a.held {
+            Some(held) => self.host.extend(held, &bytes)?,
+            None => self.host.hold(&bytes, bytes.len())?,
+        };
+        self.free(b);
         Ok(Val {
             value: IniValue::Str(bytes),
             number: a.number,
+            held,
         })
     }
 
@@ -941,33 +1055,37 @@ impl<H: Host> Parser<'_, '_, H> {
         if bytes.contains(&b':') {
             return Ok(name);
         }
-        match self.host.constant(bytes)? {
-            Some(value) => Ok(Val::string(&value)),
+        let value = match self.host.constant(bytes)? {
+            Some(value) => value,
             // `zend_get_constant` ends at `zend_get_special_const`:
             // `true`, `false` and `null` in any case, as strings.
             None => match bytes.to_ascii_lowercase().as_slice() {
-                b"true" => Ok(Val::string(b"1")),
-                b"false" | b"null" => Ok(Val::string(b"")),
-                _ => Ok(name),
+                b"true" => b"1".to_vec(),
+                b"false" | b"null" => Vec::new(),
+                _ => return Ok(name),
             },
-        }
+        };
+        let found = self.made(&value)?;
+        self.free(&name);
+        Ok(found)
     }
 
     /// `zend_ini_get_var(result, name, fallback)`: the configuration
     /// directive, else the environment variable, else the fallback, else
     /// the empty string.
-    fn get_var(&mut self, name: &Val, fallback: Option<Val>) -> Result<Val, H::Error> {
+    /// The rules that call it free the name and the fallback after.
+    fn get_var(&mut self, name: &Val, fallback: Option<&Val>) -> Result<Val, H::Error> {
         let name = self.as_bytes(name)?;
         if let Some(value) = self.host.directive(&name) {
-            return Ok(Val::string(&value));
+            return self.made(&value);
         }
         if let Some(value) = self.host.env(&name) {
-            return Ok(Val::string(&value));
+            return self.made(&value);
         }
         match fallback {
             Some(fallback) => {
-                let bytes = self.as_bytes(&fallback)?;
-                Ok(Val::string(&bytes))
+                let bytes = self.as_bytes(fallback)?;
+                self.made(&bytes)
             }
             None => Ok(Val::string(b"")),
         }
@@ -975,19 +1093,21 @@ impl<H: Host> Parser<'_, '_, H> {
 
     /// `cfg_var_ref`, the lookahead at `TC_DOLLAR_CURLY`.
     fn cfg_var_ref(&mut self) -> Result<Result<Val, Syntax>, H::Error> {
-        self.advance();
+        self.advance()?;
         if self.tok != Tok::VarName {
             return Ok(Err(self.error(&[Tok::VarName])));
         }
-        let name = self.val.clone();
-        self.advance();
+        let name = self.take();
+        self.advance()?;
         match self.tok {
             Tok::Char(b'}') => {
-                self.advance();
-                self.get_var(&name, None).map(Ok)
+                self.advance()?;
+                let found = self.get_var(&name, None)?;
+                self.free(&name);
+                Ok(Ok(found))
             }
             Tok::Fallback => {
-                self.advance();
+                self.advance()?;
                 let fallback = match self.var_string_list(false)? {
                     Ok(Some(v)) => v,
                     Ok(None) => Val::string(b""),
@@ -996,8 +1116,11 @@ impl<H: Host> Parser<'_, '_, H> {
                 if self.tok != Tok::Char(b'}') {
                     return Ok(Err(self.error(&[Tok::Char(b'}')])));
                 }
-                self.advance();
-                self.get_var(&name, Some(fallback)).map(Ok)
+                self.advance()?;
+                let found = self.get_var(&name, Some(&fallback))?;
+                self.free(&name);
+                self.free(&fallback);
+                Ok(Ok(found))
             }
             _ => Ok(Err(self.error(&[Tok::Fallback, Tok::Char(b'}')]))),
         }
@@ -1005,7 +1128,7 @@ impl<H: Host> Parser<'_, '_, H> {
 
     /// `'"' encapsed_list '"'`, the lookahead at the opening quote.
     fn encapsed(&mut self) -> Result<Result<Val, Syntax>, H::Error> {
-        self.advance();
+        self.advance()?;
         let mut acc = Val::string(b"");
         loop {
             match self.tok {
@@ -1014,12 +1137,12 @@ impl<H: Host> Parser<'_, '_, H> {
                     Err(e) => return Ok(Err(e)),
                 },
                 Tok::QuotedString => {
-                    let v = self.val.clone();
-                    self.advance();
+                    let v = self.take();
+                    self.advance()?;
                     acc = self.add(&acc, &v)?;
                 }
                 Tok::Char(b'"') => {
-                    self.advance();
+                    self.advance()?;
                     return Ok(Ok(acc));
                 }
                 _ => {
@@ -1050,8 +1173,8 @@ impl<H: Host> Parser<'_, '_, H> {
                 },
                 Tok::Constant | Tok::Raw | Tok::Number | Tok::Str | Tok::Whitespace => {
                     let tok = self.tok;
-                    let mut v = self.val.clone();
-                    self.advance();
+                    let mut v = self.take();
+                    self.advance()?;
                     if !section {
                         if tok == Tok::Constant {
                             v = self.get_constant(v)?;
@@ -1085,8 +1208,9 @@ impl<H: Host> Parser<'_, '_, H> {
     }
 
     /// `zend_ini_do_op(type, result, op1, op2)`: the operation over
-    /// C `int`s, answered as `%d` or, typed, as a long.
-    fn do_op(&mut self, op: u8, lhs: &Val, rhs: Option<&Val>) -> Val {
+    /// C `int`s, each operand's string freed as `get_int_val` reads it,
+    /// answered as a new `%d` string or, typed, as a long.
+    fn do_op(&mut self, op: u8, lhs: &Val, rhs: Option<&Val>) -> Result<Val, H::Error> {
         let left = Self::int_val(lhs);
         let right = rhs.map_or(0, Self::int_val);
         let out = match op {
@@ -1097,15 +1221,20 @@ impl<H: Host> Parser<'_, '_, H> {
             b'!' => i32::from(left == 0),
             _ => 0,
         };
-        let value = if self.scanner.mode == IniScanner::Typed {
-            IniValue::Long(i64::from(out))
-        } else {
-            IniValue::Str(out.to_string().into_bytes())
-        };
-        Val {
-            value,
-            number: lhs.number,
+        for operand in std::iter::once(lhs).chain(rhs) {
+            self.free(operand);
         }
+        let mut val = if self.scanner.mode == IniScanner::Typed {
+            Val {
+                value: IniValue::Long(i64::from(out)),
+                number: false,
+                held: None,
+            }
+        } else {
+            self.made(out.to_string().as_bytes())?
+        };
+        val.number = lhs.number;
+        Ok(val)
     }
 
     /// The tokens an `expr` may start with, for the error at one that
@@ -1130,14 +1259,14 @@ impl<H: Host> Parser<'_, '_, H> {
     fn unary(&mut self) -> Result<Result<Val, Syntax>, H::Error> {
         match self.tok {
             Tok::Char(op @ (b'~' | b'!')) => {
-                self.advance();
+                self.advance()?;
                 match self.unary()? {
-                    Ok(v) => Ok(Ok(self.do_op(op, &v, None))),
+                    Ok(v) => self.do_op(op, &v, None).map(Ok),
                     Err(e) => Ok(Err(e)),
                 }
             }
             Tok::Char(b'(') => {
-                self.advance();
+                self.advance()?;
                 let inner = match self.expr()? {
                     Ok(v) => v,
                     Err(e) => return Ok(Err(e)),
@@ -1150,7 +1279,7 @@ impl<H: Host> Parser<'_, '_, H> {
                         Tok::Char(b')'),
                     ])));
                 }
-                self.advance();
+                self.advance()?;
                 Ok(Ok(inner))
             }
             _ => match self.var_string_list(false)? {
@@ -1169,35 +1298,36 @@ impl<H: Host> Parser<'_, '_, H> {
             Err(e) => return Ok(Err(e)),
         };
         while let Tok::Char(op @ (b'|' | b'&' | b'^')) = self.tok {
-            self.advance();
+            self.advance()?;
             let rhs = match self.unary()? {
                 Ok(v) => v,
                 Err(e) => return Ok(Err(e)),
             };
-            acc = self.do_op(op, &acc, Some(&rhs));
+            acc = self.do_op(op, &acc, Some(&rhs))?;
         }
         Ok(Ok(acc))
     }
 
     /// `normalize_value(zv)`: in the typed scanner, a string that began
-    /// with a number and reads whole as one, as that number.
-    fn normalize(&self, val: Val) -> Val {
+    /// with a number and reads whole as one, as that number, the string
+    /// given up.
+    fn normalize(&mut self, val: Val) -> Val {
         if self.scanner.mode != IniScanner::Typed || !val.number {
             return val;
         }
         let IniValue::Str(s) = &val.value else {
             return val;
         };
-        match numeric_string(s).as_ref().map(Value::as_ref) {
-            Some(ValueRef::Int(n)) => Val {
-                value: IniValue::Long(n),
-                number: true,
-            },
-            Some(ValueRef::Float(d)) if !overflowed(s) => Val {
-                value: IniValue::Double(d),
-                number: true,
-            },
-            _ => val,
+        let value = match numeric_string(s).as_ref().map(Value::as_ref) {
+            Some(ValueRef::Int(n)) => IniValue::Long(n),
+            Some(ValueRef::Float(d)) if !overflowed(s) => IniValue::Double(d),
+            _ => return val,
+        };
+        self.free(&val);
+        Val {
+            value,
+            number: true,
+            held: None,
         }
     }
 
@@ -1205,12 +1335,12 @@ impl<H: Host> Parser<'_, '_, H> {
     fn string_or_value(&mut self) -> Result<Result<Val, Syntax>, H::Error> {
         match self.tok {
             Tok::BoolTrue | Tok::BoolFalse | Tok::Null => {
-                let v = self.val.clone();
-                self.advance();
+                let v = self.take();
+                self.advance()?;
                 Ok(Ok(v))
             }
             Tok::EndOfLine => {
-                self.advance();
+                self.advance()?;
                 Ok(Ok(Val::string(b"")))
             }
             _ => match self.expr()? {
@@ -1220,59 +1350,71 @@ impl<H: Host> Parser<'_, '_, H> {
         }
     }
 
-    /// `statement_list`.
+    /// `statement_list`: each statement's callback as it is reduced,
+    /// the host giving up its strings after it.
     fn statements(&mut self) -> Result<Result<(), Syntax>, H::Error> {
         loop {
             match self.tok {
                 Tok::End => return Ok(Ok(())),
-                Tok::EndOfLine => self.advance(),
+                Tok::EndOfLine => self.advance()?,
                 Tok::Section => {
-                    self.advance();
+                    self.advance()?;
                     let name = match self.var_string_list(true)? {
                         Ok(Some(v)) => v,
                         Ok(None) => Val::string(b""),
                         Err(e) => return Ok(Err(e)),
                     };
-                    if let Err(e) = self.expect(Tok::Char(b']')) {
+                    if let Err(e) = self.expect(Tok::Char(b']'))? {
+                        self.free(&name);
                         return Ok(Err(e));
                     }
-                    self.host.event(IniEvent::Section(name.value));
+                    self.host.event(IniEvent::Section(name))?;
                 }
                 Tok::Label => {
-                    let label = self.val.clone();
-                    self.advance();
+                    let label = self.take();
+                    self.advance()?;
                     if self.tok == Tok::Char(b'=') {
-                        self.advance();
+                        self.advance()?;
                         let value = match self.string_or_value()? {
                             Ok(v) => v,
-                            Err(e) => return Ok(Err(e)),
+                            Err(e) => {
+                                self.free(&label);
+                                return Ok(Err(e));
+                            }
                         };
-                        self.host
-                            .event(IniEvent::Entry(label.value, Some(value.value)));
+                        self.host.event(IniEvent::Entry(label, Some(value)))?;
                     } else {
-                        self.host.event(IniEvent::Entry(label.value, None));
+                        self.host.event(IniEvent::Entry(label, None))?;
                     }
                 }
                 Tok::Offset => {
-                    let label = self.val.clone();
-                    self.advance();
+                    let label = self.take();
+                    self.advance()?;
                     let offset = match self.var_string_list(false)? {
                         Ok(Some(v)) => v,
                         Ok(None) => Val::string(b""),
-                        Err(e) => return Ok(Err(e)),
+                        Err(e) => {
+                            self.free(&label);
+                            return Ok(Err(e));
+                        }
                     };
-                    if let Err(e) = self.expect(Tok::Char(b']')) {
-                        return Ok(Err(e));
+                    let mut closed = self.expect(Tok::Char(b']'))?;
+                    if closed.is_ok() {
+                        closed = self.expect(Tok::Char(b'='))?;
                     }
-                    if let Err(e) = self.expect(Tok::Char(b'=')) {
-                        return Ok(Err(e));
-                    }
-                    let value = match self.string_or_value()? {
+                    let value = match closed {
+                        Ok(()) => self.string_or_value()?,
+                        Err(e) => Err(e),
+                    };
+                    let value = match value {
                         Ok(v) => v,
-                        Err(e) => return Ok(Err(e)),
+                        Err(e) => {
+                            self.free(&label);
+                            self.free(&offset);
+                            return Ok(Err(e));
+                        }
                     };
-                    self.host
-                        .event(IniEvent::PopEntry(label.value, value.value, offset.value));
+                    self.host.event(IniEvent::PopEntry(label, value, offset))?;
                 }
                 _ => return Ok(Err(self.error(&[]))),
             }
@@ -1343,14 +1485,17 @@ pub(crate) fn parse<H: Host>(
             at: 0,
             state: State::Initial,
             stack: Vec::new(),
+            deepest: 0,
+            escaped: None,
             lineno: 1,
             mode,
         },
         tok: Tok::End,
         val: Val::string(b""),
         host,
+        stack_slots: 0,
     };
-    parser.advance();
+    parser.advance()?;
     match parser.statements()? {
         Ok(()) => Ok(Ok(())),
         Err(Syntax(message)) => Ok(Err((message, parser.scanner.lineno))),

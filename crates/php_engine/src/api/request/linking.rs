@@ -490,19 +490,17 @@ impl Request {
 }
 
 /// A constant expression that is a value as written: `null`, a bool,
-/// a number, a string, or an array of them.
+/// a number, a string, or the array the compiler folded.
 fn is_literal(expr: &ConstExpr) -> bool {
-    match expr {
+    matches!(
+        expr,
         ConstExpr::Null
-        | ConstExpr::Bool(_)
-        | ConstExpr::Long { .. }
-        | ConstExpr::Double(_)
-        | ConstExpr::Str(_) => true,
-        ConstExpr::Array { elements, .. } => elements
-            .iter()
-            .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
-        _ => false,
-    }
+            | ConstExpr::Bool(_)
+            | ConstExpr::Long { .. }
+            | ConstExpr::Double(_)
+            | ConstExpr::Str(_)
+            | ConstExpr::ImmutableArray(_)
+    )
 }
 
 /// A value as the constant expression that writes it, arrays element by

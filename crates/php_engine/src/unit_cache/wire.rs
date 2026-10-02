@@ -14,8 +14,8 @@ use php_heap::{Intern, Key, Zval, ZvalType};
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
-    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Radix,
-    TraitAdaptation, TraitMethodRef, Type, Visibility,
+    ImmutableArray, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
+    PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MethodBody,
@@ -615,6 +615,7 @@ impl Wire for ConstExpr {
                 line,
             } => (21u8, (class, (method, line))).put(out),
             ConstExpr::ScopeClass => 22u8.put(out),
+            ConstExpr::ImmutableArray(array) => (23u8, array.value()).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
@@ -712,6 +713,7 @@ impl Wire for ConstExpr {
                 line: Wire::take(r)?,
             },
             22 => ConstExpr::ScopeClass,
+            23 => ConstExpr::ImmutableArray(ImmutableArray::new(Wire::take(r)?)?),
             _ => return None,
         })
     }

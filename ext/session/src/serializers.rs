@@ -153,7 +153,7 @@ fn encode_through(
 pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<bool, Thrown> {
     let data = data.to_vec();
     if format == Format::PhpSerialize {
-        let mut reader = Unserializer::new(req, &data);
+        let mut reader = Unserializer::new(req, &data)?;
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own.
         let read = reader.value(req);
@@ -181,7 +181,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
     let Some(array) = session_array_mut(req)? else {
         return Ok(true);
     };
-    let mut reader = Unserializer::new(req, &data);
+    let mut reader = Unserializer::new(req, &data)?;
     let mut ok = true;
     let mut p = 0;
     while p < data.len() {

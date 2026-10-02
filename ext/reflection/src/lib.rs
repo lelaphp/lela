@@ -6155,34 +6155,6 @@ fn property_string(
     out
 }
 
-/// Whether the compiler folds `expr` to a value: a scalar written out,
-/// or an array of such, which prints as the value, its keys numbered as
-/// the array numbered them; an array of any other element prints as
-/// written.
-///
-/// ```php
-/// class A { public $a = [1, "k" => 2, 3]; public $b = [1, 2]; public $c = [FOO, 2 => X]; }
-/// foreach ((new ReflectionClass("A"))->getProperties() as $p) echo $p;
-/// ```
-/// ```expect
-/// Property [ public $a = [0 => 1, 'k' => 2, 1 => 3] ]
-/// Property [ public $b = [1, 2] ]
-/// Property [ public $c = [FOO, 2 => X] ]
-/// ```
-fn folded(expr: &ConstExpr) -> bool {
-    match expr {
-        ConstExpr::Null
-        | ConstExpr::Bool(_)
-        | ConstExpr::Long { .. }
-        | ConstExpr::Double(_)
-        | ConstExpr::Str(_) => true,
-        ConstExpr::Array { elements, .. } => elements
-            .iter()
-            .all(|(key, value)| key.as_ref().is_none_or(folded) && folded(value)),
-        _ => false,
-    }
-}
-
 /// `format_default_value` over a default already evaluated
 /// ([`Request::evaluated_default`]): a scalar as `smart_str_append_scalar`
 /// writes it, an enum case `Class::Case`, an array by its keys where it
@@ -6263,6 +6235,75 @@ fn double_string(req: &mut Request, f: f64) -> String {
     text
 }
 
+/// An element of an expression still to evaluate as `zend_ast_export`
+/// writes it: an array the compiler folded as `zend_ast_export_zval`
+/// writes the zval, every key before its value whatever the array's
+/// shape, and anything else as [`default_value_string`] writes it.
+///
+/// ```php
+/// function f($a = [FOO, [1, 2], ['k' => 'v', 1.5]], $b = [1, 'k' => [2, 3]], $c = [true, null, 1.0, "q'x"]) {}
+/// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+/// class A { public $a = [1, "k" => 2, 3]; public $b = [1, 2]; public $c = [FOO, 2 => X, [5]]; }
+/// foreach ((new ReflectionClass("A"))->getProperties() as $p) echo $p;
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = [FOO, [0 => 1, 1 => 2], ['k' => 'v', 0 => 1.5]] ]
+/// Parameter #1 [ <optional> $b = [0 => 1, 'k' => [2, 3]] ]
+/// Parameter #2 [ <optional> $c = [true, NULL, 1.0, 'q'x'] ]
+/// Property [ public $a = [0 => 1, 'k' => 2, 1 => 3] ]
+/// Property [ public $b = [1, 2] ]
+/// Property [ public $c = [FOO, 2 => X, [0 => 5]] ]
+/// ```
+fn exported(req: &mut Request, expr: &ConstExpr) -> String {
+    match expr {
+        ConstExpr::ImmutableArray(_) => folded_array(req, expr, exported_value),
+        _ => default_value_string(req, expr),
+    }
+}
+
+/// `zend_ast_export_zval` over a value of an array the compiler folded:
+/// an array with every key written, `'key' => ` or the number, and a
+/// scalar as [`value_default_string`] writes it.
+fn exported_value(req: &mut Request, value: &Value) -> String {
+    let ValueRef::Array(array) = value.as_ref() else {
+        return value_default_string(req, value);
+    };
+    let mut out = String::from("[");
+    for (i, (key, element)) in array.snapshot_refs().iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        match key {
+            Key::Str(s) => {
+                let _ = write!(out, "'{}' => ", escaped(s.as_bytes()));
+            }
+            Key::Int(n) => {
+                let _ = write!(out, "{n} => ");
+            }
+        }
+        out.push_str(&exported_value(req, element));
+    }
+    out.push(']');
+    out
+}
+
+/// The array the compiler folded, `expr`, as `write` renders its value;
+/// reading it takes no owner and raises nothing.
+fn folded_array(
+    req: &mut Request,
+    expr: &ConstExpr,
+    write: fn(&mut Request, &Value) -> String,
+) -> String {
+    match eval_const_expr(req, expr, None) {
+        Ok(value) => {
+            let written = write(req, &value);
+            req.release(value);
+            written
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// `format_default_value` over a declared default: `smart_str_append_scalar`
 /// for a scalar, `NULL`, `true`, `false`, the number, or the string in
 /// single quotes with `smart_str_append_escaped`'s escapes; an array as
@@ -6285,35 +6326,28 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         ConstExpr::Long { value, .. } => value.to_string(),
         ConstExpr::Double(f) => double_string(req, *f),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
-        // An array of scalars written out is the value the compiler folded
-        // it to, whose keys print unless it is a list; any other is the expression,
-        // `zend_ast_export`'s `ZEND_AST_ARRAY`, a key where one is written.
+        // The array the compiler folded is the value it is, whose keys
+        // print unless it is a list.
+        ConstExpr::ImmutableArray(_) => folded_array(req, expr, value_default_string),
+        // `zend_ast_export`'s `ZEND_AST_ARRAY`, an array some element of
+        // which is still to evaluate: a key where one is written, and
+        // each element as the export writes it ([`exported`]).
         ConstExpr::Array { elements, .. } => {
-            let is_list = elements.iter().all(|(key, _)| key.is_none());
-            let folded = folded(expr);
-            // `nNextFreeElement` over the keys the array gives.
-            let mut next = 0i64;
             let mut out = String::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
                 match key {
-                    Some(ConstExpr::Long { value: n, .. }) => next = next.max(n.saturating_add(1)),
-                    None => next = next.saturating_add(1),
-                    Some(_) => {}
-                }
-                if !is_list && (folded || key.is_some()) {
-                    match key {
-                        Some(ConstExpr::Str(s)) => {
-                            let _ = write!(out, "'{}'", escaped(s));
-                        }
-                        Some(key) => out.push_str(&default_value_string(req, key)),
-                        None => out.push_str(&(next - 1).to_string()),
+                    Some(ConstExpr::Str(s)) => {
+                        let _ = write!(out, "'{}' => ", escaped(s));
                     }
-                    out.push_str(" => ");
+                    Some(key) => {
+                        let _ = write!(out, "{} => ", exported(req, key));
+                    }
+                    None => {}
                 }
-                out.push_str(&default_value_string(req, value));
+                out.push_str(&exported(req, value));
             }
             out.push(']');
             out
@@ -6565,7 +6599,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             text.push(')');
             return text;
         }
-        leaf => return default_value_string(req, leaf),
+        leaf => return exported(req, leaf),
     };
     if priority > own {
         format!("({text})")

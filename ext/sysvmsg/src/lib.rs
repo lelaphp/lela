@@ -405,7 +405,7 @@ fn msg_receive(
         message.set(req, Value::string(text))?;
         return Ok(true);
     }
-    let mut reader = Unserializer::new(req, &text);
+    let mut reader = Unserializer::new(req, &text)?;
     let read = reader.local(req);
     let finished = reader.finish(req);
     let read = read?;

@@ -315,6 +315,7 @@ impl Request {
                     | ConstExpr::Long { .. }
                     | ConstExpr::Double(_)
                     | ConstExpr::Str(_)
+                    | ConstExpr::ImmutableArray(_)
             )
         };
         let constants = self.constant_names(class).iter().all(|name| {
@@ -520,6 +521,61 @@ impl Request {
     /// string(6) "kconst" interned
     /// string(14) "a long default" interned
     /// string(14) "a long default" interned
+    /// ```
+    ///
+    /// An array the declaration wrote, every key and value folded, is
+    /// the unit's immutable array ([`ConstExpr::ImmutableArray`]), so a
+    /// slot, a `static` and a constant copied from it take no owner, as
+    /// opcache leaves php's table of defaults:
+    ///
+    /// [`ConstExpr::ImmutableArray`]: php_unit::decl::ConstExpr::ImmutableArray
+    ///
+    /// ```php
+    /// class C { public $arr = ['x']; public $n = [[1], 'a']; public $q = [PHP_INT_SIZE]; public static $s = ['y', 'k' => 1]; const K = ['z']; }
+    /// debug_zval_dump(new C);
+    /// debug_zval_dump(C::$s, C::K, get_class_vars('C')['arr'], (new ReflectionProperty('C', 'arr'))->getDefaultValue());
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// object(C)#1 (3) refcount(1){
+    ///   ["arr"]=>
+    ///   array(1) packed interned {
+    ///     [0]=>
+    ///     string(1) "x" interned
+    ///   }
+    ///   ["n"]=>
+    ///   array(2) packed interned {
+    ///     [0]=>
+    ///     array(1) packed interned {
+    ///       [0]=>
+    ///       int(1)
+    ///     }
+    ///     [1]=>
+    ///     string(1) "a" interned
+    ///   }
+    ///   ["q"]=>
+    ///   array(1) packed interned {
+    ///     [0]=>
+    ///     int(8)
+    ///   }
+    /// }
+    /// array(2) interned {
+    ///   [0]=>
+    ///   string(1) "y" interned
+    ///   ["k"]=>
+    ///   int(1)
+    /// }
+    /// array(1) packed interned {
+    ///   [0]=>
+    ///   string(1) "z" interned
+    /// }
+    /// array(1) packed interned {
+    ///   [0]=>
+    ///   string(1) "x" interned
+    /// }
+    /// array(1) packed interned {
+    ///   [0]=>
+    ///   string(1) "x" interned
+    /// }
     /// ```
     pub(super) fn default_properties(
         &mut self,
