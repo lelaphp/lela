@@ -734,6 +734,7 @@ dependencies = [
  "php_ext_sysvmsg",
  "php_ext_sysvsem",
  "php_ext_sysvshm",
+ "php_ext_tidy",
  "php_ext_tokenizer",
  "php_ext_uri",
  "php_ext_xml",
@@ -1137,6 +1138,14 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_tidy"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "pkg-config",
 ]
 
 [[package]]
