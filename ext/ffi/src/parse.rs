@@ -100,6 +100,40 @@ pub(crate) struct Scope {
     pub(crate) tags: Option<Table<Tag>>,
 }
 
+impl Scope {
+    /// What php `emalloc`s for the tables `zend_ffi_declare`,
+    /// `zend_ffi_add_enum_val` and `zend_ffi_declare_tag` fill, which
+    /// `zend_ffi_free_obj` frees with the `FFI` object: each table's
+    /// `HashTable`, 56, and the buckets `zend_hash_real_init_mixed` lays
+    /// at its first add, eight or the power of two its rows double to,
+    /// 32 bytes and two `uint32_t` hash slots each; then each
+    /// `zend_ffi_symbol`, 24, and its key's `zend_string`, and each
+    /// `zend_ffi_tag`, 16, and its name's, the one the type's
+    /// `tag_name` shares.
+    pub(crate) fn emallocs(&self) -> Vec<usize> {
+        fn table<T>(sizes: &mut Vec<usize>, table: &Table<T>, row: usize) {
+            sizes.push(56);
+            if table.rows.is_empty() {
+                return;
+            }
+            let slots = table.rows.len().next_power_of_two().max(8);
+            sizes.push(slots * 32 + slots * 2 * 4);
+            for (name, _) in &table.rows {
+                sizes.push(row);
+                sizes.push(24 + name.len() + 1);
+            }
+        }
+        let mut sizes = Vec::new();
+        if let Some(symbols) = &self.symbols {
+            table(&mut sizes, symbols, 24);
+        }
+        if let Some(tags) = &self.tags {
+            table(&mut sizes, tags, 16);
+        }
+        sizes
+    }
+}
+
 /// `ZEND_FFI_DCL_*`, the bits of a declaration's `flags`.
 pub(crate) mod dcl {
     pub(crate) const VOID: u32 = 1 << 0;
@@ -1157,7 +1191,13 @@ impl<'a> Parser<'a> {
                     }
                     self.declare(&name, &mut dcl)?;
                 }
-            } else if sym != tok::SEMICOLON {
+            } else if sym == tok::SEMICOLON {
+                // `zend_ffi_cleanup_dcl`: a struct, union or enum no tag
+                // and no declarator keeps is freed.
+                if common.flags & (dcl::ENUM | dcl::STRUCT | dcl::UNION) != 0 {
+                    self.cleanup(&common);
+                }
+            } else {
                 return Err(self.error_sym("unexpected", sym));
             }
             if sym != tok::SEMICOLON {
@@ -3249,6 +3289,7 @@ impl<'a> Parser<'a> {
     /// `zend_ffi_declare`: a typedef, a variable or a function into the
     /// scope's symbols; a redeclaration of the same is allowed.
     fn declare(&mut self, name: &[u8], dcl: &mut Dcl) -> Parse<()> {
+        self.scope.symbols.get_or_insert_with(Table::default);
         let ty = self.finalize(dcl)?;
         let storage = dcl.flags & dcl::STORAGE_CLASS;
         let is_const = dcl.attr & attr::CONST != 0;
@@ -3265,17 +3306,20 @@ impl<'a> Parser<'a> {
                 && self.types.is_same(sym.ty, ty)
                 && sym.is_const == is_const
             {
+                self.cleanup(dcl);
                 return Ok(());
             }
             if storage == 0 || storage == dcl::EXTERN {
                 if matches!(self.types.get(ty).kind, Kind::Func(_)) {
                     if sym.kind == SymbolKind::Func && self.types.same_types(sym.ty, ty) {
+                        self.cleanup(dcl);
                         return Ok(());
                     }
                 } else if sym.kind == SymbolKind::Var
                     && self.types.is_same(sym.ty, ty)
                     && sym.is_const == is_const
                 {
+                    self.cleanup(dcl);
                     return Ok(());
                 }
             }
@@ -3329,9 +3373,24 @@ impl<'a> Parser<'a> {
                     },
                 );
                 dcl.owned = false;
+            } else {
+                // A useless declaration.
+                self.cleanup(dcl);
             }
         }
         Ok(())
+    }
+
+    /// `zend_ffi_type_dtor(dcl->type)` where the declaration owns its
+    /// type: the type no longer counted on the request's heap. What it
+    /// owned in turn stays counted, an approximation the arena, which
+    /// records no nested owner, keeps.
+    fn cleanup(&mut self, dcl: &Dcl) {
+        if dcl.owned
+            && let Some(ty) = dcl.ty
+        {
+            self.types.free(ty);
+        }
     }
 
     /// `zend_ffi_declare_tag`: a struct, union or enum tag, made

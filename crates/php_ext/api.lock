@@ -615,6 +615,7 @@ request::Request::serialize_precision
 request::Request::set_assert_callback
 request::Request::set_caller_var
 request::Request::set_cwd
+request::Request::set_display_errors
 request::Request::set_env
 request::Request::set_error_handler
 request::Request::set_exception_handler

@@ -15,9 +15,10 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
-    CData, Data, Fetch, Place, alloc, as_cdata, free, hold_types, make, to_value, view, write_value,
+    CData, Data, Fetch, Place, alloc, as_cdata, free, free_types, hold, hold_types, make, remember,
+    to_value, view, write_value,
 };
-use crate::ctype::{CType, ctype_of, make_ctype, make_owning};
+use crate::ctype::{CType, TypeRef, ctype_of, make_ctype, make_owning};
 use crate::ffi::{self, Library};
 use crate::parse::{BIGGEST_ALIGNMENT, Dcl, Parser, Scope, SymbolKind};
 use crate::preload::Fail;
@@ -32,6 +33,9 @@ pub(crate) struct Decls {
     #[allow(dead_code)]
     pub(crate) lib: Option<Library>,
     pub(crate) scope: Box<Scope>,
+    /// What php `emalloc`s for the declarations, their tables and their
+    /// types ([`hold_decls`]), given back with the object.
+    pub(crate) held: Box<[usize]>,
 }
 
 /// `final class FFI`, `@not-serializable`.
@@ -86,16 +90,19 @@ impl FFI {
             None => None,
         };
         let mut scope = Scope::default();
+        let from = types(req).len();
         if !code.as_bytes().is_empty() {
             parse_decl(req, code.as_bytes(), &mut scope, attr::STORED)
                 .map_err(|bail| parser_error(req, &bail))?;
             resolve(req, &mut scope, lib.as_ref())?;
         }
+        let held = hold_decls(req, &scope, from)?;
         made(
             req,
             Decls {
                 lib,
                 scope: Box::new(scope),
+                held,
             },
         )
     }
@@ -120,6 +127,7 @@ impl FFI {
                 Decls {
                     lib: None,
                     scope: Box::new(scope),
+                    held: Box::default(),
                 },
             )
             .map(Some);
@@ -147,6 +155,7 @@ impl FFI {
             Decls {
                 lib: None,
                 scope: Box::new(scope),
+                held: Box::default(),
             },
         )
     }
@@ -787,6 +796,15 @@ fn resolve(req: &mut Request, scope: &mut Scope, lib: Option<&Library>) -> Resul
     })
 }
 
+/// What php `emalloc`s for the declarations parsed into `scope`, the
+/// types made from the `from`th on and the tables
+/// ([`Scope::emallocs`]), held by the `FFI` object made of them.
+fn hold_decls(req: &mut Request, scope: &Scope, from: usize) -> Result<Box<[usize]>, Thrown> {
+    let mut sizes = types(req).emallocs(from);
+    sizes.extend(scope.emallocs());
+    hold(req, &sizes)
+}
+
 /// An `FFI` object holding `decls`.
 fn made(req: &mut Request, decls: Decls) -> Result<Instance<FFI>, Thrown> {
     let class = classes(req)?.ffi;
@@ -806,6 +824,7 @@ fn made_cdata(req: &mut Request, data: Data) -> Result<Instance<CData>, Thrown> 
 /// thrown as php throws it.
 fn load(req: &mut Request, filename: &[u8]) -> Result<Instance<FFI>, Thrown> {
     let shown = String::from_utf8_lossy(filename).into_owned();
+    let from = types(req).len();
     let loaded = match crate::preload::load_header(filename, types(req), attr::STORED, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
@@ -837,11 +856,13 @@ fn load(req: &mut Request, filename: &[u8]) -> Result<Instance<FFI>, Thrown> {
             return Err(ffi_error(req, &message));
         }
     };
+    let held = hold_decls(req, &loaded.scope, from)?;
     made(
         req,
         Decls {
             lib: loaded.lib,
             scope: Box::new(loaded.scope),
+            held,
         },
     )
 }
@@ -883,12 +904,20 @@ fn ffi_new(
     validate_api_restriction(req)?;
     static_call(req, scope_of, "new")?;
     let from = types(req).len();
+    let ctype = match &ty {
+        Union::A(ctype) => Some(ctype.object()),
+        Union::B(_) => None,
+    };
     let (ty, is_const) = type_argument(req, scope_of, ty)?;
+    let mut held = hold_types(req, from)?;
+    if let Some(object) = ctype {
+        held = take_ctype_types(req, object, held)?;
+    }
     let size = types(req).get(ty).size;
     if size == 0 {
+        free_types(req, &held);
         return Err(ffi_error(req, "Cannot instantiate FFI\\CData of zero size"));
     }
-    let held = hold_types(req, from)?;
     let addr = alloc(req, size, persistent)?;
     let place = if owned {
         Place::Owned(addr)
@@ -905,6 +934,50 @@ fn ffi_new(
             held,
         },
     )
+}
+
+/// `FFI::new` over a `FFI\\CType` that owns its type: the new value
+/// takes the type where the object is its one owner's, `transfer type
+/// ownership`; otherwise `zend_ffi_remember_type` keeps it until the
+/// request ends. Either way the object owns it no longer. `held` is
+/// what the value holds otherwise.
+///
+/// ```php
+/// $ffi = FFI::cdef();
+/// $m = memory_get_usage(); $x = $ffi->new($ffi->type("int[2]")); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($x); echo memory_get_usage() - $m, "\n";
+/// $t = $ffi->type("int[3]");
+/// $m = memory_get_usage(); $x = $ffi->new($t); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = $ffi->new($t); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); unset($x, $y, $t); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 208
+/// -208
+/// 328
+/// 112
+/// -288
+/// ```
+fn take_ctype_types(
+    req: &mut Request,
+    object: PhpObject,
+    held: Box<[usize]>,
+) -> Result<Box<[usize]>, Thrown> {
+    let sole = object.as_value().refcount() == 1;
+    let Some(slot) = object.native_mut::<TypeRef>(req) else {
+        return Ok(held);
+    };
+    if slot.held.is_empty() {
+        return Ok(held);
+    }
+    let owned = std::mem::take(&mut slot.held);
+    if sole {
+        let mut all = held.into_vec();
+        all.extend(owned);
+        return Ok(all.into_boxed_slice());
+    }
+    remember(req)?;
+    Ok(held)
 }
 
 /// `ZEND_METHOD(FFI, cast)`.
@@ -1138,6 +1211,29 @@ impl ObjectHandlers for Handlers {
     /// No `clone_obj`: an `FFI` object is not cloned.
     fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
         None
+    }
+
+    /// `zend_ffi_free_obj`: the declarations' tables, their rows and
+    /// their types given back.
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $f = FFI::cdef("int abs(int);"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $f = FFI::cdef("typedef struct { int a; long b; } pt; struct tag { int x; }; int abs(int); long labs(long); enum e { A, B = 3 };"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 840
+    /// -840
+    /// 2944
+    /// -2944
+    /// ```
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let Some(decls) = object.native_mut::<Decls>(req) else {
+            return;
+        };
+        let held = std::mem::take(&mut decls.held);
+        free_types(req, &held);
     }
 
     /// `zend_ffi_read_var`: a C variable's value, a function as a

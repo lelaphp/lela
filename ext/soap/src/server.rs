@@ -156,7 +156,7 @@ impl ObjectHandlers for Handlers {
 struct Saved {
     /// `display_errors` as it stood: `soap_real_error_handler` shows no
     /// diagnostic a server raises, `PG(display_errors) = 0` around each.
-    display: Option<Vec<u8>>,
+    display: u8,
     use_handler: bool,
     error_code: Option<&'static str>,
     error_object: Option<PhpObject>,
@@ -165,8 +165,7 @@ struct Saved {
 
 /// `SOAP_SERVER_BEGIN_CODE`.
 fn begin(req: &mut Request, this: PhpObject) -> Saved {
-    let display = req.ini_get(b"display_errors").map(<[u8]>::to_vec);
-    let _ = req.ini_set(b"display_errors", b"0");
+    let display = req.set_display_errors(0);
     let state = req.state::<State>();
     let saved = Saved {
         display,
@@ -183,9 +182,7 @@ fn begin(req: &mut Request, this: PhpObject) -> Saved {
 
 /// `SOAP_SERVER_END_CODE`.
 fn end(req: &mut Request, saved: &Saved) {
-    if let Some(d) = &saved.display {
-        let _ = req.ini_set(b"display_errors", d);
-    }
+    req.set_display_errors(saved.display);
     let state = req.state::<State>();
     state.use_soap_error_handler = saved.use_handler;
     state.error_code = saved.error_code;
@@ -894,6 +891,25 @@ impl SoapServer {
     ///
     /// <?xml version="1.0" encoding="UTF-8"?>
     /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+    /// ```
+    ///
+    /// Diagnostics are off around the call as `PG(display_errors) = 0`
+    /// turns them off, past the ini table: once the request has changed
+    /// an entry, the call costs only its response buffer's growth, no
+    /// `display_errors` row and no string:
+    ///
+    /// ```php
+    /// function add($a, $b) { return $a + $b; }
+    /// ini_set('from', 'x');
+    /// $s = new SoapServer(null, ['uri' => 'urn:a']);
+    /// $s->addFunction('add');
+    /// $r = '<?xml version="1.0"?><e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><m:add xmlns:m="urn:a"><a>1</a><b>2</b></m:add></e:Body></e:Envelope>';
+    /// ob_start();
+    /// $m = memory_get_usage(); $s->handle($r); $d = memory_get_usage() - $m;
+    /// ob_end_clean(); echo $d, "\n";
+    /// ```
+    /// ```expect
+    /// 56
     /// ```
     #[php(tentative)]
     fn handle(
