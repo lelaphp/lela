@@ -161,6 +161,7 @@ abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
+abi::ObjectHandlers::own_iterator
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
@@ -468,6 +469,7 @@ request::Request::class_extension
 request::Request::class_extension_name
 request::Request::class_flags
 request::Request::class_has_create_object
+request::Request::class_own_iterator
 request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::closure_refuses_receiver

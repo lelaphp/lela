@@ -1986,6 +1986,16 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
+    /// Whether the class sets `ce->get_iterator` though it is not
+    /// `Traversable`: a `foreach` over its objects walks
+    /// [`ObjectHandlers::get_iterator`] and never their properties, and
+    /// Reflection calls the class iterable, as `FFI\CData` is
+    /// (`zend_ffi_cdata_get_iterator`). `false` at `Std`, where only a
+    /// `Traversable` class walks with an iterator.
+    fn own_iterator(&self) -> bool {
+        false
+    }
+
     /// `sizeof` the iterator struct the class's `get_iterator` `emalloc`s,
     /// what `memory_get_usage()` counts of the iterator a `foreach` or an
     /// outer iterator holds over one of its objects (design §5.13): a

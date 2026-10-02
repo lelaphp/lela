@@ -5894,6 +5894,7 @@ fn class_header(
             .flatten()
             .is_some_and(|traversable| class_is(req, class, traversable, 0));
     let iterable = traversable
+        || req.class_own_iterator(class)
         || linked_properties(req, class)
             .iter()
             .any(|(property, _)| property.hooks.is_some());

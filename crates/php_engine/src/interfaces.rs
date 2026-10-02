@@ -155,6 +155,7 @@ impl Countable {
 pub(crate) fn is_traversable(req: &Request, class: ClassId) -> bool {
     req.class_named(b"traversable")
         .is_some_and(|traversable| req.instance_of(class, traversable))
+        || req.handlers_of(class).own_iterator()
 }
 
 /// The name of php's `zend_iterator_class_entry`, `__iterator_wrapper`
@@ -657,6 +658,22 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         crate::generator::get_iterator(req, object, by_ref)?;
         req.addref(&object.as_value());
         return Ok((Funcs::Generator, object, None));
+    }
+    // `ce->get_iterator` on a class that is no `Traversable`: its own
+    // iterator, and nothing else, walks it.
+    let table = req.object_handlers(object.heap());
+    if table.own_iterator() {
+        return match table.get_iterator(req, object, by_ref)? {
+            Some(class_iter) => {
+                req.addref(&object.as_value());
+                Ok((Funcs::Class, object, Some(class_iter)))
+            }
+            None => Err(throw_error(
+                req,
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            )),
+        };
     }
     if req
         .class_named(b"iterator")

@@ -20483,6 +20483,16 @@ impl Request {
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
     }
 
+    /// `ce->get_iterator` on a class that is no `Traversable`
+    /// ([`ObjectHandlers::own_iterator`]): what Reflection calls
+    /// iterable beside a `Traversable` class.
+    ///
+    /// [`ObjectHandlers::own_iterator`]: crate::api::abi::ObjectHandlers::own_iterator
+    #[must_use]
+    pub fn class_own_iterator(&self, class: ClassId) -> bool {
+        self.handlers_of(class).own_iterator()
+    }
+
     /// Whether `function` is a native [`Request::native_trampoline`]
     /// made, php's `ZEND_ACC_CALL_VIA_TRAMPOLINE` on a function no
     /// magic method serves.
