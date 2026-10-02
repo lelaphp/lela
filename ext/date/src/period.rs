@@ -5,7 +5,7 @@
 use php_ext::abi::{Instance, Passed, Raw, Static, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
-use php_ext::raising::{Thrown, deprecated, throw};
+use php_ext::raising::{Thrown, deprecated, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -377,7 +377,7 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
 
 /// php's refusal of a hash that is no period.
 fn invalid(req: &mut Request) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         "Invalid serialization data for DatePeriod object",
@@ -564,7 +564,7 @@ impl DatePeriod {
             period.start_ce = Some(class_id(req, "DateTime")?);
             (options, iso.recurrences)
         } else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",

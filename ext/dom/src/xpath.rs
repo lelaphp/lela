@@ -7,7 +7,7 @@ use php_ext::abi::{Callable, Instance, Passed, Path, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
@@ -211,6 +211,10 @@ fn operand_value(req: &mut Request, this: PhpObject, operand: Operand) -> Result
     }
 }
 
+/// `php_dom_xpath_callbacks_call_php_ns`'s refusal of a name that is no
+/// string.
+const NOT_A_NAME: &str = "Handler name must be a string";
+
 /// `php_dom_xpath_callback_dispatch`.
 fn dispatch(
     req: &mut Request,
@@ -223,14 +227,14 @@ fn dispatch(
         Called::Php { .. } => {
             let mut operands = operands.into_iter();
             let Some(first) = operands.next() else {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "Function name must be passed as the first argument",
                 ));
             };
             let Operand::Str(name) = first else {
-                return Err(throw(req, "TypeError", "Handler name must be a string"));
+                return Err(throw_error(req, "TypeError", NOT_A_NAME));
             };
             (None, name, operands.collect::<Vec<_>>())
         }
@@ -249,14 +253,14 @@ fn dispatch(
             .map(|(_, m)| m),
     };
     let callable = match mode {
-        None | Some(Mode::None) => Err(throw(req, "Error", "No callbacks were registered")),
+        None | Some(Mode::None) => Err(throw_error(req, "Error", "No callbacks were registered")),
         Some(Mode::All) => {
             let name_value = string(req, &name)?;
             let found = callable_checked(req, &name_value);
             req.release(name_value);
             found.map_err(|why| {
                 let shown = String::from_utf8_lossy(&name).into_owned();
-                throw(req, "Error", &format!("Invalid callback {shown}, {why}"))
+                throw_error(req, "Error", &format!("Invalid callback {shown}, {why}"))
             })
         }
         Some(Mode::Set(functions)) => {
@@ -264,7 +268,7 @@ fn dispatch(
                 Ok(c.clone())
             } else {
                 let shown = String::from_utf8_lossy(&name).into_owned();
-                Err(throw(
+                Err(throw_error(
                     req,
                     "Error",
                     &format!("No callback handler \"{shown}\" registered"),
@@ -308,7 +312,7 @@ fn dispatch(
         ValueRef::Bool(b) => Returned::Bool(b),
         ValueRef::Object(_) => {
             req.release(answer);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
@@ -338,12 +342,12 @@ fn eval(
     };
     let modern = crate::modern::follows_spec(req, this);
     let Some(mut state) = take(req, this) else {
-        return Err(throw(req, "Error", "Invalid XPath Context"));
+        return Err(throw_error(req, "Error", "Invalid XPath Context"));
     };
     let Some(doc) = state.ctx.doc() else {
         put(req, this, state);
         if modern {
-            return Err(throw(req, "Error", "Invalid XPath Document Pointer"));
+            return Err(throw_error(req, "Error", "Invalid XPath Document Pointer"));
         }
         docref(req, Level::Warning, "Invalid XPath Document Pointer");
         return Ok(Value::bool(false));
@@ -360,7 +364,7 @@ fn eval(
     };
     if node.is_some_and(|n| n.doc() != Some(doc)) {
         put(req, this, state);
-        return Err(throw(req, "Error", "Node from wrong document"));
+        return Err(throw_error(req, "Error", "Node from wrong document"));
     }
     let in_scope = match node {
         Some(n) if register && modern => dom_mut(req, this)
@@ -392,7 +396,11 @@ fn eval(
     }
     let Some(answer) = answer else {
         if modern {
-            return Err(throw(req, "Error", "Could not evaluate XPath expression"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Could not evaluate XPath expression",
+            ));
         }
         return Ok(Value::bool(false));
     };
@@ -709,7 +717,7 @@ impl DOMXPath {
         };
         match took {
             Some(ok) => Ok(ok),
-            None => Err(throw(req, "Error", "Invalid XPath Context")),
+            None => Err(throw_error(req, "Error", "Invalid XPath Context")),
         }
     }
 
@@ -741,7 +749,7 @@ impl DOMXPath {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let Some(mut state) = take(req, this) else {
-            return Err(throw(req, "Error", "Invalid XPath Context"));
+            return Err(throw_error(req, "Error", "Invalid XPath Context"));
         };
         let restrict = restrict.map(|given| match given {
             Union::A(name) => Value::string(name),
@@ -795,7 +803,7 @@ impl DOMXPath {
         let (callable, value) = callable_of(req, &callable.value(), 3, false)?;
         let Some(mut state) = take(req, this) else {
             req.release(value);
-            return Err(throw(req, "Error", "Invalid XPath Context"));
+            return Err(throw_error(req, "Error", "Invalid XPath Context"));
         };
         state.ctx.register_custom(&ns, &name);
         let at = if let Some(at) = state

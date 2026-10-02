@@ -148,7 +148,9 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
+};
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -423,7 +425,7 @@ fn dir_stream(req: &mut Request, given: Option<Stream>) -> Result<Stream, Thrown
         );
         let default = req.state::<State>().default_dir;
         let Some(stream) = default.and_then(|res| Stream::from_value(req, &res.as_value())) else {
-            return Err(throw(req, "TypeError", "No resource supplied"));
+            return Err(throw_error(req, "TypeError", "No resource supplied"));
         };
         stream
     };
@@ -1604,7 +1606,7 @@ fn file_put_contents(
         ValueRef::Resource(_) => match Stream::from_value(req, &data) {
             Some(stream) => Some(stream),
             None => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     "file_put_contents(): supplied resource is not a valid stream resource",
@@ -2826,7 +2828,7 @@ fn fscanf(
     // the third on, `vars` as the frame holds them.
     let count = vars.0.len();
     let Some(stream) = Stream::from_value(req, &stream.as_value()) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "TypeError",
             "fscanf(): supplied resource is not a valid File-Handle resource",

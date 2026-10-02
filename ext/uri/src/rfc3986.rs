@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Instance, Static, This};
 use php_ext::attr::php_class;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, PhpArray, PhpString};
 
@@ -987,7 +987,7 @@ fn user_info(
     let bytes = crate::read::<R, _>(req, this.object(), mode, |u| u.user_info(mode))?;
     match bytes {
         Ok(bytes) => bytes.map(|bytes| PhpString::new(req, &bytes)).transpose(),
-        Err(Unreadable) => Err(throw(
+        Err(Unreadable) => Err(throw_error(
             req,
             "Error",
             "The userinfo component cannot be retrieved",

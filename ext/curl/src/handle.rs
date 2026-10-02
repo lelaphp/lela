@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, clear, docref, throw};
+use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpObject, PhpString, TypeTag, Value};
 
@@ -247,7 +247,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct CurlHandle, use curl_init() instead",
@@ -332,7 +332,7 @@ pub(crate) fn cast_object(
 pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<PhpObject, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw(req, "Error", &text));
+        return Err(throw_error(req, "Error", &text));
     };
     new_object(req, id)
 }
@@ -642,7 +642,7 @@ fn curl_error(req: &mut Request, handle: Instance<CurlHandle>) -> Result<PhpStri
 #[php_function(deprecated(since = "8.5", message = "as it has no effect since PHP 8.0"))]
 fn curl_close(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thrown> {
     if curl(req, handle)?.in_callback {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "curl_close(): Attempt to close cURL handle from a callback",
@@ -694,7 +694,7 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
 #[php_function]
 fn curl_reset(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thrown> {
     if curl(req, handle)?.in_callback {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "curl_reset(): Attempt to reset cURL handle from a callback",

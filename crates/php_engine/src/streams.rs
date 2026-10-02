@@ -34,7 +34,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use php_heap::{Block, ResourceType};
 
-use crate::api::raising::{Level, Thrown, raise, throw, warning};
+use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notifier,
     OptionAnswer, Request, Stream, StreamOption, Whence,
@@ -3278,7 +3278,7 @@ fn filter_open(
     options: OpenOptions,
 ) -> Result<Opened, Thrown> {
     let Some(at) = path.windows(10).position(|w| w == b"/resource=") else {
-        return Err(throw(req, "Error", "No URL resource specified"));
+        return Err(throw_error(req, "Error", "No URL resource specified"));
     };
     let Some(stream) = req.open_wrapper_ex(&path[at + 10..], mode, options)? else {
         return Ok(Err(String::from("operation failed")));
@@ -3941,7 +3941,7 @@ impl Request {
         options: OpenOptions,
     ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown> {
         if path.is_empty() {
-            return Err(throw(self, "ValueError", "Path must not be empty"));
+            return Err(throw_error(self, "ValueError", "Path must not be empty"));
         }
         let mut resolved = None;
         if options.use_path {

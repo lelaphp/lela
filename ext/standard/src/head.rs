@@ -13,7 +13,7 @@
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -316,7 +316,7 @@ fn php_setcookie(
     cookie: &Cookie,
     url_encode: bool,
 ) -> Result<bool, Thrown> {
-    let refuse = |req: &mut Request, text: String| Err(throw(req, "ValueError", &text));
+    let refuse = |req: &mut Request, text: String| Err(throw_error(req, "ValueError", &text));
     let function = if url_encode {
         "setcookie"
     } else {
@@ -417,7 +417,7 @@ fn cookie_options(
     for (key, value) in options.snapshot() {
         let Key::Str(key) = key else {
             let text = format!("{function}(): option array cannot have numeric keys");
-            return Err(throw(req, "ValueError", &text));
+            return Err(throw_error(req, "ValueError", &text));
         };
         let lower = key.as_bytes().to_ascii_lowercase();
         let string = |req: &mut Request| -> Result<Vec<u8>, Thrown> {
@@ -439,7 +439,7 @@ fn cookie_options(
                     "{function}(): option \"{}\" is invalid",
                     String::from_utf8_lossy(key.as_bytes())
                 );
-                return Err(throw(req, "ValueError", &text));
+                return Err(throw_error(req, "ValueError", &text));
             }
         }
     }

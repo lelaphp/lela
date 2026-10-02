@@ -32,7 +32,7 @@ use php_ext::abi::{
 use php_ext::call::{Function, known_method};
 use php_ext::coerce::{callable_checked, coerce_param};
 use php_ext::decl::{Name, Type as DeclType};
-use php_ext::raising::{Level, Thrown, arg_type_error, clear, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, clear, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Position, PushParser};
@@ -338,7 +338,7 @@ impl ObjectHandlers for Handlers {
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
         let message = "Cannot directly construct XMLParser, use xml_parser_create() or xml_parser_create_ns() instead";
-        Err(throw(req, "Error", message))
+        Err(throw_error(req, "Error", message))
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

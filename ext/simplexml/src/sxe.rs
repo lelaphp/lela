@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
-use php_ext::raising::{Level, Thrown, docref, throw, throw_chained};
+use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
@@ -111,8 +111,9 @@ impl View {
     /// `GET_NODE`: the node, or php's `Error` for an object nothing
     /// initialised.
     pub(crate) fn node(&self, req: &mut Request) -> Result<Node, Thrown> {
-        self.node
-            .ok_or_else(|| throw(req, "Error", "SimpleXMLElement is not properly initialized"))
+        self.node.ok_or_else(|| {
+            throw_error(req, "Error", "SimpleXMLElement is not properly initialized")
+        })
     }
 
     /// `match_ns`.
@@ -411,7 +412,7 @@ fn prop_dim_read(
     let view = View::of(req, object);
     match member {
         Member::Append if matches!(view.walk, Walk::Attributes(_)) => {
-            return Err(throw(req, "Error", "Cannot create unnamed attribute"));
+            return Err(throw_error(req, "Error", "Cannot create unnamed attribute"));
         }
         Member::Append => access = Access::Elements,
         Member::Index(_) if !matches!(view.walk, Walk::Attributes(_)) => access = Access::Elements,
@@ -428,7 +429,7 @@ fn prop_dim_read(
                 .and_then(Node::parent)
                 .is_some_and(|p| p.kind() == Kind::Document)
         {
-            return Err(throw(req, "Error", "Cannot create unnamed attribute"));
+            return Err(throw_error(req, "Error", "Cannot create unnamed attribute"));
         }
         node = first;
         attr = first_attr;
@@ -499,7 +500,7 @@ fn prop_dim_read(
 /// `value_str`, or php's `TypeError` for a value with none.
 fn text_of(req: &mut Request, value: &Value, access: Access) -> Result<Vec<u8>, Thrown> {
     match complex(req, value, access) {
-        Some(message) => Err(throw(req, "TypeError", &message)),
+        Some(message) => Err(throw_error(req, "TypeError", &message)),
         None => plain_text(req, value),
     }
 }
@@ -592,7 +593,11 @@ fn hits(
         (Access::Attributes, Member::Append) => None,
         (Access::Elements, Member::Append | Member::Index(_)) => {
             if mine.kind() == Kind::Attribute {
-                return Err(throw(req, "Error", "Cannot create duplicate attribute"));
+                return Err(throw_error(
+                    req,
+                    "Error",
+                    "Cannot create duplicate attribute",
+                ));
             }
             match member {
                 _ if view.walk == Walk::Node => {
@@ -640,9 +645,11 @@ fn write_access(
     access: Access,
 ) -> Result<Access, Thrown> {
     match member {
-        Member::Append if matches!(view.walk, Walk::Attributes(_)) => {
-            Err(throw(req, "Error", "Cannot append to an attribute list"))
-        }
+        Member::Append if matches!(view.walk, Walk::Attributes(_)) => Err(throw_error(
+            req,
+            "Error",
+            "Cannot append to an attribute list",
+        )),
         Member::Append | Member::Index(_) if !matches!(view.walk, Walk::Attributes(_)) => {
             Ok(Access::Elements)
         }
@@ -651,7 +658,7 @@ fn write_access(
                 Access::Attributes => "attribute",
                 Access::Elements => "element",
             };
-            Err(throw(
+            Err(throw_error(
                 req,
                 "ValueError",
                 &format!("Cannot create {what} with an empty name"),
@@ -695,7 +702,7 @@ fn prop_dim_write(
                     .and_then(Node::parent)
                     .is_some_and(|p| p.kind() == Kind::Document)
             {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "Cannot append to an attribute list",
@@ -1650,7 +1657,7 @@ impl ObjectHandlers for Handlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "An iterator cannot be used with foreach by reference",

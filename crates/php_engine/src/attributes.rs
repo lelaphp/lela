@@ -18,7 +18,7 @@ use php_unit::Level;
 
 use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, eval_declared, instantiate_named};
-use crate::api::raising::{Thrown, raise, throw};
+use crate::api::raising::{Thrown, raise, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
 
@@ -853,7 +853,7 @@ fn initialise(
 ) -> Result<(), Thrown> {
     if this.prop(req, name).is_some() {
         req.release(value);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!(

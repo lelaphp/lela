@@ -10,7 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw};
+use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
@@ -468,7 +468,7 @@ fn object_value(
         let Some(array) = data.as_array().copied() else {
             req.release(data);
             let shown = String::from_utf8_lossy(&name).into_owned();
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!("{shown}::__serialize() must return an array"),

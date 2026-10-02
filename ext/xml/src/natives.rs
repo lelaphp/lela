@@ -3,7 +3,7 @@
 use php_ext::abi::{Instance, OrFalse, Raw, Ref, True, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{to_long, to_string, truthy, type_name};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
@@ -491,7 +491,11 @@ fn xml_parse(
 ) -> Result<i64, Thrown> {
     let object = parser.object();
     if parser_mut(req, object).is_some_and(|p| p.engine.parsing()) {
-        return Err(throw(req, "Error", "Parser must not be called recursively"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Parser must not be called recursively",
+        ));
     }
     parse(req, object, data.as_bytes(), is_final)
 }
@@ -730,7 +734,7 @@ fn xml_parser_set_option(
         }
         Setting::ParseHuge => {
             if parser_mut(req, object).is_some_and(|p| p.engine.parsing()) {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "Cannot change option XML_OPTION_PARSE_HUGE while parsing",

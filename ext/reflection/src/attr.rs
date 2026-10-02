@@ -22,7 +22,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{attribute_object, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString};
 
@@ -162,7 +162,7 @@ pub(super) fn reflect_attributes(
         (Some(name), true) => match lookup_class(req, name)? {
             Some(class) => Some(class),
             None => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
@@ -253,7 +253,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
             .cloned()
     });
     let Some(marker) = marker else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Attempting to use non-attribute class \"{written}\" as attribute"),
@@ -268,7 +268,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
         // (`Z/Zend/zend_attributes.c:54`): the value's name, so `true`
         // stands where the type alone would read `bool`.
         let given = value_name(req, &value);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!(
@@ -278,7 +278,11 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
     };
     // `ZEND_ATTRIBUTE_FLAGS`, every target and `IS_REPEATABLE`.
     if flags & !(TARGET_ALL | IS_REPEATABLE) != 0 {
-        return Err(throw(req, "Error", "Invalid attribute flags specified"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Invalid attribute flags specified",
+        ));
     }
     Ok(flags)
 }
@@ -541,7 +545,7 @@ impl ReflectionAttribute {
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
         let looked_up = bare_name(&kept.attribute.name.0).to_vec();
         let Some(class) = lookup_class(req, &looked_up)? else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Attribute class \"{written}\" not found"),
@@ -549,7 +553,7 @@ impl ReflectionAttribute {
         };
         let flags = marker_flags(req, class, &written)?;
         if kept.target & flags == 0 {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(
@@ -580,7 +584,7 @@ impl ReflectionAttribute {
             return Err(throw(req, "Error", refused));
         }
         if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Attribute \"{written}\" must not be repeated"),

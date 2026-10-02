@@ -51,7 +51,7 @@ mod stmt;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, docref, new_throwable, throw, throw_value};
+use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{CLIENT_INFO, Mysqlnd, ReverseApi};
@@ -542,13 +542,13 @@ pub(crate) fn class_name(req: &Request, class: ClassId) -> String {
 /// `zend_throw_error(NULL, "%s object is already closed", ...)`.
 pub(crate) fn closed(req: &mut Request, object: PhpObject) -> Thrown {
     let name = class_name(req, object.class());
-    throw(req, "Error", &format!("{name} object is already closed"))
+    throw_error(req, "Error", &format!("{name} object is already closed"))
 }
 
 /// `zend_throw_error(NULL, "%s object is not fully initialized", ...)`.
 pub(crate) fn not_initialized(req: &mut Request, object: PhpObject) -> Thrown {
     let name = class_name(req, object.class());
-    throw(
+    throw_error(
         req,
         "Error",
         &format!("{name} object is not fully initialized"),

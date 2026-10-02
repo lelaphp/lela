@@ -10,7 +10,7 @@
 use php_ext::abi::{Passed, Ref, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_array;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, Value};
 
@@ -682,7 +682,7 @@ fn array_splice(
             req.release(removed.to_value());
         }
         stack.finish(req);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Array was modified during array_splice operation",
@@ -924,7 +924,7 @@ fn array_slice(
 /// php's `Error` for an append past `ZEND_LONG_MAX`.
 #[allow(dead_code)]
 fn occupied(req: &mut Request) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         "Cannot add element to the array as the next element is already occupied",

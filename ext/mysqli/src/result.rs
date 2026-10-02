@@ -13,7 +13,7 @@ use php_ext::call::{
     autoload, call_array, internal_iterator, known_method, lookup_class, new_object,
 };
 use php_ext::decl::{Name, Type};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
@@ -196,7 +196,7 @@ pub(crate) fn fetch_object(
         .is_some_and(|d| d.kind != php_ext::decl::ClassKind::Class || d.flags.is_abstract);
     if refused {
         let name = class_name(req, target);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Class {name} cannot be instantiated"),
@@ -464,7 +464,7 @@ pub(crate) fn data_seek(req: &mut Request, on: On, offset: i64) -> Result<bool, 
         } else {
             "mysqli_data_seek()"
         };
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("{name} cannot be used in MYSQLI_USE_RESULT mode"),
@@ -508,7 +508,7 @@ pub(crate) fn num_rows(req: &mut Request, on: On) -> Result<AsIs<Union<i64, PhpS
         Ok((!set.is_buffered() && !set.eof(), set.num_rows()))
     })?;
     if unfinished {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "mysqli_num_rows() cannot be used in MYSQLI_USE_RESULT mode",
@@ -832,7 +832,7 @@ impl ObjectHandlers for ResultHandlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "An iterator cannot be used with foreach by reference",

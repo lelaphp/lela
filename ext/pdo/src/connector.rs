@@ -23,7 +23,7 @@
 use std::any::Any;
 
 use php_ext::coerce::{to_long, value_name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
 
@@ -130,7 +130,7 @@ pub fn long_attribute(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
         _ => {}
     }
     let given = value_name(req, &value);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("Attribute value must be of type int for selected attribute, {given} given"),
@@ -772,7 +772,7 @@ pub fn bool_attribute(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
         ValueRef::Int(n) => Ok(n != 0),
         _ => {
             let given = value_name(req, &value);
-            Err(throw(
+            Err(throw_error(
                 req,
                 "TypeError",
                 &format!(

@@ -80,7 +80,7 @@ use std::process::{Command, Stdio};
 use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, FdStream, Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
@@ -390,7 +390,7 @@ fn process_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
     let kind = process_type(req);
     if res.kind() != Some(kind) {
         let text = format!("{native}(): supplied resource is not a valid process resource");
-        return Err(throw(req, "TypeError", &text));
+        return Err(throw_error(req, "TypeError", &text));
     }
     Ok(res)
 }
@@ -401,7 +401,7 @@ fn process_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
 fn arg_string(req: &mut Request, value: &Value, elem_num: usize) -> Result<Vec<u8>, Thrown> {
     let text = to_string(req, &value.deref())?.as_bytes().to_vec();
     if elem_num == 1 && text.is_empty() {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "First element must contain a non-empty program name",
@@ -409,7 +409,7 @@ fn arg_string(req: &mut Request, value: &Value, elem_num: usize) -> Result<Vec<u
     }
     if text.contains(&0) {
         let message = format!("Command array element {elem_num} contains a null byte");
-        return Err(throw(req, "ValueError", &message));
+        return Err(throw_error(req, "ValueError", &message));
     }
     Ok(text)
 }
@@ -424,7 +424,7 @@ fn string_parameter(
     name: &str,
 ) -> Result<Vec<u8>, Thrown> {
     let Some(value) = ht.get(&Key::Int(index)) else {
-        return Err(throw(req, "ValueError", &format!("Missing {name}")));
+        return Err(throw_error(req, "ValueError", &format!("Missing {name}")));
     };
     Ok(to_string(req, &value.deref())?.as_bytes().to_vec())
 }
@@ -598,12 +598,12 @@ fn redirect_descriptor(
     done: &[Descriptor],
 ) -> Result<Option<OwnedFd>, Thrown> {
     let Some(target) = ht.get(&Key::Int(1)).map(|value| value.deref()) else {
-        return Err(throw(req, "ValueError", "Missing redirection target"));
+        return Err(throw_error(req, "ValueError", "Missing redirection target"));
     };
     let Some(target) = target.as_int() else {
         let name = value_name(req, &target);
         let text = format!("Redirection target must be of type int, {name} given");
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     };
     let found = done
         .iter()
@@ -670,7 +670,7 @@ fn resource_descriptor(
     nindex: usize,
 ) -> Result<Option<Descriptor>, Thrown> {
     let Some(stream) = Stream::from_value(req, value) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "TypeError",
             "proc_open(): supplied resource is not a valid stream resource",

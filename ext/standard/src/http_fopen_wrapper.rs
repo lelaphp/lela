@@ -15,7 +15,7 @@
 
 use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
     Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Xport,
     XportFailure,
@@ -722,7 +722,7 @@ fn wrap_http_ex(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
             req.active_function_name()
         );
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     };
     let Some(mut resource) = parser.parse(req, cstr(path))? else {
         return Ok(None);

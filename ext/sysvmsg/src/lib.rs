@@ -32,7 +32,9 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{to_long, value_name};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, fatal, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, fatal, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
@@ -155,7 +157,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct SysvMessageQueue, use msg_get_queue() instead",
@@ -227,7 +229,11 @@ fn msg_get_queue(
         }
     };
     let Some(class) = lookup_class(req, b"SysvMessageQueue")? else {
-        return Err(throw(req, "Error", "Class \"SysvMessageQueue\" not found"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Class \"SysvMessageQueue\" not found",
+        ));
     };
     let queue = Instance::of(new_object(req, class)?);
     *queue.payload_mut(req)? = Some(Queue { id });

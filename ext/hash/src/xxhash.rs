@@ -10,7 +10,7 @@ use std::hash::Hasher as _;
 use std::slice;
 
 use php_ext::coerce::to_string;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 use twox_hash::{XxHash3_64, XxHash3_128};
@@ -406,7 +406,7 @@ impl Xxh3 {
         let seed = options.get(b"seed");
         let secret = options.get(b"secret");
         if seed.is_some() && secret.is_some() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("{name}: Only one of seed or secret is to be passed for initialization"),
@@ -464,7 +464,7 @@ impl Xxh3 {
                 .map(Hasher3::Bits128),
         };
         let Some(hasher) = hasher else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(

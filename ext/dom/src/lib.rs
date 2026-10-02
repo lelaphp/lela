@@ -54,7 +54,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{
-    Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw, throw_value,
+    Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -414,7 +414,11 @@ fn import_simplexml_common(
     }
     let Some(name) = class_for(node, new_class == ClassType::Modern) else {
         let n = node.kind().number();
-        return Err(throw(req, "Error", &format!("Unsupported node type: {n}")));
+        return Err(throw_error(
+            req,
+            "Error",
+            &format!("Unsupported node type: {n}"),
+        ));
     };
     let base = class(req, name)?;
     let class = mapped(&exported.props(), base);
@@ -616,7 +620,7 @@ fn fetch(req: &mut Request, object: PhpObject) -> Result<Node, Thrown> {
         return Ok(node);
     }
     let name = class_name(req, object.class());
-    Err(throw(req, "Error", &format!("Couldn't fetch {name}")))
+    Err(throw_error(req, "Error", &format!("Couldn't fetch {name}")))
 }
 
 /// `DOM_GET_INTERN` of the receiver: php's "Couldn't fetch" where its
@@ -627,7 +631,7 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
         return Ok(this);
     }
     let name = class_name(req, this.class());
-    Err(throw(req, "Error", &format!("Couldn't fetch {name}")))
+    Err(throw_error(req, "Error", &format!("Couldn't fetch {name}")))
 }
 
 /// php's `ZVAL_STRING`: a new string of `bytes`, one owner the
@@ -698,7 +702,11 @@ fn object_for(req: &mut Request, node: Node, context: Option<PhpObject>) -> Resu
     let modern = context.is_some_and(|c| modern::follows_spec(req, c));
     let Some(name) = class_for(node, modern) else {
         let n = node.kind().number();
-        return Err(throw(req, "Error", &format!("Unsupported node type: {n}")));
+        return Err(throw_error(
+            req,
+            "Error",
+            &format!("Unsupported node type: {n}"),
+        ));
     };
     let base = class(req, name)?;
     let class = match context {
@@ -871,7 +879,7 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
     }
     let class = class_name(req, object.class());
     let name = String::from_utf8_lossy(name);
-    Err(throw(
+    Err(throw_error(
         req,
         "Error",
         &format!("Cannot unset {class}::${name}"),
@@ -1860,7 +1868,7 @@ fn reconcile_ns_list_internal(
 fn readonly_error(req: &mut Request, object: PhpObject, name: &[u8]) -> Thrown {
     let class = class_name(req, object.class());
     let name = String::from_utf8_lossy(name);
-    throw(
+    throw_error(
         req,
         "Error",
         &format!("Cannot modify readonly property {class}::${name}"),
@@ -1917,7 +1925,7 @@ fn coerce_property(
         } else {
             String::from(given)
         };
-        throw(
+        throw_error(
             req,
             "TypeError",
             &format!("Cannot assign {given} to property {class}::${prop} of type {shown}"),

@@ -18,7 +18,7 @@ use crate::tables::{
 };
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw};
+use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -1373,7 +1373,7 @@ fn mb_ord(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             &format!("mb_ord() does not support the \"{name}\" encoding"),
@@ -1413,7 +1413,7 @@ fn mb_chr(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             &format!("mb_chr() does not support the \"{name}\" encoding"),
@@ -1505,7 +1505,7 @@ fn mb_str_pad(
         Some(out)
     };
     let (Some(mut out), Some(tail)) = (piece(left), piece(right)) else {
-        return Err(throw(req, "Error", "String size overflow"));
+        return Err(throw_error(req, "Error", "String size overflow"));
     };
     out.extend_from_slice(string.as_bytes());
     out.extend(tail);

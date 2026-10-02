@@ -6,7 +6,7 @@
 
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{ClassType, DocString, Library, Parsed, Parser, Source};
@@ -533,7 +533,7 @@ impl Node {
     #[php(private, final, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let class = crate::class_name(req, this.object().class());
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             &format!("Cannot directly construct {class}, use document methods instead"),

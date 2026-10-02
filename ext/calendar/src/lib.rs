@@ -31,7 +31,7 @@ mod unix;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Layout, PhpArray, PhpString, Value};
 
@@ -409,7 +409,7 @@ fn cal_days_in_month(
     let whole_year = year;
     let year = check_year(req, year, 3)?;
     let Some(start) = cal.to_jd(year, month, 1) else {
-        return Err(throw(req, "ValueError", "Invalid date"));
+        return Err(throw_error(req, "ValueError", "Invalid date"));
     };
     let next = match cal.to_jd(year, month + 1, 1) {
         Some(next) => Some(next),
@@ -702,7 +702,7 @@ fn jdtojewish(
         return string(req, sdn::render(date).as_bytes());
     }
     let Some(date) = date.filter(|d| d.year <= 9999) else {
-        return Err(throw(req, "ValueError", "Year out of range (0-9999)"));
+        return Err(throw_error(req, "ValueError", "Year out of range (0-9999)"));
     };
     let flags = HebrewFlags::decode(flags);
     let text = [

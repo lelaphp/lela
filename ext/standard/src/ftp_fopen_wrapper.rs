@@ -13,7 +13,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::coerce::truthy;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
     Closer, DirListing, Handshake, Opening, Request, SocketOptions, Stream, StreamWrapper, Xport,
     XportFailure,
@@ -210,7 +210,7 @@ fn connect(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
             req.active_function_name()
         );
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     };
     let Some(mut resource) = parser.parse(req, cstr(path))? else {
         return Ok(None);
@@ -1010,7 +1010,7 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
             req.active_function_name()
         );
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     };
     let Some(source) = parser.parse(req, cstr(from))? else {
         return Ok(false);

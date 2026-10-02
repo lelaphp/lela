@@ -6,7 +6,9 @@ use php_ext::abi::{Callable, OrFalse, Passed, Path, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{callable_checked, is_callable, to_string, truthy, value_name};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, arity, docref, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, arity, docref, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -98,7 +100,7 @@ fn session_module_name(
     };
     if crate::c_str(&name).eq_ignore_ascii_case(b"user") {
         req.release(Value::string(current));
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "session_module_name(): Argument #1 ($module) cannot be \"user\"",
@@ -366,7 +368,7 @@ fn session_create_id(
     let prefix = prefix.0.as_bytes().to_vec();
     if !prefix.is_empty() {
         if prefix.len() > 256 {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 "session_create_id(): Argument #1 ($prefix) cannot be longer than 256 characters",
@@ -609,7 +611,7 @@ fn session_start(
             ValueRef::Str(_) | ValueRef::Bool(_) | ValueRef::Int(_) => {}
             _ => {
                 let given = value_name(req, &value);
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     &format!(
@@ -627,7 +629,7 @@ fn session_start(
                 {
                     Some(ValueRef::Int(n)) => n,
                     _ => {
-                        return Err(throw(
+                        return Err(throw_error(
                             req,
                             "TypeError",
                             &format!(
@@ -1117,7 +1119,7 @@ fn named(req: &mut Request, name: &[u8]) -> Result<Callable, Thrown> {
         Ok(callable) => Ok(callable),
         Err(message) => {
             req.release(value);
-            Err(throw(req, "Error", &message))
+            Err(throw_error(req, "Error", &message))
         }
     }
 }

@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers};
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw};
+use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpObject, Resource, Value};
 
@@ -156,7 +156,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct Socket, use socket_create() instead",
@@ -198,7 +198,7 @@ pub(crate) fn new_socket(req: &mut Request, sock: Sock) -> Result<Instance<Socke
 pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<PhpObject, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw(req, "Error", &text));
+        return Err(throw_error(req, "Error", &text));
     };
     new_object(req, id)
 }

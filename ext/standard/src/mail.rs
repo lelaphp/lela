@@ -17,7 +17,7 @@ use std::process::Stdio;
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{FormatDate, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -78,11 +78,11 @@ fn build_elem(
         ValueRef::Str(text) => {
             if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
                 let message = format!("Header name \"{name}\" contains invalid characters");
-                return Err(throw(req, "ValueError", &message));
+                return Err(throw_error(req, "ValueError", &message));
             }
             if let Some(error) = check_field_value(text.as_bytes()) {
                 let message = format!("Header \"{name}\" {error}");
-                return Err(throw(req, "ValueError", &message));
+                return Err(throw_error(req, "ValueError", &message));
             }
             out.extend_from_slice(key);
             out.extend_from_slice(b": ");
@@ -95,7 +95,7 @@ fn build_elem(
         _ => {
             let given = value_name(req, &value.deref());
             let message = format!("Header \"{name}\" must be of type array|string, {given} given");
-            Err(throw(req, "TypeError", &message))
+            Err(throw_error(req, "TypeError", &message))
         }
     }
 }
@@ -114,14 +114,14 @@ fn build_elems(
             let found = String::from_utf8_lossy(c_string(found.as_bytes())).into_owned();
             let message =
                 format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
-            return Err(throw(req, "TypeError", &message));
+            return Err(throw_error(req, "TypeError", &message));
         }
         let element = element.deref();
         if !matches!(element.as_ref(), ValueRef::Str(_)) {
             let given = value_name(req, &element);
             let message =
                 format!("Header \"{name}\" must only contain values of type string, {given} found");
-            return Err(throw(req, "TypeError", &message));
+            return Err(throw_error(req, "TypeError", &message));
         }
         build_elem(req, out, key, &element)?;
     }
@@ -139,21 +139,21 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
             Key::Str(name) => name.as_bytes().to_vec(),
             Key::Int(idx) => {
                 let message = format!("Header name cannot be numeric, {idx} given");
-                return Err(throw(req, "TypeError", &message));
+                return Err(throw_error(req, "TypeError", &message));
             }
         };
         let value = value.deref();
         let lower = key.to_ascii_lowercase();
         match lower.as_slice() {
             b"to" => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "The additional headers cannot contain the \"To\" header",
                 ));
             }
             b"subject" => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "The additional headers cannot contain the \"Subject\" header",
@@ -165,7 +165,7 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
             {
                 let target = String::from_utf8_lossy(&lower).into_owned();
                 let message = format!("Header \"{target}\" must be of type string, array given");
-                return Err(throw(req, "TypeError", &message));
+                return Err(throw_error(req, "TypeError", &message));
             }
             _ => build_elem(req, &mut out, &key, &value)?,
         }

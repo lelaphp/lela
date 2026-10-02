@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
@@ -82,7 +82,7 @@ pub(super) fn default_zone(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
     let name = guess_timezone(req);
     match parse_tzfile(req, &name) {
         Some(zone) => Ok(zone),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "DateError",
             "Timezone database is corrupt. Please file a bug report as this should never happen",

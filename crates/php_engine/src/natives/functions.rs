@@ -7,7 +7,7 @@
 use php_macros::php_function;
 
 use crate::api::abi::{OrFalse, Passed};
-use crate::api::raising::{Thrown, arg_value_error, deprecated, throw};
+use crate::api::raising::{Thrown, arg_value_error, deprecated, throw_error};
 use crate::api::request::{NativeCaller, Request};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, TypeTag, Value};
 
@@ -35,7 +35,7 @@ fn zend_version(req: &mut Request) -> Result<PhpString, Thrown> {
 fn caller_arguments(req: &mut Request, name: &str, what: &str) -> Result<Vec<Value>, Thrown> {
     match req.native_caller() {
         NativeCaller::Function(_, arguments) => Ok(arguments),
-        NativeCaller::Code(_) => Err(throw(req, "Error", &format!("{name}() {what}"))),
+        NativeCaller::Code(_) => Err(throw_error(req, "Error", &format!("{name}() {what}"))),
         NativeCaller::Native => Err(req.dynamic_call()),
     }
 }
@@ -454,7 +454,7 @@ fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {
     let frame = match req.native_caller() {
         NativeCaller::Function(frame, _) | NativeCaller::Code(frame) => frame,
         NativeCaller::Native => {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Cannot call get_defined_vars() dynamically",

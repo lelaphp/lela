@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, raise, throw};
+use php_ext::raising::{Level, Thrown, raise, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -137,7 +137,11 @@ pub(super) fn offset_string(offset: i64) -> String {
 pub(super) fn class_id(req: &mut Request, name: &str) -> Result<ClassId, Thrown> {
     match lookup_class(req, name.as_bytes())? {
         Some(class) => Ok(class),
-        None => Err(throw(req, "Error", &format!("Class \"{name}\" not found"))),
+        None => Err(throw_error(
+            req,
+            "Error",
+            &format!("Class \"{name}\" not found"),
+        )),
     }
 }
 
@@ -182,7 +186,7 @@ pub(super) fn uninitialized(req: &mut Request, class: ClassId) -> Thrown {
             format!("Object of type {name} not been {tail}")
         }
     };
-    throw(req, "DateObjectError", &message)
+    throw_error(req, "DateObjectError", &message)
 }
 
 /// A clone of the object's time, or the uninitialised error.
@@ -574,7 +578,7 @@ impl ObjectHandlers for DateHandlers {
             return Std.compare(req, left, right);
         };
         let (Some(mut ta), Some(mut tb)) = (da.time.clone(), db.time.clone()) else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "DateObjectError",
                 "Trying to compare an incomplete DateTime or DateTimeImmutable object",
@@ -681,14 +685,14 @@ impl ObjectHandlers for TzHandlers {
             return Std.compare(req, left, right);
         };
         let (Some(ka), Some(kb)) = (ta.tz.clone(), tb.tz.clone()) else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "DateObjectError",
                 "Trying to compare uninitialized DateTimeZone objects",
             ));
         };
         if ka.zone_type() != kb.zone_type() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "DateException",
                 "Cannot compare two different kinds of DateTimeZone objects",
@@ -1100,7 +1104,7 @@ pub(super) const PERIOD_FIELDS: [&[u8]; 7] = [
 /// (`BP_VAR_W`, `BP_VAR_RW`), whatever the object's class.
 fn readonly(req: &mut Request, name: &[u8]) -> Thrown {
     let field = String::from_utf8_lossy(name).into_owned();
-    throw(
+    throw_error(
         req,
         "Error",
         &format!("Cannot modify readonly property DatePeriod::${field}"),
@@ -1245,7 +1249,7 @@ impl ObjectHandlers for PeriodHandlers {
         if PERIOD_FIELDS.contains(&name) {
             let class = class_name(req, object.class());
             let field = String::from_utf8_lossy(name).into_owned();
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("Cannot unset {class}::${field}"),

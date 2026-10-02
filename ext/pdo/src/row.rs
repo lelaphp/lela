@@ -10,7 +10,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -195,7 +195,7 @@ impl ObjectHandlers for Handlers {
         read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset) = offset else {
-            return Err(throw(req, "Error", "Cannot append to PDORow offset"));
+            return Err(throw_error(req, "Error", "Cannot append to PDORow offset"));
         };
         let Some(stmt) = statement(req, object) else {
             return Ok(Value::null());
@@ -222,7 +222,7 @@ impl ObjectHandlers for Handlers {
         let _ = object;
         req.release(value);
         req.release(Value::string(name));
-        Err(throw(req, "Error", "Cannot write to PDORow property"))
+        Err(throw_error(req, "Error", "Cannot write to PDORow property"))
     }
 
     fn write_dimension(
@@ -239,7 +239,7 @@ impl ObjectHandlers for Handlers {
         } else {
             "Cannot append to PDORow offset"
         };
-        Err(throw(req, "Error", message))
+        Err(throw_error(req, "Error", message))
     }
 
     fn get_property_ptr_ptr(
@@ -314,7 +314,7 @@ impl ObjectHandlers for Handlers {
         name: &[u8],
     ) -> Result<(), Thrown> {
         let _ = (object, name);
-        Err(throw(req, "Error", "Cannot unset PDORow property"))
+        Err(throw_error(req, "Error", "Cannot unset PDORow property"))
     }
 
     fn unset_dimension(
@@ -324,7 +324,7 @@ impl ObjectHandlers for Handlers {
         offset: &Value,
     ) -> Result<(), Thrown> {
         let _ = (object, offset);
-        Err(throw(req, "Error", "Cannot unset PDORow offset"))
+        Err(throw_error(req, "Error", "Cannot unset PDORow offset"))
     }
 
     /// What `var_dump` shows, the table `row_get_properties_for` builds

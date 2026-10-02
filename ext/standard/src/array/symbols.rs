@@ -8,7 +8,7 @@
 use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
@@ -75,7 +75,7 @@ fn assign_ref(
 }
 
 fn reassign_this(req: &mut Request) -> Thrown {
-    throw(req, "Error", "Cannot re-assign $this")
+    throw_error(req, "Error", "Cannot re-assign $this")
 }
 
 /// `extract(array &$array, int $flags = EXTR_OVERWRITE, string $prefix = ""): int`,
@@ -170,7 +170,7 @@ fn extract(
         return Err(arg_value_error(req, 2, "be a valid extract type"));
     }
     if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "extract(): Argument #3 ($prefix) is required when using this extract type",
@@ -409,7 +409,7 @@ fn compact_var(
         }
         ValueRef::Array(array) => {
             if array.is_recursive() {
-                return Err(throw(req, "Error", "Recursion detected"));
+                return Err(throw_error(req, "Error", "Recursion detected"));
             }
             call_stack_end(req)?;
             array.protect();

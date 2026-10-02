@@ -7,7 +7,7 @@
 
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -170,7 +170,7 @@ fn iptcembed(
         return Ok(Union::B(false));
     };
     if data.len() >= usize::MAX - PSHEADER.len() - 1026 {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "iptcembed(): Argument #1 ($iptc_data) is too large",

@@ -4,7 +4,7 @@
 
 use php_ext::abi::{Instance, OrFalse, Passed, Path, Raw, This, True, Union, Untyped, Variadic};
 use php_ext::attr::php_class;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
@@ -121,7 +121,7 @@ fn set_encoding(req: &mut Request, object: PhpObject, value: &Value) -> Result<(
             doc.set_doc_string(DocString::Encoding, Some(name));
             Ok(())
         }
-        _ => Err(throw(req, "ValueError", "Invalid document encoding")),
+        _ => Err(throw_error(req, "ValueError", "Invalid document encoding")),
     }
 }
 
@@ -178,7 +178,7 @@ fn set_version(req: &mut Request, object: PhpObject, value: &Value) -> Result<()
     if crate::modern::follows_spec(req, object)
         && !matches!(value.as_str_bytes(), Some(b"1.0" | b"1.1"))
     {
-        return Err(throw(req, "ValueError", "Invalid XML version"));
+        return Err(throw_error(req, "ValueError", "Invalid XML version"));
     }
     doc.set_doc_string(
         DocString::Version,
@@ -693,7 +693,7 @@ fn schema_validate_as(
             docref(req, Level::Warning, &format!("Invalid {label}"));
             Ok(false)
         }
-        Validated::Unusable => Err(throw(
+        Validated::Unusable => Err(throw_error(
             req,
             "Error",
             &format!("Invalid {label} Validation Context"),

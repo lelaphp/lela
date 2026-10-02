@@ -7,7 +7,7 @@
 use std::ffi::c_int;
 
 use php_ext::coerce::to_long;
-use php_ext::raising::throw;
+use php_ext::raising::throw_error;
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 
@@ -288,12 +288,12 @@ pub(crate) fn prereq(
             n as c_int
         }
         ValueRef::Int(_) => {
-            let thrown = throw(cx.req, "ValueError", text);
+            let thrown = throw_error(cx.req, "ValueError", text);
             cx.raise(thrown);
             0
         }
         _ => {
-            let thrown = throw(cx.req, "TypeError", text);
+            let thrown = throw_error(cx.req, "TypeError", text);
             cx.raise(thrown);
             0
         }
@@ -320,7 +320,7 @@ pub(crate) fn ssh_hostkey(cx: &mut Cx<'_>, object: PhpObject, keytype: c_int, ke
         #[allow(clippy::cast_possible_truncation)]
         ValueRef::Int(n) if n == c::CURLKHMATCH_OK || n == c::CURLKHMATCH_MISMATCH => n as c_int,
         _ => {
-            let thrown = throw(
+            let thrown = throw_error(
                 cx.req,
                 "Error",
                 "The CURLOPT_SSH_HOSTKEYFUNCTION callback must return either CURLKHMATCH_OK or CURLKHMATCH_MISMATCH",

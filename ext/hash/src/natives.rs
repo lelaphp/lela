@@ -8,7 +8,9 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path, Raw, This,
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, while_pending};
+use php_ext::raising::{
+    Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
+};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{
     Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
@@ -735,7 +737,7 @@ fn hash_init(
     }
     let mut state = (algo.init)(req, options)?;
     let Some(class) = lookup_class(req, b"HashContext")? else {
-        return Err(throw(req, "Error", "Class \"HashContext\" not found"));
+        return Err(throw_error(req, "Error", "Class \"HashContext\" not found"));
     };
     let object = new_object(req, class)?;
     let allocation = Emalloc::new(req, algo.context)?;
@@ -972,7 +974,7 @@ fn hash_update_file(
                 "{}(): supplied resource is not a valid Stream-Context resource",
                 req.active_function_name()
             );
-            let refused = throw(req, "TypeError", &text);
+            let refused = throw_error(req, "TypeError", &text);
             let path = filename.0.as_bytes();
             let carried =
                 while_pending(req, &refused, |req| hash_file_into(req, object, path, None));

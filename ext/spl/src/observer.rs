@@ -7,6 +7,8 @@
 //! information; the iterator is a position in it and `intern->index`
 //! beside it.
 
+mod table;
+
 use std::collections::HashMap;
 
 use php_ext::abi::{
@@ -15,12 +17,13 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
 use crate::{ArrayAccess, Countable, Iterator, SeekableIterator, Serializable};
+use table::Table;
 
 /// A row's key: the object's id, or the string `getHash()` answered.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -29,12 +32,14 @@ enum RowKey {
     Hash(Vec<u8>),
 }
 
-/// `spl_SplObjectStorage`: the rows with their places, the position,
-/// `intern->index`, and `MultipleIterator`'s flags.
+/// `spl_SplObjectStorage`: the rows with their places, what php's table
+/// lays down for them, the position, `intern->index`, and
+/// `MultipleIterator`'s flags.
 #[derive(Default)]
 pub(crate) struct StorageState {
     rows: Vec<Option<(RowKey, PhpObject, Value)>>,
     places: HashMap<RowKey, usize>,
+    table: Table,
     pos: usize,
     index: i64,
     flags: i64,
@@ -827,7 +832,42 @@ impl SplObjectStorage {
     }
 
     /// `offsetSet($object, mixed $info = null): void`, php's alias of
-    /// `attach()`; the witness is the class's.
+    /// `attach()`, each row laid down as php's `intern->storage` lays it
+    /// down. The table starts packed under a small id and turns to a hash where
+    /// an id lands behind the end, each row a 24-byte element; a
+    /// `getHash()` row keeps its string as the bucket's key; a storage read
+    /// back by `unserialize()` makes the same allocations:
+    ///
+    /// ```php
+    /// function d($f) { global $r; $m = memory_get_usage(); $f(); $r[] = memory_get_usage() - $m; }
+    /// $o = new stdClass; $p = new stdClass; $q = new stdClass;
+    /// d(function () use (&$s) { $s = new SplObjectStorage; });
+    /// d(function () use ($s, $o) { $s[$o] = null; });
+    /// d(function () use ($s) { $s[new stdClass] = null; });
+    /// d(function () use ($s, $p) { $s->offsetSet($p); });
+    /// d(function () use ($s, $q) { $s[$q] = 5; });
+    /// d(function () use ($s, $q) { unset($s[$q]); });
+    /// $t = new SplObjectStorage; $t[$o] = 1; $ser = serialize($t);
+    /// d(function () use (&$u, $ser) { $u = unserialize($ser); });
+    /// d(function () use (&$u) { $u = null; });
+    /// echo implode(" ", $r), "\n"; $r = [];
+    /// class H extends SplObjectStorage { function getHash($o): string { return spl_object_hash($o); } }
+    /// $h = new H;
+    /// d(function () use ($h, $o) { $h[$o] = null; });
+    /// d(function () use ($h, $p) { $h[$p] = null; });
+    /// d(function () use ($h, $p) { unset($h[$p]); });
+    /// d(function () use ($h) { $h->removeAll($h); });
+    /// $w = new SplObjectStorage; $all = [];
+    /// for ($i = 0; $i < 9; $i++) { $all[] = new stdClass; }
+    /// foreach ($all as $x) { d(function () use ($w, $x) { $w[$x] = null; }); }
+    /// d(function () use (&$w) { $w = null; });
+    /// d(function () use (&$s) { $s = null; });
+    /// echo implode(" ", $r), "\n";
+    /// ```
+    /// ```expect
+    /// 160 184 64 184 24 -24 600 -600
+    /// 408 88 -88 -88 344 24 24 24 24 24 24 24 344 -1016 -592
+    /// ```
     #[php(tentative)]
     fn offsetSet(
         req: &mut Request,
@@ -1320,18 +1360,32 @@ fn with<R>(
 /// `spl_object_storage_get_hash`: the object's id, or `getHash()`'s string
 /// where a user class overrides it, its `TypeError` for anything else.
 fn row_key(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<RowKey, Thrown> {
+    let (key, string) = hashed(req, this, object)?;
+    if let Some(string) = string {
+        req.release(string);
+    }
+    Ok(key)
+}
+
+/// [`row_key`] with the string `getHash()` answered, which a new row's
+/// bucket keeps as its key and `spl_object_storage_free_hash` releases
+/// otherwise.
+fn hashed(
+    req: &mut Request,
+    this: PhpObject,
+    object: PhpObject,
+) -> Result<(RowKey, Option<Value>), Thrown> {
     if !crate::overridden(req, this, b"gethash") {
-        return Ok(RowKey::Id(object.index()));
+        return Ok((RowKey::Id(object.index()), None));
     }
     let answered = call_method(req, &this, b"getHash", &[object.as_value()])?;
     if let Some(bytes) = answered.as_str_bytes().map(<[u8]>::to_vec) {
-        req.release(answered);
-        return Ok(RowKey::Hash(bytes));
+        return Ok((RowKey::Hash(bytes), Some(answered)));
     }
     let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
     let name = value_name(req, &answered);
     req.release(answered);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("{class}::getHash(): Return value must be of type string, {name} returned"),
@@ -1410,18 +1464,31 @@ fn remove_all_except(req: &mut Request, this: PhpObject, other: PhpObject) -> Re
 }
 
 /// `spl_object_storage_attach`: the information of a row replaced, or a
-/// row appended holding one more owner of the object.
+/// row appended holding one more owner of the object, its place and
+/// its element laid down as php's table lays them down.
 fn storage_attach(
     req: &mut Request,
     this: PhpObject,
     object: PhpObject,
     inf: Value,
 ) -> Result<(), Thrown> {
-    let key = row_key(req, this, object)?;
+    let (key, string) = hashed(req, this, object)?;
     let inf = crate::copied(req, inf);
-    match with(req, this, |s| s.attach(key, object, inf))? {
-        Ok(old) => req.release(old),
-        Err(object) => req.addref(&object.as_value()),
+    match with(req, this, |s| s.attach(key.clone(), object, inf))? {
+        Ok(old) => {
+            if let Some(string) = string {
+                req.release(string);
+            }
+            req.release(old);
+        }
+        Err(object) => {
+            req.addref(&object.as_value());
+            let copied = overridden_bits(req, this)? & SOS_OVERRIDDEN_WRITE != 0;
+            let mut table = with(req, this, |s| std::mem::take(&mut s.table))?;
+            let placed = table.place(req, key, string, copied);
+            with(req, this, |s| s.table = table)?;
+            placed?;
+        }
     }
     Ok(())
 }
@@ -1429,22 +1496,38 @@ fn storage_attach(
 /// `spl_object_storage_detach`: `true` where a row went.
 fn storage_detach(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<bool, Thrown> {
     let key = row_key(req, this, object)?;
-    match with(req, this, |s| s.detach(&key))? {
-        Some((object, inf)) => {
-            give_up_row(req, object, inf);
-            Ok(true)
-        }
-        None => Ok(false),
+    detach_key(req, this, &key)
+}
+
+/// `zend_hash_index_del` or `zend_hash_del` of the row under `key`:
+/// `true` where a row went, given up as php's table gives it up.
+fn detach_key(req: &mut Request, this: PhpObject, key: &RowKey) -> Result<bool, Thrown> {
+    let gone = with(req, this, |s| {
+        let row = s.detach(key)?;
+        Some((row, s.table.remove(key)))
+    })?;
+    let Some(((object, inf), held)) = gone else {
+        return Ok(false);
+    };
+    let (string, element) = held.map_or((None, None), |(s, e)| (s, Some(e)));
+    // `zend_hash_del` releases the key before the destructor runs.
+    if let Some(string) = string {
+        req.release(string);
     }
+    give_up_row(req, object, inf, element);
+    Ok(true)
 }
 
 /// `spl_object_storage_dtor`, the table's destructor for every row a
 /// detach or the storage's end gives up: the object released, then the
 /// information, `zend_object_release(el->obj)` before
-/// `zval_ptr_dtor(&el->inf)`.
-fn give_up_row(req: &mut Request, object: PhpObject, inf: Value) {
+/// `zval_ptr_dtor(&el->inf)`, then the element, `efree(el)`.
+fn give_up_row(req: &mut Request, object: PhpObject, inf: Value, element: Option<Emalloc>) {
     req.release(object.as_value());
     req.release(inf);
+    if let Some(element) = element {
+        element.free(req);
+    }
 }
 
 /// `SplObjectStorage::detach`'s body: the row gone and the position
@@ -1465,16 +1548,25 @@ fn storage_contains(req: &mut Request, this: PhpObject, object: PhpObject) -> Re
 
 impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let rows = object
+        let (rows, mut table) = object
             .native_mut::<Storage>(req)
             .map(|s| {
                 s.places.clear();
-                std::mem::take(&mut s.rows)
+                (std::mem::take(&mut s.rows), std::mem::take(&mut s.table))
             })
             .unwrap_or_default();
-        for (_, object, inf) in rows.into_iter().flatten() {
-            give_up_row(req, object, inf);
+        // `zend_hash_destroy`: each row's destructor, then its key, and
+        // the data last.
+        for (key, object, inf) in rows.into_iter().flatten() {
+            let (string, element) = table
+                .remove(&key)
+                .map_or((None, None), |(s, e)| (s, Some(e)));
+            give_up_row(req, object, inf, element);
+            if let Some(string) = string {
+                req.release(string);
+            }
         }
+        table.free(req);
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -1532,7 +1624,7 @@ impl ObjectHandlers for Handlers {
                     && !crate::is_a(req, target.class(), b"Iterator")
                 {
                     req.release(value);
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "TypeError",
                         "Can only attach objects that implement the Iterator interface",
@@ -1579,10 +1671,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         match offset.deref().as_object().copied() {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_UNSET == 0 => {
-                let key = RowKey::Id(target.index());
-                if let Some((object, inf)) = with(req, object, |s| s.detach(&key))? {
-                    give_up_row(req, object, inf);
-                }
+                detach_key(req, object, &RowKey::Id(target.index()))?;
                 Ok(())
             }
             _ => Std.unset_dimension(req, object, offset),

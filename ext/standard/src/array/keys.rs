@@ -14,7 +14,7 @@ use php_ext::coerce::{
     BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string,
 };
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw, warning,
+    Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw_error, warning,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, Layout, PhpArray, PhpString, Value, ValueRef};
@@ -602,14 +602,14 @@ fn array_fill(
         return Ok(PhpArray::empty());
     }
     if count > i64::from(i32::MAX) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "array_fill(): Argument #2 ($count) is too large",
         ));
     }
     if start > i64::MAX - count + 1 {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Cannot add element to the array as the next element is already occupied",
@@ -908,7 +908,7 @@ fn array_chunk(
 #[php_function]
 fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<PhpArray, Thrown> {
     if keys.len() != values.len() {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "ValueError",
             "array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements",

@@ -63,7 +63,7 @@ use std::path::Path;
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Request, Resolve, Stream, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -250,7 +250,7 @@ impl ObjectHandlers for DirectoryHandlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct Directory, use dir() instead",
@@ -336,14 +336,14 @@ fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result
     let handle = handle.map(|value| value.deref());
     let Some(handle) = handle.filter(|value| matches!(value.as_ref(), ValueRef::Resource(_)))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal directory stream has been altered",
         ));
     };
     let Some(stream) = Stream::from_value(req, &handle) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "TypeError",
             &format!(
@@ -352,7 +352,7 @@ fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result
         ));
     };
     if !stream.is_dir(req) {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal directory stream has been altered",

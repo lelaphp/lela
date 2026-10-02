@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
 
@@ -177,7 +177,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct SysvSemaphore, use sem_get() instead",
@@ -301,7 +301,11 @@ fn sem_get(
         warn(req, "Failed releasing SYSVSEM_SETVAL", errno);
     }
     let Some(class) = lookup_class(req, b"SysvSemaphore")? else {
-        return Err(throw(req, "Error", "Class \"SysvSemaphore\" not found"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Class \"SysvSemaphore\" not found",
+        ));
     };
     let semaphore = Instance::of(new_object(req, class)?);
     *semaphore.payload_mut(req)? = Some(Sem {

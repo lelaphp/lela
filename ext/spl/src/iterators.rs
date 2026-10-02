@@ -24,7 +24,9 @@ use php_ext::call::{
 };
 use php_ext::coerce::{coerce_param, to_string, truthy};
 use php_ext::decl::{Name, Type};
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
+use php_ext::raising::{
+    Thrown, arg_type_error, arg_value_error, arity, throw, throw_error, throwing_warnings,
+};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pcre::Regex;
@@ -2558,7 +2560,7 @@ fn dual_next(req: &mut Request, this: PhpObject, free: bool) -> Result<(), Throw
         dual_free(req, this)?;
     }
     let Some(iter) = inner_iter(req, this)? else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "The inner constructor wasn't initialized with an iterator instance",
@@ -2586,7 +2588,7 @@ fn dual_set(
 /// `SPL_FETCH_AND_CHECK_DUAL_IT`: the receiver, its constructor served.
 fn checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     if dual(req, this, |it| it.kind)? == Kind::Unknown {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "The object is in an invalid state as the parent constructor was not called",
@@ -3052,7 +3054,7 @@ fn regex_of(req: &mut Request, this: PhpObject) -> Result<RegexIt, Thrown> {
     let this = checked(req, this)?;
     match dual(req, this, |it| it.regex.clone())? {
         Some(regex) => Ok(regex),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "The object is in an invalid state as the parent constructor was not called",
@@ -3155,7 +3157,7 @@ fn rec<R>(
 /// The receiver, php's `Error` where its constructor was not served.
 fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     if rec(req, this, |it| it.levels.is_empty())? {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "The object is in an invalid state as the parent constructor was not called",
@@ -3569,14 +3571,14 @@ impl ObjectHandlers for RecHandlers {
             return Ok(None);
         }
         if by_ref {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "An iterator cannot be used with foreach by reference",
             ));
         }
         if rec(req, object, |it| it.levels.is_empty())? {
-            return Err(throw(req, "Error", "Object is not initialized"));
+            return Err(throw_error(req, "Error", "Object is not initialized"));
         }
         Ok(Some(Box::new(RecWalk)))
     }
@@ -3604,7 +3606,7 @@ impl ObjectHandlers for RecHandlers {
         if rec(req, object, |it| it.levels.is_empty())? {
             let name =
                 String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!("The {name} instance wasn't initialized properly"),

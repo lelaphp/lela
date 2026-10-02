@@ -32,7 +32,7 @@ use php_unit::{OpArray, Opcode};
 
 use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
@@ -196,7 +196,7 @@ impl ObjectHandlers for GeneratorHandlers {
 
     /// `zend_generator_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "The \"Generator\" class is reserved for internal use and cannot be manually instantiated",
@@ -905,7 +905,7 @@ pub(crate) fn yield_from(
     let object = value.as_object().copied().filter(|_| !constant);
     let Some(object) = object else {
         req.release(value);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Can use \"yield from\" only with arrays and Traversables",
@@ -914,7 +914,7 @@ pub(crate) fn yield_from(
     if is_generator(req, object) {
         if !has_frame(req, object) {
             req.release(value);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Generator passed to yield from was aborted without proper return and is unable to continue",
@@ -928,7 +928,7 @@ pub(crate) fn yield_from(
         }
         if same(current(req, object), generator) {
             req.release(value);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Impossible to yield from the Generator being currently run",
@@ -940,7 +940,7 @@ pub(crate) fn yield_from(
     }
     if !crate::interfaces::is_traversable(req, object.class()) {
         req.release(value);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Can use \"yield from\" only with arrays and Traversables",
@@ -1052,7 +1052,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     }
     loop {
         if is_running(req, generator) {
-            let thrown = throw(req, "Error", "Cannot resume an already running generator");
+            let thrown = throw_error(req, "Error", "Cannot resume an already running generator");
             req.leave_pending(&thrown);
             return Ok(());
         }
@@ -1931,7 +1931,7 @@ impl Generator {
         let root = current(req, this);
         if is_running(req, root) {
             req.release(throwable.as_value());
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Cannot resume an already running generator",

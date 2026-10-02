@@ -22,7 +22,7 @@ use crate::settings::settings;
 use crate::text::{must_not_be_empty, new_string, value_error};
 use php_ext::abi::{Callable, OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -361,7 +361,7 @@ fn parse_options(req: &mut Request, text: &[u8]) -> Result<(u32, Syntax), Thrown
             c => {
                 let Some((_, s)) = Syntax::ALL.iter().find(|(l, _)| *l == c) else {
                     let text = format!("Option \"{}\" is not supported", char::from(c));
-                    return Err(throw(req, "ValueError", &text));
+                    return Err(throw_error(req, "ValueError", &text));
                 };
                 syntax = *s;
             }
@@ -1035,10 +1035,10 @@ fn search(
     let st = state(req);
     let (re, pos, subject) = (st.search_re.clone(), st.search_pos, st.search_str);
     let Some(re) = re else {
-        return Err(throw(req, "Error", "No pattern was provided"));
+        return Err(throw_error(req, "Error", "No pattern was provided"));
     };
     let Some(subject) = subject else {
-        return Err(throw(req, "Error", "No string was provided"));
+        return Err(throw_error(req, "Error", "No string was provided"));
     };
     let Some(mut region) = Region::new() else {
         return Ok(false);

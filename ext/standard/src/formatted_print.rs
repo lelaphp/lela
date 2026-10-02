@@ -13,7 +13,7 @@
 use php_ext::abi::{Raw, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, docref, fatal, throw, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -781,7 +781,7 @@ fn next_argument(currarg: &mut usize) -> usize {
 
 /// `zend_value_error`: a `ValueError` with the message as it is.
 fn value_error(req: &mut Request, message: &str) -> Thrown {
-    throw(req, "ValueError", message)
+    throw_error(req, "ValueError", message)
 }
 
 /// `php_sprintf_getnumber`: `ZEND_STRTOL` over the digits at `at`,
