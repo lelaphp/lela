@@ -62,6 +62,7 @@ mod class_data;
 mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
+mod hash_bytes;
 mod scanner_file;
 pub use scanner_file::ScannerFile;
 mod hold;
@@ -1900,8 +1901,13 @@ pub struct Request {
     /// `EG(included_files)`: the resolved path of every file compiled by
     /// the request, the primary one first (`php_execute_script_ex`),
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
-    /// before they open one (`zend_include_or_eval`).
-    included_files: Vec<Vec<u8>>,
+    /// before they open one (`zend_include_or_eval`), on the request's
+    /// heap ([`hash_bytes::IncludedFiles`]).
+    included_files: hash_bytes::IncludedFiles,
+    /// `EG(symtable_cache)`: the rebuilt symbol tables' bytes a frame's
+    /// end cleaned and kept for the next rebuild, at most
+    /// `SYMTABLE_CACHE_SIZE`.
+    symtable_cache: Vec<hash_bytes::HashBytes>,
     /// The rows this request added to `EG(zend_constants)`, in the order
     /// it added them, each under the extension it is registered by:
     /// `Core` for what the host registers at request start
@@ -2296,6 +2302,10 @@ pub(crate) enum Symbol {
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
     entries: Vec<(Vec<u8>, Symbol)>,
+    /// What a rebuilt table holds on the request's heap
+    /// ([`Request::rebuilt_table_bytes`]); `EG(symbol_table)`'s are not
+    /// held.
+    bytes: Option<hash_bytes::HashBytes>,
 }
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
@@ -2693,7 +2703,8 @@ impl Request {
             post: post::Post::default(),
             armed: Vec::new(),
             tables: vec![SymbolTable::default()],
-            included_files: Vec::new(),
+            included_files: hash_bytes::IncludedFiles::default(),
+            symtable_cache: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
@@ -12979,6 +12990,7 @@ impl Request {
                 None => {
                     if let Some(entries) = self.table_mut(table) {
                         entries.push((name, Symbol::Indirect(frame, at)));
+                        self.table_bytes(table, true, false);
                     }
                     continue;
                 }
@@ -13025,7 +13037,8 @@ impl Request {
     /// the frame marked `ZEND_CALL_HAS_SYMBOL_TABLE`. What a function
     /// frame gets when it includes a file, so the included code reads
     /// and writes the function's variables; freed when the frame pops
-    /// (`zend_clean_and_cache_symbol_table`).
+    /// (`zend_clean_and_cache_symbol_table`). Its bytes are php's, on
+    /// the request's heap ([`Request::rebuilt_table_bytes`]).
     pub(crate) fn rebuild_symbol_table(&mut self, frame: FrameRef) -> TableId {
         if let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) {
             return table;
@@ -13040,11 +13053,14 @@ impl Request {
                     Symbol::Indirect(frame, u32::try_from(at).unwrap_or(u32::MAX)),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let last_var = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+        let bytes = self.rebuilt_table_bytes(last_var);
         let table = TableId(u32::try_from(self.tables.len()).unwrap_or(u32::MAX));
         self.tables.push(SymbolTable {
             owner: Some(frame),
             entries,
+            bytes,
         });
         if let Some(state) = self.vm.at_mut(frame) {
             state.symbol_table = Some(table);
@@ -13069,9 +13085,9 @@ impl Request {
     }
 
     /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt
-    /// the last table pops: its values released and the table gone. A
-    /// bucket still pointing at a CV points at a slot the pop is giving
-    /// up, and owns nothing.
+    /// the last table pops: its values released and the table gone, its
+    /// bytes kept in `EG(symtable_cache)`. A bucket still pointing at a
+    /// CV points at a slot the pop is giving up, and owns nothing.
     fn free_rebuilt_table(&mut self, frame: FrameRef) {
         if self
             .tables
@@ -13080,12 +13096,13 @@ impl Request {
         {
             return;
         }
-        let Some(table) = self.tables.pop() else {
+        let Some(mut table) = self.tables.pop() else {
             return;
         };
-        for (_, symbol) in table.entries {
+        for (_, symbol) in std::mem::take(&mut table.entries) {
             self.release_symbol(symbol);
         }
+        self.cache_symbol_table(table);
     }
 
     /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
@@ -13160,6 +13177,7 @@ impl Request {
             return;
         }
         entries.push((name, Symbol::Value(value)));
+        self.table_bytes(table, true, false);
     }
 
     /// One symbol deleted, `zend_hash_del`: the name gone and what it
@@ -13173,6 +13191,8 @@ impl Request {
             return;
         };
         let (_, symbol) = entries.remove(at);
+        let last = at == entries.len();
+        self.table_bytes(table, false, last);
         self.release_symbol(symbol);
     }
 
@@ -13403,15 +13423,16 @@ impl Request {
         let Some(entries) = self.table_mut(table) else {
             return Ok(None);
         };
-        let at = match entries.iter().position(|(key, _)| key == name) {
-            Some(at) => at,
+        let (at, symbol) = match entries.iter().position(|(key, _)| key == name) {
+            Some(at) => (at, entries[at].1),
             None if add => {
                 entries.push((name.to_vec(), Symbol::Value(Value::null())));
-                entries.len() - 1
+                let at = entries.len() - 1;
+                self.table_bytes(table, true, false);
+                (at, Symbol::Value(Value::null()))
             }
             None => return Ok(None),
         };
-        let symbol = entries[at].1;
         let cell = match symbol {
             Symbol::Indirect(frame, slot) => return Ok(self.attached_ptr(table, frame, slot)),
             Symbol::Held(cell) => cell,
@@ -17038,8 +17059,8 @@ impl Request {
     /// nowhere in the table, as php's `Standard input code` is not.
     pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
         if let Some(real) = self.realpath(script) {
-            self.included_files
-                .push(real.as_os_str().as_encoded_bytes().to_vec());
+            // The memory limit's fatal is recorded and ends the request.
+            let _ = self.note_included(real.as_os_str().as_encoded_bytes());
         }
     }
 
@@ -17052,7 +17073,7 @@ impl Request {
     pub(crate) fn expand_primary_file(&mut self) -> Vec<u8> {
         let script = self.description.script_name.clone().unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        self.included_files.push(expanded.clone());
+        let _ = self.note_included(&expanded);
         self.description.script_name = Some(expanded.clone());
         expanded
     }
@@ -17110,7 +17131,7 @@ impl Request {
             Ok(path) => return self.include_stream(kind, written, &path),
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
             Err(_) if is_wrapper_url(written) => {
-                if kind.once() && self.included_files.iter().any(|p| p == written) {
+                if kind.once() && self.included_files.contains(written) {
                     return Ok(Opened::Already);
                 }
                 return self.include_stream(kind, written, written);
@@ -17132,7 +17153,7 @@ impl Request {
             return self.failed_opening(kind, written);
         }
         if kind.once() {
-            self.included_files.push(path.clone());
+            self.note_included(&path)?;
         }
         let outer = self.including.replace((kind, self.vm.call_depth()));
         let replaced = self.compile_file_source(&path);
@@ -17145,9 +17166,7 @@ impl Request {
                     return Err(self.refused_include(&refused, &path, SourceKind::File));
                 }
             };
-            if !self.included_files.contains(&path) {
-                self.included_files.push(path);
-            }
+            self.note_included(&path)?;
             return Ok(Opened::Unit(unit));
         }
         let handle = if kind.once() {
@@ -17161,9 +17180,7 @@ impl Request {
         };
         match cached {
             Some(Ok(unit)) => {
-                if !self.included_files.contains(&path) {
-                    self.included_files.push(path);
-                }
+                self.note_included(&path)?;
                 Ok(Opened::Unit(unit))
             }
             Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
@@ -17285,7 +17302,7 @@ impl Request {
         path: &[u8],
     ) -> Result<Opened, Thrown> {
         if kind.once() {
-            self.included_files.push(path.to_vec());
+            self.note_included(path)?;
         }
         let outer = self.including.replace((kind, self.vm.call_depth()));
         let opened = ScannerFile::open(self, path);
@@ -17330,9 +17347,7 @@ impl Request {
             Ok(unit) => unit,
             Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
         };
-        if !self.included_files.iter().any(|p| p == path) {
-            self.included_files.push(path.to_vec());
-        }
+        self.note_included(path)?;
         Ok(Opened::Unit(unit))
     }
 
@@ -18457,7 +18472,19 @@ impl Request {
             .get(table.0 as usize)
             .map(|table| table.entries.clone())
             .unwrap_or_default();
-        let mut array = PhpArray::new(self)?;
+        // `zend_array_dup` lays the copy down at the table's own size,
+        // which a rebuilt table taken from `EG(symtable_cache)` may have
+        // grown past eight.
+        let size = self
+            .tables
+            .get(table.0 as usize)
+            .and_then(SymbolTable::size);
+        let mut array = match size {
+            Some(size) if size > 8 => {
+                PhpArray::sized(self, size, crate::api::values::Layout::Hash)?
+            }
+            _ => PhpArray::new(self)?,
+        };
         for (name, symbol) in entries {
             let value = match symbol {
                 Symbol::Value(value) => value,
@@ -19223,7 +19250,7 @@ impl Request {
     /// them, the primary file's first.
     #[must_use]
     pub fn included_files(&self) -> Vec<Vec<u8>> {
-        self.included_files.clone()
+        self.included_files.paths()
     }
 
     /// `get_loaded_extensions()`: `Core`, then the bundle in `MINIT`
