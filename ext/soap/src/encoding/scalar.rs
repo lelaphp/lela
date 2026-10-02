@@ -11,9 +11,9 @@ use php_ext::values::{PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Library, Node, Save};
 
 use super::{
-    Cx, Enc, bogus, child_content, collapse_in_place, conv, find_zval_null, master_to_xml,
-    master_to_zval_int, new_node, sdl, set_ns_and_type, string, text, value_error,
-    white_space_collapse, white_space_replace, xml_nil,
+    Cx, Enc, bogus, child_content, collapse_in_place, find_zval_null, master_to_xml,
+    master_to_zval_int, new_node, sdl, set_ns_and_type, string, text, white_space_collapse,
+    white_space_replace, xml_nil,
 };
 use crate::model::{TypeKind, Use, ty};
 use crate::xml::parse_memory;
@@ -212,7 +212,30 @@ pub(super) fn to_zval_bool(data: Node) -> Res<Value> {
 fn enum_backing(req: &Request, v: &Value) -> Option<EnumBacking> {
     let o = v.as_object()?;
     let decl = req.class_decl(o.class())?;
-    (decl.kind == ClassKind::Enum).then_some(decl.backing)
+    if decl.kind != ClassKind::Enum {
+        return None;
+    }
+    // `enum_backing_type`, read off the case's `value` as a user enum's
+    // declaration does not carry it.
+    Some(match o.prop(req, b"value").map(|v| v.deref()) {
+        None => EnumBacking::Pure,
+        Some(v) if v.as_int().is_some() => EnumBacking::Int,
+        Some(_) => EnumBacking::String,
+    })
+}
+
+/// `zend_value_error` where php goes on with the throwable pending: the
+/// `ValueError` chained after any already pending, kept in
+/// `State::pending` for the message's maker to hand on once the message
+/// is made, as php's caller meets `EG(exception)`.
+fn left_pending(req: &mut Request, msg: &str) {
+    let thrown = php_ext::raising::throw_error(req, "ValueError", msg);
+    let earlier = req.state::<crate::State>().pending.take();
+    let now = match earlier {
+        Some(e) => e.chain(req, thrown),
+        None => thrown,
+    };
+    req.state::<crate::State>().pending = Some(now);
 }
 
 /// `get_serialization_string_from_zval`: the string, one owner, the caller's.
@@ -220,8 +243,8 @@ pub(super) fn serialization_string(req: &mut Request, data: &Value) -> Res<PhpSt
     let data = data.deref();
     match enum_backing(req, &data) {
         Some(EnumBacking::Pure) => {
-            let err = value_error(req, "Non-backed enums have no default serialization");
-            Err(err)
+            left_pending(req, "Non-backed enums have no default serialization");
+            Ok(PhpString::new(req, b"")?)
         }
         Some(_) => {
             let case = data
@@ -251,14 +274,14 @@ fn serialization_long(req: &mut Request, data: &Value) -> Res<i64> {
             .and_then(|o| o.prop(req, b"value"))
             .and_then(|v| v.as_int())
             .unwrap_or(0)),
-        Some(EnumBacking::Pure) => Err(value_error(
-            req,
-            "Non-backed enums have no default serialization",
-        )),
-        Some(EnumBacking::String) => Err(value_error(
-            req,
-            "String-backed enum cannot be serialized as int",
-        )),
+        Some(EnumBacking::Pure) => {
+            left_pending(req, "Non-backed enums have no default serialization");
+            Ok(0)
+        }
+        Some(EnumBacking::String) => {
+            left_pending(req, "String-backed enum cannot be serialized as int");
+            Ok(0)
+        }
         None => Ok(to_long(req, data)?),
     }
 }
@@ -749,11 +772,6 @@ pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Value>
     let out = call(req, &callable, &[arg]);
     req.release(arg);
     Ok(out?)
-}
-
-/// `conv(XSD_ANYXML)`'s reference, for the model walks.
-pub(super) fn any_xml(req: &mut Request) -> Res<crate::model::EncRef> {
-    Ok(conv(req, ty::XSD_ANYXML)?.r)
 }
 
 #[cfg(test)]

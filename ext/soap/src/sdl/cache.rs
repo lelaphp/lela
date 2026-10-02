@@ -1385,12 +1385,44 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     // WSDL code: an error leaves here as php's bailout leaves
     // `load_wsdl`, with `SOAP_GLOBAL(error_code)` still `WSDL` and the
     // client's stream still libxml's, for the fault it becomes.
-    let sdl = load_wsdl(req, uri)?;
+    // `soap_real_error_handler` drops every non-fatal diagnostic a
+    // throwing client raises under the `WSDL` code: none shown, none
+    // left for `error_get_last()`.
+    let mute = mutes_wsdl_diagnostics(req);
+    let shown = mute.then(|| {
+        let had = req.last_error().ok().flatten().is_some();
+        let display = req.ini_get(b"display_errors").map(<[u8]>::to_vec);
+        let _ = req.ini_set(b"display_errors", b"0");
+        (had, display)
+    });
+    let loaded = load_wsdl(req, uri);
+    if let Some((had, display)) = shown {
+        if let Some(d) = display {
+            let _ = req.ini_set(b"display_errors", &d);
+        }
+        if !had {
+            req.clear_last_error();
+        }
+    }
+    let sdl = loaded.map_err(|e| e.coded("WSDL"))?;
     req.state::<State>().error_code = old_error_code;
     if let Some(new_context) = php_ext_libxml::switch_stream_ctx(req, orig_context) {
         req.release(new_context);
     }
     Ok(sdl)
+}
+
+/// Whether the running object is a client that throws, under which
+/// `soap_real_error_handler` drops the `WSDL` code's warnings.
+fn mutes_wsdl_diagnostics(req: &mut Request) -> bool {
+    let Some(object) = req.state::<State>().error_object else {
+        return false;
+    };
+    crate::shared::instance_of(req, object, "SoapClient")
+        && !matches!(
+            crate::shared::client_slot(object, crate::shared::ClientSlot::Exceptions).as_ref(),
+            php_ext::values::ValueRef::Bool(false)
+        )
 }
 
 /// `cache_in_memory`: the description kept in the request's memory

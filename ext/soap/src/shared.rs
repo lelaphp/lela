@@ -99,11 +99,6 @@ pub(crate) fn set_client_slot(
     object.set_slot(req, which as u32, value)
 }
 
-/// The bytes of a slot that holds a string.
-pub(crate) fn slot_bytes(object: PhpObject, index: u32) -> Option<Vec<u8>> {
-    slot(object, index).as_str_bytes().map(<[u8]>::to_vec)
-}
-
 /// Whether a value is `null` or unset.
 pub(crate) fn is_null(value: &Value) -> bool {
     matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef)

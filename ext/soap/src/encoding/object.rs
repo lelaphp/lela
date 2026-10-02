@@ -30,9 +30,28 @@ const SOAP_SINGLE_ELEMENT_ARRAYS: i64 = 1;
 
 /// `get_zval_property`: a view of the property or the element, none where
 /// there is none.
-pub(super) fn get_zval_property(req: &Request, object: &Value, name: &[u8]) -> Option<Value> {
+pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Option<Value> {
     match object.as_ref() {
-        ValueRef::Object(o) => o.prop(req, name).map(|v| v.deref()),
+        ValueRef::Object(o) => {
+            if let Some(v) = o.prop(req, name) {
+                return Some(v.deref());
+            }
+            // `zend_read_property(.., silent)`: the class's handler, so a
+            // `__get` answers; the value it made is held until the
+            // serialisation ends (`encode_finish`), as php's `rv` is.
+            let o = *o;
+            let read = o
+                .handlers(req)
+                .read_property(req, o, name, php_ext::abi::PropertyRead::Silent)
+                .ok()?;
+            let read = read.deref();
+            if matches!(read.as_ref(), ValueRef::Null | ValueRef::Undef) {
+                req.release(read);
+                return None;
+            }
+            req.state::<crate::State>().held.push(read);
+            Some(read)
+        }
         ValueRef::Array(a) => a.find(name).map(|v| v.deref()),
         _ => None,
     }

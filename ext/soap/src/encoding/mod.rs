@@ -50,6 +50,8 @@ pub(crate) struct Cx {
     /// The PHP reference the value being written was reached through,
     /// php's `zval *` for an array behind one.
     slot: Option<PhpRef>,
+    /// How many values `State::held` had when this serialisation began.
+    held_mark: usize,
 }
 
 /// What `soap_check_zval_ref` keys a written value by: an object, or the
@@ -77,6 +79,7 @@ pub(crate) fn encode_reset_ns(req: &mut Request, cx: &mut Cx) {
     st.cur_uniq_ref = 0;
     cx.clear(req);
     cx.tracking = true;
+    cx.held_mark = req.state::<State>().held.len();
 }
 
 /// `encode_finish`: the numbers reset and the `ref_map` dropped.
@@ -86,6 +89,12 @@ pub(crate) fn encode_finish(req: &mut Request, cx: &mut Cx) {
     st.cur_uniq_ref = 0;
     cx.clear(req);
     cx.tracking = false;
+    let held = &mut req.state::<State>().held;
+    let mark = cx.held_mark.min(held.len());
+    let done: Vec<Value> = held.drain(mark..).collect();
+    for v in done {
+        req.release(v);
+    }
 }
 
 // ---- encoders

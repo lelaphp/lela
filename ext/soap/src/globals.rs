@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
 
 use crate::SOAP_1_1;
@@ -44,6 +43,13 @@ pub(crate) struct State {
     /// each with the time it was read, for `WSDL_CACHE_MEMORY`; in
     /// insertion order, which decides the one `soap.wsdl_cache_limit`
     /// evicts among those read in the same second.
+    /// What a `__get` answered the encoder, held until the serialisation
+    /// that read it ends.
+    pub(crate) held: Vec<Value>,
+    /// A throwable the encoder left pending and went on past
+    /// (`zend_value_error` in a converter), handed on once the message
+    /// is made.
+    pub(crate) pending: Option<Thrown>,
     pub(crate) mem_cache: Table<(Arc<Sdl>, i64)>,
 }
 
@@ -61,6 +67,8 @@ impl Default for State {
             typemap: None,
             cur_uniq_ns: 0,
             cur_uniq_ref: 0,
+            held: Vec::new(),
+            pending: None,
             mem_cache: Table::new(),
         }
     }
@@ -87,6 +95,22 @@ pub(crate) enum Error {
     Thrown(Thrown),
     /// The message, `SOAP-ERROR: ` and what php formats after it.
     Fatal(String),
+    /// A fatal raised under an `error_code` of its own, which the fault
+    /// takes ([`Error::coded`]).
+    FatalCoded(&'static str, String),
+}
+
+impl Error {
+    /// The fatal as raised while `error_code` named `code`, which the
+    /// running client's fault takes as its code (`soap_real_error_handler`
+    /// reads `SOAP_GLOBAL(error_code)` at the raise): what a WSDL load
+    /// wraps its errors in before it puts `error_code` back.
+    pub(crate) fn coded(self, code: &'static str) -> Error {
+        match self {
+            Error::Fatal(message) => Error::FatalCoded(code, message),
+            other => other,
+        }
+    }
 }
 
 impl From<Thrown> for Error {
@@ -100,18 +124,4 @@ pub(crate) type Res<T> = Result<T, Error>;
 /// `soap_error0(E_ERROR, ...)` and its kin: `SOAP-ERROR: ` and the text.
 pub(crate) fn soap_error(text: impl std::fmt::Display) -> Error {
     Error::Fatal(format!("SOAP-ERROR: {text}"))
-}
-
-/// `soap_error0(E_WARNING, ...)` and its kin: `zend_error` with
-/// `SOAP-ERROR: ` and the text, ignored where a client that throws is
-/// reading a WSDL (`soap_real_error_handler`'s `WSDL` code).
-pub(crate) fn soap_warning(req: &mut Request, level: php_ext::raising::Level, text: &str) {
-    let state = req.state::<State>();
-    if state.use_soap_error_handler
-        && state.error_code == Some("WSDL")
-        && state.error_object.is_some()
-    {
-        return;
-    }
-    php_ext::raising::raise(req, level, &format!("SOAP-ERROR: {text}"));
 }

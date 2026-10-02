@@ -847,7 +847,6 @@ enum Sent {
 /// `make_http_soap_request`: the response body, or none where php
 /// answers false (a fault already added to the client through
 /// `shared::add_soap_fault`).
-#[expect(dead_code, reason = "the client layer calls it (#1562)")]
 pub(crate) fn make_http_soap_request(
     req: &mut Request,
     this: PhpObject,
@@ -875,7 +874,6 @@ pub(crate) fn make_http_soap_request(
 /// `oneWay`: the request sent and the response's head read only where
 /// `trace` keeps it, the connection then closed; `false` where php
 /// answers false (a fault already added to the client).
-#[expect(dead_code, reason = "the client layer calls it (#1562)")]
 pub(crate) fn make_http_soap_request_one_way(
     req: &mut Request,
     this: PhpObject,

@@ -29,20 +29,13 @@ pub(crate) const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
 pub(crate) const XML_NS_PREFIX: &[u8] = b"xml";
 pub(crate) const APACHE_NAMESPACE: &[u8] = b"http://xml.apache.org/xml-soap";
 pub(crate) const WSDL_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/wsdl/";
-pub(crate) const WSDL_NS_PREFIX: &[u8] = b"wsdl";
 pub(crate) const WSDL_SOAP11_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/wsdl/soap/";
 pub(crate) const WSDL_SOAP12_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/wsdl/soap12/";
 pub(crate) const RPC_SOAP12_NAMESPACE: &[u8] = b"http://www.w3.org/2003/05/soap-rpc";
 pub(crate) const RPC_SOAP12_NS_PREFIX: &[u8] = b"rpc";
 pub(crate) const WSDL_HTTP11_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/wsdl/http/";
 pub(crate) const WSDL_HTTP12_NAMESPACE: &[u8] = b"http://www.w3.org/2003/05/soap/bindings/HTTP/";
-pub(crate) const WSDL_HTTP_NS_PREFIX: &[u8] = b"http";
 pub(crate) const WSDL_HTTP_TRANSPORT: &[u8] = b"http://schemas.xmlsoap.org/soap/http";
-pub(crate) const WSDL_MIME_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/wsdl/mime/";
-pub(crate) const WSDL_DIME_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/ws/2002/04/dime/wsdl/";
-pub(crate) const WSDL_DIME_OPEN: &[u8] = b"http://schemas.xmlsoap.org/ws/2002/04/dime/open-layout";
-pub(crate) const WSDL_DIME_CLOSED: &[u8] =
-    b"http://schemas.xmlsoap.org/ws/2002/04/dime/closed-layout";
 pub(crate) const SOAP_1_1_ACTOR_NEXT: &[u8] = b"http://schemas.xmlsoap.org/soap/actor/next";
 pub(crate) const SOAP_1_2_ACTOR_NEXT: &[u8] = b"http://www.w3.org/2003/05/soap-envelope/role/next";
 pub(crate) const SOAP_1_2_ACTOR_NONE: &[u8] = b"http://www.w3.org/2003/05/soap-envelope/role/none";
@@ -112,7 +105,6 @@ pub(crate) mod ty {
     pub(crate) const SOAP_ENC_OBJECT: i32 = 301;
     pub(crate) const XSD_1999_TIMEINSTANT: i32 = 401;
     pub(crate) const UNKNOWN_TYPE: i32 = 999_998;
-    pub(crate) const END_KNOWN_TYPES: i32 = 999_999;
 }
 
 // ---- encoders, `php_encoding.h`
@@ -651,12 +643,6 @@ impl Sdl {
     /// The binding a function runs over, `function->binding`.
     pub(crate) fn binding_of(&self, function: &Function) -> Option<&Binding> {
         self.bindings.as_ref()?.nth(function.binding?)
-    }
-
-    /// The function a request element names, `sdl->requests`.
-    pub(crate) fn request(&self, name: &[u8]) -> Option<&Function> {
-        let at = *self.requests.as_ref()?.get_str(name)?;
-        self.functions.nth(at)
     }
 }
 

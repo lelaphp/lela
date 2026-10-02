@@ -77,11 +77,6 @@ impl<V> Table<V> {
         true
     }
 
-    /// `zend_hash_str_add`.
-    pub(crate) fn add_str(&mut self, key: &[u8], value: V) -> bool {
-        self.add(Key::str(key), value)
-    }
-
     /// `zend_hash_update`: the row replaced where it stands, or appended.
     pub(crate) fn update(&mut self, key: Key, value: V) {
         if let Some(&at) = self.index.get(&key) {
@@ -111,18 +106,9 @@ impl<V> Table<V> {
         self.rows.get(at)?.as_ref().map(|(_, v)| v)
     }
 
-    pub(crate) fn get_mut(&mut self, key: &Key) -> Option<&mut V> {
-        let at = *self.index.get(key)?;
-        self.rows.get_mut(at)?.as_mut().map(|(_, v)| v)
-    }
-
     /// `zend_hash_str_find`.
     pub(crate) fn get_str(&self, key: &[u8]) -> Option<&V> {
         self.get(&Key::Str(key.to_vec()))
-    }
-
-    pub(crate) fn get_str_mut(&mut self, key: &[u8]) -> Option<&mut V> {
-        self.get_mut(&Key::Str(key.to_vec()))
     }
 
     /// `zend_hash_index_find`.
@@ -145,10 +131,6 @@ impl<V> Table<V> {
     /// The rows in order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &V)> {
         self.rows.iter().flatten().map(|(k, v)| (k, v))
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut V)> {
-        self.rows.iter_mut().flatten().map(|(k, v)| (&*k, v))
     }
 
     /// The values in order.

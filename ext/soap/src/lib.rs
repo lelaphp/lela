@@ -20,33 +20,22 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 // php's field names (`binding_type`, `param_name`, `function_name`) kept.
 #![allow(clippy::struct_field_names)]
+// php's signatures, kept: `serialize_parameter` and its kin take what the C
+// takes, and its bindings (`ns`, `nsptr`) keep their names.
+#![allow(clippy::too_many_arguments, clippy::similar_names)]
 
 mod classes;
-#[expect(dead_code, reason = "the server and client layers call it (#1562)")]
+mod client;
 mod encoding;
-#[expect(
-    dead_code,
-    reason = "the globals the encoding, SDL, server and client layers set and read (#1562)"
-)]
 mod globals;
 mod http;
-#[expect(
-    dead_code,
-    reason = "the description the encoding, SDL, server and client layers fill and read (#1562)"
-)]
+mod message;
 mod model;
+mod packet;
 mod schema;
-#[expect(
-    dead_code,
-    reason = "the lookups the encoding and SDL layers resolve names with, and `get_sdl`, which the server and client layers call (#1562)"
-)]
 mod sdl;
-#[expect(
-    dead_code,
-    reason = "the slots and faults the SDL, server and client layers share (#1562)"
-)]
+mod server;
 mod shared;
-#[expect(dead_code, reason = "the tables the SDL layer fills (#1562)")]
 mod table;
 mod xml;
 
@@ -57,11 +46,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
-#[expect(
-    unused_imports,
-    reason = "what the encoding, SDL, server and client layers name (#1562)"
-)]
-pub(crate) use globals::{Error, Res, TypemapEntry, soap_error, soap_warning};
+pub(crate) use globals::{Error, Res, TypemapEntry, soap_error};
 pub(crate) use globals::{State, Typemap};
 
 /// Core's `Exception`, which `SoapFault` extends.
@@ -226,7 +211,9 @@ pub fn extension() -> Extension {
             use_soap_error_handler::declared(),
             is_soap_fault::declared(),
         ])
+        .class::<client::SoapClient>()
         .class::<classes::SoapVar>()
+        .class::<server::SoapServer>()
         .class::<classes::SoapFault>()
         .class::<classes::SoapParam>()
         .class::<classes::SoapHeader>()
