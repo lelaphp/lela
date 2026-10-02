@@ -36,12 +36,13 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The CLI's set (sapi/cli/Cargo.toml says why each) less `pcntl` and
-# `posix`, which no server host carries (design §7.2, revision 35): php's
-# configure builds every extension outside the `cli` class for every host,
-# so the oracle's `php-fpm -m` lists every module its `php -m` does
-# (#1477). The test `the_bundle_is_the_clis_less_pcntl_and_posix` holds it.
-php_bundle = { path = "../../crates/php_bundle", features = ["sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
+# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
+# builds every extension outside the `cli` class for every host, so the
+# oracle's `php-fpm -m` lists every module its `php -m` does (#1477), and
+# `pcntl` and `posix` are in every host whose serving process is
+# single-threaded, as php-fpm's children are (design §7.2, revision 66).
+# The test `the_bundle_is_the_clis` holds the two lists equal.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `cgi_module_entry`'s natives are declared with, as an
