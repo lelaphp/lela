@@ -35,6 +35,7 @@ mod error;
 mod ffi;
 #[allow(dead_code)]
 mod iterator;
+mod locale;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -47,7 +48,7 @@ use error::IntlError;
 use ffi::Code;
 
 /// `intl.default_locale`, `LOCALE_INI_NAME`.
-const DEFAULT_LOCALE: &[u8] = b"intl.default_locale";
+pub(crate) const DEFAULT_LOCALE: &[u8] = b"intl.default_locale";
 /// `intl.error_level`.
 const ERROR_LEVEL: &[u8] = b"intl.error_level";
 /// `intl.use_exceptions`.
@@ -303,6 +304,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = locale::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -310,6 +312,7 @@ pub fn extension() -> Extension {
     // IntlGregorianCalendar, Spoofchecker, IntlException, IntlIterator,
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
+    let builder = builder.class::<locale::Locale>();
     let builder = builder
         .class::<IntlException>()
         .class::<iterator::IntlIterator>();
@@ -442,7 +445,6 @@ fn intl_info(req: &mut Request) {
 
 /// `intl_locale_get_default`: `intl.default_locale` where it is set,
 /// ICU's default otherwise.
-#[allow(dead_code)]
 pub(crate) fn default_locale(req: &Request) -> Vec<u8> {
     match req.ini_get(DEFAULT_LOCALE) {
         Some(locale) if !locale.is_empty() => locale.to_vec(),
