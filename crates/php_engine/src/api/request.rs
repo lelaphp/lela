@@ -16956,6 +16956,27 @@ impl Request {
         self.output.started_at()
     }
 
+    /// `php_output_get_status()`: `PHP_OUTPUT_WRITTEN` (`0x04`) once a
+    /// byte reached a handler's buffer, `PHP_OUTPUT_SENT` (`0x08`) once
+    /// one reached the host, `PHP_OUTPUT_ACTIVE` (`0x10`) while a handler
+    /// is on the stack and `PHP_OUTPUT_LOCKED` (`0x20`) while one runs,
+    /// beside `PHP_OUTPUT_IMPLICITFLUSH` and `PHP_OUTPUT_DISABLED`, which
+    /// `tidy.clean_output`'s handler reads before it starts tidy's.
+    ///
+    /// ```php
+    /// ob_start(); echo 'x'; ob_clean();
+    /// var_dump(ini_set('tidy.clean_output', '1'), ini_get('tidy.clean_output'));
+    /// ```
+    /// ```expect
+    /// Warning: ini_set(): Cannot enable tidy.clean_output - there has already been output in %s on line 3
+    /// bool(false)
+    /// string(1) "0"
+    /// ```
+    #[must_use]
+    pub fn buffer_status(&self) -> i64 {
+        i64::from(self.output.status())
+    }
+
     /// `php_output_handler_alias`: the handler an extension registered
     /// under `name`, which `ob_start()` takes before it reads the name as
     /// a callable.

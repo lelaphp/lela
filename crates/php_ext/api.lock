@@ -452,6 +452,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::buffer_handler
+request::Request::buffer_status
 request::Request::build_defs
 request::Request::called_scope
 request::Request::caller_var

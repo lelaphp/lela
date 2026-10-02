@@ -297,6 +297,15 @@ impl Output {
         self.started.clone()
     }
 
+    /// `php_output_get_status` (`Z/main/output.c:218`): `OG(flags)` with
+    /// `PHP_OUTPUT_ACTIVE` while a handler is on the stack and
+    /// `PHP_OUTPUT_LOCKED` while one runs, the low byte.
+    pub(crate) fn status(&self) -> u32 {
+        let active = if self.handlers.is_empty() { 0 } else { 0x10 };
+        let locked = if self.running.is_some() { 0x20 } else { 0 };
+        (self.flags | active | locked) & 0xff
+    }
+
     /// `SG(sapi_headers).mimetype`, its NUL off, and
     /// `send_default_content_type`.
     pub(crate) fn content_type(&self) -> ContentType {
