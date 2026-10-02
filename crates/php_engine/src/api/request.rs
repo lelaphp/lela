@@ -11409,8 +11409,21 @@ impl Request {
     /// directly, visibility, `readonly` and `__set` not consulted, as php
     /// writes `Z_OBJPROP`; one whose mangling names another visibility
     /// than the declaration's is placed by `is_property_visibility_changed`,
-    /// by the unmangled name among the class's own properties and the
-    /// ones it inherits that are not private. Any other key is a dynamic
+    /// by the unmangled name among the class's properties, a parent's
+    /// private one included as `ce->properties_info` holds it:
+    ///
+    /// ```php
+    /// class P { private ?string $uri = null; function get() { return $this->uri; } }
+    /// #[AllowDynamicProperties] class C extends P {}
+    /// var_dump(unserialize('O:1:"C":1:{s:3:"uri";s:1:"X";}')->get());
+    /// try { unserialize('O:1:"C":1:{s:3:"uri";i:5;}'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "X"
+    /// Cannot assign int to property P::$uri of type ?string
+    /// ```
+    ///
+    /// Any other key is a dynamic
     /// property under the key as written, created through
     /// [`Request::dynamic_property_creation`]'s two arms where the table
     /// does not hold it yet. `value` and `key` are the object's from here;
@@ -11517,9 +11530,10 @@ impl Request {
             if !reachable {
                 return None;
             }
-            placed.iter().rposition(|(declaring, p)| {
-                *p.name.0 == *name && (*declaring == class || p.visibility != Visibility::Private)
-            })
+            // `ce->properties_info` holds a parent's private property
+            // too, unless the class declares the name again, which the
+            // later row of `placed` is.
+            placed.iter().rposition(|(_, p)| *p.name.0 == *name)
         })
     }
 

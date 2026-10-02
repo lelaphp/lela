@@ -1085,14 +1085,21 @@ fn time_sleep_until(req: &mut Request, timestamp: f64) -> Result<bool, Thrown> {
 /// ```
 #[php_function]
 fn get_current_user(req: &mut Request) -> Result<PhpString, Thrown> {
+    let owner = php_get_current_user(req);
+    PhpString::new(req, &owner)
+}
+
+/// `php_get_current_user` (`Z/main/main.c:1550`): the login name of the
+/// owner of the file the request serves, empty where there is none,
+/// which `php_sdl.c` names its cache files by.
+pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
     use std::os::unix::fs::MetadataExt;
-    let owner = req
-        .script_name()
+    req.script_name()
         .map(<[u8]>::to_vec)
         .and_then(|script| req.realpath(&script))
         .and_then(|path| std::fs::metadata(path).ok())
-        .and_then(|meta| crate::ffi::user_name(meta.uid()));
-    PhpString::new(req, &owner.unwrap_or_default())
+        .and_then(|meta| crate::ffi::user_name(meta.uid()))
+        .unwrap_or_default()
 }
 
 /// `get_cfg_var(string $option): string|array|false`: the row of

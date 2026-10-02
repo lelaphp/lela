@@ -696,6 +696,15 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
     Ok(())
 }
 
+/// `php_libxml_switch_context`: the `stream_context` every load and
+/// save opens its stream with (`LIBXML(stream_context)`) replaced by
+/// the one given, and the one it held answered; each owner moves with the
+/// value, as soap's `get_sdl` sets the client's around a WSDL fetch and
+/// puts the old one back.
+pub fn switch_stream_ctx(req: &mut Request, given: Option<Value>) -> Option<Value> {
+    std::mem::replace(&mut req.state::<State>().stream_context, given)
+}
+
 /// `libxml_use_internal_errors(?bool $use_errors = null): bool`: the
 /// setting before the call, and the list laid down or dropped.
 ///

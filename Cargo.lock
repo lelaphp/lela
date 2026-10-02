@@ -727,6 +727,7 @@ dependencies = [
  "php_ext_session",
  "php_ext_shmop",
  "php_ext_simplexml",
+ "php_ext_soap",
  "php_ext_sockets",
  "php_ext_spl",
  "php_ext_sqlite3",
@@ -1074,6 +1075,17 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_libxml",
+]
+
+[[package]]
+name = "php_ext_soap"
+version = "0.0.0"
+dependencies = [
+ "getrandom",
+ "php_ext",
+ "php_ext_libxml",
+ "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]

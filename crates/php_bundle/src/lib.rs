@@ -126,6 +126,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xsl::extension,
         #[cfg(feature = "tidy")]
         php_ext_tidy::extension,
+        #[cfg(feature = "soap")]
+        php_ext_soap::extension,
     ]
 }
 
@@ -181,6 +183,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-session",
     #[cfg(not(feature = "simplexml"))]
     "--disable-simplexml",
+    #[cfg(feature = "soap")]
+    "--enable-soap",
     #[cfg(feature = "sockets")]
     "--enable-sockets",
     "--without-sqlite3",
