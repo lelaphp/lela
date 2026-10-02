@@ -47,6 +47,16 @@
 //! ini entries on both sides, so the column grows with the ini system
 //! without changing shape.
 //!
+//! **A host's own module.** `cgi-fcgi` exists only in php-cgi and
+//! php-fpm, `cli_server` only in the built-in server, and the oracle's
+//! CLI renders neither. `--ext cgi-fcgi` and `--ext cli_server` render
+//! the module through its host on both sides, each column's program
+//! served as a request by the oracle's host from `[sapi]` (or its `php
+//! -S`) and by the engine's witness build of the same host, the
+//! response's head let go ([`host`]). The readings stand under the host's
+//! row, `sapi/cgi/cgi-fcgi`, `sapi/fpm/cgi-fcgi` and
+//! `sapi/cli/cli_server`, each with its `/ri` beside it (#1496).
+//!
 //! **The load number.** The first line, `Extension [ <persistent>
 //! extension #10 ctype version ... ]`, carries the module's load number,
 //! which is the oracle's build order and not the bundle's. The pin's
@@ -56,6 +66,7 @@
 //! differs only where the extension does; a pin without the row compares
 //! the number, which `renumbered.re` under the fixtures holds.
 
+mod host;
 #[cfg(test)]
 mod tests;
 
@@ -71,6 +82,7 @@ use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, lin
 use crate::reading::{Reading, Status, Store, plural};
 use crate::sources;
 use crate::witness::Binary;
+use host::Host;
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
@@ -118,16 +130,6 @@ impl Column {
         }
     }
 
-    /// The divergence key of one extension in this column:
-    /// `crosscheck:ctype` and `crosscheck:ctype/ri`, the registry kind's
-    /// prefix and the scope less its `ext/`, so an accepted row under it
-    /// is what `judge` reads as `Diverged` (harness §4.3).
-    pub(crate) fn id(self, name: &str) -> String {
-        let scope = self.scope(name);
-        let bare = scope.strip_prefix("ext/").unwrap_or(&scope);
-        format!("{}{bare}", Kind::Crosscheck.prefix())
-    }
-
     /// The program whose first stream is the engine's rendering of
     /// `name` in this column. `php --re <name>` prints `zend_print_zval`
     /// over a `ReflectionExtension` (`sapi/cli/php_cli.c` at the tag),
@@ -146,6 +148,15 @@ impl Column {
             Column::Ri => format!("(new ReflectionExtension('{literal}'))->info();"),
         }
     }
+}
+
+/// The divergence key of a reading's scope: the registry kind's prefix
+/// and the scope less its `ext/`, `crosscheck:ctype/ri` and
+/// `crosscheck:sapi/cgi/cgi-fcgi`, so an accepted row under it is what
+/// `judge` reads as `Diverged` (harness §4.3).
+pub(crate) fn id_of(scope: &str) -> String {
+    let bare = scope.strip_prefix("ext/").unwrap_or(scope);
+    format!("{}{bare}", Kind::Crosscheck.prefix())
 }
 
 /// What one `xtask crosscheck` run was asked for.
@@ -197,26 +208,25 @@ impl Judgement {
 /// digest with the column's extension, `<digest>.re` beside
 /// `<digest>.ri`, so a pin bump leaves the old rendering beside the new.
 pub fn kept(store: &Store, digest: &str, name: &str, column: Column) -> PathBuf {
+    kept_at(store, digest, &Column::Re.scope(name), column)
+}
+
+/// [`kept`] under a `--re` scope of any host's, `sapi/cgi/cgi-fcgi`
+/// among them.
+fn kept_at(store: &Store, digest: &str, scope: &str, column: Column) -> PathBuf {
     store
         .root()
         .join(INSTRUMENT)
-        .join(Column::Re.scope(name))
+        .join(scope)
         .join(format!("{digest}.{}", column.kept()))
 }
 
 /// The verdict on one extension: the engine's rendering held to the
 /// oracle's through the one comparison every lane uses.
-pub(crate) fn judge(
-    registry: &Registry,
-    name: &str,
-    column: Column,
-    oracle: &[u8],
-    engine: &Rendering,
-) -> Judgement {
+pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rendering) -> Judgement {
     match engine {
         Rendering::Absent(why) => Judgement::Fail(format!("the engine rendered nothing: {why}")),
-        Rendering::Bytes(bytes) => match oracle::compare(registry, &column.id(name), oracle, bytes)
-        {
+        Rendering::Bytes(bytes) => match oracle::compare(registry, id, oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
             Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff)),
@@ -289,8 +299,17 @@ pub(crate) fn render(oracle: &Oracle<'_>, name: &str, column: Column) -> Result<
 }
 
 /// The recipe as the reading names it: the invocation the oracle's bytes
-/// came from.
-pub(crate) fn recipe(manifest: &Manifest, name: &str, column: Column) -> String {
+/// came from, and through a host other than the CLI, the host and the
+/// program it serves.
+pub(crate) fn recipe(manifest: &Manifest, name: &str, host: Host, column: Column) -> String {
+    if host != Host::Cli {
+        return format!(
+            "{} {} serving {}",
+            host.invocation(),
+            manifest.pin.recipe.args.join(" "),
+            column.program(name)
+        );
+    }
     let module = oracle::module_name(name);
     let module = if module.contains(' ') {
         format!("'{module}'")
@@ -344,14 +363,19 @@ pub fn run(
     };
     extensions(manifest, &Carried::binary(root)?, ask)
         .iter()
-        .flat_map(|name| Column::ALL.iter().map(move |column| (name, *column)))
-        .map(|(name, column)| {
-            let mut reading = reading_of(root, manifest, name, column)?;
-            let recipe = recipe(manifest, name, column);
+        .flat_map(|name| {
+            host::hosts(oracle::module_name(name))
+                .iter()
+                .flat_map(move |host| Column::ALL.iter().map(move |column| (name, *host, *column)))
+        })
+        .map(|(name, host, column)| {
+            let mut reading = reading_of(root, manifest, name, host, column)?;
+            let recipe = recipe(manifest, name, host, column);
             // A row whose crate the linked engine's workspace has not
             // created yet has no rendering to hold, as `budget` and
-            // `unsafe-audit` count nothing for it (#64).
-            let row = format!("ext/{name}");
+            // `unsafe-audit` count nothing for it (#64); for a host's own
+            // module, the host's row.
+            let row = host.krate().map_or_else(|| format!("ext/{name}"), str::to_owned);
             if let Some(krate) = manifest.crates.iter().find(|k| k.name == row)
                 && !sources::exists(&crate::built_root(), krate)
             {
@@ -364,7 +388,11 @@ pub fn run(
                 reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);
                 return Ok(reading);
             }
-            let observed = render(&oracle, name, column)?;
+            let observed = if host == Host::Cli {
+                render(&oracle, name, column)?
+            } else {
+                host::oracle_side(&oracle, host, name, column)?
+            };
             if observed.exit != Some(0) {
                 reading.status = Status::Fail;
                 reading.message = format!(
@@ -374,14 +402,24 @@ pub fn run(
                 );
                 return Ok(reading);
             }
-            let path = kept(store, &manifest.pin.oracle.md5, name, column);
+            let path = kept_at(
+                store,
+                &manifest.pin.oracle.md5,
+                &host.scope(name, Column::Re),
+                column,
+            );
             if let Some(dir) = path.parent() {
                 fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
             fs::write(&path, &observed.stdout)
                 .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
-            let engine = rendering(manifest, ask, &engines, &oracle, name, column)?;
-            let judgement = judge(registry, name, column, &observed.stdout, &engine);
+            let engine = rendering(manifest, ask, &engines, &oracle, name, host, column)?;
+            let judgement = judge(
+                registry,
+                &host.id(name, column),
+                &observed.stdout,
+                &engine,
+            );
             reading.status = judgement.status();
             reading.count("bytes", observed.stdout.len() as u64)?;
             reading.count("lines", observed.stdout.split(|b| *b == b'\n').count() as u64)?;
@@ -434,12 +472,20 @@ fn rendering(
     engines: &Engines,
     oracle: &Oracle<'_>,
     name: &str,
+    host: Host,
     column: Column,
 ) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
         let program = column.program(name);
         let linked = served_linked(manifest, &engines.linked, name);
-        let served = if linked {
+        let served = if host != Host::Cli {
+            host::engine_side(oracle, &engines.binary, host, name, column).map_err(|trouble| {
+                format!(
+                    "the engine's {} did not serve it: {trouble:#}",
+                    host.invocation()
+                )
+            })
+        } else if linked {
             linked::serve(&manifest.pin.recipe, None, &program)
                 .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
         } else {
@@ -506,11 +552,18 @@ fn said(observed: &Observation) -> String {
 /// where the manifest has a row for it, so both columns are stale
 /// together, and over the workspace for a name it has not, which the
 /// oracle may still render or refuse.
-fn reading_of(root: &Path, manifest: &Manifest, name: &str, column: Column) -> Result<Reading> {
-    let scope = column.scope(name);
-    let path = manifest
-        .crate_named(&Column::Re.scope(name))
-        .map(crate::manifest::Crate::path);
+fn reading_of(
+    root: &Path,
+    manifest: &Manifest,
+    name: &str,
+    host: Host,
+    column: Column,
+) -> Result<Reading> {
+    let scope = host.scope(name, column);
+    let row = host
+        .krate()
+        .map_or_else(|| Column::Re.scope(name), str::to_owned);
+    let path = manifest.crate_named(&row).map(crate::manifest::Crate::path);
     let path = path.as_deref().unwrap_or(Path::new("."));
     Ok(Reading::stamped_over(INSTRUMENT, &scope, root, path)?.under(&manifest.pin))
 }

@@ -399,6 +399,15 @@ fn leaves(opcode: Opcode) -> bool {
 /// order, and the prompt where one of them stops: `Some` where the
 /// prompt ended the request.
 fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Option<Flow> {
+    // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` (`phpdbg_prompt.c:1666-1669`):
+    // the opline logged and nothing checked, so an uncaught throwable is
+    // the run's end to report.
+    if session::with(|s| s.after_run == AfterRun::Quit).unwrap_or(false) {
+        if !at.unwinding {
+            logged(req, at.frame, position, &tier::serves(req, at.frame));
+        }
+        return None;
+    }
     let pending = tier::pending(req);
     // `zend_get_executed_lineno`: the raising opline's while a throwable
     // is pending, as `zend_clear_exception` puts it back.
