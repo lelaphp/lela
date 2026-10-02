@@ -11,9 +11,13 @@ description = "The soap extension, php-src/ext/soap"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, libxml and standard. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# libxml2 through `ext/libxml`'s surface, `php_libxml.h`'s, as php's soap
+# includes it (`ZEND_MOD_REQUIRED("libxml")`, design §4.10, revision 72);
+# no `src/ffi/` of its own (§7.2).
+php_ext_libxml = { path = "../libxml" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

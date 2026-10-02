@@ -180,6 +180,90 @@ impl Parser {
         })
     }
 
+    /// `soap_xmlParse_ex` over `xmlCreateMemoryParserCtxt` or
+    /// `xmlCreateFileParserCtxt`, php's soap parse: the parser sanitised,
+    /// blanks dropped (`keepBlanks = 0`, `ignorableWhitespace` and
+    /// `comment` set to nothing), its warnings and errors silenced,
+    /// `XML_PARSE_HUGE`, and the document parsed with the entity loader
+    /// disabled; the tree where it was well formed, its `URL` the
+    /// parser's directory where it had none, and nothing otherwise. The
+    /// file is opened through `req`'s streams before the loader is
+    /// disabled, as php creates the parser first.
+    pub fn soap(
+        req: &mut Request,
+        source: Source<'_>,
+    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
+        Library::init();
+        let created = Routing::Parser {
+            sax: ptr::null_mut(),
+        };
+        let (ctxt, mut raised, thrown) = Raised::capture_io(req, Some(created), || match source {
+            Source::Memory(bytes) => {
+                let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                // SAFETY: `len` readable bytes, copied by the context.
+                unsafe { sys::xmlCreateMemoryParserCtxt(bytes.as_ptr().cast(), len) }
+            }
+            Source::File(path) => {
+                let p = cstr(path);
+                // SAFETY: a NUL-terminated path.
+                unsafe { sys::xmlCreateFileParserCtxt(p.as_ptr().cast()) }
+            }
+        });
+        if ctxt.is_null() || thrown.is_some() {
+            if !ctxt.is_null() {
+                // SAFETY: the context made above, freed once.
+                unsafe { sys::xmlFreeParserCtxt(ctxt) };
+            }
+            return (None, raised, thrown);
+        }
+        // SAFETY: the context just made, this function's alone until freed.
+        let c = unsafe { &mut *ctxt };
+        sanitize(c);
+        c.keepBlanks = 0;
+        c.options |= sys::XML_PARSE_HUGE;
+        // SAFETY: the context's own handler table.
+        let sax = unsafe { &mut *c.sax };
+        sax.callbacks[IGNORABLE_WHITESPACE] = soap_ignorable_whitespace as *mut c_void;
+        sax.callbacks[COMMENT] = soap_comment as *mut c_void;
+        sax.warning = ptr::null_mut();
+        sax.error = ptr::null_mut();
+        let old = std::mem::replace(
+            &mut req.state::<crate::State>().entity_loader_disabled,
+            true,
+        );
+        let parsing = Routing::Parser { sax: c.sax };
+        let (well_formed, more, thrown) = Raised::capture_io(req, Some(parsing), || {
+            // SAFETY: a live context.
+            unsafe { sys::xmlParseDocument(ctxt) };
+            // SAFETY: the context, read after the parse.
+            unsafe { (*ctxt).wellFormed != 0 }
+        });
+        req.state::<crate::State>().entity_loader_disabled = old;
+        raised.extend(more);
+        // SAFETY: the context this owns.
+        let c = unsafe { &mut *ctxt };
+        let answer = if well_formed {
+            let doc = c.myDoc;
+            if !doc.is_null() && !c.directory.is_null() {
+                // SAFETY: the parsed document, whose URL is set once.
+                let d = unsafe { &mut *doc };
+                if d.URL.is_null() {
+                    // SAFETY: the context's NUL-terminated directory.
+                    d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
+                }
+            }
+            Node::from_raw(doc.cast())
+        } else {
+            // SAFETY: the malformed tree, freed once; the context forgets it.
+            unsafe { sys::xmlFreeDoc(c.myDoc) };
+            c.myDoc = ptr::null_mut();
+            None
+        };
+        // SAFETY: the context, freed once.
+        unsafe { sys::xmlFreeParserCtxt(ctxt) };
+        (answer, raised, thrown)
+    }
+
     /// `dom_load_html`'s parse: the HTML parser over `source`, `options` put
     /// on the parser where any are given, and whatever tree it built; what
     /// it loads reads through `req`'s streams.
@@ -277,6 +361,17 @@ impl Parser {
         })
     }
 }
+
+/// `xmlSAXHandler.ignorableWhitespace` and `.comment`, by their place
+/// among the handler table's first callbacks.
+const IGNORABLE_WHITESPACE: usize = 18;
+const COMMENT: usize = 20;
+
+/// `soap_ignorableWhitespace`: nothing.
+extern "C" fn soap_ignorable_whitespace(_ctx: *mut c_void, _ch: *const u8, _len: c_int) {}
+
+/// `soap_Comment`: nothing.
+extern "C" fn soap_comment(_ctx: *mut c_void, _value: *const u8) {}
 
 /// `xmlSaveNoEmptyTags` set for one serialisation and restored after.
 fn with_no_empty_tags<R>(on: bool, f: impl FnOnce() -> R) -> R {

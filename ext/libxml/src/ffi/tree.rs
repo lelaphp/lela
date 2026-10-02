@@ -1462,6 +1462,84 @@ impl Library {
         // SAFETY: a NUL-terminated path.
         taken(unsafe { sys::xmlPathToURI(p.as_ptr()) })
     }
+
+    /// `xmlBuildURI(uri, base)`: `uri` resolved against `base`, which
+    /// `php_schema.c` resolves an import's and an include's
+    /// `schemaLocation` with; `None` where libxml could not.
+    pub fn build_uri(uri: &[u8], base: Option<&[u8]>) -> Option<Vec<u8>> {
+        let u = cstr(uri);
+        let b = base.map(cstr);
+        // SAFETY: NUL-terminated strings or null.
+        taken(unsafe { sys::xmlBuildURI(u.as_ptr(), opt_ptr(b.as_ref())) })
+    }
+
+    /// `xmlCharEncOutFunc` over the handler `xmlFindCharEncodingHandler`
+    /// finds for `name`: UTF-8 bytes in the encoding `name` names, as
+    /// php's soap answers a string to a client or a server given an
+    /// `encoding`; `None` where libxml knows no such encoding or could not
+    /// convert.
+    pub fn from_utf8(name: &[u8], bytes: &[u8]) -> Option<Vec<u8>> {
+        Library::convert(name, bytes, true)
+    }
+
+    /// `xmlCharEncInFunc` over the handler for `name`: bytes in the
+    /// encoding `name` names as UTF-8, as php's soap reads a string a
+    /// program gave it.
+    pub fn to_utf8(name: &[u8], bytes: &[u8]) -> Option<Vec<u8>> {
+        Library::convert(name, bytes, false)
+    }
+
+    fn convert(name: &[u8], bytes: &[u8], out: bool) -> Option<Vec<u8>> {
+        let len = c_int::try_from(bytes.len()).ok()?;
+        let n = cstr(name);
+        // SAFETY: a NUL-terminated name.
+        let handler = unsafe { sys::xmlFindCharEncodingHandler(n.as_ptr().cast::<c_char>()) };
+        if handler.is_null() {
+            return None;
+        }
+        // SAFETY: no argument; a fresh buffer this function frees.
+        let input = unsafe { sys::xmlBufferCreate() };
+        // SAFETY: as above.
+        let output = unsafe { sys::xmlBufferCreate() };
+        let mut answer = None;
+        if !input.is_null() && !output.is_null() {
+            // SAFETY: a live buffer and `len` readable bytes, copied.
+            let added = unsafe { sys::xmlBufferAdd(input, bytes.as_ptr(), len) };
+            let n = if added != 0 {
+                -1
+            } else if out {
+                // SAFETY: a live handler and two live buffers.
+                unsafe { sys::xmlCharEncOutFunc(handler, output, input) }
+            } else {
+                // SAFETY: a live handler and two live buffers.
+                unsafe { sys::xmlCharEncInFunc(handler, output, input) }
+            };
+            if n >= 0 {
+                // SAFETY: a live buffer.
+                let size = unsafe { sys::xmlBufferLength(output) };
+                // SAFETY: a live buffer's content, `size` bytes long.
+                let content = unsafe { sys::xmlBufferContent(output) };
+                let size = usize::try_from(size).unwrap_or(0);
+                answer = Some(if content.is_null() || size == 0 {
+                    Vec::new()
+                } else {
+                    // SAFETY: `size` readable bytes the buffer owns, copied.
+                    unsafe { std::slice::from_raw_parts(content, size) }.to_vec()
+                });
+            }
+        }
+        if !input.is_null() {
+            // SAFETY: the buffer made above, freed once.
+            unsafe { sys::xmlBufferFree(input) };
+        }
+        if !output.is_null() {
+            // SAFETY: as above.
+            unsafe { sys::xmlBufferFree(output) };
+        }
+        // SAFETY: the handler found above, closed once.
+        unsafe { sys::xmlCharEncCloseFunc(handler) };
+        answer
+    }
 }
 
 impl NodeObject {

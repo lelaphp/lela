@@ -24,11 +24,26 @@
 mod classes;
 #[expect(
     dead_code,
+    reason = "the globals the encoding, SDL, server and client layers set and read (#1562)"
+)]
+mod globals;
+#[expect(
+    dead_code,
     reason = "the description the encoding, SDL, server and client layers fill and read (#1562)"
 )]
 mod model;
+#[expect(
+    dead_code,
+    reason = "the lookups the encoding and SDL layers resolve names with (#1562)"
+)]
+mod sdl;
 #[expect(dead_code, reason = "the tables the SDL layer fills (#1562)")]
 mod table;
+#[expect(
+    dead_code,
+    reason = "the tree walks the encoding and SDL layers make (#1562)"
+)]
+mod xml;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -37,29 +52,16 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
+#[expect(
+    unused_imports,
+    reason = "what the encoding, SDL, server and client layers name (#1562)"
+)]
+pub(crate) use globals::{Error, Res, TypemapEntry, soap_error, soap_warning};
+pub(crate) use globals::{State, Typemap};
+
 /// Core's `Exception`, which `SoapFault` extends.
 #[php_class(extern)]
 pub(crate) struct Exception;
-
-/// `SOAP_GLOBAL`: request-scoped (ADR-0005), what php keeps per thread
-/// and resets in `PHP_RINIT_FUNCTION(soap)`. Nothing in it is shared or
-/// synchronised; a client or a server sets what a call runs under and
-/// puts back what it found, as `SOAP_CLIENT_BEGIN_CODE` and its kin do.
-pub(crate) struct State {
-    /// `soap_version`: what a fault's code is mapped by.
-    pub(crate) soap_version: i64,
-    /// `use_soap_error_handler`.
-    pub(crate) use_soap_error_handler: bool,
-}
-
-impl Default for State {
-    fn default() -> State {
-        State {
-            soap_version: SOAP_1_1,
-            use_soap_error_handler: false,
-        }
-    }
-}
 
 pub(crate) const SOAP_1_1: i64 = 1;
 pub(crate) const SOAP_1_2: i64 = 2;

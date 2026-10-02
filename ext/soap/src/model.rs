@@ -885,3 +885,86 @@ pub(crate) struct Attribute {
     pub(crate) extra_attributes: Option<Table<ExtraAttribute>>,
     pub(crate) encode: Option<EncRef>,
 }
+
+// ---- the default encoders' indexes, `php_soap_prepare_globals`
+
+impl Builtin {
+    /// The row as an `encode` of its own.
+    pub(crate) fn encoder(&self) -> Encoder {
+        let clark = match (self.ns, self.type_str) {
+            (Some(ns), Some(t)) => {
+                let mut c = Vec::with_capacity(ns.len() + t.len() + 2);
+                c.push(b'{');
+                c.extend_from_slice(ns);
+                c.push(b'}');
+                c.extend_from_slice(t);
+                Some(c)
+            }
+            _ => None,
+        };
+        Encoder {
+            details: EncodeType {
+                type_: self.type_,
+                type_str: self.type_str.map(<[u8]>::to_vec),
+                ns: self.ns.map(<[u8]>::to_vec),
+                clark_notation: clark,
+                sdl_type: None,
+            },
+            to_zval: self.to_zval,
+            to_xml: self.to_xml,
+        }
+    }
+}
+
+/// The row of [`DEFAULT_ENCODING`] at `index`.
+pub(crate) fn builtin(index: u16) -> Option<&'static Builtin> {
+    DEFAULT_ENCODING.get(usize::from(index))
+}
+
+/// `php_soap_defEncIndex`: the first row of a type number.
+pub(crate) fn default_by_type(type_: i32) -> Option<u16> {
+    DEFAULT_ENCODING
+        .iter()
+        .position(|b| b.type_ == type_)
+        .and_then(|at| u16::try_from(at).ok())
+}
+
+/// `php_soap_defEnc`: the first row named `ns:type`, or `type` for a row
+/// with no namespace.
+pub(crate) fn default_by_name(nscat: &[u8]) -> Option<u16> {
+    DEFAULT_ENCODING
+        .iter()
+        .position(|b| match (b.type_str, b.ns) {
+            (Some(t), Some(ns)) => {
+                nscat.len() == ns.len() + 1 + t.len()
+                    && nscat.starts_with(ns)
+                    && nscat[ns.len()] == b':'
+                    && nscat.ends_with(t)
+            }
+            (Some(t), None) => nscat == t,
+            _ => false,
+        })
+        .and_then(|at| u16::try_from(at).ok())
+}
+
+/// `get_conversion`: the default encoder of a type number, none for a
+/// number php's table does not have (php's `Encoding: Cannot find
+/// encoding`, the caller's to raise).
+pub(crate) fn get_conversion(type_: i32) -> Option<EncRef> {
+    default_by_type(type_).map(EncRef::Default)
+}
+
+/// `php_soap_defEncNs`: the prefix php writes for a namespace it knows.
+pub(crate) fn default_ns_prefix(ns: &[u8]) -> Option<&'static [u8]> {
+    [
+        (XSD_1999_NAMESPACE, XSD_NS_PREFIX),
+        (XSD_NAMESPACE, XSD_NS_PREFIX),
+        (XSI_NAMESPACE, XSI_NS_PREFIX),
+        (XML_NAMESPACE, XML_NS_PREFIX),
+        (SOAP_1_1_ENC_NAMESPACE, SOAP_1_1_ENC_NS_PREFIX),
+        (SOAP_1_2_ENC_NAMESPACE, SOAP_1_2_ENC_NS_PREFIX),
+    ]
+    .iter()
+    .find(|(n, _)| *n == ns)
+    .map(|(_, p)| *p)
+}
