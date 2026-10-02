@@ -41,16 +41,16 @@ mod preload;
 mod types;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Reentry, Request};
 use php_ext::values::{ClassId, Emalloc};
 
-use crate::ffi::Block;
 use crate::types::Types;
 
 /// `ffi.enable`.
@@ -59,8 +59,8 @@ const ENABLE: &str = "ffi.enable";
 pub(crate) const PRELOAD: &str = "ffi.preload";
 
 /// Request-scoped (ADR-0005): the C types this request's declarations
-/// made, the callbacks C may still call, the cell a callback reads
-/// the request from while C runs, and the memory `FFI` took from the
+/// made, the callbacks C may still call, the [`Reentry`] a callback
+/// reaches the request through, and the memory `FFI` took from the
 /// request's heap by its address ([`cdata::alloc`]). Dropped after `rshutdown`, which frees
 /// every callback's code as php's `RSHUTDOWN` destroys
 /// `FFI_G(callbacks)`.
@@ -68,7 +68,7 @@ pub(crate) const PRELOAD: &str = "ffi.preload";
 struct State {
     types: Types,
     callbacks: Vec<call::Callback>,
-    slot: Option<Block>,
+    reentry: Option<Arc<Reentry>>,
     classes: Option<Classes>,
     imported: Vec<(Vec<u8>, parse::Scope)>,
     heap: HashMap<usize, Emalloc>,
@@ -107,17 +107,15 @@ pub(crate) fn types(req: &mut Request) -> &mut Types {
     &mut req.state::<State>().types
 }
 
-/// The cell a callback reads the request from while C runs: eight bytes
-/// the request owns, at an address that stands for the request's life.
-pub(crate) fn slot(req: &mut Request) -> Result<usize, Thrown> {
-    let state = req.state::<State>();
-    if state.slot.is_none() {
-        state.slot = Block::zeroed(8);
+/// How a callback C calls reaches this request, made at the first call
+/// into C or the first callback.
+pub(crate) fn reentry(req: &mut Request) -> Arc<Reentry> {
+    if let Some(reentry) = &req.state::<State>().reentry {
+        return Arc::clone(reentry);
     }
-    match state.slot.as_ref() {
-        Some(slot) => Ok(slot.addr()),
-        None => Err(fatal(req, "Out of memory")),
-    }
+    let reentry = Arc::new(Reentry::new(req.interrupt()));
+    req.state::<State>().reentry = Some(Arc::clone(&reentry));
+    reentry
 }
 
 /// `zend_throw_error(zend_ffi_exception_ce, ...)`.
@@ -239,6 +237,7 @@ pub fn extension() -> Extension {
         .engine_state(preload::engine_state)
         .post_startup(preload::post_startup)
         .rshutdown(call::release_callbacks)
+        .interrupt(call::serve_deferred)
         .info(info)
         .build("FFI")
 }
