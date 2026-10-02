@@ -1263,6 +1263,11 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
                 Judgement::Pass
             ),
             (
+                "phpt:php-src/ext/shared/tests/second.phpt via php-src/ext/driver/tests/common.phpt",
+                "ext/shared/tests/second.phpt via common.phpt",
+                Judgement::Pass
+            ),
+            (
                 "phpt:php-src/ext/driver/tests/own.phpt",
                 "own.phpt",
                 Judgement::Pass
@@ -1271,10 +1276,12 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
         "{driver:#?}"
     );
     let shared = verdicts("ext/shared/tests");
-    assert_eq!(shared.len(), 1, "{shared:#?}");
-    assert_eq!(
-        (shared[0].2, shared[0].3.as_str()),
-        (Judgement::Skip, "no driver"),
+    assert_eq!(shared.len(), 2, "{shared:#?}");
+    assert!(
+        shared
+            .iter()
+            .all(|(_, _, judgement, note)| (*judgement, note.as_str())
+                == (Judgement::Skip, "no driver")),
         "{shared:#?}"
     );
     let refused = verdicts("ext/refused/tests");
@@ -1296,6 +1303,37 @@ fn a_redirecttest_runs_its_set_under_the_environment_its_section_returns() {
             ),
         ],
         "{refused:#?}"
+    );
+}
+
+/// A reading counts the corpus's files its subset holds beside the tests
+/// its run judged: the driver's directory holds two files, and its run
+/// judges the set of two its `common.phpt` names and its own test, so a
+/// count of the lane does not hold the set again beside the set's own
+/// subset (#1589).
+#[test]
+fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran() {
+    let Some(binary) = oracle() else { return };
+    let tree = Tree::new("phpt-redirect-files").unwrap();
+    let mut subset = redirect_subset(&tree, "ext/driver/tests");
+    let tally = run(&subset, &registry(""));
+    // A reading is stamped over its scope's tree, so the scope is a crate
+    // the manifest has and the tree holds.
+    subset.scope = "ext/pcre".to_owned();
+    let manifest = manifest();
+    let under = Under {
+        runner: &Runner::Engine(binary),
+        lane: None,
+        oracle_absent: None,
+        jobs: crate::tally::cores(),
+        served: None,
+    };
+    let source = manifest.pin.source.tree().unwrap_or_default();
+    let reading = reading(&tally, &workspace(), &manifest, &source, &subset, under).unwrap();
+    assert_eq!(
+        (&reading.numbers["tests"], &reading.numbers["files"]),
+        (&3i64.into(), &2i64.into()),
+        "{reading:#?}"
     );
 }
 

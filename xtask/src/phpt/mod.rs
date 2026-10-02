@@ -612,6 +612,17 @@ pub(crate) fn reading(
         message,
     )?;
     reading.count("tests", tally.found as u64)?;
+    // The corpus's files the subset holds, which are its tests but where a
+    // `--REDIRECTTEST--` ran a set in its place: a PDO driver's reading
+    // judges `ext/pdo/tests` beside its own, which `ext/pdo`'s reading holds
+    // too, so a count of the lane sums this and not `tests` (#1589). A
+    // subset whose directory the tree has not holds none.
+    let files = if absent.is_empty() {
+        subset.tests()?.len()
+    } else {
+        0
+    };
+    reading.count("files", files as u64)?;
     reading.count("passed", tally.count(Judgement::Pass))?;
     reading.count("failed", tally.count(Judgement::Fail))?;
     reading.count("skipped", tally.count(Judgement::Skip))?;
