@@ -354,6 +354,48 @@ budget = 5000     # php_zip.c and zip_stream.c, ZipArchive and the zip:// wrappe
 feature = "zip"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/gmp"
+budget = 2500     # gmp.c over the libgmp the pinned keg links, found through pkg-config and bound in src/ffi/, never vendored; 1,615 lines of C (#1166, #727's rule, #1540)
+feature = "gmp"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/sodium"
+budget = 6000     # libsodium.c and sodium_pwhash.c over the libsodium the pinned keg links, through pkg-config, bound in src/ffi/, never vendored; 4,643 lines of C (#1166, #727's rule, #1540)
+feature = "sodium"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/tidy"
+budget = 2500     # tidy.c over the libtidy (tidy-html5) the pinned keg links, through pkg-config, bound in src/ffi/; 1,690 lines of C (#1166, #727's rule, #1540)
+feature = "tidy"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/gettext"
+budget = 500      # gettext.c over the libintl the pinned keg links, through pkg-config, bound in src/ffi/; 331 lines of C (#1166, #727's rule, #1540)
+feature = "gettext"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/xsl"
+budget = 1500     # php_xsl.c and xsltprocessor.c over the platform's libxslt and libexslt, beside ext/libxml's libxml2, bound in src/ffi/; 1,078 lines of C (#1166, #727's rule, #1540)
+feature = "xsl"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/readline"
+budget = 2000     # readline.c and readline_cli.c over the platform's libedit, as the oracle links it, bound in src/ffi/, with the CLI's interactive shell where php puts it; 1,252 lines of C (#1166, #727's rule, #1540)
+feature = "readline"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/soap"
+budget = 20000    # php's soap C ported over ext/libxml's surface, no library of its own, as simplexml; 15,620 lines of C (#1166, #727's rule, #1540)
+feature = "soap"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 # ---------------------------------------------------------------- sapi/
 # One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
