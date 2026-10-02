@@ -54,9 +54,11 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `mysqli`, php's `--with-mysqli`, over the same `mysqlnd` (#1367), and
 # `dba`, php's `--enable-dba`, which the oracle is built with (#1451),
 # `zip`, php's `--with-zip`, which the oracle is built with (#1515),
-# `tidy`, php's `--with-tidy`, which the oracle is built with (#1540), and
-# `soap`, php's `--enable-soap`, which the oracle is built with (#1562).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap"] }
+# `tidy`, php's `--with-tidy`, which the oracle is built with (#1540),
+# `soap`, php's `--enable-soap`, which the oracle is built with (#1562), and
+# `gd`, php's `--enable-gd --with-external-gd`, which the oracle is built
+# with (#1575).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd"] }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `additional_functions` and the built-in server's module are
 # declared with, as an extension declares its own (ADR-0008, #1348).

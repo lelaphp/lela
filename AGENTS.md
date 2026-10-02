@@ -214,6 +214,7 @@ Options:
 ├── fileinfo
 ├── filter
 ├── ftp
+├── gd
 ├── gmp
 ├── hash
 ├── iconv
@@ -255,7 +256,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=2767c6e99d6545784293cd37571f06badb995b386f78f56802044ff7e47d302a out=81e0adb64ffa197f2aadb54f177be3a4e2cc4bce2af935bcfb623545dcbca9e9 -->
+<!-- /computed in=2065a173b42b0d434067e8359d971f48a2237469b54ce1f5456c6e363a88a820 out=a80880803ed123ed472477e299e96213f1a819867f0b2373ef73e02da187facd -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
