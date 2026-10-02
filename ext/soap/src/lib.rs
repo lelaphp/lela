@@ -37,6 +37,11 @@ mod model;
     reason = "the lookups the encoding and SDL layers resolve names with (#1562)"
 )]
 mod sdl;
+#[expect(
+    dead_code,
+    reason = "the slots and faults the SDL, server and client layers share (#1562)"
+)]
+mod shared;
 #[expect(dead_code, reason = "the tables the SDL layer fills (#1562)")]
 mod table;
 #[expect(

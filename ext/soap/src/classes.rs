@@ -203,7 +203,7 @@ pub(crate) enum FaultSlot {
 }
 
 impl FaultSlot {
-    fn index(self) -> u32 {
+    pub(crate) fn index(self) -> u32 {
         FAULT_START + self as u32
     }
 }
@@ -579,10 +579,11 @@ impl SoapVar {
 #[derive(Default)]
 pub(crate) struct UrlPayload;
 
-/// `soap_sdl_object`: the description a client was made with; empty until
-/// the SDL layer reads one.
+/// `soap_sdl_object`: the description a client was made with.
 #[derive(Default)]
-pub(crate) struct SdlPayload;
+pub(crate) struct SdlPayload {
+    pub(crate) sdl: Option<std::sync::Arc<crate::model::Sdl>>,
+}
 
 /// The handlers `Soap\Url` and `Soap\Sdl` share: no constructor, no clone,
 /// never comparable; `Soap\Url` casts to `int` as its object number, as php's
