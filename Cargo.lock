@@ -911,6 +911,7 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "php_ext",
+ "php_ext_date",
 ]
 
 [[package]]

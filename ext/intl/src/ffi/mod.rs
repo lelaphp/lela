@@ -34,7 +34,9 @@ macro_rules! icu {
 #[allow(unused_imports)]
 pub(crate) use icu;
 
+pub(crate) mod cpp;
 pub(crate) mod enumeration;
+pub(crate) mod timezone;
 
 mod sys {
     use std::ffi::c_char;

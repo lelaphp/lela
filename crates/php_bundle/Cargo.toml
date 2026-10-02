@@ -125,7 +125,7 @@ zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt la
 gmp = ["dep:php_ext_gmp", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links; gmp.c includes ext/standard/php_var.h for the `C:` unserializer (design §7.2, revision 72; #1540, #1563)
 xsl = ["dep:php_ext_xsl", "libxml", "dom"] # php_xsl.c: ZEND_MOD_REQUIRED("libxml") and ("dom"), over the platform's libxslt and libexslt (design §7.2, revision 72; #1564)
 tidy = ["dep:php_ext_tidy"] # the `php` binary and the phpt lane, as php builds it with --with-tidy over the keg's libtidy (design §7.2, revision 72; #1540)
-intl = ["dep:php_ext_intl"] # the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
+intl = ["dep:php_ext_intl", "date"] # common_date.cpp, timezone_class.cpp and calendar_methods.cpp include ext/date/php_date.h; the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
