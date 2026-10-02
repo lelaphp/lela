@@ -33,6 +33,7 @@
 mod error;
 #[allow(dead_code)]
 mod ffi;
+mod grapheme;
 mod idn;
 #[allow(dead_code)]
 mod iterator;
@@ -303,6 +304,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = grapheme::functions(builder);
     let builder = idn::functions(builder);
     let builder = normalizer::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,

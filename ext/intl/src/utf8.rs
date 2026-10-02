@@ -19,6 +19,11 @@ pub(crate) fn is_single(b: u8) -> bool {
     b & 0x80 == 0
 }
 
+/// `U8_IS_LEAD`.
+pub(crate) fn is_lead(b: u8) -> bool {
+    b.wrapping_sub(0xc2) <= 0x32
+}
+
 /// `U8_IS_TRAIL`.
 fn is_trail(b: u8) -> bool {
     b & 0xc0 == 0x80
@@ -77,4 +82,29 @@ pub(crate) fn next(s: &[u8], i: &mut usize) -> i32 {
     c = (c << 6) | i32::from(at(s, *i) & 0x3f);
     *i += 1;
     c
+}
+
+/// `U8_FWD_1(s, i, length)`: past one code point or one ill-formed
+/// maximal subpart.
+pub(crate) fn forward(s: &[u8], i: &mut usize) {
+    let len = s.len();
+    let lead = at(s, *i);
+    *i += 1;
+    if !is_lead(lead) || *i == len {
+        return;
+    }
+    let t1 = at(s, *i);
+    let trails = match lead {
+        0xe0..=0xef if lead3_t1(lead, t1) => 2,
+        0xf0.. if lead4_t1(lead, t1) => 3,
+        ..0xe0 if is_trail(t1) => 1,
+        _ => return,
+    };
+    *i += 1;
+    for _ in 1..trails {
+        if *i == len || !is_trail(at(s, *i)) {
+            return;
+        }
+        *i += 1;
+    }
 }

@@ -35,6 +35,7 @@ macro_rules! icu {
 pub(crate) use icu;
 
 pub(crate) mod enumeration;
+pub(crate) mod grapheme;
 pub(crate) mod idn;
 pub(crate) mod normalizer;
 
