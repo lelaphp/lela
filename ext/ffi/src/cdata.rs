@@ -20,27 +20,61 @@ use php_ext::call::{Function, new_object};
 use php_ext::coerce::{BinaryOp, to_double, to_long, to_string, truthy, value_name};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClosureInfo, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{
+    ClosureInfo, Emalloc, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+};
+
+use std::num::NonZeroUsize;
 
 use crate::ffi::{self, Block};
 use crate::types::{Field, Int, Kind, Scalar, TypeId, attr};
-use crate::{classes, ffi_error, types};
+use crate::{State, classes, ffi_error, types};
 
-/// What a `FFI\CData` frees when it goes: the pointee of a pointer it
-/// owns, php's `ZEND_FFI_FLAG_OWNED` over `ptr_holder`.
-#[derive(Debug)]
-pub(crate) struct OwnedTarget(std::num::NonZeroUsize);
+/// `pemalloc(size, persistent)`, zeroed: the request's heap, where
+/// `memory_get_usage()` counts it as php's `emalloc` is counted, kept by
+/// its address until [`free`] gives it back; the process's for a
+/// persistent value, as php's `malloc`. The `Err` is the memory limit's
+/// fatal.
+pub(crate) fn alloc(req: &mut Request, size: usize, persistent: bool) -> Result<usize, Thrown> {
+    if persistent {
+        return match Block::zeroed(size) {
+            Some(block) => Ok(block.release()),
+            None => Err(ffi_error(req, "Out of memory")),
+        };
+    }
+    let mut block = Emalloc::new(req, size.max(1))?;
+    let addr = block.as_mut_ptr() as usize;
+    req.state::<State>().heap.insert(addr, block);
+    Ok(addr)
+}
 
-impl OwnedTarget {
-    /// The pointee at `addr`, owned from here; none for a null one.
-    pub(crate) fn adopt(addr: usize) -> Option<OwnedTarget> {
-        std::num::NonZeroUsize::new(addr).map(OwnedTarget)
+/// `pefree(ptr, persistent)`: memory [`alloc`] made back where it came
+/// from, and any other the process's `free`, as `FFI::free` hands C
+/// memory back.
+pub(crate) fn free(req: &mut Request, addr: usize) {
+    match req.state::<State>().heap.remove(&addr) {
+        Some(block) => block.free(req),
+        None => ffi::free(addr),
     }
 }
 
-impl Drop for OwnedTarget {
-    fn drop(&mut self) {
-        ffi::free(self.0.get());
+/// What php `emalloc`s for each type the C declarations made from the
+/// `from`th on, held by the value made of them until it is freed, as
+/// php frees an owned `zend_ffi_type` with its `FFI\CData` or its
+/// `FFI\CType`: [`crate::types::Types::emallocs`].
+pub(crate) fn hold_types(req: &mut Request, from: usize) -> Result<Box<[usize]>, Thrown> {
+    let sizes = types(req).emallocs(from);
+    let mut held = Vec::with_capacity(sizes.len());
+    for size in sizes {
+        held.push(alloc(req, size, false)?);
+    }
+    Ok(held.into_boxed_slice())
+}
+
+/// The types a value held given back with it.
+pub(crate) fn free_types(req: &mut Request, held: &[usize]) {
+    for addr in held {
+        free(req, *addr);
     }
 }
 
@@ -50,15 +84,16 @@ pub(crate) enum Place {
     /// `cdata->ptr == NULL`: an object no constructor of php's filled.
     #[default]
     Null,
-    /// `ZEND_FFI_FLAG_OWNED`: memory the object allocated and frees.
-    Owned(Block),
+    /// `ZEND_FFI_FLAG_OWNED`: memory the object allocated and frees
+    /// ([`free`]).
+    Owned(usize),
     /// Memory someone else owns.
     Borrowed(usize),
     /// `cdata->ptr == &cdata->ptr_holder`: a pointer value the object
     /// holds in a cell of its own, and the pointee where it owns that.
     Holder {
         cell: Block,
-        target: Option<OwnedTarget>,
+        target: Option<NonZeroUsize>,
     },
     /// After `FFI::free`: php's free handlers, `Use after free()`.
     Freed,
@@ -79,8 +114,7 @@ impl Place {
     /// `cdata->ptr`.
     pub(crate) fn ptr(&self) -> usize {
         match self {
-            Place::Owned(block) => block.addr(),
-            Place::Borrowed(addr) => *addr,
+            Place::Owned(addr) | Place::Borrowed(addr) => *addr,
             Place::Holder { cell, .. } => cell.addr(),
             Place::Null | Place::Freed => 0,
         }
@@ -99,13 +133,15 @@ impl Place {
     }
 }
 
-/// `zend_ffi_cdata` past its object header.
+/// `zend_ffi_cdata` past its object header, and the types it owns
+/// ([`hold_types`]).
 #[derive(Debug, Default)]
 pub(crate) struct Data {
     pub(crate) ty: TypeId,
     pub(crate) place: Place,
     pub(crate) is_const: bool,
     pub(crate) persistent: bool,
+    pub(crate) held: Box<[usize]>,
 }
 
 impl Data {
@@ -116,6 +152,7 @@ impl Data {
             place: Place::Borrowed(ptr),
             is_const,
             persistent: false,
+            held: Box::default(),
         }
     }
 
@@ -126,6 +163,7 @@ impl Data {
             place: Place::holder(value),
             is_const,
             persistent: false,
+            held: Box::default(),
         }
     }
 }
@@ -143,7 +181,9 @@ impl Data {
 /// bool(true)
 /// Instantiation of FFI\CData is not allowed
 /// ```
-#[php_class(namespace(FFI), final, not_serializable, payload = Data, size = 88, handlers = crate::cdata::HANDLERS)]
+// `size = 104`: php's `zend_ffi_cdata_new` asks `emalloc` for
+// `sizeof(zend_ffi_cdata)`, 88, whole, not `zend_object_alloc`.
+#[php_class(namespace(FFI), final, not_serializable, payload = Data, size = 104, handlers = crate::cdata::HANDLERS)]
 pub(crate) struct CData;
 
 #[php_class]
@@ -333,7 +373,7 @@ pub(crate) fn to_value(
                 return Ok(value);
             }
             let data = if is_ret {
-                slow_ret(ptr, ty, f, is_const)
+                slow_ret(req, ptr, ty, f, is_const)?
             } else {
                 Data::holding(ty, value, is_const)
             };
@@ -346,7 +386,7 @@ pub(crate) fn to_value(
         return Ok(value);
     }
     let data = if is_ret {
-        slow_ret(ptr, ty, f, is_const)
+        slow_ret(req, ptr, ty, f, is_const)?
     } else {
         Data::borrowed(ty, ptr, is_const)
     };
@@ -355,22 +395,28 @@ pub(crate) fn to_value(
 
 /// `zend_ffi_cdata_to_zval_slow_ret`: a returned pointer held, a
 /// returned struct copied into memory the object owns.
-fn slow_ret(ptr: usize, ty: TypeId, f: Facts, is_const: bool) -> Data {
+fn slow_ret(
+    req: &mut Request,
+    ptr: usize,
+    ty: TypeId,
+    f: Facts,
+    is_const: bool,
+) -> Result<Data, Thrown> {
     if f.pointee.is_some() {
-        return Data::holding(ty, ffi::read::<usize>(ptr), is_const);
+        return Ok(Data::holding(ty, ffi::read::<usize>(ptr), is_const));
     }
-    if f.is_struct
-        && let Some(block) = Block::zeroed(f.size)
-    {
-        ffi::copy(block.addr(), ptr, f.size);
-        return Data {
+    if f.is_struct {
+        let addr = alloc(req, f.size, false)?;
+        ffi::copy(addr, ptr, f.size);
+        return Ok(Data {
             ty,
-            place: Place::Owned(block),
+            place: Place::Owned(addr),
             is_const,
             persistent: false,
-        };
+            held: Box::default(),
+        });
     }
-    Data::borrowed(ty, ptr, is_const)
+    Ok(Data::borrowed(ty, ptr, is_const))
 }
 
 /// `zend_ffi_bit_field_read`.
@@ -743,6 +789,44 @@ impl ObjectHandlers for Handlers {
         Some(clone_cdata)
     }
 
+    /// `zend_ffi_cdata_free_obj`: the memory it owns and the types it
+    /// owns given back, `pefree` and `zend_ffi_type_dtor`, so
+    /// `memory_get_usage()` falls by what `FFI::new` raised it by.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef();
+    /// $a = memory_get_usage(); $x = $ffi->new("char[4096]"); $b = memory_get_usage(); unset($x); $c = memory_get_usage();
+    /// $y = $ffi->new("int"); $d = memory_get_usage(); $y = null; $e = memory_get_usage();
+    /// $p = $ffi->new("int[2]", false); $f = memory_get_usage(); FFI::free($p); $p = null; $g = memory_get_usage();
+    /// $t = $ffi->type("char[16]"); $h = memory_get_usage(); $q = $ffi->new("char[16]", true, true); $i = memory_get_usage();
+    /// var_dump($b - $a, $c - $b, $d - $c, $e - $d, $f - $e, $g - $f, $h - $g, $i - $h);
+    /// ```
+    /// ```expect
+    /// int(4288)
+    /// int(-4288)
+    /// int(112)
+    /// int(-112)
+    /// int(208)
+    /// int(-176)
+    /// int(160)
+    /// int(192)
+    /// ```
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let Some(data) = object.native_mut::<Data>(req) else {
+            return;
+        };
+        let place = std::mem::take(&mut data.place);
+        let held = std::mem::take(&mut data.held);
+        match place {
+            Place::Owned(addr) => free(req, addr),
+            Place::Holder {
+                target: Some(addr), ..
+            } => free(req, addr.get()),
+            _ => {}
+        }
+        free_types(req, &held);
+    }
+
     /// `zend_ffi_cdata_read_field`, `zend_ffi_cdata_get` for a scalar.
     ///
     /// ```php
@@ -1089,7 +1173,28 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `zend_ffi_cdata_get_closure`: a pointer to a C function called as
-    /// one, through the same trampoline `FFI`'s methods are.
+    /// one, through the same trampoline `FFI`'s methods are, which
+    /// `zend_is_callable` asks too; the trampoline has no scope, so
+    /// `Closure::fromCallable` refuses it.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("int abs(int j);"); $f = $ffi->abs;
+    /// var_dump(is_callable($f, false, $name), $name, call_user_func($f, -3), call_user_func_array($f, [-4]), array_map($f, [-1]));
+    /// try { Closure::fromCallable($f); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { call_user_func($ffi->new("int")); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(19) "FFI\CData::__invoke"
+    /// int(3)
+    /// int(4)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// Failed to create closure from callable
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, no array or string given
+    /// ```
     fn get_closure(&self, req: &mut Request, object: PhpObject) -> Option<ClosureInfo> {
         let v = view(req, object);
         if v.freed() || v.ptr == 0 {
@@ -1341,17 +1446,16 @@ fn clone_cdata(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
         return Err(use_after_free(req));
     }
     let size = types(req).get(v.ty).size;
-    let Some(block) = Block::zeroed(size) else {
-        return Err(ffi_error(req, "Out of memory"));
-    };
-    ffi::copy(block.addr(), v.ptr, size);
+    let addr = alloc(req, size, false)?;
+    ffi::copy(addr, v.ptr, size);
     make(
         req,
         Data {
             ty: v.ty,
-            place: Place::Owned(block),
+            place: Place::Owned(addr),
             is_const: false,
             persistent: false,
+            held: Box::default(),
         },
     )
 }

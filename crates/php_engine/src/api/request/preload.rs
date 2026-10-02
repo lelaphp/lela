@@ -342,6 +342,33 @@ impl Request {
         self.preloading.is_some()
     }
 
+    /// `EX(prev_execute_data)->func->common.fn_flags &
+    /// ZEND_ACC_PRELOADED`: whether the native being served was called
+    /// from a function, a method or a closure the preload compiled, as
+    /// `zend_compile_func_decl` flags each one under
+    /// `ZEND_COMPILE_PRELOAD`; a file's main code is no function and is
+    /// never one. What `FFI`'s API restriction under
+    /// `ffi.enable=preload` admits in any host (`zend_ffi_validate_api_restriction`).
+    #[must_use]
+    pub fn caller_preloaded(&self) -> bool {
+        let Some(preloaded) = self.shared.units.preloaded() else {
+            return false;
+        };
+        let mut chain = self.chain();
+        if !matches!(chain.next(), Some(super::Link::Call(_))) {
+            return false;
+        }
+        let Some(super::Link::Frame(_, state)) = chain.next() else {
+            return false;
+        };
+        state.body != Body::Main
+            && preloaded.scripts.iter().any(|held| {
+                held.unit
+                    .as_ref()
+                    .is_ok_and(|unit| Arc::ptr_eq(unit, &state.unit))
+            })
+    }
+
     /// The request, started, is the preload's from here: every file it
     /// compiles is compiled into the preload.
     pub(crate) fn begin_preload(&mut self) {

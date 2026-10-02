@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, StartupIni};
-use php_ext::raising::warning;
+use php_ext::abi::{Cache, PostStartup, StartupIni};
+use php_ext::raising::{Level, startup, warning};
 use php_ext::request::Request;
 
 use crate::ffi::{self, Library};
-use crate::parse::{Parser, Scope, SymbolKind};
+use crate::parse::{Parser, Scope, SymbolKind, TagKind};
 use crate::types::{TypeId, Types, attr};
 use crate::{PRELOAD, State, types};
 
@@ -35,15 +35,20 @@ pub(crate) enum Fail {
     Parse(String),
     Lib(Vec<u8>, String),
     Symbol(&'static str, Vec<u8>),
+    /// What `zend_ffi_same_symbols` or `zend_ffi_same_tags` refused
+    /// against the scope a preloaded header adds to, as php names it.
+    Redefined(String),
 }
 
 /// `zend_ffi_load` up to its scope: the file read, its directives, its
 /// declarations parsed into `types`, the library opened and every
-/// variable and function resolved.
+/// variable and function resolved; at startup, each held against the
+/// scope of `scopes` it adds to.
 pub(crate) fn load_header(
     path: &[u8],
     types: &mut Types,
     default_attr: u32,
+    scopes: Option<&[(Vec<u8>, Scope)]>,
 ) -> Result<Loaded, Fail> {
     let shown = String::from_utf8_lossy(path).into_owned();
     let file = std::path::Path::new(&shown);
@@ -62,7 +67,13 @@ pub(crate) fn load_header(
         Some(name) => Some(Library::open(&name).map_err(|error| Fail::Lib(name, error))?),
         None => None,
     };
-    resolve_symbols(&mut scope, lib.as_ref()).map_err(|(what, name)| Fail::Symbol(what, name))?;
+    let name = scope_name.as_deref().unwrap_or(b"C");
+    let old = scopes.and_then(|scopes| scopes.iter().find(|(have, _)| have == name));
+    let old = old.map(|(_, old)| (old, &*types));
+    resolve_symbols(&mut scope, lib.as_ref(), old)?;
+    if let Some((old, types)) = old {
+        same_tags(&scope, old, types)?;
+    }
     Ok(Loaded {
         scope,
         lib,
@@ -71,28 +82,67 @@ pub(crate) fn load_header(
 }
 
 /// `DL_FETCH_SYMBOL` over each variable and function of `scope`, in
-/// `lib` or in the process; the kind and the name of the first missing.
+/// `lib` or in the process, the first missing named by its kind; and
+/// each symbol, in its turn, held by `zend_ffi_same_symbols` to the one
+/// of the same name in `old`, the scope a preloaded header adds to.
 pub(crate) fn resolve_symbols(
     scope: &mut Scope,
     lib: Option<&Library>,
-) -> Result<(), (&'static str, Vec<u8>)> {
+    old: Option<(&Scope, &Types)>,
+) -> Result<(), Fail> {
     let Some(symbols) = scope.symbols.as_mut() else {
         return Ok(());
     };
     for (name, sym) in symbols.iter_mut() {
         let what = match sym.kind {
-            SymbolKind::Var => "variable",
-            SymbolKind::Func => "function",
-            _ => continue,
+            SymbolKind::Var => Some("variable"),
+            SymbolKind::Func => Some("function"),
+            _ => None,
         };
-        let addr = match lib {
-            Some(lib) => lib.symbol(name),
-            None => ffi::default_symbol(name),
+        if let Some(what) = what {
+            let addr = match lib {
+                Some(lib) => lib.symbol(name),
+                None => ffi::default_symbol(name),
+            };
+            let Some(addr) = addr else {
+                return Err(Fail::Symbol(what, name.to_vec()));
+            };
+            sym.addr = addr;
+        }
+        let Some((old, types)) = old else {
+            continue;
         };
-        let Some(addr) = addr else {
-            return Err((what, name.to_vec()));
+        if let Some(was) = old.symbols.as_ref().and_then(|symbols| symbols.get(name)) {
+            let same = was.kind == sym.kind
+                && was.is_const == sym.is_const
+                && (sym.kind != SymbolKind::Const || was.value == sym.value)
+                && types.same_types(was.ty, sym.ty);
+            if !same {
+                return Err(Fail::Redefined(String::from_utf8_lossy(name).into_owned()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `zend_ffi_same_tags` over each tag of `scope` that `old` has too.
+fn same_tags(scope: &Scope, old: &Scope, types: &Types) -> Result<(), Fail> {
+    let (Some(tags), Some(was)) = (scope.tags.as_ref(), old.tags.as_ref()) else {
+        return Ok(());
+    };
+    for (name, tag) in tags.iter() {
+        let Some(was) = was.get(name) else {
+            continue;
         };
-        sym.addr = addr;
+        if was.kind != tag.kind || !types.same_types(was.ty, tag.ty) {
+            let kind = match tag.kind {
+                TagKind::Enum => "enum",
+                TagKind::Struct => "struct",
+                TagKind::Union => "union",
+            };
+            let name = String::from_utf8_lossy(name);
+            return Err(Fail::Redefined(format!("{kind} {name}")));
+        }
     }
     Ok(())
 }
@@ -204,14 +254,31 @@ fn preload_warning(path: &str, fail: &Fail) -> String {
             "failed pre-loading '{path}', cannot resolve C function '{}'",
             String::from_utf8_lossy(name)
         ),
+        Fail::Redefined(what) => {
+            format!("FFI: failed pre-loading '{path}', redefinition of '{what}'")
+        }
     }
 }
 
+/// `zend_ffi_load(filename, 1)`'s warnings for a header that failed:
+/// `zend_ffi_parser_error`'s first where the parser refused it.
+fn preload_warnings(path: &[u8], fail: &Fail) -> Vec<String> {
+    let shown = String::from_utf8_lossy(path);
+    let mut warnings = Vec::new();
+    if let Fail::Parse(message) = fail {
+        warnings.push(format!("FFI Parser: {message}"));
+    }
+    warnings.push(preload_warning(&shown, fail));
+    warnings
+}
+
 /// What preloading made, for every request: the scopes `ffi.preload`
-/// loaded over one arena, and the cache the opcache preload's `FFI::load`
-/// registers its scopes in.
+/// loaded over one arena, the warnings of the header that failed it,
+/// and the cache the opcache preload's `FFI::load` registers its scopes
+/// in.
 pub(crate) struct Preloads {
     types: Arc<Types>,
+    refused: Vec<String>,
     startup: Vec<(Vec<u8>, Arc<Scope>)>,
     registered: Cache<Vec<u8>, Option<(Types, Scope)>>,
 }
@@ -219,10 +286,11 @@ pub(crate) struct Preloads {
 /// `zend_ffi_preload(FFI_G(preload))` at startup (`MINIT`): each path of
 /// the list, `:`-separated, a glob where it has a `*`, `?` or `[`, loaded
 /// into its scope, `C` where the header names none; the first that fails
-/// ends the list.
+/// ends the list, and its warnings wait for [`post_startup`].
 pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
     let mut types = Types::default();
     let mut scopes: Vec<(Vec<u8>, Scope)> = Vec::new();
+    let mut refused = Vec::new();
     let list = ini
         .entries
         .iter()
@@ -236,8 +304,13 @@ pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
             vec![part.to_vec()]
         };
         for path in paths {
-            let Ok(loaded) = load_header(&path, &mut types, attr::STORED | attr::PERSISTENT) else {
-                break 'list;
+            let preload = attr::STORED | attr::PERSISTENT;
+            let loaded = match load_header(&path, &mut types, preload, Some(&scopes)) {
+                Ok(loaded) => loaded,
+                Err(fail) => {
+                    refused = preload_warnings(&path, &fail);
+                    break 'list;
+                }
             };
             let name = loaded.scope_name.unwrap_or_else(|| b"C".to_vec());
             if let Some(lib) = loaded.lib {
@@ -248,12 +321,32 @@ pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
     }
     Preloads {
         types: Arc::new(types),
+        refused,
         startup: scopes
             .into_iter()
             .map(|(name, scope)| (name, Arc::new(scope)))
             .collect(),
         registered: Cache::new(1024),
     }
+}
+
+/// `PHP_MINIT_FUNCTION(ffi)`'s failure, which php raises as it starts:
+/// the warnings of the header `ffi.preload` failed on, then
+/// `zend_startup_module_ex`'s `E_CORE_ERROR`, and nothing served, the
+/// process ending as `zend_error_noreturn` ends it at startup.
+///
+/// The test `a_failed_preload_refuses_startup` holds a missing file and
+/// a redeclaration to the oracle's bytes.
+pub(crate) fn post_startup(req: &mut Request) -> PostStartup {
+    let refused = match req.engine::<Preloads>() {
+        Some(preloads) if !preloads.refused.is_empty() => preloads.refused.clone(),
+        _ => return PostStartup::Serve,
+    };
+    for warning in &refused {
+        startup(req, Level::Warning, warning);
+    }
+    startup(req, Level::CoreError, "Unable to start FFI module");
+    PostStartup::Refuse { status: -2 }
 }
 
 /// A scope merged into the one of the same name, each name kept where
@@ -414,15 +507,13 @@ fn moved_scope(mut scope: Scope, moved: &impl Fn(TypeId) -> TypeId) -> Scope {
 /// kept open for the process's life, and the scope this request uses.
 /// A failure is php's warning and no scope.
 pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
-    let shown = String::from_utf8_lossy(path).into_owned();
-    let loaded = match load_header(path, crate::types(req), attr::STORED | attr::PERSISTENT) {
+    let preload = attr::STORED | attr::PERSISTENT;
+    let loaded = match load_header(path, crate::types(req), preload, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
-            if let Fail::Parse(message) = &fail {
-                warning(req, &format!("FFI Parser: {message}"));
+            for text in preload_warnings(path, &fail) {
+                warning(req, &text);
             }
-            let text = preload_warning(&shown, &fail);
-            warning(req, &text);
             return None;
         }
     };
