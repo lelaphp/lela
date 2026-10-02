@@ -1391,15 +1391,11 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     let mute = mutes_wsdl_diagnostics(req);
     let shown = mute.then(|| {
         let had = req.last_error().ok().flatten().is_some();
-        let display = req.ini_get(b"display_errors").map(<[u8]>::to_vec);
-        let _ = req.ini_set(b"display_errors", b"0");
-        (had, display)
+        (had, req.set_display_errors(0))
     });
     let loaded = load_wsdl(req, uri);
     if let Some((had, display)) = shown {
-        if let Some(d) = display {
-            let _ = req.ini_set(b"display_errors", &d);
-        }
+        req.set_display_errors(display);
         if !had {
             req.clear_last_error();
         }
