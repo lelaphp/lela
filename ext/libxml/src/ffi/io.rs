@@ -211,8 +211,12 @@ impl Parser {
         });
         if ctxt.is_null() || thrown.is_some() {
             if !ctxt.is_null() {
-                // SAFETY: the context made above, freed once.
-                unsafe { sys::xmlFreeParserCtxt(ctxt) };
+                let ((), more, _) = Raised::capture_io(req, None, || {
+                    // SAFETY: the context made above, freed once, its input
+                    // closed through `req`'s streams.
+                    unsafe { sys::xmlFreeParserCtxt(ctxt) };
+                });
+                raised.extend(more);
             }
             return (None, raised, thrown);
         }
@@ -232,35 +236,36 @@ impl Parser {
             true,
         );
         let parsing = Routing::Parser { sax: c.sax };
-        let (well_formed, more, thrown) = Raised::capture_io(req, Some(parsing), || {
+        // The parser is freed inside the capture, so the input it opened
+        // through `req`'s streams is closed through them.
+        let (answer, more, thrown) = Raised::capture_io(req, Some(parsing), || {
             // SAFETY: a live context.
             unsafe { sys::xmlParseDocument(ctxt) };
-            // SAFETY: the context, read after the parse.
-            unsafe { (*ctxt).wellFormed != 0 }
+            // SAFETY: the context this owns, read after the parse.
+            let c = unsafe { &mut *ctxt };
+            let answer = if c.wellFormed != 0 {
+                let doc = c.myDoc;
+                if !doc.is_null() && !c.directory.is_null() {
+                    // SAFETY: the parsed document, whose URL is set once.
+                    let d = unsafe { &mut *doc };
+                    if d.URL.is_null() {
+                        // SAFETY: the context's NUL-terminated directory.
+                        d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
+                    }
+                }
+                Node::from_raw(doc.cast())
+            } else {
+                // SAFETY: the malformed tree, freed once; the context forgets it.
+                unsafe { sys::xmlFreeDoc(c.myDoc) };
+                c.myDoc = ptr::null_mut();
+                None
+            };
+            // SAFETY: the context, freed once.
+            unsafe { sys::xmlFreeParserCtxt(ctxt) };
+            answer
         });
         req.state::<crate::State>().entity_loader_disabled = old;
         raised.extend(more);
-        // SAFETY: the context this owns.
-        let c = unsafe { &mut *ctxt };
-        let answer = if well_formed {
-            let doc = c.myDoc;
-            if !doc.is_null() && !c.directory.is_null() {
-                // SAFETY: the parsed document, whose URL is set once.
-                let d = unsafe { &mut *doc };
-                if d.URL.is_null() {
-                    // SAFETY: the context's NUL-terminated directory.
-                    d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
-                }
-            }
-            Node::from_raw(doc.cast())
-        } else {
-            // SAFETY: the malformed tree, freed once; the context forgets it.
-            unsafe { sys::xmlFreeDoc(c.myDoc) };
-            c.myDoc = ptr::null_mut();
-            None
-        };
-        // SAFETY: the context, freed once.
-        unsafe { sys::xmlFreeParserCtxt(ctxt) };
         (answer, raised, thrown)
     }
 
