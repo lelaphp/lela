@@ -705,6 +705,7 @@ dependencies = [
  "php_ext_filter",
  "php_ext_ftp",
  "php_ext_gd",
+ "php_ext_gettext",
  "php_ext_gmp",
  "php_ext_hash",
  "php_ext_iconv",
@@ -884,6 +885,14 @@ dependencies = [
  "cc",
  "php_ext",
  "pkg-config",
+]
+
+[[package]]
+name = "php_ext_gettext"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "php_ext",
 ]
 
 [[package]]
