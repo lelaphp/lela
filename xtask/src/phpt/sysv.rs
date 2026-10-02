@@ -473,7 +473,9 @@ impl fmt::Display for Swept {
 }
 
 /// Remove what the programs of `spawned` left since `before`, read again
-/// now, and say what was done.
+/// now, and say what was done: each object by an `ipcrm` of its own, so
+/// one that another run's sweep took in the moment between is passed over
+/// and not the whole sweep refused (#1582).
 pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
     let clock = Clock::now()?;
     let after = Standing::now()?;
@@ -491,23 +493,45 @@ pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
         ..Swept::default()
     };
     gone.extend(unnamed_gone);
-    if gone.is_empty() {
+    let mut refused = Vec::new();
+    for object in gone {
+        let removed = Command::new("ipcrm")
+            .arg(object.kind.flag())
+            .arg(object.id.to_string())
+            .output()
+            .context("running ipcrm")?;
+        if removed.status.success() {
+            *swept.removed.entry(object.kind).or_default() += 1;
+        } else {
+            refused.push((object, removed));
+        }
+    }
+    if refused.is_empty() {
         return Ok(swept);
     }
-    let mut ipcrm = Command::new("ipcrm");
-    for object in &gone {
-        ipcrm.arg(object.kind.flag()).arg(object.id.to_string());
-    }
-    let removed = ipcrm.output().context("running ipcrm")?;
-    if !removed.status.success() {
-        bail!(
-            "ipcrm exited {}: {}",
-            removed.status,
-            String::from_utf8_lossy(&removed.stderr).trim()
-        );
-    }
-    for object in gone {
-        *swept.removed.entry(object.kind).or_default() += 1;
+    // An object `ipcrm` refused that is no longer standing was removed in
+    // the moment between: by another run's sweep on the machine, which the
+    // rule for an object naming no process lets take one of this user's
+    // private objects of the same second (#1582). It is that run's to
+    // count, and this sweep goes on; one still standing is a refusal.
+    let now = Standing::now()?;
+    for (object, removed) in refused {
+        if now
+            .0
+            .iter()
+            .any(|o| o.kind == object.kind && o.id == object.id)
+        {
+            bail!(
+                "ipcrm {} {} exited {}: {}",
+                object.kind.flag(),
+                object.id,
+                removed.status,
+                String::from_utf8_lossy(&removed.stderr).trim()
+            );
+        }
+        if object.named.is_empty() {
+            swept.unnamed_removed = swept.unnamed_removed.saturating_sub(1);
+        }
     }
     Ok(swept)
 }
@@ -546,10 +570,7 @@ impl Namespace {
                     .map(|dir| dir.join("unshare"))
                     .find(|candidate| candidate.is_file())
             })?;
-            let unshare = unshare.to_string_lossy().into_owned();
-            Namespace::tries(&unshare)
-                .into_iter()
-                .find(Namespace::permitted)
+            Namespace::chosen(&unshare.to_string_lossy(), Namespace::permitted)
         })
         .clone()
     }
@@ -557,6 +578,14 @@ impl Namespace {
     #[cfg(not(target_os = "linux"))]
     fn here() -> Option<Namespace> {
         None
+    }
+
+    /// The first of the ways `unshare` at `path` may make one that
+    /// `permitted` lets run, in the order [`Namespace::tries`] lists them;
+    /// none where it lets neither.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn chosen(path: &str, permitted: impl Fn(&Namespace) -> bool) -> Option<Namespace> {
+        Namespace::tries(path).into_iter().find(|ns| permitted(ns))
     }
 
     /// The two ways `unshare` at `path` may make one, in the order tried.
