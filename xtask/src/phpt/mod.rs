@@ -931,22 +931,43 @@ pub fn run(
 /// What one subset runs with beside the run: the `MySQL` server's version
 /// where it needs the server and its tests run (the `server` module), and
 /// where it runs its programs otherwise than the run does, a pin of its
-/// own beside the run's: a System V one in a namespace (#1482), said on
-/// its own line.
-struct Own {
+/// own beside the run's: a `MySQL` one in a database of its own on the
+/// server, made here and dropped when this drops (#1546), and a System V
+/// one in a namespace (#1482), each said on its own line.
+struct Own<'o> {
     served: Option<String>,
     pin: Option<Pin>,
+    _database: Option<server::Database<'o>>,
 }
 
-impl Own {
-    fn of(oracle: &Oracle<'_>, subset: &Subset, scope: &str, runs: bool) -> Result<Own> {
+impl<'o> Own<'o> {
+    fn of(oracle: &'o Oracle<'o>, subset: &Subset, scope: &str, runs: bool) -> Result<Own<'o>> {
         let served = server::served(oracle, subset, runs)?;
+        let database = match served {
+            Some(_) => Some(server::Database::made(oracle, &subset.scope)?),
+            None => None,
+        };
         let namespace = sysv::Namespace::of(&subset.scope).filter(|_| runs);
-        let pin = namespace.map(|namespace| {
-            println!("phpt: {scope}: {namespace}");
-            oracle.pin().clone().wrapped(namespace.0)
+        let pin = (database.is_some() || namespace.is_some()).then(|| {
+            let mut pin = oracle.pin().clone();
+            if let Some(database) = &database {
+                println!(
+                    "phpt: {scope}: runs in a database of its own on the server, {}, dropped when it ends",
+                    database.name
+                );
+                database.lay_over(&mut pin);
+            }
+            if let Some(namespace) = namespace {
+                println!("phpt: {scope}: {namespace}");
+                pin = pin.wrapped(namespace.0);
+            }
+            pin
         });
-        Ok(Own { served, pin })
+        Ok(Own {
+            served,
+            pin,
+            _database: database,
+        })
     }
 }
 
