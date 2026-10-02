@@ -70,6 +70,7 @@ linked = [
     "dba",
     "zip",
     "gmp",
+    "readline",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -120,6 +121,7 @@ fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166
 dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
 zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"), and php_glob and the stream context through standard (design §7.2, revision 70; #1515)
 gmp = ["dep:php_ext_gmp", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links; gmp.c includes ext/standard/php_var.h for the `C:` unserializer (design §7.2, revision 72; #1540, #1563)
+readline = ["dep:php_ext_readline"] # the `php` binary and the phpt lane, as php builds it with --with-libedit, over the platform's libedit; readline_cli.c's shell is `php -a` (design §7.2, revision 72; #1540, #1567)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -173,6 +175,7 @@ php_ext_fileinfo = { path = "../../ext/fileinfo", optional = true }
 php_ext_dba = { path = "../../ext/dba", optional = true }
 php_ext_zip = { path = "../../ext/zip", optional = true }
 php_ext_gmp = { path = "../../ext/gmp", optional = true }
+php_ext_readline = { path = "../../ext/readline", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

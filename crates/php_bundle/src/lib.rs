@@ -18,6 +18,9 @@ mod refusals;
 /// last; a person moves it when the crate declares an edge, and
 /// `api-check` names both crates until it is moved.
 #[must_use]
+// Two lines an extension, as `new-ext` writes them; the list is the length
+// of the bundle.
+#[allow(clippy::too_many_lines)]
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
         #[cfg(feature = "date")]
@@ -118,6 +121,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_zip::extension,
         #[cfg(feature = "gmp")]
         php_ext_gmp::extension,
+        #[cfg(feature = "readline")]
+        php_ext_readline::extension,
     ]
 }
 

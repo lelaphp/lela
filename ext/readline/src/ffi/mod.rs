@@ -1,0 +1,444 @@
+//! libedit's readline layer, the library the pinned php links
+//! (`/usr/lib/libedit.3.dylib`; design §7.2, revision 72; #1540): the
+//! calls and the variables of `<editline/readline.h>` that `readline.c`
+//! and `readline_cli.c` reach, declared by hand, no bindgen. The one home
+//! of this crate's `unsafe` (`unsafe.homes`' `ext/*/src/ffi/`).
+//!
+//! The layer is one per process: its line, its history, its completion
+//! function and its callback handler are the library's own variables, and so
+//! is the one thing this binding keeps beside them, the [`Lent`] record
+//! of the call in progress. A native that calls into the library lends
+//! its request for that call ([`lend`]); a callback the library makes
+//! from inside it finds the request there and nowhere else, as php's
+//! callbacks find theirs in `EG(current_execute_data)`. Outside a lending
+//! call a callback finds none and answers as php does with nothing to
+//! call.
+#![allow(unsafe_code)]
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
+use std::ffi::{CStr, CString, c_char, c_int};
+use std::ptr;
+
+use php_ext::request::Request;
+
+mod sys {
+    use std::ffi::{c_char, c_int};
+
+    pub(super) type Generator = unsafe extern "C" fn(*const c_char, c_int) -> *mut c_char;
+    pub(super) type Attempted =
+        unsafe extern "C" fn(*const c_char, c_int, c_int) -> *mut *mut c_char;
+    pub(super) type LineHandler = unsafe extern "C" fn(*mut c_char);
+
+    #[link(name = "edit")]
+    unsafe extern "C" {
+        pub(super) static rl_library_version: *const c_char;
+        pub(super) static mut rl_readline_name: *mut c_char;
+        pub(super) static mut rl_line_buffer: *mut c_char;
+        pub(super) static mut rl_point: c_int;
+        pub(super) static mut rl_end: c_int;
+        pub(super) static mut rl_attempted_completion_function: Option<Attempted>;
+        pub(super) static mut rl_attempted_completion_over: c_int;
+        pub(super) static mut rl_special_prefixes: *mut c_char;
+        pub(super) static mut rl_completion_append_character: c_int;
+        pub(super) fn readline(prompt: *const c_char) -> *mut c_char;
+        pub(super) fn using_history();
+        pub(super) fn add_history(line: *const c_char) -> c_int;
+        pub(super) fn clear_history();
+        pub(super) fn read_history(file: *const c_char) -> c_int;
+        pub(super) fn write_history(file: *const c_char) -> c_int;
+        pub(super) fn rl_completion_matches(
+            text: *const c_char,
+            generator: Generator,
+        ) -> *mut *mut c_char;
+        pub(super) fn rl_callback_handler_install(prompt: *const c_char, handler: LineHandler);
+        pub(super) fn rl_callback_read_char();
+        pub(super) fn rl_callback_handler_remove();
+        pub(super) fn rl_redisplay();
+        pub(super) fn rl_on_new_line() -> c_int;
+    }
+}
+
+/// The call in progress that lent its request: the request, and the
+/// candidates a completion is serving to `rl_completion_matches`, the
+/// array php's generator walks.
+struct Lent {
+    req: *mut Request,
+    candidates: Vec<CString>,
+    at: usize,
+}
+
+/// The record of the lending call in progress, null outside one; the
+/// library's own state is process-wide, and so is this.
+static mut LENT: *mut Lent = ptr::null_mut();
+
+/// `call` with `req` lent to whatever the library calls back while it
+/// runs, the lending before it put back after, so a callback that lends
+/// again nests.
+fn lend<R>(req: &mut Request, call: impl FnOnce() -> R) -> R {
+    let mut lent = Lent {
+        req,
+        candidates: Vec::new(),
+        at: 0,
+    };
+    // SAFETY: the record of the call in progress, read by copy.
+    let outer = unsafe { LENT };
+    // SAFETY: the record lives on this frame until it is put back below,
+    // after `call` returns.
+    unsafe { LENT = &raw mut lent };
+    let answer = call();
+    // SAFETY: as above.
+    unsafe { LENT = outer };
+    answer
+}
+
+/// The lending call's record, `None` outside one.
+fn lent<'a>() -> Option<&'a mut Lent> {
+    // SAFETY: the record of the call in progress, read by copy.
+    let at = unsafe { LENT };
+    // SAFETY: set by `lend` to a record on its frame, live until `lend`
+    // returns, which it does not while the library calls back; the
+    // lending native touches neither the record nor its request until
+    // then, so this is the one live borrow of both.
+    unsafe { at.as_mut() }
+}
+
+/// The lending call's request.
+fn request<'a>(lent: &Lent) -> &'a mut Request {
+    // SAFETY: as in `lent`; the request was a `&mut` when it was lent.
+    unsafe { &mut *lent.req }
+}
+
+/// `s` as a C string, cut at its first NUL as C reads it.
+fn c(s: &[u8]) -> CString {
+    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+    CString::new(&s[..end]).unwrap_or_default()
+}
+
+/// The bytes of a C string, empty for null (`SAFE_STRING`).
+///
+/// # Safety
+/// `s` is null or a NUL-terminated string live for the call.
+unsafe fn bytes(s: *const c_char) -> Vec<u8> {
+    if s.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the caller's contract.
+    unsafe { CStr::from_ptr(s) }.to_bytes().to_vec()
+}
+
+/// `strdup` of `s`, which the library may `free`.
+fn dup(s: &[u8]) -> *mut c_char {
+    let s = c(s);
+    // SAFETY: a NUL-terminated string live for the call.
+    unsafe { libc::strdup(s.as_ptr()) }
+}
+
+/// `readline(prompt)`: the line read, without its end, or `None` at the
+/// end of input; the request lent to the completion function.
+pub(crate) fn readline(req: &mut Request, prompt: Option<&[u8]>) -> Option<Vec<u8>> {
+    let prompt = prompt.map(c);
+    let at = prompt.as_ref().map_or(ptr::null(), |p| p.as_ptr());
+    // SAFETY: a NUL-terminated prompt or null, live for the call.
+    let line = lend(req, || unsafe { sys::readline(at) });
+    if line.is_null() {
+        return None;
+    }
+    // SAFETY: the line the library allocated, NUL-terminated.
+    let read = unsafe { bytes(line) };
+    // SAFETY: allocated with `malloc` and handed to the caller.
+    unsafe { libc::free(line.cast()) };
+    Some(read)
+}
+
+/// `add_history(line)`.
+pub(crate) fn add_history(line: &[u8]) {
+    let line = c(line);
+    // SAFETY: a NUL-terminated string the library copies.
+    unsafe { sys::add_history(line.as_ptr()) };
+}
+
+/// `using_history()` then `clear_history()`, which libedit needs
+/// initialised first.
+pub(crate) fn clear_history() {
+    // SAFETY: no argument.
+    unsafe { sys::using_history() };
+    // SAFETY: no argument.
+    unsafe { sys::clear_history() };
+}
+
+/// `read_history(file)`, the library's `~/.history` for `None`; whether
+/// it read.
+pub(crate) fn read_history(file: Option<&[u8]>) -> bool {
+    let file = file.map(c);
+    let at = file.as_ref().map_or(ptr::null(), |f| f.as_ptr());
+    // SAFETY: a NUL-terminated path or null, live for the call.
+    unsafe { sys::read_history(at) == 0 }
+}
+
+/// `write_history(file)`; whether it wrote.
+pub(crate) fn write_history(file: Option<&[u8]>) -> bool {
+    let file = file.map(c);
+    let at = file.as_ref().map_or(ptr::null(), |f| f.as_ptr());
+    // SAFETY: as in `read_history`.
+    unsafe { sys::write_history(at) == 0 }
+}
+
+/// The library's `rl_library_version`.
+pub(crate) fn library_version() -> Vec<u8> {
+    // SAFETY: the library's static string, never written.
+    let at = unsafe { sys::rl_library_version };
+    // SAFETY: as above.
+    unsafe { bytes(at) }
+}
+
+/// `rl_line_buffer`.
+pub(crate) fn line_buffer() -> Vec<u8> {
+    // SAFETY: the library's global, read by copy.
+    let at = unsafe { sys::rl_line_buffer };
+    // SAFETY: the library's line or one this binding gave it.
+    unsafe { bytes(at) }
+}
+
+/// The copy of a value php last gave the library, freed when the next
+/// one replaces it (`php_readline_custom_line_buffer`,
+/// `php_readline_custom_readline_name`).
+static mut OWNED_LINE: *mut c_char = ptr::null_mut();
+static mut OWNED_NAME: *mut c_char = ptr::null_mut();
+
+/// `rl_line_buffer` and `rl_end` set to a copy of `value`, as libedit's
+/// branch of `readline_info()` sets them.
+pub(crate) fn set_line_buffer(value: &[u8]) {
+    let copy = dup(value);
+    // SAFETY: the library's global, written with a copy it may read.
+    unsafe { sys::rl_line_buffer = copy };
+    // SAFETY: the copy this binding gave before, or null.
+    let old = unsafe { OWNED_LINE };
+    // SAFETY: allocated by `strdup` and no longer the library's.
+    unsafe { libc::free(old.cast()) };
+    // SAFETY: this binding's own global.
+    unsafe { OWNED_LINE = copy };
+    let end = c_int::try_from(c(value).as_bytes().len()).unwrap_or(c_int::MAX);
+    // SAFETY: the library's global.
+    unsafe { sys::rl_end = end };
+}
+
+/// `rl_point`.
+pub(crate) fn point() -> i64 {
+    // SAFETY: the library's global, read by copy.
+    i64::from(unsafe { sys::rl_point })
+}
+
+/// `rl_end`.
+pub(crate) fn end() -> i64 {
+    // SAFETY: the library's global, read by copy.
+    i64::from(unsafe { sys::rl_end })
+}
+
+/// `rl_readline_name`.
+pub(crate) fn readline_name() -> Vec<u8> {
+    // SAFETY: the library's global, read by copy.
+    let at = unsafe { sys::rl_readline_name };
+    // SAFETY: the library's name or one this binding gave it.
+    unsafe { bytes(at) }
+}
+
+/// `rl_readline_name` set to a copy of `value`.
+pub(crate) fn set_readline_name(value: &[u8]) {
+    let copy = dup(value);
+    // SAFETY: the library's global, written with a copy it may read.
+    unsafe { sys::rl_readline_name = copy };
+    // SAFETY: the copy this binding gave before, or null.
+    let old = unsafe { OWNED_NAME };
+    // SAFETY: allocated by `strdup` and no longer the library's.
+    unsafe { libc::free(old.cast()) };
+    // SAFETY: this binding's own global.
+    unsafe { OWNED_NAME = copy };
+}
+
+/// `rl_attempted_completion_over`.
+pub(crate) fn attempted_completion_over() -> i64 {
+    // SAFETY: the library's global, read by copy.
+    i64::from(unsafe { sys::rl_attempted_completion_over })
+}
+
+/// `rl_attempted_completion_over = value`, an `int` as C stores a
+/// `zend_long` into one.
+pub(crate) fn set_attempted_completion_over(value: i64) {
+    #[allow(clippy::cast_possible_truncation)]
+    let value = value as c_int;
+    // SAFETY: the library's global.
+    unsafe { sys::rl_attempted_completion_over = value };
+}
+
+/// `rl_completion_append_character = c`.
+pub(crate) fn set_completion_append_character(c: u8) {
+    // SAFETY: the library's global.
+    unsafe { sys::rl_completion_append_character = c_int::from(c) };
+}
+
+/// Which completion function the library calls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Completion {
+    /// `php_readline_completion_cb`, the program's callback.
+    User,
+    /// `cli_code_completion`, the shell's own.
+    Shell,
+}
+
+/// `rl_attempted_completion_function` set to `completion`'s.
+pub(crate) fn complete_with(completion: Completion) {
+    let function: sys::Attempted = match completion {
+        Completion::User => user_completion,
+        Completion::Shell => shell_completion,
+    };
+    // SAFETY: the library's global, a function that lives as long.
+    unsafe { sys::rl_attempted_completion_function = Some(function) };
+}
+
+/// Whether the program's callback is the completion function.
+pub(crate) fn completes_with_user() -> bool {
+    // SAFETY: the library's global, read by copy.
+    let current = unsafe { sys::rl_attempted_completion_function };
+    let user: sys::Attempted = user_completion;
+    current.is_some_and(|f| ptr::fn_addr_eq(f, user))
+}
+
+/// `rl_special_prefixes = "$"`, the shell's.
+pub(crate) fn special_prefixes_dollar() {
+    // SAFETY: the library's global, a static string it only reads.
+    unsafe { sys::rl_special_prefixes = c"$".as_ptr().cast_mut() };
+}
+
+/// What a completion answered: nothing, the empty match list libedit
+/// reads three slots of, or the candidates `rl_completion_matches`
+/// walks with `text`.
+pub(crate) enum Matches {
+    None,
+    Empty,
+    Candidates(Vec<Vec<u8>>),
+}
+
+/// `php_readline_completion_cb`: [`crate::user_completion`] over the
+/// lent request.
+unsafe extern "C" fn user_completion(
+    text: *const c_char,
+    start: c_int,
+    end: c_int,
+) -> *mut *mut c_char {
+    // SAFETY: the word the library hands its completion function.
+    let word = unsafe { bytes(text) };
+    let Some(lent) = lent() else {
+        return ptr::null_mut();
+    };
+    let answer = crate::user_completion(request(lent), &word, start.into(), end.into());
+    // SAFETY: the word, as above.
+    unsafe { matches(lent, text, answer) }
+}
+
+/// `cli_code_completion`: [`crate::shell::completion`] over the lent
+/// request.
+unsafe extern "C" fn shell_completion(
+    text: *const c_char,
+    _start: c_int,
+    _end: c_int,
+) -> *mut *mut c_char {
+    // SAFETY: the word the library hands its completion function.
+    let word = unsafe { bytes(text) };
+    let Some(lent) = lent() else {
+        return ptr::null_mut();
+    };
+    let answer = crate::shell::completion(request(lent), &word);
+    // SAFETY: the word, as above.
+    unsafe { matches(lent, text, answer) }
+}
+
+/// The list the library is handed for `answer`.
+///
+/// # Safety
+/// `text` is the word the library handed the completion function.
+unsafe fn matches(lent: &mut Lent, text: *const c_char, answer: Matches) -> *mut *mut c_char {
+    match answer {
+        Matches::None => ptr::null_mut(),
+        Matches::Empty => {
+            // SAFETY: three null slots; libedit reads `matches[2]`.
+            let list: *mut *mut c_char =
+                unsafe { libc::calloc(3, size_of::<*mut c_char>()) }.cast();
+            if !list.is_null() {
+                // SAFETY: the first of the three slots just allocated.
+                unsafe { *list = dup(b"") };
+            }
+            list
+        }
+        Matches::Candidates(candidates) => {
+            lent.candidates = candidates.iter().map(|s| c(s)).collect();
+            lent.at = 0;
+            // SAFETY: the word, and a generator that reads the record
+            // this call holds.
+            unsafe { sys::rl_completion_matches(text, next_candidate) }
+        }
+    }
+}
+
+/// `_readline_command_generator` and `cli_completion_generator` over the
+/// candidates the completion kept: the next one, a copy the library
+/// frees, or null when they are spent.
+unsafe extern "C" fn next_candidate(_text: *const c_char, _state: c_int) -> *mut c_char {
+    let Some(lent) = lent() else {
+        return ptr::null_mut();
+    };
+    let Some(candidate) = lent.candidates.get(lent.at) else {
+        return ptr::null_mut();
+    };
+    lent.at += 1;
+    dup(candidate.as_bytes())
+}
+
+/// `rl_callback_handler_install(prompt, php_rl_callback_handler)`.
+pub(crate) fn callback_handler_install(prompt: &[u8]) {
+    let prompt = c(prompt);
+    // SAFETY: a NUL-terminated prompt the library copies, and a handler
+    // that lives as long as it.
+    unsafe { sys::rl_callback_handler_install(prompt.as_ptr(), line_handler) };
+}
+
+/// `rl_callback_read_char()`, the request lent to the handler.
+pub(crate) fn callback_read_char(req: &mut Request) {
+    // SAFETY: no argument.
+    lend(req, || unsafe { sys::rl_callback_read_char() });
+}
+
+/// `rl_callback_handler_remove()`.
+pub(crate) fn callback_handler_remove() {
+    // SAFETY: no argument.
+    unsafe { sys::rl_callback_handler_remove() };
+}
+
+/// `php_rl_callback_handler`: [`crate::callback_line`] over the lent
+/// request, with the line, `None` at the end of input.
+unsafe extern "C" fn line_handler(line: *mut c_char) {
+    let read = (!line.is_null()).then(|| {
+        // SAFETY: the line the library hands its handler.
+        unsafe { bytes(line) }
+    });
+    if let Some(lent) = lent() {
+        crate::callback_line(request(lent), read);
+    }
+}
+
+/// `using_history()` then `rl_redisplay()`, as libedit's branch has it
+/// (bug #72538).
+pub(crate) fn redisplay() {
+    // SAFETY: no argument.
+    unsafe { sys::using_history() };
+    // SAFETY: no argument.
+    unsafe { sys::rl_redisplay() };
+}
+
+/// `rl_on_new_line()`.
+pub(crate) fn on_new_line() {
+    // SAFETY: no argument.
+    unsafe { sys::rl_on_new_line() };
+}
