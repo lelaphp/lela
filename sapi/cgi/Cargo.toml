@@ -34,11 +34,13 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and the eight the CLI turns on (sapi/cli's
-# manifest says why each): php builds its CGI with its CLI's extensions,
-# `pcntl` and `posix` among them, and the oracle's `php-cgi -m` lists all
-# eight (design §7.2, revision 35).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
+# The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
+# builds an extension of the `cli` class for the CLI, CGI, embed and
+# phpdbg alike (`EXT_CLI_STATIC`, `Z/build/php.m4`) and every other one
+# for every host, so the oracle's `php-cgi -m` lists every module its
+# `php -m` does (#1477). The test `the_bundle_is_the_clis` holds the two
+# lists equal.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face `cgi_module_entry`'s natives are declared with, as an extension
