@@ -670,13 +670,71 @@ pub(crate) fn owned_key(req: &Request, key: &Key) -> Key {
 }
 
 /// `object_properties_load`: each member written onto the object, a
-/// mangled name placing a protected or a private property in its slot.
+/// mangled name placing a protected or a private property in its slot,
+/// and an integer key a row of its own (`zend_hash_index_update`) once
+/// the class's dynamic-property rule has had its say: the `Error` that
+/// ends the load, or the deprecation, the integer printed in either.
+///
+/// ```php
+/// var_dump(unserialize('O:11:"ArrayObject":4:{i:0;i:0;i:1;a:0:{}i:2;a:1:{i:5;i:1;}i:3;N;}'));
+/// class D extends ArrayObject {}
+/// var_dump(unserialize('O:1:"D":4:{i:0;i:0;i:1;a:0:{}i:2;a:1:{i:7;s:1:"x";}i:3;N;}'));
+/// ```
+/// ```expect
+///
+/// Deprecated: Creation of dynamic property ArrayObject::$5 is deprecated in %s on line 2
+/// object(ArrayObject)#1 (2) {
+///   [5]=>
+///   int(1)
+///   ["storage":"ArrayObject":private]=>
+///   array(0) {
+///   }
+/// }
+///
+/// Deprecated: Creation of dynamic property D::$7 is deprecated in %s on line 4
+/// object(D)#1 (2) {
+///   [7]=>
+///   string(1) "x"
+///   ["storage":"ArrayObject":private]=>
+///   array(0) {
+///   }
+/// }
+/// ```
 fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result<(), Thrown> {
     if let Some(members) = members.as_array() {
         for (key, value) in members.snapshot() {
+            if let Key::Int(h) = key {
+                integer_member(req, object, h)?;
+                req.addref(&value);
+                object.set_row(req, &key, value)?;
+                continue;
+            }
             let name = key.to_prop_name(req)?;
             req.addref(&value);
             object.unserialize_prop(req, name, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// `object_properties_load`'s rule for an integer member key
+/// (`Z/Zend/zend_API.c:1806`): the class that forbids dynamic
+/// properties throws, one that does not allow them deprecates.
+fn integer_member(req: &mut Request, object: PhpObject, h: i64) -> Result<(), Thrown> {
+    use php_ext::decl::DynamicProperties;
+    let Some(flags) = req.class_flags(object.class()) else {
+        return Ok(());
+    };
+    let class = String::from_utf8_lossy(&class_name(req, object.class())).into_owned();
+    match flags.dynamic_properties {
+        DynamicProperties::Allowed => {}
+        DynamicProperties::Forbidden => {
+            let message = format!("Cannot create dynamic property {class}::${h}");
+            return Err(throw_error(req, "Error", &message));
+        }
+        DynamicProperties::Deprecated => {
+            let message = format!("Creation of dynamic property {class}::${h} is deprecated");
+            php_ext::raising::deprecated(req, &message);
         }
     }
     Ok(())

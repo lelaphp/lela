@@ -1539,7 +1539,11 @@ pub trait ObjectHandlers: Send + Sync {
     /// down with a new object on the request's heap that its payload's
     /// `Default` cannot, `array_init(&intern->array)` among them, after
     /// the properties' defaults and before any constructor. `Std` lays
-    /// nothing down.
+    /// nothing down. On a class under `Throwable` it runs after
+    /// `zend_default_exception_new` has written `file`, `line` and
+    /// `trace`, as php's `ce->create_object` wraps
+    /// `zend_ce_exception->create_object`, and the table answers
+    /// `clone_obj` with `None`, as the throwables' does.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         let _ = (req, object);
         Ok(())

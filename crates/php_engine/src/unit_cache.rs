@@ -332,6 +332,12 @@ impl UnitCache {
         self.held.get(key)
     }
 
+    /// `zend_accel_add_key`: `key` filed beside the names `held` is held
+    /// under.
+    pub(crate) fn add_key(&self, key: UnitKey, held: &Arc<Held>) {
+        self.held.alias(key, held);
+    }
+
     /// A hit on `held`, counted on the cache and on the file, which was
     /// served at the request time `now`; php without the cache,
     /// [`Validation::EveryHit`], counts nothing.
@@ -348,7 +354,8 @@ impl UnitCache {
     /// under `path` where `validation` finds it fresh at the request time
     /// `now`, a hit; else the stale copy discarded under every name it
     /// was filed under, the file cache asked where there is one, a hit
-    /// where it keeps the file as it stands, `decode`d and held; else a
+    /// where it keeps the file as it stands, `decode`d and held under the
+    /// full path alone; else a
     /// miss, the file read and `compile`d, and what it compiled to held,
     /// or what another request held for the path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
@@ -401,11 +408,10 @@ impl UnitCache {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return (Some(Ok(unit)), Filed::Unheld);
             }
+            // Under its full path alone: `zend_file_cache_script_load`
+            // files no key, which the next include adds after opening it.
             let held = self.hold(path, validation, now, Ok(unit), kept.size, observed);
             self.hit(&held, validation, now);
-            if let Some(written) = written {
-                self.held.alias(written, &held);
-            }
             return (Some(held.unit.clone()), Filed::Hit);
         }
         if memory && validation != Validation::EveryHit {
