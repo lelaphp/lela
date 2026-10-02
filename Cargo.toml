@@ -18,6 +18,7 @@ members = ["crates/*", "sapi/*", "xtask", "ext/standard", "ext/spl", "ext/date",
 [profile.dev]
 split-debuginfo = "packed"
 debug = "line-tables-only"
+incremental = false  # rustc's incremental cache was ~70% of a checkout's target/; off, a worktree builds in ~12G, not ~39G (#1609)
 
 [workspace.package]
 edition = "2024"
