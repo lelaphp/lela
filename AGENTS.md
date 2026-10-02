@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 378 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 987 | 1500 | pass |
+| api | api.lock | 988 | 1500 | pass |
 | sapi | sapi.lock | 24 |  | pass |
 | tier | tier.lock | 61 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=6617ffa9938de99c1641516b625bbf6478b50fdc46473605116579fa300af27c out=0981cc9124ec5f77c231cef0ece5c4804b25c8ca8b31ff96625dd2316755d2a8 -->
+<!-- /computed in=afbaf2fad0898ba7eb105b773cf0fb502a51879db29552f6e06afeb646ca57c8 out=7fa6218df15e53d005a626cd41ee5e1a3893abb77a16f4a1d2ff267c96177635 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -243,6 +243,7 @@ Options:
 ├── sysvmsg
 ├── sysvsem
 ├── sysvshm
+├── tidy
 ├── tokenizer
 ├── uri
 ├── xml
@@ -251,7 +252,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=d24dbb6165d002e35c6a5288c449300599b28b325c1557f486ba2e072093f097 out=0f45504b6dba3324311db5c4e5d36150990dbd599b21bcb1ff8d3dffa55f8aed -->
+<!-- /computed in=6ae2a1cf026c913ad17cd3fb2504dbe5ca73dc0a06a01bcc8739e846775f1ffc out=85135a4f0ba4be2748ad90df31630283f09c19bcd7781e3762a89f95d7fca87c -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

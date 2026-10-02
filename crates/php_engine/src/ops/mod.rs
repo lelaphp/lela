@@ -73,8 +73,10 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
     }
 }
 
+/// `zval_get_string_func` over an object: the class's `cast_object` to a
+/// string, which a class such as tidy's answers itself and which is
 /// `zend_std_cast_object_tostring` (`Z/Zend/zend_object_handlers.c:2558`)
-/// under `zval_get_string`: the class's `__toString` served on the
+/// at `Std`: the class's `__toString` served on the
 /// object with no arguments, and what it returned when that is a
 /// string, the caller's to own as the method's return was. A class
 /// with no `__toString` is php's `Error` naming the class, thrown by
@@ -116,19 +118,12 @@ pub(crate) fn object_to_string(
     object: crate::api::values::PhpObject,
 ) -> Result<PhpString, Thrown> {
     let class = object.class();
-    if req.method_named(class, b"__tostring").is_some() {
-        let returned = crate::api::call::call_method(req, &object, b"__toString", &[])?;
-        let returned = req.unwrap_reference(returned);
-        if let Some(text) = returned.as_php_string() {
+    let table = req.object_handlers(object.heap());
+    if let Some(cast) = table.cast_object(req, object, TypeTag::String)? {
+        if let Some(text) = cast.as_php_string() {
             return Ok(*text);
         }
-        req.release(returned);
-        let name = req.class_name(class);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Method {name}::__toString() must return a string value"),
-        ));
+        req.release(cast);
     }
     let name = req.class_name(class);
     Err(throw_error(
