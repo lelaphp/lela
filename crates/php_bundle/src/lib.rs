@@ -126,6 +126,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xsl::extension,
         #[cfg(feature = "tidy")]
         php_ext_tidy::extension,
+        #[cfg(feature = "gettext")]
+        php_ext_gettext::extension,
     ]
 }
 
@@ -160,6 +162,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-filter",
     #[cfg(feature = "ftp")]
     "--enable-ftp",
+    #[cfg(feature = "gettext")]
+    "--with-gettext",
     #[cfg(feature = "gmp")]
     "--with-gmp",
     #[cfg(not(feature = "iconv"))]
