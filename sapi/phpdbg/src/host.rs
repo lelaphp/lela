@@ -169,11 +169,13 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     match s.stopped {
         None if execution == Execution::Run => {
             prompt::run_queued(s);
-            if s.stopped != Some(Stop::Quit) {
-                cycle_notice();
-            }
+            // `-rr` quits with `PHPDBG_IS_QUITTING` set
+            // (`Z/sapi/phpdbg/phpdbg.c:1713-1719`), so the module's
+            // shutdown writes no notice.
             if s.after_run == AfterRun::Quit {
                 s.stopped = Some(Stop::Quit);
+            } else if s.stopped != Some(Stop::Quit) {
+                cycle_notice();
             }
         }
         // `clean`, or `exec` where php takes something to be executing,

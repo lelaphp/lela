@@ -36,6 +36,42 @@ fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
     )
 }
 
+/// What the binary wrote on stdout and stderr, and its status, for
+/// `flags` over a program of `source`, with nothing on stdin.
+fn ran(name: &str, flags: &[&str], source: &str) -> (String, String, Option<i32>) {
+    let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("t.php");
+    std::fs::write(&file, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
+        .args(flags)
+        .arg(&file)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// `-rr` runs the file and quits with php's quitting flag set, so a run
+/// that ends normally writes no closing notice (the pinned phpdbg's
+/// bytes for `phpdbg -qrr -n`).
+#[test]
+fn run_twice_on_the_line_quits_without_the_closing_notice() {
+    let (out, err, status) = ran("rr", &["-qrr", "-n"], "<?php echo \"x\\n\";\n");
+    assert_eq!((out.as_str(), err.as_str(), status), ("x\n", "", Some(0)));
+    let (out, err, status) = ran(
+        "rr-exit",
+        &["-qrr", "-n"],
+        "<?php echo \"x\\n\"; exit(3);\n",
+    );
+    assert_eq!((out.as_str(), err.as_str(), status), ("x\n", "", Some(3)));
+}
+
 #[test]
 fn a_run_stops_at_a_breakpoint_and_evaluates_in_the_frame() {
     let (out, file) = debugged(
