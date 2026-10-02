@@ -199,6 +199,58 @@ pub fn run_queued(s: &mut Session) {
     }
 }
 
+/// How one line of an init file ended.
+pub enum InitLine {
+    /// Its commands ran, or one failed and wrote its own error.
+    Done,
+    /// A command ended the request: the session's `stopped` says why.
+    Stopped,
+    /// A command named nothing php's table resolves, or what it named was
+    /// held to the wrong parameters, and no registered function took the
+    /// line: the error, which `phpdbg_line_init` writes with the line.
+    Unrecognized(String),
+}
+
+/// One line of an init file, `phpdbg_line_init`'s `phpdbg_stack_execute`:
+/// its commands in turn until one does not succeed. What resolving and
+/// verifying a command writes is held back in php's error buffer and
+/// handed to the caller instead; a handler's own error is written, and a
+/// line that fails in its handler or goes on with the program ends
+/// silently, as php's buffer is let go before the handler runs.
+pub fn init_line(s: &mut Session, here: &mut Here<'_>, commands: Vec<Command>) -> InitLine {
+    if commands.is_empty() {
+        return InitLine::Unrecognized(String::from("The stack contains nothing !"));
+    }
+    for command in commands {
+        let asked = match &command {
+            Command::Params(params) => {
+                let resolved = resolve(&ROOT, None, params).and_then(|(def, rest)| {
+                    verify(def, rest)?;
+                    Ok((def, rest))
+                });
+                match resolved {
+                    Ok((def, rest)) => (def.handler)(s, here, rest),
+                    Err(error) => {
+                        if call_registered(s, here, params) {
+                            return InitLine::Done;
+                        }
+                        return error.map_or(InitLine::Done, InitLine::Unrecognized);
+                    }
+                }
+            }
+            Command::Eval(_) | Command::Run(_) | Command::Shell(_) => execute(s, here, &command),
+        };
+        if s.stopped.is_some() {
+            return InitLine::Stopped;
+        }
+        match asked {
+            Ret::Success => {}
+            Ret::Failure | Ret::Run | Ret::Resume => return InitLine::Done,
+        }
+    }
+    InitLine::Done
+}
+
 /// The command a run left that needs a request standing, served by an
 /// idle request of its own once the run's has ended.
 pub fn idle_job(s: &mut Session, req: &mut Request, command: &Command) {
@@ -331,7 +383,7 @@ static ROOT: [Def; 27] = [
     def("clean", Some(b'X'), "", clean),
     def("clear", Some(b'C'), "", clear),
     def("help", Some(b'h'), "|s", help),
-    def("set", Some(b'S'), "s", unsupported),
+    with_subs("set", Some(b'S'), "s", SET, set),
     def("register", Some(b'R'), "s", register),
     def("source", Some(b'<'), "s", unsupported),
     def("export", Some(b'>'), "s", unsupported),
@@ -387,6 +439,21 @@ static INFO: &[Def] = &[
     sub(&ROOT[13], "globals", Some(b'g'), "", crate::info::globals),
     sub(&ROOT[13], "literal", Some(b'l'), "", crate::info::literal),
     sub(&ROOT[13], "memory", Some(b'm'), "", unsupported),
+];
+
+/// `phpdbg_set_commands`, whose parent is php's row 17, `clear`
+/// (`Z/sapi/phpdbg/phpdbg_set.c:28-46`).
+static SET: &[Def] = &[
+    sub(&ROOT[17], "prompt", Some(b'p'), "|s", set_prompt),
+    sub(&ROOT[17], "pagination", Some(b'P'), "|b", unsupported),
+    sub(&ROOT[17], "color", Some(b'c'), "ss", set_color),
+    sub(&ROOT[17], "colors", Some(b'C'), "|b", set_colors),
+    sub(&ROOT[17], "break", Some(b'b'), "l|b", unsupported),
+    sub(&ROOT[17], "breaks", Some(b'B'), "|b", unsupported),
+    sub(&ROOT[17], "quiet", Some(b'q'), "|b", unsupported),
+    sub(&ROOT[17], "stepping", Some(b's'), "|s", unsupported),
+    sub(&ROOT[17], "refcount", Some(b'r'), "|b", unsupported),
+    sub(&ROOT[17], "lines", Some(b'l'), "|l", unsupported),
 ];
 
 /// `phpdbg_watch_commands` (`Z/sapi/phpdbg/phpdbg_watch.c:124-129`):
@@ -1696,6 +1763,130 @@ fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
         })
     {
         out::error(format!("No help topic found for {}", lossy(topic)).as_bytes());
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_COMMAND(set)`: a word no row of `set` names.
+fn set(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
+    out::error(b"No set command selected!");
+    Ret::Success
+}
+
+/// `PHPDBG_SET(prompt)`: the prompt as the prompt shows it, or its text
+/// from here, a byte past ASCII shown as `?` as `phpdbg_prompt()` sets it.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set prompt
+/// set prompt dbg>
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Current prompt: prompt>%s
+/// prompt> dbg> x
+/// [Script ended normally]
+/// dbg>
+/// ```
+fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        Some(Param::Str(text)) => {
+            s.prompt = text
+                .iter()
+                .map(|b| if *b & 0x80 == 0 { *b } else { b'?' })
+                .collect();
+        }
+        _ => out::writeln(&[&b"Current prompt: "[..], &s.prompt, b" "].concat()),
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_SET(color)`: the element's colour by the table's name for it,
+/// the notice naming both.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set color error nope
+/// set color foo red
+/// set colors on
+/// set color notice red
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Failed to find the requested color (nope)]
+/// prompt> [Failed to find the requested element (foo)]
+/// prompt> prompt> %s[setting notice color to red (0;31)]%s
+/// prompt> x
+/// %s0;31m[Script ended normally]%s
+/// prompt>
+/// ```
+fn set_color(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    let [Param::Str(element), Param::Str(name), ..] = params else {
+        return Ret::Failure;
+    };
+    let Some(colour) = out::find_colour(name) else {
+        out::error(format!("Failed to find the requested color ({})", lossy(name)).as_bytes());
+        return Ret::Success;
+    };
+    let Some(element) = out::Element::named(element) else {
+        out::error(format!("Failed to find the requested element ({})", lossy(element)).as_bytes());
+        return Ret::Success;
+    };
+    let named = match element {
+        out::Element::Prompt => "prompt",
+        out::Element::Error => "error",
+        out::Element::Notice => "notice",
+    };
+    out::notice(format!("setting {named} color to {} ({})", colour.name, colour.code).as_bytes());
+    out::set_colour(element, colour);
+    Ret::Success
+}
+
+/// `PHPDBG_SET(colors)`: whether notices and errors are coloured, or
+/// which they are.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set colors
+/// set colors on
+/// set colors
+/// set colors off
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Colors off
+/// prompt> prompt> Colors on
+/// prompt> prompt> x
+/// [Script ended normally]
+/// prompt>
+/// ```
+fn set_colors(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        None => {
+            let shown = match out::colours() {
+                out::Colours::On => "on",
+                out::Colours::Off => "off",
+            };
+            out::writeln(format!("Colors {shown}").as_bytes());
+        }
+        Some(Param::Num(on)) => out::set_colours(if *on != 0 {
+            out::Colours::On
+        } else {
+            out::Colours::Off
+        }),
+        Some(_) => out::error(b"set colors used incorrectly: set colors <on|off>"),
     }
     Ret::Success
 }

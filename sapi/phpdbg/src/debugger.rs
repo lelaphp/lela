@@ -83,18 +83,40 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             let Some(mut session) = session::take() else {
                 return Flow::Continue;
             };
-            match session.job.take() {
-                Some(command) => prompt::idle_job(&mut session, req, &command),
-                None => {
-                    let _ = prompted(&mut session, req, |req| Here::Idle { req });
-                }
+            if let Some(command) = session.job.take() {
+                prompt::idle_job(&mut session, req, &command);
+            } else {
+                crate::init::run(&mut session, &mut Here::Idle { req });
+                let _ = prompted(&mut session, req, |req| Here::Idle { req });
             }
             session::put(session);
             tier::exit(req);
             Flow::Resume(frame)
         }
-        Plan::Run => drive(req, frame),
+        Plan::Run => {
+            if initialized(req) {
+                tier::exit(req);
+                return Flow::Resume(frame);
+            }
+            drive(req, frame)
+        }
     }
+}
+
+/// The init files run where a cycle starts with a run, before the run's
+/// first opline, in the run's request, so what they leave the program
+/// finds; true where they stopped the session.
+fn initialized(req: &mut Request) -> bool {
+    if session::with(|s| !s.init_due).unwrap_or(true) {
+        return false;
+    }
+    let Some(mut session) = session::take() else {
+        return false;
+    };
+    crate::init::run(&mut session, &mut Here::Idle { req });
+    let stopped = session.stopped.is_some();
+    session::put(session);
+    stopped
 }
 
 /// The execution context compiled and standing at its first opline: the
@@ -104,6 +126,12 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(mut session) = session::take() else {
         return Flow::Continue;
     };
+    crate::init::run(&mut session, &mut Here::Idle { req });
+    if session.stopped.is_some() {
+        session::put(session);
+        tier::exit(req);
+        return Flow::Resume(frame);
+    }
     if session.context != Context::Announced {
         session.context = Context::Announced;
         if let Some(exec) = &session.exec {
@@ -399,6 +427,11 @@ fn leaves(opcode: Opcode) -> bool {
 /// order, and the prompt where one of them stops: `Some` where the
 /// prompt ended the request.
 fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Option<Flow> {
+    // `PHPDBG_IS_INITIALIZING` (`phpdbg_prompt.c:1704-1708`): what the
+    // init files serve runs uninterrupted, logged by no oplog.
+    if session::with(|s| s.initializing).unwrap_or(false) {
+        return None;
+    }
     // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` (`phpdbg_prompt.c:1666-1669`):
     // the opline logged and nothing checked, so an uncaught throwable is
     // the run's end to report.
