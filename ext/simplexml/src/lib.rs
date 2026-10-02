@@ -35,7 +35,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Layout, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -517,7 +517,7 @@ impl SimpleXMLElement {
     ) -> Result<bool, Thrown> {
         let this = this.object();
         if sxe(req, this).is_none_or(|s| !s.obj.has_document()) {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "SimpleXMLElement is not properly initialized",
@@ -648,7 +648,7 @@ impl SimpleXMLElement {
         let this = this.object();
         let node = if fromRoot {
             let Some(doc) = sxe(req, this).and_then(|s| s.obj.document_node()) else {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "SimpleXMLElement is not properly initialized",
@@ -1057,7 +1057,7 @@ impl SimpleXMLElement {
     fn current(req: &mut Request, this: This<Self>) -> Result<Element, Thrown> {
         match sxe::current(req, this.object()) {
             Some(value) => Element::from_value(req, value),
-            None => Err(throw(
+            None => Err(throw_error(
                 req,
                 "Error",
                 "Iterator not initialized or already consumed",
@@ -1080,7 +1080,7 @@ impl SimpleXMLElement {
     fn key(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         match sxe::current_name(req, this.object()) {
             Some(name) => PhpString::new(req, &name),
-            None => Err(throw(
+            None => Err(throw_error(
                 req,
                 "Error",
                 "Iterator not initialized or already consumed",

@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
-use crate::api::raising::{Thrown, arg_count_error, throw};
+use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpArray, Value};
 
@@ -115,7 +115,7 @@ fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
                 .is_some_and(|decl| decl.kind == ClassKind::Enum)
         })
         .ok_or_else(|| {
-            throw(
+            throw_error(
                 req,
                 "Error",
                 "InternalError: an enum method served on no enum",
@@ -272,7 +272,11 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         .map_or(EnumBacking::Pure, |decl| decl.backing);
     if backing == EnumBacking::Pure {
         let name = req.class_name(class);
-        return Err(throw(req, "Error", &format!("Enum {name} is not backed")));
+        return Err(throw_error(
+            req,
+            "Error",
+            &format!("Enum {name} is not backed"),
+        ));
     }
     let given = req.argument(1).unwrap_or_default().deref();
     let wanted = backing_key(req, &given, backing)?;
@@ -311,7 +315,7 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         ),
     };
     req.release(wanted);
-    Err(throw(
+    Err(throw_error(
         req,
         "ValueError",
         &format!("{shown} is not a valid backing value for enum {class_name}"),

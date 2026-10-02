@@ -16,7 +16,7 @@ use php_unit::decl::Visibility;
 
 use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
-use crate::api::raising::{Level, Thrown, deprecated, raise, throw, warning};
+use crate::api::raising::{Level, Thrown, deprecated, raise, throw, throw_error, warning};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -124,14 +124,14 @@ pub(crate) fn object_to_string(
         }
         req.release(returned);
         let name = req.class_name(class);
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             &format!("Method {name}::__toString() must return a string value"),
         ));
     }
     let name = req.class_name(class);
-    Err(throw(
+    Err(throw_error(
         req,
         "Error",
         &format!("Object of class {name} could not be converted to string"),
@@ -1301,7 +1301,7 @@ pub(crate) fn typed_ref_holds(
                 let one_declared = crate::api::coerce::declared_type_name(&first_ty);
                 let two_declared = crate::api::coerce::declared_type_name(ty);
                 let given = type_name(req, &held.undef_as_null());
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     &format!(
@@ -1345,7 +1345,7 @@ pub(crate) fn incdec_prop_error(
     } else {
         ("decrement", "minimal", i64::MIN)
     };
-    let thrown = throw(
+    let thrown = throw_error(
         req,
         "TypeError",
         &format!(
@@ -1389,7 +1389,7 @@ fn ref_type_error(
     let class = req.class_name(declaring);
     let declared = crate::api::coerce::declared_type_name(ty);
     let given = value_name(req, &value.undef_as_null());
-    throw(
+    throw_error(
         req,
         "TypeError",
         &format!(
@@ -1411,17 +1411,17 @@ fn conflicting_coercion(
     second: usize,
 ) -> Thrown {
     let Some((one_at, one_name, one_ty)) = listed.get(first) else {
-        return throw(req, "TypeError", "Cannot assign to reference");
+        return throw_error(req, "TypeError", "Cannot assign to reference");
     };
     let Some((two_at, two_name, two_ty)) = listed.get(second) else {
-        return throw(req, "TypeError", "Cannot assign to reference");
+        return throw_error(req, "TypeError", "Cannot assign to reference");
     };
     let one_class = req.class_name(*one_at);
     let two_class = req.class_name(*two_at);
     let one_declared = crate::api::coerce::declared_type_name(one_ty);
     let two_declared = crate::api::coerce::declared_type_name(two_ty);
     let given = value_name(req, &value.undef_as_null());
-    throw(
+    throw_error(
         req,
         "TypeError",
         &format!(
@@ -1489,7 +1489,7 @@ pub(crate) fn verify_class_constant_type(
         Some(object) => req.class_name(object.class()),
         None => held.type_name().to_string(),
     };
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!(
@@ -1509,7 +1509,7 @@ fn property_type_error(
     let class = req.class_name(declaring);
     let declared = crate::api::coerce::declared_type_name(ty);
     let given = value_name(req, &value.undef_as_null());
-    throw(
+    throw_error(
         req,
         "TypeError",
         &format!(
@@ -2027,7 +2027,7 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     match (a, b) {
         (Number::Long(a), Number::Long(b)) => {
             if b == 0 {
-                return Err(throw(req, "DivisionByZeroError", "Division by zero"));
+                return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
             }
             // php's own case, "prevent overflow error/crash".
             if b == -1 && a == i64::MIN {
@@ -2042,7 +2042,7 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         (a, b) => {
             let (a, b) = (a.double(), b.double());
             if b == 0.0 {
-                return Err(throw(req, "DivisionByZeroError", "Division by zero"));
+                return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
             }
             Ok(Value::float(a / b))
         }
@@ -2525,7 +2525,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
         return Ok(Value::string(negated));
     }
     let name = value_name(req, &value);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("Cannot perform bitwise not on {name}"),
@@ -2608,7 +2608,7 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// `Error`, `String size overflow`.
 pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpString, Thrown> {
     if a.len() > ZSTR_MAX_LEN - b.len() {
-        return Err(throw(req, "Error", "String size overflow"));
+        return Err(throw_error(req, "Error", "String size overflow"));
     }
     PhpString::filled(req, a.len() + b.len(), |bytes| {
         let (head, tail) = bytes.split_at_mut(a.len());
@@ -2766,7 +2766,7 @@ pub(crate) fn concat_assign(
         if owned {
             req.release(Value::string(b));
         }
-        return Err(throw(req, "Error", "String size overflow"));
+        return Err(throw_error(req, "Error", "String size overflow"));
     }
     vacate(req);
     // An empty side hands the other side on, `ZVAL_STR_COPY` of it.
@@ -3341,7 +3341,7 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
 /// php's `Error` for a table a comparison's walk is already inside,
 /// `zend_hash_compare`'s and `zend_std_compare_objects`' alike.
 pub(crate) fn nesting_too_deep(req: &mut Request) -> Thrown {
-    crate::api::raising::throw(
+    crate::api::raising::throw_error(
         req,
         "Error",
         "Nesting level too deep - recursive dependency?",
@@ -3495,11 +3495,19 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 return increment(req, &number);
             }
             let name = value_name(req, value);
-            Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
+            Err(throw_error(
+                req,
+                "TypeError",
+                &format!("Cannot increment {name}"),
+            ))
         }
         ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
-            Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
+            Err(throw_error(
+                req,
+                "TypeError",
+                &format!("Cannot increment {name}"),
+            ))
         }
     }
 }
@@ -3637,11 +3645,19 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 return decrement(req, &number);
             }
             let name = value_name(req, value);
-            Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
+            Err(throw_error(
+                req,
+                "TypeError",
+                &format!("Cannot decrement {name}"),
+            ))
         }
         ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
             let name = value_name(req, value);
-            Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
+            Err(throw_error(
+                req,
+                "TypeError",
+                &format!("Cannot decrement {name}"),
+            ))
         }
     }
 }
@@ -3806,7 +3822,7 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
         }
     }
     let name = value_name(req, value);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("strlen(): Argument #1 ($string) must be of type string, {name} given"),
@@ -3982,7 +3998,7 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     }
     let function = if sizeof { "sizeof" } else { "count" };
     let name = value_name(req, value);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!(
@@ -4080,7 +4096,7 @@ pub(crate) fn add_array_element(
             if req.array_append(a, value)? {
                 return Ok(());
             }
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Cannot add element to the array as the next element is already occupied",
@@ -4242,7 +4258,7 @@ pub(crate) fn string_dim_offset(
 ) -> Result<Option<i64>, Thrown> {
     let dim = dim.deref();
     let illegal = |req: &mut Request, dim: &Value| {
-        throw(
+        throw_error(
             req,
             "TypeError",
             &format!(
@@ -4420,14 +4436,14 @@ pub(crate) fn array_offset(
             Ok(php_heap::Key::Long(id))
         }
         ValueRef::Undef => empty(req),
-        ValueRef::Array(_) => Err(throw(
+        ValueRef::Array(_) => Err(throw_error(
             req,
             "TypeError",
             "Cannot access offset of type array on array",
         )),
         ValueRef::Object(o) => {
             let class = req.class_name(o.class());
-            Err(throw(
+            Err(throw_error(
                 req,
                 "TypeError",
                 &format!("Cannot access offset of type {class} on array"),
@@ -4638,14 +4654,14 @@ pub(crate) fn isset_offset(
     // and the type's for everything else.
     let held = offset.deref();
     match held.as_ref() {
-        ValueRef::Array(_) => Err(throw(
+        ValueRef::Array(_) => Err(throw_error(
             req,
             "TypeError",
             "Cannot access offset of type array in isset or empty",
         )),
         ValueRef::Object(object) => {
             let class = req.class_name(object.class());
-            Err(throw(
+            Err(throw_error(
                 req,
                 "TypeError",
                 &format!("Cannot access offset of type {class} in isset or empty"),
@@ -4761,7 +4777,7 @@ pub(crate) fn unset_dim(
             return Ok(());
         }
         ValueRef::Array(_) => {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 "Cannot unset offset of type array on array",
@@ -4769,7 +4785,7 @@ pub(crate) fn unset_dim(
         }
         ValueRef::Object(o) => {
             let class = req.class_name(o.class());
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!("Cannot unset offset of type {class} on array"),
@@ -4940,7 +4956,7 @@ fn numbers(
 ) -> Result<(Number, Number), Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
     let unsupported = |req: &mut Request| {
-        throw(
+        throw_error(
             req,
             "TypeError",
             &format!(
@@ -4971,7 +4987,7 @@ fn longs(
 ) -> Result<(i64, i64), Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
     let unsupported = |req: &mut Request| {
-        throw(
+        throw_error(
             req,
             "TypeError",
             &format!(

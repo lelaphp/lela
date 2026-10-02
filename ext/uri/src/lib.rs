@@ -35,7 +35,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
-use php_ext::raising::{Thrown, fatal, throw, throw_chained};
+use php_ext::raising::{Thrown, fatal, throw, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -389,7 +389,7 @@ fn instantiate<P: UriParser>(
 
 /// "Cannot modify readonly object of class ..."
 fn readonly(req: &mut Request, class: &str) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         &format!("Cannot modify readonly object of class {class}"),

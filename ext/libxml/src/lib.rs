@@ -36,7 +36,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
@@ -647,7 +647,7 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
     // `zend_fetch_resource_ex(arg, "Stream-Context", le_stream_context)`.
     let is_context = resource.type_name(req) == Some(b"stream-context".as_slice());
     if !is_context {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "TypeError",
             "libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource",

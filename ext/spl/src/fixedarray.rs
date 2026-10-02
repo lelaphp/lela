@@ -14,7 +14,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
-use php_ext::raising::{Thrown, arg_value_error, throw, warning};
+use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, Value, ValueRef};
 
@@ -584,7 +584,7 @@ fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
 
 fn illegal(req: &mut Request, offset: &Value) -> Thrown {
     let ty = crate::zval_type_name(req, offset);
-    throw(
+    throw_error(
         req,
         "TypeError",
         &format!("Cannot access offset of type {ty} on SplFixedArray"),
@@ -625,7 +625,7 @@ fn has(
 
 fn read(req: &mut Request, object: PhpObject, offset: Option<&Value>) -> Result<Value, Thrown> {
     let Some(offset) = offset else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "[] operator not supported for SplFixedArray",
@@ -643,7 +643,7 @@ fn write(
     value: Value,
 ) -> Result<(), Thrown> {
     let Some(offset) = offset else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "[] operator not supported for SplFixedArray",

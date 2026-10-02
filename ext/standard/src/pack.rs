@@ -10,7 +10,7 @@
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -143,7 +143,7 @@ fn pack(
             }
             b'a' | b'A' | b'Z' | b'h' | b'H' => {
                 if currentarg >= num_args {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "ValueError",
                         &format!("Type {ch}: not enough arguments"),
@@ -168,7 +168,7 @@ fn pack(
                 }
                 let current = i64::try_from(currentarg).unwrap_or(INT_MAX);
                 if current > INT_MAX - arg || current + arg > i64::try_from(num_args).unwrap_or(0) {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "ValueError",
                         &format!("Type {ch}: too few arguments"),
@@ -177,7 +177,7 @@ fn pack(
                 currentarg += usize::try_from(arg).unwrap_or(0);
             }
             _ => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     &format!("Type {ch}: unknown format code"),
@@ -370,7 +370,7 @@ fn pack(
 
 /// `INC_OUTPUTPOS`'s refusal.
 fn overflow(req: &mut Request, code: char) -> Thrown {
-    throw(
+    throw_error(
         req,
         "ValueError",
         &format!("Type {code}: integer overflow in format string"),
@@ -560,7 +560,7 @@ fn unpack(
             b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
             _ => {
                 req.release(Value::array(array));
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     &format!("Invalid format type {ch}"),
@@ -621,7 +621,7 @@ fn unpack(
                 b'h' | b'H' => {
                     if size > INT_MAX / 2 {
                         req.release(Value::array(array));
-                        return Err(throw(
+                        return Err(throw_error(
                             req,
                             "ValueError",
                             &format!(

@@ -11,7 +11,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
 use php_ext::coerce::to_string;
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -265,7 +265,11 @@ impl ObjectHandlers for Handlers {
                 .is_some_and(|v| !matches!(v.as_ref(), ValueRef::Undef))
         {
             req.release(value);
-            return Err(throw(req, "Error", "Property queryString is read only"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Property queryString is read only",
+            ));
         }
         Std.write_property(req, object, name, value)
     }
@@ -278,7 +282,11 @@ impl ObjectHandlers for Handlers {
         name: &[u8],
     ) -> Result<(), Thrown> {
         if name == b"queryString" {
-            return Err(throw(req, "Error", "Property queryString is read only"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Property queryString is read only",
+            ));
         }
         Std.unset_property(req, object, name)
     }
@@ -402,7 +410,7 @@ pub(super) fn handle(req: &mut Request, object: PhpObject) -> Result<PhpObject, 
         return Ok(dbh);
     }
     let class = crate::class_name(req, object.class());
-    Err(throw(
+    Err(throw_error(
         req,
         "Error",
         &format!("{class} object is uninitialized"),

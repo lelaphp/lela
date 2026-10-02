@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw, warning};
+use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{HeldRow, Key, PhpString, RecursionGuard, Value};
 
@@ -361,7 +361,7 @@ impl ObjectHandlers for Incomplete {
         req.release(value);
         req.release(Value::string(name));
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     /// `incomplete_class_get_property_ptr_ptr`: every place refused with
@@ -388,7 +388,7 @@ impl ObjectHandlers for Incomplete {
         _name: &[u8],
     ) -> Result<PropertyPlace, Thrown> {
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     /// `incomplete_class_get_method`: every method refused with the
@@ -408,7 +408,7 @@ impl ObjectHandlers for Incomplete {
         _lowered: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         let message = incomplete_message(req, object, "call a method");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     fn has_property(
@@ -430,7 +430,7 @@ impl ObjectHandlers for Incomplete {
         _name: &[u8],
     ) -> Result<(), Thrown> {
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 }
 

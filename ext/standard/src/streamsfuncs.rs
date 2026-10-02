@@ -92,7 +92,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, arity, deprecated, docref, throw,
+    Level, Thrown, arg_type_error, arg_value_error, arity, deprecated, docref, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
@@ -240,7 +240,7 @@ pub(crate) fn context_of(
                 "{}(): supplied resource is not a valid Stream-Context resource",
                 req.active_function_name()
             );
-            return Err(throw(req, "TypeError", &text));
+            return Err(throw_error(req, "TypeError", &text));
         }
         return Ok(Some(res));
     }
@@ -433,7 +433,7 @@ fn parse_options(req: &mut Request, res: Resource, options: PhpArray) -> Result<
                 }
             }
             _ => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "Options should have the form [\"wrappername\"][\"optionname\"] = $value",
@@ -478,7 +478,11 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
     if let Some(options) = params.find(b"options") {
         let options = options.deref();
         let Some(options) = options.as_array() else {
-            return Err(throw(req, "TypeError", "Invalid stream/context parameter"));
+            return Err(throw_error(
+                req,
+                "TypeError",
+                "Invalid stream/context parameter",
+            ));
         };
         return parse_options(req, res, *options);
     }
@@ -711,7 +715,7 @@ fn stream_context_set_option(
     };
     let refuse = |req: &mut Request, text: &str| {
         let message = format!("stream_context_set_option(): {text}");
-        Err(throw(req, "ValueError", &message))
+        Err(throw_error(req, "ValueError", &message))
     };
     match wrapper_or_options {
         Union::A(options) => {

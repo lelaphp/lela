@@ -9,7 +9,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::Function;
 use php_ext::coerce::{float_to_long, numeric_string, type_name};
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -102,7 +102,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead",

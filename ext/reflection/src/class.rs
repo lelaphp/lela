@@ -13,7 +13,7 @@ use php_ext::call::{
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
-use php_ext::raising::{Thrown, deprecated, throw};
+use php_ext::raising::{Thrown, deprecated, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -157,7 +157,7 @@ fn reflector_class(
                 .prop(req, b"name")
                 .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
             else {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "Internal error: Failed to retrieve the argument's reflection object",
@@ -348,7 +348,7 @@ impl Unpacked {
             match key {
                 Key::Str(name) => unpacked.named.push((name, value)),
                 Key::Int(_) if !unpacked.named.is_empty() => {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot use positional argument after named argument",
@@ -2462,7 +2462,7 @@ impl ReflectionClass {
         let shown = String::from_utf8_lossy(&shown).into_owned();
         let name = String::from_utf8_lossy(&name).into_owned();
         if held.is_some() {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 &format!(

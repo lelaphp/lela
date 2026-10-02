@@ -29,7 +29,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Instance};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::read_prop;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, argument_error, throw, warning};
+use php_ext::raising::{Thrown, argument_error, throw, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -433,7 +433,7 @@ fn bcpowmod(
 fn raisemod_error(req: &mut Request, error: RaiseModError, method: bool) -> Thrown {
     let shift = u32::from(method);
     match error {
-        RaiseModError::BaseHasFractional if method => throw(
+        RaiseModError::BaseHasFractional if method => throw_error(
             req,
             "ValueError",
             "Base number cannot have a fractional part",
@@ -503,7 +503,7 @@ fn raise_error(req: &mut Request, error: RaiseError, position: Option<u32>) -> T
             throw(req, "DivisionByZeroError", "Negative power of zero")
         }
         (RaiseError::Overflow, Some(position)) => value_error(req, position, OVERFLOW),
-        (RaiseError::Overflow, None) => throw(req, "ValueError", OVERFLOW),
+        (RaiseError::Overflow, None) => throw_error(req, "ValueError", OVERFLOW),
     }
 }
 

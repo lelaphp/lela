@@ -51,7 +51,7 @@ use php_ext::abi::{
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -171,7 +171,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(req, "Error", self.0))
+        Err(throw_error(req, "Error", self.0))
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

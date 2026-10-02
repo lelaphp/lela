@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use php_ext::abi::{Extension, ExtensionBuilder, This, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw, throw_at};
+use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw_at, throw_error};
 use php_ext::request::Request;
 use php_ext::syntax::{self, FileId, LexOptions};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -228,7 +228,7 @@ impl PhpToken {
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
         let Some(token_class) = req.called_scope() else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "PhpToken::tokenize() called with no class",
@@ -549,7 +549,7 @@ fn fill_token(
 fn token_id(req: &mut Request, this: PhpObject) -> Result<i64, Thrown> {
     match this.prop(req, b"id").and_then(|id| id.deref().as_int()) {
         Some(id) => Ok(id),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "Typed property PhpToken::$id must not be accessed before initialization",
@@ -565,7 +565,7 @@ fn token_text(req: &mut Request, this: PhpObject) -> Result<PhpString, Thrown> {
         .and_then(|text| text.deref().as_php_string().copied())
     {
         Some(text) => Ok(text),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "Typed property PhpToken::$text must not be accessed before initialization",

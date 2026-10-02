@@ -78,7 +78,7 @@ use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, throw, throw_error};
 use php_ext::request::{ExtensionId, Request};
 use php_ext::values::{
     ClassId, Emalloc, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
@@ -4775,7 +4775,7 @@ fn this_attribute(req: &mut Request, this: PhpObject) -> Result<attr::AttributeR
         .and_then(|reflected| reflected.attribute.clone());
     match kept {
         Some(kept) => Ok(kept),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
@@ -4925,7 +4925,7 @@ fn this_name(req: &mut Request, this: PhpObject, class: &str) -> Result<Vec<u8>,
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
         Some(name) => Ok(name),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             &format!("Typed property {class}::$name must not be accessed before initialization"),
@@ -5293,7 +5293,7 @@ fn this_property(
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionProperty::$class must not be accessed before initialization",
@@ -5379,7 +5379,7 @@ fn this_class_constant(
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionClassConstant::$class must not be accessed before initialization",
@@ -8608,7 +8608,7 @@ fn this_zend_extension(req: &mut Request, this: PhpObject) -> Result<ZendExtensi
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     match name.and_then(|name| zend_extension_named(req, &name)) {
         Some(row) => Ok(row),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",

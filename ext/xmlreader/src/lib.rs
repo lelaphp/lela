@@ -34,7 +34,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Function, instantiate, lookup_class};
 use php_ext::coerce::truthy;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Resolve, Stream};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 use php_ext_libxml::Errors;
@@ -133,7 +133,7 @@ impl ObjectHandlers for Handlers {
         req.release(value);
         let class = class_name(req, object.class());
         let message = format!("Cannot modify readonly property {class}::${shown}");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     fn get_property_ptr_ptr(
@@ -183,7 +183,7 @@ impl ObjectHandlers for Handlers {
         }
         let class = class_name(req, object.class());
         let message = format!("Cannot unset {class}::${}", String::from_utf8_lossy(name));
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     /// `xmlreader_get_debug_info`: the object's own properties, then each
@@ -398,7 +398,7 @@ fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Value, T
             docref(req, Level::Warning, message);
             Ok(Value::bool(false))
         }
-        Failure::Throw => Err(throw(req, "Error", message)),
+        Failure::Throw => Err(throw_error(req, "Error", message)),
     }
 }
 
@@ -560,7 +560,7 @@ impl Property {
                 | Property::IsEmptyElement
         );
         match read {
-            Some(Read::Number(-1, _)) => Err(throw(
+            Some(Read::Number(-1, _)) => Err(throw_error(
                 req,
                 "Error",
                 "Failed to read property because no XML data has been read yet",
@@ -752,7 +752,7 @@ impl XMLReader {
         property: i64,
     ) -> Result<bool, Thrown> {
         match quiet(req, this.object(), |r| r.parser_prop(flags_int(property))) {
-            None => Err(throw(
+            None => Err(throw_error(
                 req,
                 "Error",
                 "Cannot access parser properties before loading data",
@@ -855,7 +855,11 @@ impl XMLReader {
     #[php(tentative)]
     fn read(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         match with(req, this.object(), TextReader::read)? {
-            None => Err(throw(req, "Error", "Data must be loaded before reading")),
+            None => Err(throw_error(
+                req,
+                "Error",
+                "Data must be loaded before reading",
+            )),
             Some(n) => Ok(n == 1),
         }
     }
@@ -883,7 +887,11 @@ impl XMLReader {
     ) -> Result<bool, Thrown> {
         let object = this.object();
         let Some(mut n) = with(req, object, TextReader::next)? else {
-            return Err(throw(req, "Error", "Data must be loaded before reading"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Data must be loaded before reading",
+            ));
         };
         if let Some(name) = name {
             let end = name
@@ -979,7 +987,7 @@ impl XMLReader {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message =
                 "XMLReader::fromStream(): supplied resource is not a valid stream resource";
-            return Err(throw(req, "TypeError", message));
+            return Err(throw_error(req, "TypeError", message));
         };
         valid_encoding(req, encoding.as_ref())?;
         let (e, u) = (
@@ -989,7 +997,11 @@ impl XMLReader {
         let (made, raised, thrown) = TextReader::stream(req, stream, u, e, flags_int(flags));
         Errors::settle(req, raised, thrown)?;
         let Some(reader) = made else {
-            return Err(throw(req, "Error", "Could not construct libxml reader"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Could not construct libxml reader",
+            ));
         };
         let class = called(req)?;
         let made = Target::New(class).land(req, reader)?;
@@ -1038,7 +1050,11 @@ impl XMLReader {
         }
         let xsd = filename.as_ref().map(|f| f.0.as_bytes());
         match with(req, this.object(), |r, req| r.schema_validate(req, xsd))? {
-            None => Err(throw(req, "Error", "Schema must be set prior to reading")),
+            None => Err(throw_error(
+                req,
+                "Error",
+                "Schema must be set prior to reading",
+            )),
             Some(0) => Ok(true),
             Some(_) => {
                 docref(req, Level::Warning, "Schema contains errors");
@@ -1057,7 +1073,7 @@ impl XMLReader {
         match quiet(req, this.object(), |r| {
             r.set_parser_prop(flags_int(property), value)
         }) {
-            None => Err(throw(
+            None => Err(throw_error(
                 req,
                 "Error",
                 "Cannot access parser properties before loading data",
@@ -1192,7 +1208,11 @@ impl XMLReader {
             doc = node.doc();
         }
         let Some(expanded) = with(req, this.object(), |r, req| r.expand(req, doc))? else {
-            return Err(throw(req, "Error", "Data must be loaded before expanding"));
+            return Err(throw_error(
+                req,
+                "Error",
+                "Data must be loaded before expanding",
+            ));
         };
         match expanded {
             Expanded::Failed => {
@@ -1247,7 +1267,11 @@ fn relaxng(
         Some(Some(bytes)) => r.relaxng(req, Some(RelaxNg::Source(bytes))),
     })?;
     match answer {
-        None => Err(throw(req, "Error", "Schema must be set prior to reading")),
+        None => Err(throw_error(
+            req,
+            "Error",
+            "Schema must be set prior to reading",
+        )),
         Some(0) => Ok(true),
         Some(_) => {
             docref(req, Level::Warning, "Schema contains errors");

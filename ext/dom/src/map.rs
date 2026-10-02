@@ -9,7 +9,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
@@ -500,7 +500,7 @@ fn illegal_offset(req: &mut Request, object: PhpObject, value: &Value, isset: bo
         let class = class_name(req, object.class());
         format!("Cannot access offset of type {given} on {class}")
     };
-    throw(req, "TypeError", &message)
+    throw_error(req, "TypeError", &message)
 }
 
 /// The dimensions a map's class reads, `Dims`.
@@ -637,7 +637,7 @@ impl ObjectHandlers for MapHandlers {
             } else {
                 format!("Cannot append to {name}")
             };
-            return Err(throw(req, "Error", &message));
+            return Err(throw_error(req, "Error", &message));
         };
         if dims != Dims::Legacy {
             return match (dims, modern_index(req, offset_value)?) {
@@ -659,7 +659,11 @@ impl ObjectHandlers for MapHandlers {
             Ok(index) if is_list => item(req, object, index),
             Ok(index) => {
                 if !(0..=i64::from(i32::MAX)).contains(&index) {
-                    return Err(throw(req, "ValueError", "must be between 0 and 2147483647"));
+                    return Err(throw_error(
+                        req,
+                        "ValueError",
+                        "must be between 0 and 2147483647",
+                    ));
                 }
                 item(req, object, index)
             }
@@ -715,7 +719,7 @@ impl ObjectHandlers for MapHandlers {
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
             let message = "An iterator cannot be used with foreach by reference";
-            return Err(throw(req, "Error", message));
+            return Err(throw_error(req, "Error", message));
         }
         let current = item(req, object, 0)?;
         Ok(Some(Box::new(NodeIter {
@@ -791,7 +795,11 @@ impl ClassIterator for NodeIter {
         if self.steps == 0 {
             return Ok(());
         }
-        Err(throw(req, "Error", "Iterator does not support rewinding"))
+        Err(throw_error(
+            req,
+            "Error",
+            "Iterator does not support rewinding",
+        ))
     }
 
     fn valid(&mut self, _: &mut Request, _: PhpObject) -> Result<bool, Thrown> {

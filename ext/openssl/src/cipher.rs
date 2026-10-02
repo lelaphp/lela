@@ -9,7 +9,9 @@ use std::ffi::{c_int, c_ulong};
 
 use php_ext::abi::{OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -272,7 +274,11 @@ fn context(req: &mut Request) -> Option<CipherContext> {
 /// with no argument named.
 fn check_len(req: &mut Request, len: usize, what: &str) -> Result<(), Thrown> {
     if c_int::try_from(len).is_err() {
-        return Err(throw(req, "ValueError", &format!("{what} is too long")));
+        return Err(throw_error(
+            req,
+            "ValueError",
+            &format!("{what} is too long"),
+        ));
     }
     Ok(())
 }
@@ -324,7 +330,7 @@ fn openssl_encrypt(
     check_len(req, passphrase.as_bytes().len(), "password")?;
     check_len(req, aad.as_bytes().len(), "aad")?;
     let Ok(tag_len) = c_int::try_from(tag_length) else {
-        return Err(throw(req, "ValueError", "tag_len is too long"));
+        return Err(throw_error(req, "ValueError", "tag_len is too long"));
     };
     let Some(cipher) = cipher_named(req, cipher_algo) else {
         return Ok(OrFalse::False);

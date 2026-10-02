@@ -339,7 +339,7 @@ fn set_character_set(req: &mut Request, object: PhpObject, value: &Value) -> Res
             doc.set_doc_string(php_ext_libxml::ffi::DocString::Encoding, Some(found.name()));
             Ok(())
         }
-        None => Err(php_ext::raising::throw(
+        None => Err(php_ext::raising::throw_error(
             req,
             "ValueError",
             "Invalid document encoding",

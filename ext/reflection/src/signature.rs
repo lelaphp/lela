@@ -16,7 +16,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{autoload, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -177,7 +177,7 @@ pub(super) fn type_factory(
 fn this_type(req: &mut Request, this: PhpObject) -> Result<TypeRef, Thrown> {
     match super::kept_type(req, this) {
         Some(reference) => Ok(reference),
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
@@ -337,21 +337,21 @@ fn this_parameter(
     this: PhpObject,
 ) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
     let Some(reference) = super::kept_parameter(req, this) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
     let Some(decl) = function_decl_of(req, &reference.function) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
     let Some(parameter) = decl.parameters.get(reference.offset).cloned() else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
@@ -580,7 +580,7 @@ fn construct_offset(
         }
         Union::A(position) => {
             if position < 0 {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "ValueError",
                     "ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0",
@@ -725,7 +725,7 @@ pub(super) fn this_function(
         }
     };
     let Some(decl) = function_decl_of(req, &function) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Internal error: Failed to retrieve the reflection object",
@@ -801,7 +801,7 @@ impl ReflectionParameter {
     ) -> Result<(), Thrown> {
         let function = construct_function(req, function.0)?;
         let Some(decl) = function_decl_of(req, &function) else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Internal error: Failed to retrieve the reflection object",

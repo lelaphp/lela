@@ -7,7 +7,7 @@ use std::sync::Arc;
 use php_ext::abi::{Instance, OrFalse, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -676,7 +676,7 @@ impl DateTimeZone {
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let (object, hash) = (this.object(), data);
         let Some(kind) = from_hash(hash) else {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Invalid serialization data for DateTimeZone object",
@@ -717,7 +717,7 @@ impl DateTimeZone {
                 set_zone(req, object, kind);
                 Ok(())
             }
-            None => Err(throw(
+            None => Err(throw_error(
                 req,
                 "Error",
                 "Invalid serialization data for DateTimeZone object",
@@ -753,7 +753,7 @@ impl DateTimeZone {
         let object = new_object(req, class)?;
         let Some(kind) = from_hash(hash) else {
             req.release(object.as_value());
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "Invalid serialization data for DateTimeZone object",

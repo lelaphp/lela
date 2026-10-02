@@ -21,7 +21,7 @@ use php_heap::{Heap, Laziness, Obj};
 use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, throw_error};
 use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
@@ -299,7 +299,7 @@ impl Request {
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
         let name = self.class_name(class);
         if internal(self, class) {
-            return Some(throw(
+            return Some(throw_error(
                 self,
                 "Error",
                 &format!("Cannot make instance of internal class lazy: {name} is internal"),
@@ -310,7 +310,7 @@ impl Request {
             let Some(parent) = at else { break };
             if internal(self, parent) {
                 let parent = self.class_name(parent);
-                return Some(throw(
+                return Some(throw_error(
                     self,
                     "Error",
                     &format!(
@@ -417,7 +417,7 @@ impl Request {
         let iterating = |at: Obj| at.properties().is_some_and(php_heap::Arr::has_iterators);
         let forwarded = self.lazy_instance(o);
         if iterating(o) || forwarded.is_some_and(|i| iterating(i.heap())) {
-            return Err(throw(
+            return Err(throw_error(
                 self,
                 "Error",
                 "Can not reset an object during property iteration",
@@ -428,7 +428,7 @@ impl Request {
             self.lazy_forget(o);
         } else {
             if self.lazy_row(o).is_some() {
-                return Err(throw(
+                return Err(throw_error(
                     self,
                     "Error",
                     "Can not reset an object while it is being initialized",
@@ -689,7 +689,7 @@ impl Request {
             Ok(returned) if returned.tag() != TypeTag::Null => {
                 self.lazy_revert(o, snapshot, table);
                 self.release(returned);
-                Err(throw(
+                Err(throw_error(
                     self,
                     "TypeError",
                     "Lazy object initializer must return NULL or no value",
@@ -777,7 +777,7 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);
-            return Err(throw(
+            return Err(throw_error(
                 self,
                 "TypeError",
                 &format!(
@@ -789,7 +789,7 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = self.class_name(instance.class());
             self.release(returned);
-            return Err(throw(
+            return Err(throw_error(
                 self,
                 "TypeError",
                 &format!(
@@ -800,7 +800,7 @@ impl Request {
         if instance == object || instance.heap().laziness() != Laziness::Eager {
             o.set_laziness(Laziness::Proxy);
             self.release(returned);
-            return Err(throw(
+            return Err(throw_error(
                 self,
                 "Error",
                 "Lazy proxy factory must return a non-lazy object",
@@ -871,7 +871,7 @@ impl Request {
             self.release(object.as_value());
             return outcome;
         }
-        let thrown = throw(
+        let thrown = throw_error(
             self,
             "Error",
             "Lazy object was released during initialization",

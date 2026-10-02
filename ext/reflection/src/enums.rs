@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
-use php_ext::raising::{Thrown, fatal, throw};
+use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString};
 
@@ -97,7 +97,7 @@ fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), T
         .prop(req, b"class")
         .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
     else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Typed property ReflectionClassConstant::$class must not be accessed before initialization",

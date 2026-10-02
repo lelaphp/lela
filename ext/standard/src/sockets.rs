@@ -136,7 +136,7 @@ use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{
     BindTo, FdStream, Handshake, Request, SocketOptions, Stream, Xport, XportFailure,
 };
@@ -361,7 +361,7 @@ fn fsockopen_stream(
     let limited = timeout != -1.0;
     if limited && !(0.0..=TIMEOUT_MAX).contains(&timeout) {
         let text = format!("{native}(): Argument #6 must be -1 or between 0 and {TIMEOUT_MAX}");
-        return Err(throw(req, "ValueError", &text));
+        return Err(throw_error(req, "ValueError", &text));
     }
     let mut hostname = host.clone();
     if port > 0 {

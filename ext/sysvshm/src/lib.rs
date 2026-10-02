@@ -34,7 +34,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
 use php_ext_standard::{Serializer, Unserializer};
@@ -179,7 +179,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot directly construct SysvSharedMemory, use shm_attach() instead",
@@ -366,7 +366,11 @@ fn shm_attach(
         segment.set_word(32, word(len));
     }
     let Some(class) = lookup_class(req, b"SysvSharedMemory")? else {
-        return Err(throw(req, "Error", "Class \"SysvSharedMemory\" not found"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Class \"SysvSharedMemory\" not found",
+        ));
     };
     let shm = Instance::of(new_object(req, class)?);
     *shm.payload_mut(req)? = Shm {
@@ -380,7 +384,7 @@ fn shm_attach(
 /// The `Error` every native but `shm_attach` throws on a detached
 /// object.
 fn destroyed(req: &mut Request) -> Thrown {
-    throw(
+    throw_error(
         req,
         "Error",
         "Shared memory block has already been destroyed",
@@ -513,7 +517,7 @@ fn shm_put_var(
     hash.finish(req);
     if shm.payload_mut(req)?.segment.is_none() {
         let text = "Shared memory block has been destroyed by the serialization function";
-        return Err(throw(req, "Error", text));
+        return Err(throw_error(req, "Error", text));
     }
     written?;
     let put = with(req, shm, |seg| {

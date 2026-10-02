@@ -26,7 +26,7 @@ use php_unit::decl::ClassKind;
 use crate::api::abi::{
     ClassIterator, CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped,
 };
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, Value};
 
@@ -672,7 +672,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         let funcs = match by_ref_places(req, object) {
             Some(place) => Funcs::Places(place),
             None if by_ref => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "An iterator cannot be used with foreach by reference",
@@ -703,7 +703,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
             req.release(answered);
             if by_ref {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     "An iterator cannot be used with foreach by reference",
@@ -1008,7 +1008,7 @@ impl InternalIterator {
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             "Cannot manually construct InternalIterator",
@@ -1161,7 +1161,7 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
 /// class's `iterator_element`.
 fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<(Value, Value)>, Thrown> {
     let Some(Internal::Elements { object, index }) = this.native::<Internal>(req) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "The InternalIterator object has not been properly initialized",

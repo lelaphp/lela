@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, This};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw};
+use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
@@ -174,7 +174,7 @@ fn verify_bool(req: &mut Request, answer: Option<Value>) -> bool {
     let verdict = verdict.unwrap_or_else(|| {
         if !pending(req) {
             let name = value_name(req, &value);
-            let thrown = throw(
+            let thrown = throw_error(
                 req,
                 "TypeError",
                 &format!("Session callback must have a return value of type bool, {name} returned"),
@@ -300,10 +300,14 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
 fn sanity(req: &mut Request, open: bool) -> Result<Option<Module>, Thrown> {
     let state = req.state::<State>();
     if state.status != Status::Active {
-        return Err(throw(req, "Error", "Session is not active"));
+        return Err(throw_error(req, "Error", "Session is not active"));
     }
     let Some(module) = state.default_module else {
-        return Err(throw(req, "Error", "Cannot call default session handler"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Cannot call default session handler",
+        ));
     };
     if open && !state.parent_open {
         docref(req, Level::Warning, "Parent session handler is not open");

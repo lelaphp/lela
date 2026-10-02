@@ -5,7 +5,7 @@
 //! for as long as one draw needs them.
 
 use php_ext::call::call_method;
-use php_ext::raising::throw;
+use php_ext::raising::throw_error;
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
 
@@ -56,7 +56,7 @@ impl Algo for User<'_> {
             .fold(0_u64, |acc, (i, b)| acc | (u64::from(*b) << (8 * i)));
         self.req.release(answered);
         if size == 0 {
-            return Err(Failure::Thrown(throw(
+            return Err(Failure::Thrown(throw_error(
                 self.req,
                 "Random\\BrokenRandomEngineError",
                 "A random engine must return a non-empty string",

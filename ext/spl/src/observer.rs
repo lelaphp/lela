@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
@@ -1331,7 +1331,7 @@ fn row_key(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<RowK
     let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
     let name = value_name(req, &answered);
     req.release(answered);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("{class}::getHash(): Return value must be of type string, {name} returned"),
@@ -1532,7 +1532,7 @@ impl ObjectHandlers for Handlers {
                     && !crate::is_a(req, target.class(), b"Iterator")
                 {
                     req.release(value);
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "TypeError",
                         "Can only attach objects that implement the Iterator interface",

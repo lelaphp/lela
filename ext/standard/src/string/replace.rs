@@ -6,7 +6,7 @@ use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_long, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_type_error, arity, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arity, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -463,14 +463,14 @@ pub(super) fn substr_replace(
     match string {
         Union::B(string) => {
             if matches!(from, Union::A(_)) {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     "substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string",
                 ));
             }
             if matches!(length, Some(Union::A(_))) {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     "substr_replace(): Argument #4 ($length) cannot be an array when working on a single string",

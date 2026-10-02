@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use super::Request;
 use super::variables::BodyLimits;
-use crate::api::raising::{Level, Thrown, docref, throw};
+use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::values::PhpArray;
 use crate::engine::{Body, Method};
 use crate::wrapper::TemporaryCheck;
@@ -323,7 +323,7 @@ impl Request {
     /// is php's `RequestParseBodyException`.
     pub fn parse_body(&mut self, limits: &BodyLimits) -> Result<(PhpArray, PhpArray), Thrown> {
         let Some(content_type) = self.web().and_then(|web| web.content_type.clone()) else {
-            return Err(throw(
+            return Err(throw_error(
                 self,
                 "RequestParseBodyException",
                 "Request does not provide a content type",
@@ -335,7 +335,7 @@ impl Request {
                 "Content-Type \"{}\" is not supported",
                 String::from_utf8_lossy(&content_type)
             );
-            return Err(throw(self, "RequestParseBodyException", &text));
+            return Err(throw_error(self, "RequestParseBodyException", &text));
         }
         let post = PhpArray::new(self)?;
         let files = PhpArray::new(self)?;

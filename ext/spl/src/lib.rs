@@ -44,7 +44,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::{ClassKind, Name};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_standard::Serializer;
@@ -529,7 +529,7 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
         return Ok(Key::Str(PhpString::new(req, b"")?));
     }
     let name = zval_type_name(req, key);
-    Err(throw(
+    Err(throw_error(
         req,
         "TypeError",
         &format!("Cannot access offset of type {name} on array"),

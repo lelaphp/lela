@@ -45,7 +45,7 @@ use php_macros::php_class;
 
 use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
 use crate::api::call::call_named;
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::{Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
@@ -396,7 +396,11 @@ pub(crate) fn view(
 /// The payload of `object`, which a `Fiber`'s object always carries.
 fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Thrown> {
     if object.native::<ZendFiber>(req).is_none() {
-        return Err(throw(req, "Error", "Fiber object with no fiber payload"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Fiber object with no fiber payload",
+        ));
     }
     object
         .native_mut::<ZendFiber>(req)
@@ -405,7 +409,7 @@ fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Throw
 
 /// `FiberError` with php's sentence.
 fn fiber_error(req: &mut Request, message: &str) -> Thrown {
-    throw(req, "FiberError", message)
+    throw_error(req, "FiberError", message)
 }
 
 /// `Fiber`: `ZEND_ACC_FINAL`, `@strict-properties` and
@@ -954,7 +958,7 @@ impl FiberError {
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = req.class_name(this.object().class());
-        Err(throw(
+        Err(throw_error(
             req,
             "Error",
             &format!(
@@ -1156,7 +1160,7 @@ fn switch_into(
 ) -> Result<Transfer, Thrown> {
     let fiber = payload(req, object)?;
     let (Some(mut stack), Some(execution)) = (fiber.stack.take(), fiber.execution.take()) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "InternalError: a fiber resumed with no stack of its own",
@@ -1355,7 +1359,7 @@ fn start_gc_fiber(req: &mut Request) {
 /// destroyed at the request's end while it waits returns too.
 fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
     let Some(fiber) = req.fibers().gc.fiber else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "InternalError: gc_destructor_fiber served with no collector's fiber",
@@ -1418,7 +1422,7 @@ fn start(
         ));
     }
     let Some(callable) = fiber.callable.clone() else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Cannot start a fiber whose constructor was not called",

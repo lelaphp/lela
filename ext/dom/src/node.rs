@@ -8,7 +8,9 @@
 use php_ext::abi::{Instance, OrFalse, Path, Raw, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
@@ -629,7 +631,11 @@ fn c14n_query(
     Errors::route(req, raised);
     match found {
         Some(pair) if pair.1.is_node_set() => Ok(pair),
-        _ => Err(throw(req, "Error", "XPath query did not return a nodeset")),
+        _ => Err(throw_error(
+            req,
+            "Error",
+            "XPath query did not return a nodeset",
+        )),
     }
 }
 
@@ -795,7 +801,7 @@ fn canonicalization(
         None
     };
     let Some(doc) = node.doc() else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "Node must be associated with a document",
@@ -1012,7 +1018,7 @@ fn insert_before(
             match refp.add_prev_sibling(child) {
                 Some(n) => Some(n),
                 None => {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot add newnode as the previous sibling of refnode",
@@ -1033,7 +1039,7 @@ fn insert_before(
                     Some(n)
                 }
                 None => {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot add newnode as the previous sibling of refnode",
@@ -1070,7 +1076,7 @@ fn insert_before(
             match parent.add_child(child) {
                 Some(n) => Some(n),
                 None => {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot add newnode as the previous sibling of refnode",
@@ -1091,7 +1097,7 @@ fn insert_before(
                     Some(n)
                 }
                 None => {
-                    return Err(throw(
+                    return Err(throw_error(
                         req,
                         "Error",
                         "Cannot add newnode as the previous sibling of refnode",

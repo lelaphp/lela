@@ -365,6 +365,7 @@ raising::startup
 raising::throw
 raising::throw_at
 raising::throw_chained
+raising::throw_error
 raising::throw_value
 raising::throwing_warnings
 raising::too_few_arguments

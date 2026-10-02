@@ -11,7 +11,9 @@ use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::raising::{Level, Thrown, call_stack_end, deprecated, docref, throw, warning};
+use php_ext::raising::{
+    Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, warning,
+};
 use php_ext::request::Request;
 use php_ext::values::{
     ClassId, Emalloc, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
@@ -1008,7 +1010,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             }
             _ => {
                 let name = value_name(req, &classes);
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "TypeError",
                     &format!(
@@ -1023,14 +1025,14 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
         let max = max.deref();
         let Some(n) = max.as_int() else {
             let name = value_name(req, &max);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
             ));
         };
         if n < 0 {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "ValueError",
                 &format!("{function}(): Option \"max_depth\" must be greater than or equal to 0"),
@@ -1059,7 +1061,7 @@ fn allowed_names(
         let entry = entry.deref();
         if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             let name = value_name(req, &entry);
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "TypeError",
                 &format!(
@@ -1074,7 +1076,7 @@ fn allowed_names(
             let bytes = name.as_bytes();
             let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
             let shown = String::from_utf8_lossy(&bytes[..end]).into_owned();
-            let thrown = throw(
+            let thrown = throw_error(
                 req,
                 "ValueError",
                 &format!(
@@ -2001,7 +2003,7 @@ impl State<'_> {
         let callable = match checked {
             Ok(callable) => callable,
             Err(error) => {
-                return Err(throw(
+                return Err(throw_error(
                     req,
                     "Error",
                     &format!("Invalid callback {shown}, {error}"),
