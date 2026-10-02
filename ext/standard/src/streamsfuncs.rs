@@ -187,6 +187,13 @@ fn context_alloc(req: &mut Request) -> Result<Resource, Thrown> {
     )
 }
 
+/// `php_stream_context_alloc` (`Z/main/streams/streams.c:2422`): a
+/// fresh `context` with no options, its one owner the caller's, as
+/// `php_sdl.c` makes one to fetch a WSDL with.
+pub fn stream_ctx_alloc(req: &mut Request) -> Result<Resource, Thrown> {
+    context_alloc(req)
+}
+
 /// `FG(default_context)`, made on first use and kept for the request.
 fn default_context(req: &mut Request) -> Result<Resource, Thrown> {
     if let Some(res) = req.state::<State>().contexts.default {
