@@ -8,27 +8,141 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{Extension, ExtensionBuilder, Union};
+use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpArray;
 
-/// One `PHP_INI_BEGIN` row at its default, `None` for php's `NULL`; `user`
-/// is `PHP_INI_ALL`, otherwise `PHP_INI_SYSTEM`.
-fn row(name: &str, default: Option<&str>, user: bool) -> IniDecl {
-    IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: default.map(|default| default.as_bytes().into()),
-        user,
-        per_dir: user,
-        system: true,
+/// One `PHP_INI_BEGIN` row: its name, its default, `None` for php's
+/// `NULL`, whether it is `PHP_INI_ALL` rather than `PHP_INI_SYSTEM`, and
+/// whether it is a `STD_PHP_INI_BOOLEAN`, whose displayer is
+/// `zend_ini_boolean_displayer_cb`.
+struct Row {
+    name: &'static str,
+    default: Option<&'static str>,
+    user: bool,
+    boolean: bool,
+}
+
+/// `fpm_main.c`'s `PHP_INI_BEGIN` (`Z/sapi/fpm/fpm/fpm_main.c:1433-1442`).
+const INI: [Row; 8] = [
+    Row::boolean("cgi.rfc2616_headers", "0", ALL),
+    Row::boolean("cgi.nph", "0", ALL),
+    Row::boolean("cgi.fix_pathinfo", "1", SYSTEM),
+    Row::boolean("cgi.discard_path", "0", SYSTEM),
+    Row::boolean("fastcgi.script_path_encoded", "1", SYSTEM),
+    Row::boolean("fastcgi.logging", "1", SYSTEM),
+    Row::entry("fastcgi.error_header", SYSTEM),
+    Row::entry("fpm.config", SYSTEM),
+];
+
+/// `PHP_INI_ALL`, which a program may change.
+const ALL: bool = true;
+/// `PHP_INI_SYSTEM`, which only the host's configuration sets.
+const SYSTEM: bool = false;
+
+impl Row {
+    /// `STD_PHP_INI_BOOLEAN(name, default, modifiable)`.
+    const fn boolean(name: &'static str, default: &'static str, user: bool) -> Row {
+        Row {
+            name,
+            default: Some(default),
+            user,
+            boolean: true,
+        }
+    }
+
+    /// `STD_PHP_INI_ENTRY(name, NULL, modifiable)`, a string with no
+    /// displayer.
+    const fn entry(name: &'static str, user: bool) -> Row {
+        Row {
+            name,
+            default: None,
+            user,
+            boolean: false,
+        }
+    }
+
+    /// The row as the engine declares it.
+    fn decl(&self) -> IniDecl {
+        IniDecl {
+            name: Name(self.name.as_bytes().into()),
+            default: self.default.map(|default| default.as_bytes().into()),
+            user: self.user,
+            per_dir: self.user,
+            system: true,
+        }
     }
 }
 
+/// `PHP_MINFO_FUNCTION(cgi)` (`Z/sapi/fpm/fpm/fpm_main.c:1484`): a table
+/// of one row, `php-fpm` `active`, then `DISPLAY_INI_ENTRIES()`, a
+/// boolean entry `On` or `Off` in both columns.
+///
+/// ```php
+/// ini_set('cgi.rfc2616_headers', 'yes');
+/// (new ReflectionExtension('cgi-fcgi'))->info();
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// <h2><a name="module_cgi-fcgi" href="#module_cgi-fcgi">cgi-fcgi</a></h2>
+/// <table>
+/// <tr><td class="e">php-fpm </td><td class="v">active </td></tr>
+/// </table>
+/// <table>
+/// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+/// <tr><td class="e">cgi.rfc2616_headers</td><td class="v">On</td><td class="v">Off</td></tr>
+/// <tr><td class="e">cgi.nph</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">cgi.fix_pathinfo</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">cgi.discard_path</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">fastcgi.script_path_encoded</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">fastcgi.logging</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">fastcgi.error_header</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">fpm.config</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// </table>
+/// ```
+fn info(req: &mut Request) {
+    req.info_table(&[&["php-fpm", "active"]]);
+    let entries = req.ini_entries();
+    let shown = |row: &Row, value: Option<&[u8]>| -> String {
+        let value = value.unwrap_or_default();
+        match row.boolean {
+            true if Request::ini_parse_bool(value) => String::from("On"),
+            true => String::from("Off"),
+            false => String::from_utf8_lossy(value).into_owned(),
+        }
+    };
+    let rows: Vec<[String; 3]> = INI
+        .iter()
+        .filter_map(|row| {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.decl.name.0.as_ref() == row.name.as_bytes())?;
+            Some([
+                row.name.to_owned(),
+                shown(row, entry.value.as_deref()),
+                shown(row, entry.master.as_deref()),
+            ])
+        })
+        .collect();
+    let cells: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    req.info_ini_table(&cells);
+}
+
 /// php-fpm's `cgi_module_entry`: its natives in the stub's order, its
-/// `PHP_INI_BEGIN` rows, and the error header after the program.
+/// `PHP_INI_BEGIN` rows, its `MINFO`, and the error header after the
+/// program.
 #[must_use]
 pub(crate) fn extension() -> Extension {
     ExtensionBuilder::default()
@@ -38,16 +152,8 @@ pub(crate) fn extension() -> Extension {
             getallheaders::declared(),
             fpm_get_status::declared(),
         ])
-        .ini(vec![
-            row("cgi.rfc2616_headers", Some("0"), true),
-            row("cgi.nph", Some("0"), true),
-            row("cgi.fix_pathinfo", Some("1"), false),
-            row("cgi.discard_path", Some("0"), false),
-            row("fastcgi.script_path_encoded", Some("1"), false),
-            row("fastcgi.logging", Some("1"), false),
-            row("fastcgi.error_header", None, false),
-            row("fpm.config", None, false),
-        ])
+        .ini(INI.iter().map(Row::decl).collect())
+        .info(info)
         .program_ended(error_header)
         .build("cgi-fcgi")
 }
@@ -112,11 +218,27 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 ///
 /// witness static 1 1 1 Running
 /// ```
+///
+/// Its return is declared as the stub declares it, `array|false`:
+///
+/// ```php
+/// echo (new ReflectionFunction('fpm_get_status'))->getReturnType(), "\n";
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// array|false
+/// ```
 #[php_function]
-fn fpm_get_status(req: &mut Request) -> Result<Union<PhpArray, bool>, Thrown> {
+fn fpm_get_status(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     Ok(match req.host_status()? {
-        Some(status) => Union::A(status),
-        None => Union::B(false),
+        Some(status) => OrFalse::Value(status),
+        None => OrFalse::False,
     })
 }
 

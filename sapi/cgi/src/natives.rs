@@ -19,16 +19,126 @@ use php_sapi::EngineBuilder;
 
 use crate::Origin;
 
-/// One `PHP_INI_BEGIN` row at its default, `None` for php's `NULL`; `user`
-/// is `PHP_INI_ALL`, otherwise `PHP_INI_SYSTEM`.
-fn row(name: &str, default: Option<&str>, user: bool) -> IniDecl {
-    IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: default.map(|default| default.as_bytes().into()),
-        user,
-        per_dir: user,
-        system: true,
+/// One `PHP_INI_BEGIN` row: its name, its default, `None` for php's
+/// `NULL`, whether it is `PHP_INI_ALL` rather than `PHP_INI_SYSTEM`, and
+/// whether it is a `STD_PHP_INI_BOOLEAN`, whose displayer is
+/// `zend_ini_boolean_displayer_cb`.
+struct Row {
+    name: &'static str,
+    default: Option<&'static str>,
+    user: bool,
+    boolean: bool,
+}
+
+/// `cgi_main.c`'s `PHP_INI_BEGIN` (`Z/sapi/cgi/cgi_main.c:1504-1516`),
+/// less `fastcgi.impersonate`, which only Windows declares.
+const INI: [Row; 8] = [
+    Row::boolean("cgi.rfc2616_headers", "0", ALL),
+    Row::boolean("cgi.nph", "0", ALL),
+    Row::boolean("cgi.check_shebang_line", "1", SYSTEM),
+    Row::boolean("cgi.force_redirect", "1", SYSTEM),
+    Row::entry("cgi.redirect_status_env", SYSTEM),
+    Row::boolean("cgi.fix_pathinfo", "1", SYSTEM),
+    Row::boolean("cgi.discard_path", "0", SYSTEM),
+    Row::boolean("fastcgi.logging", "1", SYSTEM),
+];
+
+/// `PHP_INI_ALL`, which a program may change.
+const ALL: bool = true;
+/// `PHP_INI_SYSTEM`, which only the host's configuration sets.
+const SYSTEM: bool = false;
+
+impl Row {
+    /// `STD_PHP_INI_BOOLEAN(name, default, modifiable)`.
+    const fn boolean(name: &'static str, default: &'static str, user: bool) -> Row {
+        Row {
+            name,
+            default: Some(default),
+            user,
+            boolean: true,
+        }
     }
+
+    /// `STD_PHP_INI_ENTRY(name, NULL, modifiable)`, a string with no
+    /// displayer.
+    const fn entry(name: &'static str, user: bool) -> Row {
+        Row {
+            name,
+            default: None,
+            user,
+            boolean: false,
+        }
+    }
+
+    /// The row as the engine declares it.
+    fn decl(&self) -> IniDecl {
+        IniDecl {
+            name: Name(self.name.as_bytes().into()),
+            default: self.default.map(|default| default.as_bytes().into()),
+            user: self.user,
+            per_dir: self.user,
+            system: true,
+        }
+    }
+}
+
+/// `PHP_MINFO_FUNCTION(cgi)` (`Z/sapi/cgi/cgi_main.c:1558`):
+/// `DISPLAY_INI_ENTRIES()` alone, a boolean entry `On` or `Off` in both
+/// columns, so php-cgi writes no `Version` row.
+///
+/// ```php
+/// ini_set('cgi.rfc2616_headers', 'yes');
+/// (new ReflectionExtension('cgi-fcgi'))->info();
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// <h2><a name="module_cgi-fcgi" href="#module_cgi-fcgi">cgi-fcgi</a></h2>
+/// <table>
+/// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+/// <tr><td class="e">cgi.rfc2616_headers</td><td class="v">On</td><td class="v">Off</td></tr>
+/// <tr><td class="e">cgi.nph</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">cgi.check_shebang_line</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">cgi.force_redirect</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">cgi.redirect_status_env</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">cgi.fix_pathinfo</td><td class="v">On</td><td class="v">On</td></tr>
+/// <tr><td class="e">cgi.discard_path</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">fastcgi.logging</td><td class="v">On</td><td class="v">On</td></tr>
+/// </table>
+/// ```
+fn info(req: &mut Request) {
+    let entries = req.ini_entries();
+    let shown = |row: &Row, value: Option<&[u8]>| -> String {
+        let value = value.unwrap_or_default();
+        match row.boolean {
+            true if Request::ini_parse_bool(value) => String::from("On"),
+            true => String::from("Off"),
+            false => String::from_utf8_lossy(value).into_owned(),
+        }
+    };
+    let rows: Vec<[String; 3]> = INI
+        .iter()
+        .filter_map(|row| {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.decl.name.0.as_ref() == row.name.as_bytes())?;
+            Some([
+                row.name.to_owned(),
+                shown(row, entry.value.as_deref()),
+                shown(row, entry.master.as_deref()),
+            ])
+        })
+        .collect();
+    let cells: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    req.info_ini_table(&cells);
 }
 
 /// `builder` with what php-cgi declares itself: `cgi_module_entry` as its
@@ -46,7 +156,8 @@ pub fn declare(builder: EngineBuilder, origin: Origin) -> EngineBuilder {
 }
 
 /// `cgi_module_entry`: its natives in the stub's order and its
-/// `PHP_INI_BEGIN` rows, `cgi.redirect_status_env`'s default php's `NULL`.
+/// `PHP_INI_BEGIN` rows, `cgi.redirect_status_env`'s default php's `NULL`,
+/// and its `MINFO`.
 fn extension() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -55,16 +166,8 @@ fn extension() -> Extension {
             getallheaders::declared(),
             apache_response_headers::declared(),
         ])
-        .ini(vec![
-            row("cgi.rfc2616_headers", Some("0"), true),
-            row("cgi.nph", Some("0"), true),
-            row("cgi.check_shebang_line", Some("1"), false),
-            row("cgi.force_redirect", Some("1"), false),
-            row("cgi.redirect_status_env", None, false),
-            row("cgi.fix_pathinfo", Some("1"), false),
-            row("cgi.discard_path", Some("0"), false),
-            row("fastcgi.logging", Some("1"), false),
-        ])
+        .ini(INI.iter().map(Row::decl).collect())
+        .info(info)
         .build(crate::NAME)
 }
 
