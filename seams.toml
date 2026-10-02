@@ -348,6 +348,12 @@ budget = 6000     # dba.c with the flatfile, inifile and cdb handlers, php's own
 feature = "dba"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/zip"
+budget = 5000     # php_zip.c and zip_stream.c, ZipArchive and the zip:// wrapper, over the `zip` crate, pure Rust with no src/ffi/; php's --with-zip; 3,897 lines of C (#727's rule, #1515)
+feature = "zip"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 # ---------------------------------------------------------------- sapi/
 # One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
