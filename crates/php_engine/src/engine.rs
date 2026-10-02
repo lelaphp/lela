@@ -2523,6 +2523,27 @@ fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     for name in declared {
         let _ = names.intern(&name.0);
     }
+    // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
+    // of each string a native's `#[\Deprecated]` is written with, so a
+    // deprecation's suffix is read and nothing is made.
+    let attributed = functions
+        .iter()
+        .chain(
+            classes
+                .iter()
+                .flat_map(|decl| decl.methods.iter().map(|m| &m.function)),
+        )
+        .flat_map(|decl| &decl.attributes)
+        .chain(
+            classes
+                .iter()
+                .flat_map(|decl| decl.constants.iter().flat_map(|c| &c.attributes)),
+        );
+    for argument in attributed.flat_map(|attribute| &attribute.arguments) {
+        if let ConstExpr::Str(written) = &argument.value {
+            let _ = names.intern(written);
+        }
+    }
     names
 }
 

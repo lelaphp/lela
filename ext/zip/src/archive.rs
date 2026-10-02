@@ -1155,7 +1155,26 @@ impl Archive {
 
     /// An unchanged entry's data, decrypted with `password` and
     /// decompressed, through the zip crate; ZSTD, which the crate reads
-    /// only through a C library, through ruzstd.
+    /// only through a C library, through ruzstd. Each of two entries
+    /// under one name reads its own data.
+    ///
+    /// ```php
+    /// $f = 'dup-witness.zip'; $z = new ZipArchive; $z->open($f, ZipArchive::CREATE);
+    /// $z->addFromString('a', 'first'); $z->addFromString('b', str_repeat('second ', 9)); $z->close();
+    /// file_put_contents($f, str_replace("\0b", "\0a", file_get_contents($f)));
+    /// var_dump($z->open($f), $z->numFiles, $z->getNameIndex(1), $z->getFromIndex(0), $z->getFromIndex(1), $z->getFromName('a'));
+    /// echo stream_get_contents($z->getStreamIndex(1)), "\n";
+    /// $z->close(); unlink($f);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(2)
+    /// string(1) "a"
+    /// string(5) "first"
+    /// string(63) "second second second second second second second second second "
+    /// string(5) "first"
+    /// second second second second second second second second second
+    /// ```
     pub(crate) fn decoded(
         &mut self,
         idx: usize,
@@ -1182,24 +1201,31 @@ impl Archive {
             return Err(Status::of(Er::Compnotsupp, 0));
         }
         let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
-        let zi = *data
-            .by_offset
-            .get(&orig.offset)
-            .ok_or(Status::of(Er::Incons, 0))?;
+        let fail = |e| match e {
+            zip::result::ZipError::InvalidPassword => Status::of(Er::Wrongpasswd, 0),
+            zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED) => {
+                Status::of(Er::Nopasswd, 0)
+            }
+            zip::result::ZipError::Io(e) => Status::of(Er::Read, e.raw_os_error().unwrap_or(0)),
+            _ => Status::of(Er::Compnotsupp, 0),
+        };
         let opts = zip::ZipReadOptions::new()
             .password(password)
             .ignore_crc32(true);
-        let mut file = data
-            .zip
-            .by_index_with_options(zi, opts)
-            .map_err(|e| match e {
-                zip::result::ZipError::InvalidPassword => Status::of(Er::Wrongpasswd, 0),
-                zip::result::ZipError::UnsupportedArchive(
-                    zip::result::ZipError::PASSWORD_REQUIRED,
-                ) => Status::of(Er::Nopasswd, 0),
-                zip::result::ZipError::Io(e) => Status::of(Er::Read, e.raw_os_error().unwrap_or(0)),
-                _ => Status::of(Er::Compnotsupp, 0),
-            })?;
+        // A name the central directory holds twice is one row of the zip
+        // crate's map by name; the others are read from their own local
+        // header, as libzip reads every entry by its position.
+        let mut file = if let Some(zi) = data.by_offset.get(&orig.offset) {
+            data.zip.by_index_with_options(*zi, opts).map_err(fail)?
+        } else {
+            data.file
+                .seek(SeekFrom::Start(orig.offset))
+                .map_err(|e| Status::of(Er::Seek, e.raw_os_error().unwrap_or(0)))?;
+            let size = orig.comp_size;
+            zip::read::read_zipfile_from_stream_with_compressed_size(&mut data.file, size)
+                .map_err(fail)?
+                .ok_or(Status::of(Er::Incons, 0))?
+        };
         let mut out = Vec::new();
         let fault = file
             .read_to_end(&mut out)

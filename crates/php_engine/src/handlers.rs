@@ -2467,11 +2467,11 @@ pub(crate) fn init_user_call<T: Tier>(
         Err(refusal) => {
             let native = exec::constant(code, ConstIdx(op.op1));
             let native = String::from_utf8_lossy(native.as_str_bytes().unwrap_or_default());
-            Err(crate::api::raising::throw_over_pending(
-                req,
-                "TypeError",
-                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}"),
-            ))
+            let message =
+                format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}");
+            Err(refusal.across(req, |req| {
+                crate::api::raising::throw_over_pending(req, "TypeError", &message)
+            }))
         }
     };
     let target = match target {
@@ -6233,6 +6233,7 @@ pub(crate) fn begin_silence<T: Tier>(
     req.release(previous);
     if !has_only_fatal_errors(standing) {
         req.set_error_reporting(standing & E_FATAL_ERRORS);
+        req.silence_modifies_error_reporting();
     }
     Ok(advance(req, frame))
 }

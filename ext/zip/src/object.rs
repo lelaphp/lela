@@ -12,7 +12,9 @@ use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{
+    DeclaredRows, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 
 use crate::archive::{self as za, Archive, Source};
 use crate::c;
@@ -60,6 +62,8 @@ pub(crate) struct Intern {
     pub(crate) cancel: Option<Box<Kept>>,
     /// The archive's number, which its entries' streams read by.
     pub(crate) id: u64,
+    /// While `refresh` reads the table it is about to copy.
+    pub(crate) detaching: bool,
 }
 
 /// The archive numbered `id` discarded: its entries' streams read php's
@@ -225,7 +229,20 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `php_zip_get_properties`: each of the six written into the table
-    /// as it reads now, then the table.
+    /// as it reads now, then the table. `unserialize()` reads it first,
+    /// so what it writes under one of the six lands in the table's row
+    /// held to no type, and the property reads on from the archive.
+    ///
+    /// ```php
+    /// $z = unserialize('O:10:"ZipArchive":2:{s:8:"filename";a:1:{i:0;i:7;}s:6:"status";s:1:"x";}');
+    /// var_dump($z->filename, $z->status);
+    /// echo serialize($z), "\n";
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// int(0)
+    /// O:10:"ZipArchive":6:{s:6:"lastId";i:-1;s:6:"status";i:0;s:9:"statusSys";i:0;s:8:"numFiles";i:0;s:8:"filename";s:0:"";s:7:"comment";s:0:"";}
+    /// ```
     fn get_properties(
         &self,
         req: &mut Request,
@@ -258,7 +275,12 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// The six written into the property table as they read now.
+/// The six written into the property table as they read now, with
+/// `zend_hash_update`, which puts a plain value where the table held
+/// php's `IS_INDIRECT` to the slot: the table holds its rows from then
+/// on ([`DeclaredRows::Copied`]), so `unserialize()` writes them with no
+/// type to hold to. A subclass that declares a slot past the six keeps
+/// its slots, since the table here holds every declared row or none.
 fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     for (name, p) in Prop::ALL {
         let value = p.read(req, object)?;
@@ -267,6 +289,26 @@ fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         if let Key::Str(s) = key {
             req.release(Value::string(s));
         }
+    }
+    let detach = object.declared_rows() == DeclaredRows::Slots
+        && object.slot(6).is_none()
+        && object
+            .native_mut::<Intern>(req)
+            .is_some_and(|i| !std::mem::replace(&mut i.detaching, true));
+    if detach {
+        let rows = object.entries(req);
+        if let Some(i) = object.native_mut::<Intern>(req) {
+            i.detaching = false;
+        }
+        let mut table = PhpArray::new(req)?;
+        for (key, value) in rows? {
+            if let Key::Str(s) = key {
+                req.addref(&Value::string(s));
+            }
+            req.addref(&value);
+            table.set(req, key, value)?;
+        }
+        object.replace_table(req, table)?;
     }
     Ok(())
 }

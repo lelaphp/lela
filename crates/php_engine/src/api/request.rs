@@ -1845,6 +1845,10 @@ pub struct Request {
     /// where it has none (php's `NULL`); the value it started with is the
     /// engine's ([`Request::ini_deactivate`]).
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// The bytes `EG(modified_ini_directives)` takes on the request's
+    /// heap, laid down by the first entry the request changes, a `@`'s
+    /// `error_reporting` among them, and freed by the request's end.
+    ini_bytes: Option<hash_bytes::HashBytes>,
     /// The entries this request's host locked past the engine's
     /// ([`crate::engine::IniOrigin::Admin`]).
     locked: Vec<Vec<u8>>,
@@ -2728,6 +2732,7 @@ impl Request {
             tables: vec![SymbolTable::default()],
             included_files: hash_bytes::IncludedFiles::default(),
             symtable_cache: Vec::new(),
+            ini_bytes: None,
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
@@ -7142,7 +7147,7 @@ impl Request {
             Message::String(string) => (string, false),
             // The memory limit refusing the message has rendered its
             // fatal, and the request is ending.
-            Message::Text(text) => match PhpString::new(self, text.as_bytes()) {
+            Message::Text(text) => match crate::api::raising::strpprintf(self, text) {
                 Ok(string) => (string, true),
                 Err(_) => return false,
             },
@@ -7160,6 +7165,32 @@ impl Request {
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
     /// masked, logged and displayed, with the trace
     /// [`Request::note_error_in`] fetched, if one, under `Stack trace:`.
+    ///
+    /// The last error keeps its message, one more owner of the string
+    /// raised or the one formatted, and its file, the string the file
+    /// was opened under, so what an error leaves is php's: the first
+    /// `@` lays down `EG(modified_ini_directives)` as it replaces the
+    /// warning's message by `trigger_error()`'s interned `'x'`, a
+    /// deprecated method's message replaces that, a repeat replaces it by
+    /// its twin, and `error_get_last()` takes no string of its own:
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $o = new stdClass; echo $w;
+    /// $m = memory_get_usage(); @trigger_error('x', E_USER_DEPRECATED); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// error_clear_last();
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $e = error_get_last(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $w in %s on line 2
+    /// 328
+    /// 160
+    /// 0
+    /// 160
+    /// 376
+    /// ```
     fn error_cb(&mut self, level: Level, string: PhpString, message: &str, file: &[u8], line: u32) {
         if !self.displayed(string, file, line) {
             return;
@@ -7168,9 +7199,14 @@ impl Request {
         // php stores the diagnostic before it masks it, which is why
         // `error_get_last()` answers one `error_reporting` hid: the
         // message with one more owner and the file name the op array's,
-        // `zend_string_copy` of each.
+        // `zend_string_copy` of each; the string a file was opened under
+        // is the one `EG(included_files)` holds.
         self.clear_last_error_strings();
-        if let Ok(file) = self.interned(file) {
+        let held = self.included_files.held(file);
+        if let Some(path) = held {
+            self.addref(&Value::string(path));
+        }
+        if let Some(file) = held.map_or_else(|| self.interned(file).ok(), Some) {
             self.addref(&Value::string(string));
             self.last_error = Some(LastError {
                 level,
@@ -7189,7 +7225,13 @@ impl Request {
         let trace = self.stack_trace_after_the_site();
         if self.log_errors() {
             let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
-            if self.log_err(text.as_bytes()) && fatal_errors(level) {
+            // `spprintf(&log_buffer, …)`, freed once it is logged.
+            let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
+                return;
+            };
+            let logged = self.log_err(text.as_bytes());
+            self.heap.free_block(buffer);
+            if logged && fatal_errors(level) {
                 // What follows a fatal in the host's log is still inside
                 // `sapi_module.log_message`, so inside `php_log_err`'s
                 // guard: a diagnostic it raises is not logged.
@@ -7215,7 +7257,7 @@ impl Request {
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
-            self.display(text.as_bytes());
+            self.printed(text.as_bytes());
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -7223,16 +7265,23 @@ impl Request {
             // the newline.
             let prepend = self.ini_text(b"error_prepend_string");
             let append = self.ini_text(b"error_append_string");
-            let text = match level {
-                Level::Error | Level::Parse => format!(
+            if let Level::Error | Level::Parse = level {
+                // `escape_html`'s string stands while it is printed.
+                let Ok(escaped) = self.heap.block(escaped_html_size(message)) else {
+                    return;
+                };
+                let text = format!(
                     "{prepend}<br />\n<b>{name}</b>:  {} in <b>{named}</b> on line <b>{line}</b><br />\n{append}",
                     escape_html(message)
-                ),
-                _ => format!(
+                );
+                self.printed(text.as_bytes());
+                self.heap.free_block(escaped);
+            } else {
+                let text = format!(
                     "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
-                ),
-            };
-            self.display(text.as_bytes());
+                );
+                self.printed(text.as_bytes());
+            }
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
@@ -7246,7 +7295,51 @@ impl Request {
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
-            self.display(text.as_bytes());
+            self.printed(text.as_bytes());
+        }
+    }
+
+    /// `php_printf` (`Z/main/main.c:1003`) of a diagnostic's display:
+    /// `vspprintf`'s buffer laid down for `text`, written, and freed, so
+    /// the peak around a displayed diagnostic holds it as php's does: a
+    /// `smart_string`'s 256 bytes for a short one, the page for one past
+    /// 255 bytes, and nothing for one `@` silenced. Under `html_errors`
+    /// an `E_ERROR`'s message is escaped into a string of its own that
+    /// stands beside the buffer.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo "\n", memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// class K { function m() {} }
+    /// pk(function () { trigger_error('x', E_USER_DEPRECATED); });
+    /// pk(function () { @trigger_error('x', E_USER_DEPRECATED); });
+    /// pk(function () { trigger_error(str_repeat('y', 300), E_USER_DEPRECATED); });
+    /// pk(function () { new ReflectionMethod('K::m'); });
+    /// ```
+    /// ```expect
+    /// Deprecated: x in %s on line 4
+    ///
+    /// Deprecated: x in %s on line 4
+    ///
+    /// 256 0
+    ///
+    /// 0 0
+    ///
+    /// Deprecated: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy in %s on line 6
+    ///
+    /// Deprecated: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy in %s on line 6
+    ///
+    /// 4096 0
+    ///
+    /// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 7
+    ///
+    /// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 7
+    ///
+    /// 528 0
+    /// ```
+    fn printed(&mut self, text: &[u8]) {
+        if let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) {
+            self.display(text);
+            self.heap.free_block(buffer);
         }
     }
 
@@ -11362,7 +11455,7 @@ impl Request {
             self.release(Value::string(key));
             return Ok(false);
         }
-        let slot = self.unserialize_slot(class, &bytes);
+        let slot = self.unserialize_slot(object, &bytes);
         if let Some(at) = slot.and_then(|at| u32::try_from(at).ok()) {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
@@ -11388,8 +11481,16 @@ impl Request {
     /// The declared slot a serialized key places its value in, by its
     /// index among [`Request::placed_properties`]: the property the
     /// mangled name names, or the one of that name whose visibility
-    /// changed since (`is_property_visibility_changed`).
-    fn unserialize_slot(&self, class: ClassId, key: &[u8]) -> Option<usize> {
+    /// changed since (`is_property_visibility_changed`). None where the
+    /// table holds copies of the declared rows, whose rows are plain
+    /// values, not php's `IS_INDIRECT` to a slot: what
+    /// `php_zip_get_properties` leaves, and the value is written there
+    /// with no type to hold to.
+    fn unserialize_slot(&self, object: PhpObject, key: &[u8]) -> Option<usize> {
+        if object.heap().declared_rows() == php_heap::DeclaredRows::Copied {
+            return None;
+        }
+        let class = object.class();
         let (mangled_class, name) = match key.strip_prefix(b"\0") {
             Some(rest) => match rest.iter().position(|b| *b == 0) {
                 Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
@@ -11432,7 +11533,7 @@ impl Request {
         object: PhpObject,
         key: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(at) = self.unserialize_slot(object.class(), key) else {
+        let Some(at) = self.unserialize_slot(object, key) else {
             return Ok(());
         };
         let placed = self.placed_properties(object.class());
@@ -17781,13 +17882,14 @@ impl Request {
             (b"file", Value::string(last.file)),
             (b"line", Value::int(i64::from(last.line))),
         ] {
-            let key = Key::Str(PhpString::new(self, name)?);
+            // `ZSTR_KNOWN`, the four names permanent.
+            let key = Key::Str(self.interned(name)?);
             array.set(self, key, value)?;
         }
         if let Some((Some(trace), _)) = self.last_fatal_error_backtrace {
             let trace = Value::array(trace);
             self.addref(&trace);
-            let key = Key::Str(PhpString::new(self, b"trace")?);
+            let key = Key::Str(self.interned(b"trace")?);
             array.set(self, key, trace)?;
         }
         Ok(Some(array))
@@ -20577,9 +20679,21 @@ impl Request {
     /// changed it yet.
     fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
         let value = value.map(<[u8]>::to_vec);
-        match self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
-            Some((_, held)) => *held = value,
-            None => self.ini.push((name.to_vec(), value)),
+        if let Some((_, held)) = self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
+            *held = value;
+        } else {
+            self.ini.push((name.to_vec(), value));
+            self.ini_modified_bytes();
+        }
+    }
+
+    /// `BEGIN_SILENCE` over an `error_reporting` entry not yet changed:
+    /// the entry marked changed, holding the value it holds, as the
+    /// handler adds it to `EG(modified_ini_directives)`.
+    pub(crate) fn silence_modifies_error_reporting(&mut self) {
+        if !self.ini.iter().any(|(n, _)| n == b"error_reporting") {
+            let held = self.ini_value(b"error_reporting").map(<[u8]>::to_vec);
+            self.ini_hold(b"error_reporting", held.as_deref());
         }
     }
 
@@ -20620,8 +20734,11 @@ impl Request {
             return Ok(());
         }
         let original = self.shared.ini_default_value(name).map(<[u8]>::to_vec);
-        if self.ini_alter(name, original.as_deref(), true)?.is_some() {
-            self.ini.retain(|(n, _)| n.as_slice() != name);
+        if self.ini_alter(name, original.as_deref(), true)?.is_some()
+            && let Some(at) = self.ini.iter().position(|(n, _)| n == name)
+        {
+            self.ini.remove(at);
+            self.ini_unmodified_bytes(at == self.ini.len());
         }
         Ok(())
     }
@@ -20678,6 +20795,7 @@ impl Request {
                 self.update_error_reporting();
             }
         }
+        self.free_modified_ini_bytes();
     }
 
     /// Whether an extension's entry is `PHP_INI_USER`, its declaration's
@@ -23082,6 +23200,32 @@ pub(crate) fn escape_html(message: &str) -> String {
         }
     }
     escaped
+}
+
+/// The bytes `php_escape_html_entities_ex` asks for the string
+/// [`escape_html`] writes: `zend_string_alloc(maxlen)` with `maxlen` 128
+/// for a message under 64 bytes and twice its length otherwise, grown
+/// by 128 before each character that finds fewer than 40 bytes left.
+fn escaped_html_size(message: &str) -> usize {
+    let mut maxlen = if message.len() < 64 {
+        128
+    } else {
+        message.len() * 2
+    };
+    let mut len = 0;
+    for letter in message.chars() {
+        if len > maxlen - 40 {
+            maxlen += 128;
+        }
+        len += match letter {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' => 6,
+            _ => letter.len_utf8(),
+        };
+    }
+    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
+    24 + maxlen + 1
 }
 
 /// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte
