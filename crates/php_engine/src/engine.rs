@@ -2347,7 +2347,7 @@ impl EngineBuilder {
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
-        let names = permanent_names(&functions, &classes);
+        let names = permanent_names(&functions, &classes, &constants);
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
@@ -2527,7 +2527,11 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     strings
 }
 
-fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
+fn permanent_names(
+    functions: &[FunctionDecl],
+    classes: &[ClassDecl],
+    constants: &[ConstDecl],
+) -> Strings {
     let mut names = Strings::new();
     for known in KNOWN_STRINGS {
         let _ = names.intern(known.as_bytes());
@@ -2546,7 +2550,8 @@ fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
     // of each string a native's `#[\Deprecated]` is written with, so a
-    // deprecation's suffix is read and nothing is made.
+    // deprecation's suffix is read and nothing is made, a global
+    // constant's among them (`zend_add_global_constant_attribute`).
     let attributed = functions
         .iter()
         .chain(
@@ -2559,7 +2564,8 @@ fn permanent_names(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
             classes
                 .iter()
                 .flat_map(|decl| decl.constants.iter().flat_map(|c| &c.attributes)),
-        );
+        )
+        .chain(constants.iter().flat_map(|decl| &decl.attributes));
     for argument in attributed.flat_map(|attribute| &attribute.arguments) {
         if let ConstExpr::Str(written) = &argument.value {
             let _ = names.intern(written);
