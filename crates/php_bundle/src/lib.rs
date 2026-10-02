@@ -116,6 +116,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_dba::extension,
         #[cfg(feature = "zip")]
         php_ext_zip::extension,
+        #[cfg(feature = "xsl")]
+        php_ext_xsl::extension,
     ]
 }
 
