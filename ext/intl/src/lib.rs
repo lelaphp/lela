@@ -29,6 +29,7 @@
 
 // The error state and the binding's base are what every area calls; the
 // areas land one at a time over them (#1574).
+mod breakiterator;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -312,7 +313,11 @@ pub fn extension() -> Extension {
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
     let builder = builder
         .class::<IntlException>()
-        .class::<iterator::IntlIterator>();
+        .class::<iterator::IntlIterator>()
+        .class::<breakiterator::IntlBreakIterator>()
+        .class::<breakiterator::IntlRuleBasedBreakIterator>()
+        .class::<breakiterator::IntlCodePointBreakIterator>()
+        .class::<breakiterator::IntlPartsIterator>();
     builder
         .request_state::<State>()
         .info(intl_info)

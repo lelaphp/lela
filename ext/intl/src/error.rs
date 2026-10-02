@@ -270,3 +270,13 @@ pub(crate) fn parse_error_text(line: i32, offset: i32, pre: &[u8], post: &[u8]) 
     }
     out
 }
+
+/// `intl_parse_error_to_string` over ICU's `UParseError`, its contexts
+/// read up to their NUL.
+pub(crate) fn parse_error(pe: &crate::ffi::ParseError) -> String {
+    let context = |c: &[u16; 16]| {
+        let end = c.iter().position(|&u| u == 0).unwrap_or(c.len());
+        crate::ffi::to_utf8(&c[..end]).unwrap_or_default()
+    };
+    parse_error_text(pe.line, pe.offset, &context(&pe.pre), &context(&pe.post))
+}
