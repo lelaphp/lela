@@ -736,6 +736,33 @@ fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
     assert_eq!(names, ["tests/c.phpt", "uchar/tests/d.phpt"]);
 }
 
+/// Every `.phpt` of the pinned tree is in exactly one subset of the
+/// nightly lane's corpus, `ext/intl/uchar/tests` among them, so the lane
+/// holds the whole corpus and nothing twice (#1598).
+#[test]
+fn every_test_of_the_pinned_tree_is_in_one_subset_of_the_corpus() {
+    let Some(tree) = source() else { return };
+    let mut all = Vec::new();
+    crate::tally::files_under(&tree, &mut all).unwrap();
+    all.retain(|path| path.extension().is_some_and(|e| e == "phpt"));
+    all.sort();
+    let mut held: Vec<PathBuf> = Subset::corpus(&tree)
+        .iter()
+        .flat_map(|subset| subset.tests().unwrap())
+        .collect();
+    held.sort();
+    assert_eq!(
+        held.len(),
+        all.len(),
+        "the corpus holds a test twice or misses one"
+    );
+    assert_eq!(held, all);
+    assert!(
+        held.contains(&tree.join("ext/intl/uchar/tests/bug70453.phpt")),
+        "ext/intl/uchar/tests is held"
+    );
+}
+
 #[test]
 fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
     if source().is_none() {
