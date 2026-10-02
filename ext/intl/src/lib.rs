@@ -33,8 +33,11 @@
 mod error;
 #[allow(dead_code)]
 mod ffi;
+mod idn;
 #[allow(dead_code)]
 mod iterator;
+mod normalizer;
+mod utf8;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -300,6 +303,8 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = idn::functions(builder);
+    let builder = normalizer::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -308,6 +313,7 @@ pub fn extension() -> Extension {
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
     let builder = builder
+        .class::<normalizer::Normalizer>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>();
     builder

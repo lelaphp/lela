@@ -35,6 +35,8 @@ macro_rules! icu {
 pub(crate) use icu;
 
 pub(crate) mod enumeration;
+pub(crate) mod idn;
+pub(crate) mod normalizer;
 
 mod sys {
     use std::ffi::c_char;
