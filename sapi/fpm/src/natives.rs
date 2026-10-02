@@ -8,7 +8,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::abi::{Extension, ExtensionBuilder, Union};
+use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
@@ -218,11 +218,27 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 ///
 /// witness static 1 1 1 Running
 /// ```
+///
+/// Its return is declared as the stub declares it, `array|false`:
+///
+/// ```php
+/// echo (new ReflectionFunction('fpm_get_status'))->getReturnType(), "\n";
+/// ```
+/// ```request fpm
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// array|false
+/// ```
 #[php_function]
-fn fpm_get_status(req: &mut Request) -> Result<Union<PhpArray, bool>, Thrown> {
+fn fpm_get_status(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     Ok(match req.host_status()? {
-        Some(status) => Union::A(status),
-        None => Union::B(false),
+        Some(status) => OrFalse::Value(status),
+        None => OrFalse::False,
     })
 }
 
