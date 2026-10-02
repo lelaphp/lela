@@ -5774,7 +5774,9 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
     };
     let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
     let mut dynamic = Vec::new();
-    for (name, _) in entries {
+    // An integer key is no property, as `_adddynproperty` ignores it.
+    for (key, _) in entries {
+        let Key::Str(name) = key else { continue };
         let name = name.as_bytes().to_vec();
         if name.first().is_none_or(|byte| *byte == 0) || public.contains(&name) {
             continue;
@@ -5838,7 +5840,10 @@ fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -
     };
     entries
         .into_iter()
-        .map(|(name, _)| name.as_bytes().to_vec())
+        .filter_map(|(key, _)| match key {
+            Key::Str(name) => Some(name.as_bytes().to_vec()),
+            Key::Int(_) => None,
+        })
         .filter(|name| name.first().is_some_and(|byte| *byte != 0))
         .filter(|name| !declared.iter().any(|shown| shown == name))
         .collect()

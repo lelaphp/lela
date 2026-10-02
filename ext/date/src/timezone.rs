@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
@@ -706,9 +706,9 @@ impl DateTimeZone {
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let object = this.object();
         let mut hash = PhpArray::new(req)?;
-        for (name, value) in object.props(req)? {
+        for (key, value) in object.props(req)? {
             req.addref(&value);
-            hash.set(req, Key::Str(name), value)?;
+            hash.set(req, key, value)?;
         }
         let kind = from_hash(hash);
         req.release(Value::array(hash));

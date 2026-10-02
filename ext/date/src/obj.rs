@@ -330,15 +330,15 @@ fn mangled(req: &mut Request, class: ClassId, name: PhpString) -> Result<PhpStri
 }
 
 /// `zend_std_get_properties(object)` with each declared name mangled as
-/// a reader keys it: views, no owner taken.
-pub(super) fn std_rows(
-    req: &mut Request,
-    object: PhpObject,
-) -> Result<Vec<(PhpString, Value)>, Thrown> {
+/// a reader keys it, an integer key as it stands: views, no owner taken.
+pub(super) fn std_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
     let rows = Std.get_properties(req, object)?;
     let mut out = Vec::with_capacity(rows.len());
-    for (name, value) in rows {
-        let key = mangled(req, object.class(), name)?;
+    for (key, value) in rows {
+        let key = match key {
+            Key::Str(name) => Key::Str(mangled(req, object.class(), name)?),
+            Key::Int(_) => key,
+        };
         out.push((key, value));
     }
     Ok(out)
@@ -346,13 +346,13 @@ pub(super) fn std_rows(
 
 /// `zend_hash_str_update(props, name, value)` over rows: the value of a
 /// row already named replaced where it stands, a new row appended.
-fn update(rows: &mut Vec<(PhpString, Value)>, name: PhpString, value: Value) {
+fn update(rows: &mut Vec<(Key, Value)>, name: PhpString, value: Value) {
     match rows
         .iter_mut()
-        .find(|(n, _)| n.as_bytes() == name.as_bytes())
+        .find(|(n, _)| matches!(n, Key::Str(n) if n.as_bytes() == name.as_bytes()))
     {
         Some(row) => row.1 = value,
-        None => rows.push((name, value)),
+        None => rows.push((Key::Str(name), value)),
     }
 }
 
@@ -363,16 +363,18 @@ fn update(rows: &mut Vec<(PhpString, Value)>, name: PhpString, value: Value) {
 /// field took their name, as `add_common_properties` adds them.
 pub(super) fn rows_array(
     req: &mut Request,
-    own: &[(PhpString, Value)],
+    own: &[(Key, Value)],
     fields: Vec<(&[u8], Value)>,
     first: bool,
 ) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     if !first {
-        for (name, value) in own {
-            req.addref(&Value::string(*name));
+        for (key, value) in own {
+            if let Key::Str(name) = key {
+                req.addref(&Value::string(*name));
+            }
             req.addref(value);
-            array.set(req, Key::Str(*name), *value)?;
+            array.set(req, key.clone(), *value)?;
         }
     }
     for (name, value) in fields {
@@ -380,12 +382,13 @@ pub(super) fn rows_array(
         array.set(req, key, value)?;
     }
     if first {
-        for (name, value) in own {
-            let key = Key::Str(*name);
-            if !array.contains(&key) {
-                req.addref(&Value::string(*name));
+        for (key, value) in own {
+            if !array.contains(key) {
+                if let Key::Str(name) = key {
+                    req.addref(&Value::string(*name));
+                }
                 req.addref(value);
-                array.set(req, key, *value)?;
+                array.set(req, key.clone(), *value)?;
             }
         }
     }
@@ -414,10 +417,7 @@ fn rows_view(
     for value in old.into_iter().flatten() {
         req.release(value);
     }
-    Ok(rows
-        .into_iter()
-        .map(|(name, value)| (Key::Str(name), value))
-        .collect())
+    Ok(rows)
 }
 
 /// What `free_obj` gives back of the kept rows.
@@ -1022,7 +1022,7 @@ impl ObjectHandlers for IntervalHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
         write_fields(req, object)?;
         Std.get_properties(req, object)
     }

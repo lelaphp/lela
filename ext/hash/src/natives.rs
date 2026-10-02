@@ -1074,10 +1074,15 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         ));
     };
     let copy = new_object(req, object.class())?;
-    for (name, value) in object.props(req)? {
-        req.addref(&Value::string(name));
+    for (key, value) in object.props(req)? {
         req.addref(&value);
-        copy.set_prop(req, name, value)?;
+        match key {
+            Key::Str(name) => {
+                req.addref(&Value::string(name));
+                copy.set_prop(req, name, value)?;
+            }
+            Key::Int(_) => copy.set_row(req, &key, value)?,
+        }
     }
     let running = Running::new(req, algo, state)?;
     let mut kept = Emalloc::new(req, algo.block)?;
@@ -1665,10 +1670,16 @@ impl HashContext {
         out.append(req, Value::array(fields))?;
         out.append(req, Value::int(magic))?;
         let mut members = PhpArray::new(req)?;
-        for (name, value) in this.props(req)? {
+        for (key, value) in this.props(req)? {
             req.addref(&value);
-            req.addref(&Value::string(name));
-            members.set(req, Key::from_string(name), value)?;
+            let key = match key {
+                Key::Str(name) => {
+                    req.addref(&Value::string(name));
+                    Key::from_string(name)
+                }
+                Key::Int(_) => key,
+            };
+            members.set(req, key, value)?;
         }
         out.append(req, Value::array(members))?;
         Ok(out)

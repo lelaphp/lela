@@ -487,7 +487,18 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     // answer, each row one owner of its own.
     if let Some(rows) = req.hooked_object_rows(object)? {
         let mut array = PhpArray::new(req)?;
-        for (name, value, declared) in rows {
+        for (key, value, declared) in rows {
+            let name = match key {
+                Key::Int(_) if array.contains(&key) => {
+                    req.release(value);
+                    continue;
+                }
+                Key::Int(_) => {
+                    array.add_new(req, key, value)?;
+                    continue;
+                }
+                Key::Str(name) => name,
+            };
             let seen = declared
                 .is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
             if !seen {
@@ -506,7 +517,25 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     }
     let rows = req.property_rows(object)?;
     let mut array = PhpArray::new(req)?;
-    for (name, value, declared) in rows {
+    for (key, value, declared) in rows {
+        let value = if value.tag() == TypeTag::Reference && value.refcount() == 1 {
+            value.deref()
+        } else {
+            value
+        };
+        // An integer key, which only a loophole such as
+        // `object_properties_load` leaves in the table, is no name the
+        // access rule is asked about (`zend_hash_index_add`).
+        let name = match key {
+            Key::Int(n) => {
+                if !array.contains(&key) {
+                    req.addref(&value);
+                    array.add_new(req, Key::Int(n), value)?;
+                }
+                continue;
+            }
+            Key::Str(name) => name,
+        };
         let seen = req.property_row_visible(
             class,
             name.as_bytes(),
@@ -515,11 +544,6 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         if !seen {
             continue;
         }
-        let value = if value.tag() == TypeTag::Reference && value.refcount() == 1 {
-            value.deref()
-        } else {
-            value
-        };
         req.addref(&value);
         req.addref(&Value::string(name));
         let key = if declared.is_some() {
@@ -607,7 +631,7 @@ fn get_mangled_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpAr
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
     let rows = req.properties_no_lazy_init(object)?;
-    crate::ops::mangled_array(req, object, crate::ops::named_rows(rows))
+    crate::ops::mangled_array(req, object, rows)
 }
 
 /// `ce->function_table` in its order: the class's own methods as

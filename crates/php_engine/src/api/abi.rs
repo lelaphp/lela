@@ -1734,14 +1734,16 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `get_properties`, `zend_std_get_properties` at `Std`: the
     /// declared slots that hold a value then the dynamic table, in
-    /// `rebuild_object_properties`' order; views, no owner taken. A lazy
+    /// `rebuild_object_properties`' order; views, no owner taken. A
+    /// declared slot is keyed by its name unmangled, and a dynamic row by
+    /// the table's key, an integer one as the integer it is. A lazy
     /// object is initialised first and the rows are those of what that
     /// answers, `zend_lazy_object_get_properties`.
     fn get_properties(
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
         let object = req.lazy_init(object)?;
         req.object_entries(object.heap())
     }

@@ -12,7 +12,7 @@ use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
@@ -384,17 +384,13 @@ impl ObjectHandlers for Handlers {
             let key = PhpString::new(req, name)?;
             match rows
                 .iter_mut()
-                .find(|(k, _)| k.as_bytes() == name.as_slice())
+                .find(|(k, _)| matches!(k, Key::Str(k) if k.as_bytes() == name.as_slice()))
             {
                 Some(slot) => slot.1 = value,
-                None => rows.push((key, value)),
+                None => rows.push((Key::Str(key), value)),
             }
         }
-        Ok(PropertiesFor::Rows(
-            rows.into_iter()
-                .map(|(name, value)| (php_ext::values::Key::Str(name), value))
-                .collect(),
-        ))
+        Ok(PropertiesFor::Rows(rows))
     }
 
     /// `row_get_ctor`.
