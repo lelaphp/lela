@@ -1070,16 +1070,22 @@ impl OneTree {
     /// `xtask phpt` over `subset` of the tree from the checkout at `root`,
     /// a process of its own on a pool of two.
     fn run(&self, root: &Tree, subset: &str) -> std::process::Child {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
+        self.command(root, subset).spawn().unwrap()
+    }
+
+    /// The command [`OneTree::run`] spawns, for a run that needs one more
+    /// variable set.
+    fn command(&self, root: &Tree, subset: &str) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        command
             .arg("--root")
             .arg(root.path())
             .args(["phpt", "--subset", subset, "--jobs", "2", "--engine"])
             .arg(&self.engine)
             .env(xtask::oracle::TREE_VARIABLE, self.corpus.path())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap()
+            .stderr(std::process::Stdio::piped());
+        command
     }
 }
 
@@ -1210,6 +1216,15 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// sleeps until the run is killed, and the tree holds only what it held
 /// before. The copy it leaves, which a killed run drops nothing of, is the
 /// next run's sweep's: that run passes, and the dead one's copy is gone.
+///
+/// Once the run is dead its copy is a dead run's, and the first scratch
+/// tree any process on the machine makes sweeps it from the temporary
+/// directory (#1473): another session's instrument, a test binary
+/// starting. So both runs take a temporary directory the test holds,
+/// `TMPDIR`, which no other process's sweep reads, and the copy the test
+/// asserts on is its own. Another process's run, in the machine's
+/// temporary directory, goes between the kill and the assertion: the sweep
+/// in the window is made, not met by chance.
 #[test]
 fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     use std::io::{BufRead, BufReader};
@@ -1222,6 +1237,7 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     fs::create_dir_all(&dir).unwrap();
     let signal = Tree::new("phpt-killed-signal").unwrap();
     let held = signal.join("held");
+    let temporary = Tree::new("phpt-killed-tmp").unwrap();
     fs::write(
         dir.join("a-held.phpt"),
         format!(
@@ -1233,7 +1249,11 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     .unwrap();
     let before = listing(tree.corpus.path());
     let one = OneTree::checkout("killed-one");
-    let mut first = tree.run(&one, "Zend/tests");
+    let mut first = tree
+        .command(&one, "Zend/tests")
+        .env("TMPDIR", temporary.path())
+        .spawn()
+        .unwrap();
     let mut lines = BufReader::new(first.stdout.take().unwrap()).lines();
     let copy = loop {
         let line = lines.next().expect("the run named no copy").unwrap();
@@ -1257,6 +1277,19 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     first.wait().unwrap();
     let pid = fs::read_to_string(&held).unwrap();
     let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+
+    // Another process's run, in the machine's temporary directory, whose
+    // first scratch tree sweeps every dead run's standing there.
+    let other = OneTree::new("killed-other");
+    fs::create_dir_all(other.corpus.join("Zend/tests")).unwrap();
+    fs::write(
+        other.corpus.join("Zend/tests/quick.phpt"),
+        "--TEST--\nquick\n--FILE--\n<?php\necho \"ok\\n\";\n--EXPECT--\nok\n",
+    )
+    .unwrap();
+    let swept = other.run(&one, "Zend/tests").wait_with_output().unwrap();
+    assert!(swept.status.success(), "{swept:?}");
+
     assert_eq!(listing(tree.corpus.path()), before, "the pinned tree moved");
     assert!(copy.is_dir(), "a killed run drops nothing");
 
@@ -1267,7 +1300,12 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     )
     .unwrap();
     let two = OneTree::checkout("killed-two");
-    let run = kept(&two, tree.run(&two, "Zend/tests"));
+    let second = tree
+        .command(&two, "Zend/tests")
+        .env("TMPDIR", temporary.path())
+        .spawn()
+        .unwrap();
+    let run = kept(&two, second);
     assert_eq!(
         run["verdicts"]
             .as_object()
