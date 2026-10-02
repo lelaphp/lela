@@ -1,0 +1,663 @@
+//! The value classes of `soap.c`: `SoapParam`, `SoapHeader`, `SoapFault`,
+//! `SoapVar`, and the two opaque handles `Soap\Url` and `Soap\Sdl` a
+//! client keeps its connection URL and its description in; with
+//! `set_soap_fault` and `add_soap_fault`, which every fault is made by.
+
+use php_ext::abi::ConstValue;
+use php_ext::abi::{ObjectHandlers, Passed, Std, This, Union};
+use php_ext::attr::php_class;
+use php_ext::call::{call_method, lookup_class, read_prop};
+use php_ext::coerce::{to_long, to_string};
+use php_ext::raising::{Thrown, arg_value_error, argument_error, throw_error};
+use php_ext::request::Request;
+use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+
+use crate::model;
+use crate::{SOAP_1_1, SOAP_1_2, State};
+
+type R<T> = Result<T, Thrown>;
+
+/// `instanceof_function(ce, soap_fault_class_entry)`.
+pub(crate) fn is_fault(req: &mut Request, object: PhpObject) -> bool {
+    match lookup_class(req, b"SoapFault") {
+        Ok(Some(class)) => object.instance_of(req, class),
+        _ => false,
+    }
+}
+
+/// A string value, made in the request's heap.
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Value> {
+    Ok(Value::string(PhpString::new(req, bytes)?))
+}
+
+/// `ZVAL_COPY`: one more owner of `value`, the caller's to give away.
+pub(crate) fn copied(req: &mut Request, value: Value) -> Value {
+    let value = value.deref();
+    req.addref(&value);
+    value
+}
+
+// ---- SoapParam
+
+/// `SoapParam`: a value sent under a name of its own.
+///
+/// ```php
+/// $p = new SoapParam([1, 2], 'list');
+/// var_dump($p);
+/// try { new SoapParam(1, ''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(SoapParam)#1 (2) {
+///   ["param_name"]=>
+///   string(4) "list"
+///   ["param_data"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+/// }
+/// SoapParam::__construct(): Argument #2 ($name) must not be empty
+/// ```
+#[php_class]
+pub(crate) struct SoapParam;
+
+#[php_class]
+impl SoapParam {
+    #[php(property)]
+    const param_name: PhpString;
+    #[php(property)]
+    const param_data: Value;
+
+    /// `SoapParam::__construct(mixed $data, string $name)`.
+    fn __construct(req: &mut Request, this: This<Self>, data: Value, name: PhpString) -> R<()> {
+        if name.is_empty() {
+            return Err(arg_value_error(req, 2, "not be empty"));
+        }
+        let object = this.object();
+        req.addref(&Value::string(name));
+        object.set_slot(req, 0, Value::string(name))?;
+        let data = copied(req, data);
+        object.set_slot(req, 1, data)
+    }
+}
+
+// ---- SoapHeader
+
+/// `SoapHeader`: one header block a client sends or a server answers.
+///
+/// ```php
+/// $h = new SoapHeader('urn:x', 'auth', ['u' => 'me'], true, SOAP_ACTOR_NEXT);
+/// var_dump($h->namespace, $h->name, $h->data, $h->mustUnderstand, $h->actor);
+/// var_dump((new SoapHeader('urn:x', 'h', null, false, 'http://a'))->actor);
+/// try { (new SoapHeader('urn:x', 'h'))->actor; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// foreach ([['', 'h'], ['n', ''], ['n', 'h', 1, false, 'ab'], ['n', 'h', 1, false, 7]] as $a) {
+///     try { new SoapHeader(...$a); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump((new SoapHeader('n', 'h'))->data);
+/// ```
+/// ```expect
+/// string(5) "urn:x"
+/// string(4) "auth"
+/// array(1) {
+///   ["u"]=>
+///   string(2) "me"
+/// }
+/// bool(true)
+/// int(1)
+/// string(8) "http://a"
+/// Typed property SoapHeader::$actor must not be accessed before initialization
+/// SoapHeader::__construct(): Argument #1 ($namespace) must not be empty
+/// SoapHeader::__construct(): Argument #2 ($name) must not be empty
+/// SoapHeader::__construct(): Argument #5 ($actor) must be longer than 2 characters
+/// SoapHeader::__construct(): Argument #5 ($actor) must be one of SOAP_ACTOR_NEXT, SOAP_ACTOR_NONE, or SOAP_ACTOR_UNLIMATERECEIVER
+/// NULL
+/// ```
+#[php_class]
+pub(crate) struct SoapHeader;
+
+#[php_class]
+impl SoapHeader {
+    #[php(property)]
+    const namespace: PhpString;
+    #[php(property)]
+    const name: PhpString;
+    #[php(property)]
+    const data: Value = ConstValue::Null;
+    #[php(property)]
+    const mustUnderstand: bool;
+    #[php(property)]
+    const actor: Option<Union<PhpString, i64>>;
+
+    /// `SoapHeader::__construct(string $namespace, string $name, mixed $data
+    /// = UNKNOWN, bool $mustUnderstand = false, string|int|null $actor = null)`.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: PhpString,
+        name: PhpString,
+        data: Passed<Value>,
+        #[php(default = false)] mustUnderstand: bool,
+        #[php(default = null)] actor: Option<Union<PhpString, i64>>,
+    ) -> R<()> {
+        if namespace.is_empty() {
+            return Err(arg_value_error(req, 1, "not be empty"));
+        }
+        if name.is_empty() {
+            return Err(arg_value_error(req, 2, "not be empty"));
+        }
+        let object = this.object();
+        req.addref(&Value::string(namespace));
+        object.set_slot(req, 0, Value::string(namespace))?;
+        req.addref(&Value::string(name));
+        object.set_slot(req, 1, Value::string(name))?;
+        if let Passed::Given(data) = data {
+            let data = copied(req, data);
+            object.set_slot(req, 2, data)?;
+        }
+        object.set_slot(req, 3, Value::bool(mustUnderstand))?;
+        match actor {
+            Some(Union::A(s)) => {
+                if s.len() > 2 {
+                    req.addref(&Value::string(s));
+                    object.set_slot(req, 4, Value::string(s))?;
+                } else {
+                    return Err(arg_value_error(req, 5, "be longer than 2 characters"));
+                }
+            }
+            Some(Union::B(n)) => {
+                if (1..=3).contains(&n) {
+                    object.set_slot(req, 4, Value::int(n))?;
+                } else {
+                    return Err(arg_value_error(
+                        req,
+                        5,
+                        "be one of SOAP_ACTOR_NEXT, SOAP_ACTOR_NONE, or SOAP_ACTOR_UNLIMATERECEIVER",
+                    ));
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+// ---- SoapFault
+
+/// `zend_ce_exception->default_properties_count`: where `SoapFault`'s own
+/// slots start.
+const FAULT_START: u32 = 7;
+
+/// `SoapFault`'s eight slots, after `Exception`'s.
+#[derive(Clone, Copy)]
+pub(crate) enum FaultSlot {
+    String = 0,
+    Code = 1,
+    CodeNs = 2,
+    Actor = 3,
+    Detail = 4,
+    Name = 5,
+    HeaderFault = 6,
+    Lang = 7,
+}
+
+impl FaultSlot {
+    pub(crate) fn index(self) -> u32 {
+        FAULT_START + self as u32
+    }
+}
+
+fn set_fault_slot(req: &mut Request, object: PhpObject, slot: FaultSlot, value: Value) -> R<()> {
+    object.set_slot(req, slot.index(), value)
+}
+
+/// `SoapFault`: a fault a server answers and a client throws.
+///
+/// ```php
+/// $f = new SoapFault('Server', 'Oops', 'actor', ['d' => 1], 'name', 'hf', 'nl');
+/// var_dump($f->faultcode, $f->faultcodens, $f->faultstring, $f->getMessage(), $f->faultactor, $f->detail, $f->_name, $f->headerfault, $f->lang);
+/// $g = new SoapFault(['urn:x', 'Mine'], 'two');
+/// var_dump($g->faultcode, $g->faultcodens, (new SoapFault(null, 's'))->faultcode, (new SoapFault('Other', 's'))->faultcodens);
+/// foreach (['', ['a'], ['a', 1]] as $c) {
+///     try { new SoapFault($c, 'x'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump((new SoapFault('Client', 'x', null, null, ''))->_name);
+/// ```
+/// ```expect
+/// string(6) "Server"
+/// string(41) "http://schemas.xmlsoap.org/soap/envelope/"
+/// string(4) "Oops"
+/// string(4) "Oops"
+/// string(5) "actor"
+/// array(1) {
+///   ["d"]=>
+///   int(1)
+/// }
+/// string(4) "name"
+/// string(2) "hf"
+/// string(2) "en"
+/// string(4) "Mine"
+/// string(5) "urn:x"
+/// NULL
+/// NULL
+/// SoapFault::__construct(): Argument #1 ($code) is not a valid fault code
+/// SoapFault::__construct(): Argument #1 ($code) is not a valid fault code
+/// SoapFault::__construct(): Argument #1 ($code) is not a valid fault code
+/// NULL
+/// ```
+#[php_class(extends(crate::Exception))]
+pub(crate) struct SoapFault;
+
+#[php_class]
+impl SoapFault {
+    #[php(property)]
+    const faultstring: PhpString;
+    #[php(property)]
+    const faultcode: Option<PhpString> = None;
+    #[php(property)]
+    const faultcodens: Option<PhpString> = None;
+    #[php(property)]
+    const faultactor: Option<PhpString> = None;
+    #[php(property)]
+    const detail: Value = ConstValue::Null;
+    #[php(property)]
+    const _name: Option<PhpString> = None;
+    #[php(property)]
+    const headerfault: Value = ConstValue::Null;
+    #[php(property)]
+    const lang: PhpString = "";
+
+    /// `SoapFault::__construct(array|string|null $code, string $string,
+    /// ?string $actor = null, mixed $details = null, ?string $name = null,
+    /// mixed $headerFault = null, string $lang = "")`: the properties
+    /// cleared and set again, the language always `en`.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        code: Option<Union<PhpArray, PhpString>>,
+        string: PhpString,
+        #[php(default = null)] actor: Option<PhpString>,
+        #[php(default = null)] details: Value,
+        #[php(default = null)] name: Option<PhpString>,
+        #[php(default = null)] headerFault: Value,
+        #[php(default = "")] lang: php_ext::abi::Path,
+    ) -> R<()> {
+        let _ = lang;
+        let mut fault_code: Option<Vec<u8>> = None;
+        let mut fault_code_ns: Option<Vec<u8>> = None;
+        let given = code.is_some();
+        match &code {
+            Some(Union::B(s)) => fault_code = Some(s.as_bytes().to_vec()),
+            Some(Union::A(a)) if a.len() == 2 => {
+                let ns = a.get(&php_ext::values::Key::Int(0));
+                let c = a.get(&php_ext::values::Key::Int(1));
+                if let (Some(ns), Some(c)) = (ns, c)
+                    && let (Some(ns), Some(c)) = (ns.as_str_bytes(), c.as_str_bytes())
+                {
+                    fault_code_ns = Some(ns.to_vec());
+                    fault_code = Some(c.to_vec());
+                }
+            }
+            _ => {}
+        }
+        if given && fault_code.as_ref().is_none_or(Vec::is_empty) {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                1,
+                "is not a valid fault code",
+            ));
+        }
+        let object = this.object();
+        clear_fault(req, object)?;
+        let name = name
+            .filter(|n| !n.is_empty())
+            .map(|n| n.as_bytes().to_vec());
+        let details =
+            (!matches!(details.as_ref(), ValueRef::Null | ValueRef::Undef)).then_some(details);
+        set_soap_fault(
+            req,
+            object,
+            &Fault {
+                code_ns: fault_code_ns.as_deref(),
+                code: fault_code.as_deref(),
+                string: Some(string.as_bytes()),
+                actor: actor.as_ref().map(PhpString::as_bytes),
+                detail: details,
+                name: name.as_deref(),
+                lang: b"en",
+            },
+        )?;
+        if !matches!(headerFault.as_ref(), ValueRef::Null | ValueRef::Undef) {
+            let h = copied(req, headerFault);
+            set_fault_slot(req, object, FaultSlot::HeaderFault, h)?;
+        }
+        Ok(())
+    }
+
+    /// `SoapFault::__toString(): string`: `SoapFault exception: [code]
+    /// string in file:line`, then the trace.
+    ///
+    /// ```php
+    /// $f = new SoapFault('Server', 'Oops');
+    /// echo $f, "\n";
+    /// function g() { return new SoapFault(['urn:x', 'C'], 'deep'); }
+    /// echo g(), "\n";
+    /// ```
+    /// ```expect
+    /// SoapFault exception: [Server] Oops in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    /// SoapFault exception: [C] deep in %s:4
+    /// Stack trace:
+    /// #0 %s(5): g()
+    /// #1 {main}
+    /// ```
+    fn __toString(req: &mut Request, this: This<Self>) -> R<PhpString> {
+        let object = this.object();
+        let faultcode = read_prop(req, &object, b"faultcode")?;
+        let faultstring = read_prop(req, &object, b"faultstring")?;
+        let file = read_prop(req, &object, b"file")?;
+        let line = read_prop(req, &object, b"line")?;
+        let trace = call_method(req, &object, b"gettraceasstring", &[])?;
+        let faultcode = to_string(req, &faultcode)?;
+        let faultstring = to_string(req, &faultstring)?;
+        let file = to_string(req, &file)?;
+        let line = to_long(req, &line)?;
+        let trace_s = to_string(req, &trace)?;
+        req.release(trace);
+        let mut out = Vec::new();
+        out.extend_from_slice(b"SoapFault exception: [");
+        out.extend_from_slice(faultcode.as_bytes());
+        out.extend_from_slice(b"] ");
+        out.extend_from_slice(faultstring.as_bytes());
+        out.extend_from_slice(b" in ");
+        out.extend_from_slice(file.as_bytes());
+        out.push(b':');
+        out.extend_from_slice(line.to_string().as_bytes());
+        out.extend_from_slice(b"\nStack trace:\n");
+        if trace_s.is_empty() {
+            out.extend_from_slice(b"#0 {main}\n");
+        } else {
+            out.extend_from_slice(trace_s.as_bytes());
+        }
+        for s in [faultcode, faultstring, file, trace_s] {
+            req.release(Value::string(s));
+        }
+        PhpString::new(req, &out)
+    }
+}
+
+/// The arguments of `set_soap_fault`.
+pub(crate) struct Fault<'a> {
+    pub(crate) code_ns: Option<&'a [u8]>,
+    pub(crate) code: Option<&'a [u8]>,
+    pub(crate) string: Option<&'a [u8]>,
+    pub(crate) actor: Option<&'a [u8]>,
+    pub(crate) detail: Option<Value>,
+    pub(crate) name: Option<&'a [u8]>,
+    pub(crate) lang: &'a [u8],
+}
+
+/// `soap_fault_dtor_properties`: the eight slots back to their defaults.
+fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
+    let empty = string(req, b"")?;
+    set_fault_slot(req, object, FaultSlot::String, empty)?;
+    for slot in [
+        FaultSlot::Code,
+        FaultSlot::CodeNs,
+        FaultSlot::Actor,
+        FaultSlot::Detail,
+        FaultSlot::Name,
+        FaultSlot::HeaderFault,
+    ] {
+        set_fault_slot(req, object, slot, Value::null())?;
+    }
+    let empty = string(req, b"")?;
+    set_fault_slot(req, object, FaultSlot::Lang, empty)
+}
+
+/// `set_soap_fault`: the string (and `Exception::$message`), the code
+/// mapped by the SOAP version running, the actor, detail, name and
+/// language written into `object`.
+pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>) -> R<()> {
+    let text = string(req, f.string.unwrap_or_default())?;
+    set_fault_slot(req, object, FaultSlot::String, text)?;
+    let message = string(req, f.string.unwrap_or_default())?;
+    php_ext::call::write_prop(req, &object, b"message", message)?;
+    if let Some(code) = f.code {
+        let version = req.state::<State>().soap_version;
+        let (code, ns): (&[u8], Option<&[u8]>) = if let Some(ns) = f.code_ns {
+            (code, Some(ns))
+        } else if version == SOAP_1_1 {
+            let ns = matches!(
+                code,
+                b"Client" | b"Server" | b"VersionMismatch" | b"MustUnderstand"
+            )
+            .then_some(model::SOAP_1_1_ENV_NAMESPACE);
+            (code, ns)
+        } else if version == SOAP_1_2 {
+            match code {
+                b"Client" => (b"Sender".as_slice(), Some(model::SOAP_1_2_ENV_NAMESPACE)),
+                b"Server" => (b"Receiver".as_slice(), Some(model::SOAP_1_2_ENV_NAMESPACE)),
+                b"VersionMismatch" | b"MustUnderstand" | b"DataEncodingUnknown" => {
+                    (code, Some(model::SOAP_1_2_ENV_NAMESPACE))
+                }
+                _ => (code, None),
+            }
+        } else {
+            (code, None)
+        };
+        if version == SOAP_1_1 || version == SOAP_1_2 || f.code_ns.is_some() {
+            let c = string(req, code)?;
+            set_fault_slot(req, object, FaultSlot::Code, c)?;
+            if let Some(ns) = ns {
+                let n = string(req, ns)?;
+                set_fault_slot(req, object, FaultSlot::CodeNs, n)?;
+            }
+        }
+    }
+    if let Some(actor) = f.actor {
+        let a = string(req, actor)?;
+        set_fault_slot(req, object, FaultSlot::Actor, a)?;
+    }
+    if let Some(detail) = f.detail
+        && !matches!(detail.as_ref(), ValueRef::Undef)
+    {
+        let d = copied(req, detail);
+        set_fault_slot(req, object, FaultSlot::Detail, d)?;
+    }
+    if let Some(name) = f.name {
+        let n = string(req, name)?;
+        set_fault_slot(req, object, FaultSlot::Name, n)?;
+    }
+    let lang = string(req, f.lang)?;
+    set_fault_slot(req, object, FaultSlot::Lang, lang)
+}
+
+// ---- SoapVar
+
+/// `SoapVar`: a value sent as the type given.
+///
+/// ```php
+/// var_dump(new SoapVar('x', XSD_STRING, 'string', 'http://www.w3.org/2001/XMLSchema', 'node', ''));
+/// var_dump((new SoapVar(null, null))->enc_type);
+/// try { new SoapVar(1, 12345); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(SoapVar)#1 (6) {
+///   ["enc_type"]=>
+///   int(101)
+///   ["enc_value"]=>
+///   string(1) "x"
+///   ["enc_stype"]=>
+///   string(6) "string"
+///   ["enc_ns"]=>
+///   string(32) "http://www.w3.org/2001/XMLSchema"
+///   ["enc_name"]=>
+///   string(4) "node"
+///   ["enc_namens"]=>
+///   NULL
+/// }
+/// int(999998)
+/// SoapVar::__construct(): Argument #2 ($encoding) is not a valid encoding
+/// ```
+#[php_class]
+pub(crate) struct SoapVar;
+
+#[php_class]
+impl SoapVar {
+    #[php(property)]
+    const enc_type: i64;
+    #[php(property)]
+    const enc_value: Value = ConstValue::Null;
+    #[php(property)]
+    const enc_stype: Option<PhpString> = None;
+    #[php(property)]
+    const enc_ns: Option<PhpString> = None;
+    #[php(property)]
+    const enc_name: Option<PhpString> = None;
+    #[php(property)]
+    const enc_namens: Option<PhpString> = None;
+
+    /// `SoapVar::__construct(mixed $data, ?int $encoding, ?string $typeName =
+    /// null, ?string $typeNamespace = null, ?string $nodeName = null,
+    /// ?string $nodeNamespace = null)`.
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        data: Value,
+        encoding: Option<i64>,
+        #[php(default = null)] typeName: Option<PhpString>,
+        #[php(default = null)] typeNamespace: Option<PhpString>,
+        #[php(default = null)] nodeName: Option<PhpString>,
+        #[php(default = null)] nodeNamespace: Option<PhpString>,
+    ) -> R<()> {
+        let object = this.object();
+        match encoding {
+            None => object.set_slot(req, 0, Value::int(model::ty::UNKNOWN_TYPE.into()))?,
+            Some(t) => {
+                let known = i32::try_from(t)
+                    .is_ok_and(|t| model::DEFAULT_ENCODING.iter().any(|b| b.type_ == t));
+                if !known {
+                    return Err(argument_error(
+                        req,
+                        "ValueError",
+                        2,
+                        "is not a valid encoding",
+                    ));
+                }
+                object.set_slot(req, 0, Value::int(t))?;
+            }
+        }
+        if !matches!(data.as_ref(), ValueRef::Null | ValueRef::Undef) {
+            let d = copied(req, data);
+            object.set_slot(req, 1, d)?;
+        }
+        for (slot, given) in [
+            (2, typeName),
+            (3, typeNamespace),
+            (4, nodeName),
+            (5, nodeNamespace),
+        ] {
+            if let Some(s) = given
+                && !s.is_empty()
+            {
+                req.addref(&Value::string(s));
+                object.set_slot(req, slot, Value::string(s))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---- Soap\Url and Soap\Sdl
+
+/// `soap_url_object`: the parsed URL a client keeps between calls, the
+/// one its kept connection goes to; none until a request made one.
+#[derive(Default)]
+pub(crate) struct UrlPayload {
+    /// `uri`, php's `php_uri`, its `port` defaulted for the scheme.
+    pub(crate) uri: Option<php_ext_uri::UriStruct>,
+}
+
+/// `soap_sdl_object`: the description a client was made with.
+#[derive(Default)]
+pub(crate) struct SdlPayload {
+    pub(crate) sdl: Option<std::sync::Arc<crate::model::Sdl>>,
+}
+
+/// The handlers `Soap\Url` and `Soap\Sdl` share: no constructor, no clone,
+/// never comparable; `Soap\Url` casts to `int` as its object number, as php's
+/// typo leaves `Soap\Sdl` with the standard cast.
+pub(crate) struct OpaqueHandlers {
+    url: bool,
+}
+
+pub(crate) static URL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: true };
+pub(crate) static SDL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: false };
+
+impl ObjectHandlers for OpaqueHandlers {
+    fn get_constructor(
+        &self,
+        req: &mut Request,
+        _object: PhpObject,
+    ) -> R<Option<php_ext::call::Function>> {
+        let name = if self.url { "Soap\\Url" } else { "Soap\\Sdl" };
+        Err(throw_error(
+            req,
+            "Error",
+            &format!("Cannot directly construct {name}"),
+        ))
+    }
+
+    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
+        None
+    }
+
+    fn cast_object(&self, req: &mut Request, object: PhpObject, to: TypeTag) -> R<Option<Value>> {
+        if self.url && to == TypeTag::Int {
+            return Ok(Some(Value::int(i64::from(object.index()))));
+        }
+        Std.cast_object(req, object, to)
+    }
+
+    fn compare(
+        &self,
+        _req: &mut Request,
+        _left: &Value,
+        _right: &Value,
+    ) -> R<Option<std::cmp::Ordering>> {
+        Ok(None)
+    }
+}
+
+/// `Soap\Url`: final, opaque, not serializable.
+///
+/// ```php
+/// try { new Soap\Url; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { new Soap\Sdl; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $r = new ReflectionClass('Soap\Url');
+/// var_dump($r->isFinal(), $r->isCloneable());
+/// try { $r->newInstanceWithoutConstructor(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot directly construct Soap\Url
+/// Cannot directly construct Soap\Sdl
+/// bool(true)
+/// bool(false)
+/// Class Soap\Url is an internal class marked as final that cannot be instantiated without invoking its constructor
+/// ```
+#[php_class(namespace(Soap), final, not_serializable, payload = UrlPayload, handlers = URL_HANDLERS)]
+pub(crate) struct Url;
+
+#[php_class]
+impl Url {}
+
+/// `Soap\Sdl`: final, opaque, not serializable.
+#[php_class(namespace(Soap), final, not_serializable, payload = SdlPayload, handlers = SDL_HANDLERS)]
+pub(crate) struct Sdl;
+
+#[php_class]
+impl Sdl {}

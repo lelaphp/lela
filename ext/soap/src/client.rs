@@ -1,0 +1,1415 @@
+//! `SoapClient` (`soap.c`): its 36 private properties, the options its
+//! constructor reads into them, and the call (`do_soap_call`,
+//! `do_request`) that serialises the request, hands it to `__doRequest`
+//! and parses the response.
+
+use php_ext::abi::{ConstArray, ConstValue, Instance, Ref, This, Untyped};
+use php_ext::attr::php_class;
+use php_ext::call::{call_method, lookup_function};
+use php_ext::coerce::{to_long, value_name};
+use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
+use php_ext::request::Request;
+use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext_libxml::ffi::{Library, Node, Save};
+
+use crate::classes::SoapFault;
+use crate::message::{
+    function_to_string, get_function, release_typemap, serialize_function_call, soap_binding,
+    soap_create_typemap, type_to_string,
+};
+use crate::model::{BindingType, Sdl};
+use crate::shared::{
+    ClientSlot, add_soap_fault, client_slot, instance_of, is_null, new_sdl_object, sdl_of,
+    set_client_slot,
+};
+use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State};
+
+type R<T> = Result<T, Thrown>;
+
+/// `SoapClient`'s payload: the typemap its `typemap` option made, which
+/// php keeps as pointers in the `typemap` property's array.
+#[derive(Default)]
+pub(crate) struct Client {
+    pub(crate) typemap: Option<crate::Typemap>,
+}
+
+/// The typemap held, given back with the object.
+pub(crate) struct Handlers;
+
+pub(crate) static HANDLERS: Handlers = Handlers;
+
+impl php_ext::abi::ObjectHandlers for Handlers {
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let typemap = object
+            .native_mut::<Client>(req)
+            .and_then(|c| c.typemap.take());
+        if let Some(t) = typemap {
+            release_typemap(req, &t);
+        }
+        php_ext::abi::Std.free_obj(req, object);
+    }
+}
+
+/// `SOAP_CLIENT_BEGIN_CODE`'s saved state.
+struct Saved {
+    use_handler: bool,
+    error_code: Option<&'static str>,
+    error_object: Option<PhpObject>,
+    soap_version: i64,
+}
+
+fn begin(req: &mut Request, this: PhpObject) -> Saved {
+    let state = req.state::<State>();
+    let saved = Saved {
+        use_handler: state.use_soap_error_handler,
+        error_code: state.error_code,
+        error_object: state.error_object,
+        soap_version: state.soap_version,
+    };
+    state.use_soap_error_handler = true;
+    state.error_code = Some("Client");
+    state.error_object = Some(this);
+    saved
+}
+
+fn end(req: &mut Request, saved: &Saved) {
+    let state = req.state::<State>();
+    state.use_soap_error_handler = saved.use_handler;
+    state.error_code = saved.error_code;
+    state.error_object = saved.error_object;
+    state.soap_version = saved.soap_version;
+}
+
+/// What `soap_real_error_handler` makes of an `E_ERROR` a client raised:
+/// a fault in its `__soap_fault`, thrown, where the client throws; the
+/// fatal itself otherwise.
+fn settle<T>(req: &mut Request, this: PhpObject, r: Res<T>) -> R<T> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(Error::Thrown(t)) => Err(t),
+        Err(Error::Fatal(message)) => {
+            let code = req.state::<State>().error_code.unwrap_or("Client");
+            fail(req, this, code, &message)
+        }
+        Err(Error::FatalCoded(code, message)) => fail(req, this, code, &message),
+    }
+}
+
+/// The fault a client's fatal becomes: thrown, or the fatal itself where
+/// the client does not throw.
+fn fail<T>(req: &mut Request, this: PhpObject, code: &str, message: &str) -> R<T> {
+    {
+        {
+            let exceptions = !matches!(
+                client_slot(this, ClientSlot::Exceptions).as_ref(),
+                ValueRef::Bool(false)
+            );
+            if exceptions {
+                let fault = add_soap_fault(
+                    req,
+                    this,
+                    code.as_bytes(),
+                    message.as_bytes(),
+                    None,
+                    None,
+                    b"en",
+                )?;
+                let value = fault.as_value();
+                let thrown = throw_value(req, &value);
+                req.release(value);
+                Err(thrown)
+            } else {
+                Err(fatal(req, message))
+            }
+        }
+    }
+}
+
+/// An `E_ERROR` raised outside `SOAP_CLIENT_BEGIN_CODE`: the soap
+/// handler's where one is installed, the plain fatal otherwise.
+fn unwrapped<T>(req: &mut Request, this: PhpObject, r: Res<T>) -> R<T> {
+    if req.state::<State>().use_soap_error_handler {
+        return settle(req, this, r);
+    }
+    match r {
+        Ok(v) => Ok(v),
+        Err(Error::Thrown(t)) => Err(t),
+        Err(Error::Fatal(m) | Error::FatalCoded(_, m)) => Err(fatal(req, &m)),
+    }
+}
+
+/// `php_error_docref(NULL, E_ERROR, ...)`.
+fn docref_error(req: &Request, message: &str) -> Error {
+    crate::server::docref_error(req, message)
+}
+
+/// A string option.
+fn str_option(options: PhpArray, name: &[u8]) -> Option<Value> {
+    options
+        .find(name)
+        .map(|v| v.deref())
+        .filter(|v| v.as_str_bytes().is_some())
+}
+
+/// A copy of a string value, one owner.
+fn owned(req: &mut Request, v: Value) -> Value {
+    req.addref(&v);
+    v
+}
+
+/// `SoapClient`.
+///
+/// ```php
+/// $c = new SoapClient(null, ['location' => 'http://localhost/x', 'uri' => 'urn:x', 'trace' => 1, 'exceptions' => 0, 'login' => 'me']);
+/// $p = (array) $c;
+/// var_dump(count($p), $p["\0SoapClient\0uri"], $p["\0SoapClient\0trace"], $p["\0SoapClient\0_exceptions"], $p["\0SoapClient\0_soap_version"], $p["\0SoapClient\0_login"]);
+/// ```
+/// ```expect
+/// int(36)
+/// string(5) "urn:x"
+/// bool(true)
+/// bool(false)
+/// int(1)
+/// string(2) "me"
+/// ```
+#[php_class(payload = Client, handlers = HANDLERS)]
+pub(crate) struct SoapClient;
+
+#[php_class]
+impl SoapClient {
+    #[php(property, private)]
+    const uri: Option<PhpString> = None;
+    #[php(property, private)]
+    const style: Option<i64> = None;
+    #[php(property, private)]
+    const r#use: Option<i64> = None;
+    #[php(property, private)]
+    const location: Option<PhpString> = None;
+    #[php(property, private)]
+    const trace: bool = false;
+    #[php(property, private)]
+    const compression: Option<i64> = None;
+    #[php(property, private)]
+    const sdl: Option<Instance<crate::classes::Sdl>> = None;
+    #[php(property, private)]
+    const typemap: Option<PhpArray> = None;
+    #[php(property, private)]
+    const httpsocket: Untyped<Value> = ConstValue::Null;
+    #[php(property, private)]
+    const httpurl: Option<Instance<crate::classes::Url>> = None;
+    #[php(property, private)]
+    const _login: Option<PhpString> = None;
+    #[php(property, private)]
+    const _password: Option<PhpString> = None;
+    #[php(property, private)]
+    const _use_digest: bool = false;
+    #[php(property, private)]
+    const _digest: Option<PhpString> = None;
+    #[php(property, private)]
+    const _proxy_host: Option<PhpString> = None;
+    #[php(property, private)]
+    const _proxy_port: Option<i64> = None;
+    #[php(property, private)]
+    const _proxy_login: Option<PhpString> = None;
+    #[php(property, private)]
+    const _proxy_password: Option<PhpString> = None;
+    #[php(property, private)]
+    const _exceptions: bool = true;
+    #[php(property, private)]
+    const _encoding: Option<PhpString> = None;
+    #[php(property, private)]
+    const _classmap: Option<PhpArray> = None;
+    #[php(property, private)]
+    const _features: Option<i64> = None;
+    #[php(property, private)]
+    const _connection_timeout: i64 = 0;
+    #[php(property, private)]
+    const _stream_context: Untyped<Value> = ConstValue::Null;
+    #[php(property, private)]
+    const _user_agent: Option<PhpString> = None;
+    #[php(property, private)]
+    const _keep_alive: bool = true;
+    #[php(property, private)]
+    const _ssl_method: Option<i64> = None;
+    #[php(property, private)]
+    const _soap_version: i64;
+    #[php(property, private)]
+    const _use_proxy: Option<i64> = None;
+    #[php(property, private)]
+    const _cookies: PhpArray = ConstArray(&[]);
+    #[php(property, private)]
+    const __default_headers: Option<PhpArray> = None;
+    #[php(property, private)]
+    const __soap_fault: Option<Instance<SoapFault>> = None;
+    #[php(property, private)]
+    const __last_request: Option<PhpString> = None;
+    #[php(property, private)]
+    const __last_response: Option<PhpString> = None;
+    #[php(property, private)]
+    const __last_request_headers: Option<PhpString> = None;
+    #[php(property, private)]
+    const __last_response_headers: Option<PhpString> = None;
+
+    /// `SoapClient::__construct(?string $wsdl, array $options = [])`: the
+    /// options read into the properties, the description loaded where one
+    /// is given; a refusal is a `SoapFault`.
+    ///
+    /// ```php
+    /// foreach ([[], ['uri' => 'u'], ['location' => 'l'], ['uri' => 'u', 'location' => 'l', 'encoding' => 'nope'], ['uri' => 'u', 'location' => 'l', 'classmap' => [1]]] as $o) {
+    ///     try { new SoapClient(null, $o); echo "ok\n"; } catch (SoapFault $f) { echo $f->faultcode, ': ', $f->getMessage(), "\n"; }
+    /// }
+    /// $c = new SoapClient(null, ['uri' => 'u', 'location' => 'l', 'ssl_method' => SOAP_SSL_METHOD_TLS]);
+    /// ```
+    /// ```expect
+    /// Client: SoapClient::__construct(): 'uri' option is required in nonWSDL mode
+    /// Client: SoapClient::__construct(): 'location' option is required in nonWSDL mode
+    /// Client: SoapClient::__construct(): 'uri' option is required in nonWSDL mode
+    /// Client: SoapClient::__construct(): Invalid 'encoding' option - 'nope'
+    /// Client: SoapClient::__construct(): 'classmap' option must be an associative array
+    ///
+    /// Deprecated: SoapClient::__construct(): The "ssl_method" option is deprecated. Use "ssl" stream context options instead in %s on line %d
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        wsdl: Option<PhpString>,
+        #[php(default = [])] options: PhpArray,
+    ) -> R<()> {
+        let object = this.object();
+        let saved = begin(req, object);
+        let given = req.argument_count() > 1;
+        let r = construct(req, object, wsdl, given.then_some(options));
+        let r = settle(req, object, r);
+        end(req, &saved);
+        r
+    }
+
+    /// `SoapClient::__call(string $name, array $args): mixed`: the call by
+    /// name.
+    ///
+    /// ```php
+    /// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string { echo $r, "\n"; return null; } }
+    /// $c = new C(null, ['location' => 'test://', 'uri' => 'urn:x', 'exceptions' => false]);
+    /// $f = $c->hello(1, 'two');
+    /// echo $f->faultstring, "\n";
+    /// ```
+    /// ```expect
+    /// <?xml version="1.0" encoding="UTF-8"?>
+    /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:x" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:hello><param0 xsi:type="xsd:int">1</param0><param1 xsi:type="xsd:string">two</param1></ns1:hello></SOAP-ENV:Body></SOAP-ENV:Envelope>
+    ///
+    /// SoapClient::__doRequest() returned non string value
+    /// ```
+    #[php(tentative)]
+    fn __call(req: &mut Request, this: This<Self>, name: PhpString, args: PhpArray) -> R<Value> {
+        call_common(req, this.object(), name, args, None, None, None, None, None)
+    }
+
+    /// `SoapClient::__soapCall(string $name, array $args, ?array $options =
+    /// null, $inputHeaders = null, &$outputHeaders = null): mixed`: the call
+    /// with a location, an action and a URI of its own, headers sent and
+    /// the response's headers given back.
+    ///
+    /// ```php
+    /// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string { echo $l, ' ', $a, "\n"; return '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Header><h>x</h></e:Header><e:Body><r><v>5</v></r></e:Body></e:Envelope>'; } }
+    /// $c = new C(null, ['location' => 'test://', 'uri' => 'urn:x']);
+    /// var_dump($c->__soapCall('f', [], ['location' => 'test://other', 'soapaction' => 'act'], new SoapHeader('urn:h', 'h'), $out), $out);
+    /// try { $c->__soapCall('f', [], null, 7); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// test://other act
+    /// string(1) "5"
+    /// array(1) {
+    ///   ["h"]=>
+    ///   string(1) "x"
+    /// }
+    /// SoapClient::__soapCall(): Argument #4 ($inputHeaders) must be of type SoapHeader|array|null, int given
+    /// ```
+    #[php(tentative)]
+    fn __soapCall(
+        req: &mut Request,
+        this: This<Self>,
+        name: PhpString,
+        args: PhpArray,
+        #[php(default = null)] options: Option<PhpArray>,
+        #[php(default = null)] inputHeaders: Untyped<Value>,
+        #[php(default = null)] outputHeaders: Ref<Untyped<Value>>,
+    ) -> R<Value> {
+        let object = this.object();
+        let mut location = None;
+        let mut soap_action = None;
+        let mut uri = None;
+        if let Some(o) = &options {
+            location =
+                str_option(*o, b"location").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+            soap_action =
+                str_option(*o, b"soapaction").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+            uri = str_option(*o, b"uri").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+        }
+        let output = if outputHeaders.is_given() {
+            let fresh = PhpArray::new(req)?;
+            outputHeaders.set(req, Untyped(Value::array(fresh)))?;
+            Some(())
+        } else {
+            None
+        };
+        let headers = inputHeaders.0.deref();
+        let soap_headers: Option<Vec<Value>> = match headers.as_ref() {
+            ValueRef::Null | ValueRef::Undef => None,
+            ValueRef::Array(a) => {
+                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                if !verify_soap_headers(req, &list) {
+                    let e = docref_error(req, "Invalid SOAP header");
+                    return unwrapped(req, object, Err(e));
+                }
+                Some(list)
+            }
+            ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => Some(vec![headers]),
+            _ => {
+                let shown = value_name(req, &headers);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    4,
+                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                ));
+            }
+        };
+        let out_ref = output.map(|()| &outputHeaders);
+        call_common(
+            req,
+            object,
+            name,
+            args,
+            location.as_deref(),
+            soap_action.as_deref(),
+            uri.as_deref(),
+            soap_headers,
+            out_ref,
+        )
+    }
+
+    /// `SoapClient::__getFunctions(): ?array`: the description's
+    /// operations as signatures; `null` without one.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getFunctions());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn __getFunctions(req: &mut Request, this: This<Self>) -> R<Option<PhpArray>> {
+        let Some(sdl) = this_sdl(req, this.object()) else {
+            return Ok(None);
+        };
+        let mut out = PhpArray::new(req)?;
+        for f in sdl.functions.values() {
+            let s = function_to_string(&sdl, f);
+            let v = Value::string(PhpString::new(req, &s)?);
+            out.append(req, v)?;
+        }
+        Ok(Some(out))
+    }
+
+    /// `SoapClient::__getTypes(): ?array`: the description's types as
+    /// declarations; `null` without one.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getTypes());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn __getTypes(req: &mut Request, this: This<Self>) -> R<Option<PhpArray>> {
+        let Some(sdl) = this_sdl(req, this.object()) else {
+            return Ok(None);
+        };
+        let mut out = PhpArray::new(req)?;
+        if let Some(types) = &sdl.types {
+            for id in types.values() {
+                let mut s = Vec::new();
+                if let Some(t) = sdl.ty(*id) {
+                    type_to_string(&sdl, t, &mut s, 0);
+                }
+                let v = Value::string(PhpString::new(req, &s)?);
+                out.append(req, v)?;
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// `SoapClient::__getLastRequest(): ?string`.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getLastRequest());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    #[allow(clippy::unnecessary_wraps)] // the native's return shape
+    fn __getLastRequest(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(req, this.object(), ClientSlot::LastRequest))
+    }
+
+    /// `SoapClient::__getLastResponse(): ?string`.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getLastResponse());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    #[allow(clippy::unnecessary_wraps)] // the native's return shape
+    fn __getLastResponse(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(req, this.object(), ClientSlot::LastResponse))
+    }
+
+    /// `SoapClient::__getLastRequestHeaders(): ?string`.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getLastRequestHeaders());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    #[allow(clippy::unnecessary_wraps)] // the native's return shape
+    fn __getLastRequestHeaders(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(
+            req,
+            this.object(),
+            ClientSlot::LastRequestHeaders,
+        ))
+    }
+
+    /// `SoapClient::__getLastResponseHeaders(): ?string`.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getLastResponseHeaders());
+    /// ```
+    /// ```expect
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    #[allow(clippy::unnecessary_wraps)] // the native's return shape
+    fn __getLastResponseHeaders(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(
+            req,
+            this.object(),
+            ClientSlot::LastResponseHeaders,
+        ))
+    }
+
+    /// `SoapClient::__doRequest(string $request, string $location, string
+    /// $action, int $version, bool $oneWay = false, ?string $uriParserClass
+    /// = null): ?string`: the request sent over HTTP, the response body
+    /// answered, `null` with a fault kept where it failed.
+    ///
+    /// ```php
+    /// $c = new SoapClient(null, ['location' => 'l', 'uri' => 'u', 'exceptions' => false]);
+    /// var_dump($c->__doRequest('<x/>', 'test://', 'a', SOAP_1_1));
+    /// echo get_class(((array) $c)["\0SoapClient\0__soap_fault"]), "\n";
+    /// ```
+    /// ```expect
+    /// NULL
+    /// SoapFault
+    /// ```
+    #[php(tentative)]
+    fn __doRequest(
+        req: &mut Request,
+        this: This<Self>,
+        request: PhpString,
+        location: PhpString,
+        action: PhpString,
+        version: i64,
+        #[php(default = false)] oneWay: bool,
+        #[php(default = null)] uriParserClass: Option<PhpString>,
+    ) -> R<Option<PhpString>> {
+        let object = this.object();
+        let mut one_way = oneWay;
+        if req.state::<State>().features & 2 != 0 {
+            one_way = false;
+        }
+        let parser = uriParserClass.as_ref().map(PhpString::as_bytes);
+        let action = Some(action.as_bytes());
+        let answered = if one_way {
+            crate::http::make_http_soap_request_one_way(
+                req,
+                object,
+                request.as_bytes(),
+                location.as_bytes(),
+                action,
+                version,
+                parser,
+            )
+            .map(|ok| ok.then(Vec::new))
+        } else {
+            crate::http::make_http_soap_request(
+                req,
+                object,
+                request.as_bytes(),
+                location.as_bytes(),
+                action,
+                version,
+                parser,
+            )
+        };
+        // An `E_ERROR` reaches the soap handler only while a client or a
+        // server runs; called on its own it is the plain fatal.
+        let answered = unwrapped(req, object, answered)?;
+        match answered {
+            Some(body) => Ok(Some(PhpString::new(req, &body)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `SoapClient::__setCookie(string $name, ?string $value = null):
+    /// void`: a cookie sent with every call, removed without a value.
+    ///
+    /// ```php
+    /// $c = new SoapClient(null, ['location' => 'l', 'uri' => 'u']);
+    /// $c->__setCookie('a', 'b'); $c->__setCookie('c', 'd'); $c->__setCookie('c');
+    /// var_dump($c->__getCookies());
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   ["a"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     string(1) "b"
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn __setCookie(
+        req: &mut Request,
+        this: This<Self>,
+        name: PhpString,
+        #[php(default = null)] value: Option<PhpString>,
+    ) -> R<()> {
+        let object = this.object();
+        let cookies = client_slot(object, ClientSlot::Cookies);
+        let mut cookies = match cookies.as_ref() {
+            ValueRef::Array(a) => {
+                let mut a = *a;
+                req.addref(&Value::array(a));
+                a.separate(req)?;
+                a
+            }
+            _ => PhpArray::new(req)?,
+        };
+        match value {
+            None => {
+                cookies.unset(req, &PhpKey::from_string(name))?;
+            }
+            Some(v) => {
+                let mut cookie = PhpArray::new(req)?;
+                req.addref(&Value::string(v));
+                cookie.set(req, PhpKey::Int(0), Value::string(v))?;
+                req.addref(&Value::string(name));
+                cookies.set(req, PhpKey::from_string(name), Value::array(cookie))?;
+            }
+        }
+        set_client_slot(req, object, ClientSlot::Cookies, Value::array(cookies))
+    }
+
+    /// `SoapClient::__getCookies(): array`.
+    ///
+    /// ```php
+    /// var_dump((new SoapClient(null, ['location' => 'l', 'uri' => 'u']))->__getCookies());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    #[allow(clippy::unnecessary_wraps)] // the native's return shape
+    fn __getCookies(req: &mut Request, this: This<Self>) -> R<PhpArray> {
+        match client_slot(this.object(), ClientSlot::Cookies)
+            .as_array()
+            .copied()
+        {
+            Some(a) => {
+                req.addref(&Value::array(a));
+                Ok(a)
+            }
+            None => PhpArray::new(req),
+        }
+    }
+
+    /// `SoapClient::__setSoapHeaders($headers = null): bool`: the headers
+    /// every call sends, replaced.
+    ///
+    /// ```php
+    /// $c = new SoapClient(null, ['location' => 'l', 'uri' => 'u']);
+    /// var_dump($c->__setSoapHeaders(new SoapHeader('urn:h', 'a')), $c->__setSoapHeaders([new SoapHeader('urn:h', 'b')]), $c->__setSoapHeaders());
+    /// try { $c->__setSoapHeaders(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// SoapClient::__setSoapHeaders(): Argument #1 ($headers) must be of type SoapHeader|array|null, int given
+    /// ```
+    #[php(tentative)]
+    fn __setSoapHeaders(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] headers: Untyped<Value>,
+    ) -> R<bool> {
+        let object = this.object();
+        let headers = headers.0.deref();
+        match headers.as_ref() {
+            ValueRef::Null | ValueRef::Undef => {
+                set_client_slot(req, object, ClientSlot::DefaultHeaders, Value::null())?;
+            }
+            ValueRef::Array(a) => {
+                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                if !verify_soap_headers(req, &list) {
+                    let e = docref_error(req, "Invalid SOAP header");
+                    return unwrapped(req, object, Err(e));
+                }
+                req.addref(&headers);
+                set_client_slot(req, object, ClientSlot::DefaultHeaders, headers)?;
+            }
+            ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => {
+                let mut list = PhpArray::new(req)?;
+                req.addref(&headers);
+                list.append(req, headers)?;
+                set_client_slot(req, object, ClientSlot::DefaultHeaders, Value::array(list))?;
+            }
+            _ => {
+                let shown = value_name(req, &headers);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    1,
+                    &format!("must be of type SoapHeader|array|null, {shown} given"),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    /// `SoapClient::__setLocation(?string $location = null): ?string`: the
+    /// endpoint replaced, the old one answered.
+    ///
+    /// ```php
+    /// $c = new SoapClient(null, ['location' => 'l', 'uri' => 'u']);
+    /// var_dump($c->__setLocation('m'), $c->__setLocation(''), $c->__setLocation());
+    /// ```
+    /// ```expect
+    /// string(1) "l"
+    /// string(1) "m"
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn __setLocation(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] location: Option<PhpString>,
+    ) -> R<Option<PhpString>> {
+        let object = this.object();
+        let old = slot_string(req, object, ClientSlot::Location);
+        let new = match location {
+            Some(l) if !l.is_empty() => {
+                req.addref(&Value::string(l));
+                Value::string(l)
+            }
+            _ => Value::null(),
+        };
+        set_client_slot(req, object, ClientSlot::Location, new)?;
+        Ok(old)
+    }
+}
+
+/// A string slot with one more owner, the caller's; none for `null`.
+fn slot_string(req: &mut Request, this: PhpObject, which: ClientSlot) -> Option<PhpString> {
+    let v = client_slot(this, which);
+    let s = v.as_php_string().copied()?;
+    req.addref(&v);
+    Some(s)
+}
+
+/// `FETCH_THIS_SDL`.
+fn this_sdl(req: &Request, this: PhpObject) -> Option<std::sync::Arc<Sdl>> {
+    sdl_of(req, &client_slot(this, ClientSlot::Sdl))
+}
+
+/// `verify_soap_headers_array`: every element a `SoapHeader`.
+fn verify_soap_headers(req: &mut Request, list: &[Value]) -> bool {
+    list.iter().all(|v| match v.deref().as_ref() {
+        ValueRef::Object(o) => instance_of(req, *o, "SoapHeader"),
+        _ => false,
+    })
+}
+
+/// A string slot written from an option.
+fn set_str(req: &mut Request, this: PhpObject, which: ClientSlot, v: Value) -> R<()> {
+    let v = owned(req, v);
+    set_client_slot(req, this, which, v)
+}
+
+/// `stream_context_create()`: a fresh stream option set, `php_stream_context_alloc`.
+fn new_context(req: &mut Request) -> R<Option<Resource>> {
+    let Some(f) = lookup_function(req, b"stream_context_create") else {
+        return Ok(None);
+    };
+    let name = Value::string(PhpString::new(req, b"stream_context_create")?);
+    let callable = php_ext::coerce::to_callable(req, &name);
+    req.release(name);
+    let _ = f;
+    let made = php_ext::call::call(req, &callable?, &[])?;
+    Ok(made.as_resource().copied())
+}
+
+/// `SoapClient::__construct`'s body.
+#[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
+fn construct(
+    req: &mut Request,
+    this: PhpObject,
+    wsdl: Option<PhpString>,
+    options: Option<PhpArray>,
+) -> Res<()> {
+    let mut cache_wsdl = crate::sdl::cache::default_cache_wsdl(req);
+    let mut soap_version = SOAP_1_1;
+    let mut typemap_ht: Option<PhpArray> = None;
+    if let Some(ht) = &options {
+        if wsdl.is_none() {
+            match str_option(*ht, b"uri") {
+                Some(v) => set_str(req, this, ClientSlot::Uri, v)?,
+                None => {
+                    return Err(docref_error(
+                        req,
+                        "'uri' option is required in nonWSDL mode",
+                    ));
+                }
+            }
+            if let Some(ValueRef::Int(s)) = ht
+                .find(b"style")
+                .map(|v| v.deref())
+                .as_ref()
+                .map(Value::as_ref)
+                && (s == 1 || s == 2)
+            {
+                set_client_slot(req, this, ClientSlot::Style, Value::int(s))?;
+            }
+            if let Some(ValueRef::Int(u)) = ht
+                .find(b"use")
+                .map(|v| v.deref())
+                .as_ref()
+                .map(Value::as_ref)
+                && (u == 1 || u == 2)
+            {
+                set_client_slot(req, this, ClientSlot::Use, Value::int(u))?;
+            }
+        }
+        let mut context: Option<Resource> = None;
+        if let Some(v) = ht.find(b"stream_context").map(|v| v.deref())
+            && let Some(r) = v.as_resource().copied()
+        {
+            req.addref(&v);
+            context = Some(r);
+        } else {
+            context = new_context(req)?.or(context);
+        }
+        match str_option(*ht, b"location") {
+            Some(v) => set_str(req, this, ClientSlot::Location, v)?,
+            None if wsdl.is_none() => {
+                return Err(docref_error(
+                    req,
+                    "'location' option is required in nonWSDL mode",
+                ));
+            }
+            None => {}
+        }
+        if let Some(ValueRef::Int(v)) = ht
+            .find(b"soap_version")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+            && (v == SOAP_1_1 || v == SOAP_1_2)
+        {
+            soap_version = v;
+        }
+        if let Some(login) = str_option(*ht, b"login") {
+            set_str(req, this, ClientSlot::Login, login)?;
+            if let Some(p) = str_option(*ht, b"password") {
+                set_str(req, this, ClientSlot::Password, p)?;
+            }
+            if let Some(ValueRef::Int(1)) = ht
+                .find(b"authentication")
+                .map(|v| v.deref())
+                .as_ref()
+                .map(Value::as_ref)
+            {
+                set_client_slot(req, this, ClientSlot::UseDigest, Value::bool(true))?;
+            }
+        }
+        if let Some(host) = str_option(*ht, b"proxy_host") {
+            set_str(req, this, ClientSlot::ProxyHost, host)?;
+            if let Some(port) = ht.find(b"proxy_port").map(|v| v.deref()) {
+                let n = to_long(req, &port)?;
+                set_client_slot(req, this, ClientSlot::ProxyPort, Value::int(n))?;
+            }
+            if let Some(l) = str_option(*ht, b"proxy_login") {
+                set_str(req, this, ClientSlot::ProxyLogin, l)?;
+                if let Some(p) = str_option(*ht, b"proxy_password") {
+                    set_str(req, this, ClientSlot::ProxyPassword, p)?;
+                }
+            }
+        }
+        if let Some(cert) = str_option(*ht, b"local_cert") {
+            if context.is_none() {
+                context = new_context(req)?;
+            }
+            if let Some(ctx) = context {
+                php_ext_standard::stream_ctx_set_option(req, ctx, b"ssl", b"local_cert", &cert)?;
+                if let Some(pp) = str_option(*ht, b"passphrase") {
+                    php_ext_standard::stream_ctx_set_option(req, ctx, b"ssl", b"passphrase", &pp)?;
+                }
+            }
+        }
+        if let Some(t) = ht.find(b"trace").map(|v| v.deref())
+            && matches!(t.as_ref(), ValueRef::Bool(true) | ValueRef::Int(1))
+        {
+            set_client_slot(req, this, ClientSlot::Trace, Value::bool(true))?;
+        }
+        if let Some(t) = ht.find(b"exceptions").map(|v| v.deref())
+            && matches!(t.as_ref(), ValueRef::Bool(false) | ValueRef::Int(0))
+        {
+            set_client_slot(req, this, ClientSlot::Exceptions, Value::bool(false))?;
+        }
+        if let Some(ValueRef::Int(c)) = ht
+            .find(b"compression")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+            && [
+                &b"gzinflate"[..],
+                b"gzdeflate",
+                b"gzuncompress",
+                b"gzcompress",
+                b"gzencode",
+            ]
+            .iter()
+            .all(|f| lookup_function(req, f).is_some())
+        {
+            set_client_slot(req, this, ClientSlot::Compression, Value::int(c))?;
+        }
+        if let Some(enc) = str_option(*ht, b"encoding") {
+            let name = enc.as_str_bytes().unwrap_or_default().to_vec();
+            if Library::known_encoding(&name) {
+                set_str(req, this, ClientSlot::Encoding, enc)?;
+            } else {
+                let shown = String::from_utf8_lossy(&name).into_owned();
+                return Err(docref_error(
+                    req,
+                    &format!("Invalid 'encoding' option - '{shown}'"),
+                ));
+            }
+        }
+        if let Some(cm) = ht.find(b"classmap").map(|v| v.deref())
+            && let ValueRef::Array(a) = cm.as_ref()
+        {
+            if a.is_packed() {
+                return Err(docref_error(
+                    req,
+                    "'classmap' option must be an associative array",
+                ));
+            }
+            req.addref(&cm);
+            set_client_slot(req, this, ClientSlot::Classmap, cm)?;
+        }
+        if let Some(tm) = ht.find(b"typemap").map(|v| v.deref())
+            && let ValueRef::Array(a) = tm.as_ref()
+            && !a.is_empty()
+        {
+            typemap_ht = Some(*a);
+        }
+        if let Some(ValueRef::Int(f)) = ht
+            .find(b"features")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+        {
+            set_client_slot(req, this, ClientSlot::Features, Value::int(f))?;
+        }
+        if let Some(t) = ht.find(b"connection_timeout").map(|v| v.deref()) {
+            let n = to_long(req, &t)?;
+            if n > 0 {
+                set_client_slot(req, this, ClientSlot::ConnectionTimeout, Value::int(n))?;
+            }
+        }
+        if let Some(ctx) = context {
+            set_client_slot(req, this, ClientSlot::StreamContext, ctx.as_value())?;
+        }
+        if let Some(ValueRef::Int(c)) = ht
+            .find(b"cache_wsdl")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+        {
+            cache_wsdl = c;
+        }
+        if let Some(ua) = str_option(*ht, b"user_agent") {
+            set_str(req, this, ClientSlot::UserAgent, ua)?;
+        }
+        if let Some(t) = ht.find(b"keep_alive").map(|v| v.deref())
+            && matches!(t.as_ref(), ValueRef::Bool(false) | ValueRef::Int(0))
+        {
+            set_client_slot(req, this, ClientSlot::KeepAlive, Value::bool(false))?;
+        }
+        if let Some(ValueRef::Int(m)) = ht
+            .find(b"ssl_method")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+        {
+            set_client_slot(req, this, ClientSlot::SslMethod, Value::int(m))?;
+            docref(
+                req,
+                Level::Deprecated,
+                "The \"ssl_method\" option is deprecated. Use \"ssl\" stream context options instead",
+            );
+        }
+    } else if wsdl.is_none() {
+        return Err(docref_error(
+            req,
+            "'location' and 'uri' options are required in nonWSDL mode",
+        ));
+    }
+    set_client_slot(req, this, ClientSlot::SoapVersion, Value::int(soap_version))?;
+    let mut sdl = None;
+    if let Some(w) = &wsdl {
+        let old = std::mem::replace(&mut req.state::<State>().soap_version, soap_version);
+        let loaded = crate::sdl::cache::get_sdl(req, this, w.as_bytes(), cache_wsdl);
+        req.state::<State>().soap_version = old;
+        let loaded = loaded?;
+        let object = new_sdl_object(req, loaded.clone())?;
+        set_client_slot(req, this, ClientSlot::Sdl, object.as_value())?;
+        sdl = Some(loaded);
+    }
+    if let Some(ht) = typemap_ht {
+        match soap_create_typemap(req, sdl.as_deref(), ht) {
+            Ok(Some(t)) => {
+                let mut shown = PhpArray::new(req)?;
+                for (k, _) in t.iter() {
+                    if let crate::table::Key::Str(name) = k {
+                        let key = PhpKey::Str(PhpString::new(req, name)?);
+                        shown.set(req, key, Value::null())?;
+                    }
+                }
+                set_client_slot(req, this, ClientSlot::Typemap, Value::array(shown))?;
+                let old = this
+                    .native_mut::<Client>(req)
+                    .and_then(|c| c.typemap.replace(t));
+                if let Some(old) = old {
+                    release_typemap(req, &old);
+                }
+            }
+            Ok(None) => {}
+            Err(t) => return Err(Error::Thrown(t)),
+        }
+    }
+    Ok(())
+}
+
+/// `soap_client_call_common`: the default headers added to the call's,
+/// the arguments in order, and the call made.
+fn call_common(
+    req: &mut Request,
+    this: PhpObject,
+    function: PhpString,
+    args: PhpArray,
+    location: Option<&[u8]>,
+    soap_action: Option<&[u8]>,
+    uri: Option<&[u8]>,
+    soap_headers: Option<Vec<Value>>,
+    output_headers: Option<&Ref<Untyped<Value>>>,
+) -> R<Value> {
+    let mut headers = soap_headers;
+    if let ValueRef::Array(defaults) = client_slot(this, ClientSlot::DefaultHeaders).as_ref() {
+        let defaults: Vec<Value> = defaults.snapshot().into_iter().map(|(_, v)| v).collect();
+        match &mut headers {
+            Some(list) => list.extend(
+                defaults
+                    .into_iter()
+                    .filter(|v| v.deref().as_object().is_some()),
+            ),
+            None => headers = Some(defaults),
+        }
+    }
+    let real_args: Vec<Value> = args
+        .snapshot()
+        .into_iter()
+        .map(|(_, v)| v.deref())
+        .collect();
+    do_soap_call(
+        req,
+        this,
+        function.as_bytes(),
+        &real_args,
+        location,
+        soap_action,
+        uri,
+        headers.as_deref(),
+        output_headers,
+    )
+}
+
+/// `do_request`: the request dumped, kept for `__getLastRequest()` under
+/// `trace`, handed to `__doRequest()`, the response kept likewise; a
+/// fault where `__doRequest()` answered no string.
+fn do_request(
+    req: &mut Request,
+    this: PhpObject,
+    request: Node,
+    location: &[u8],
+    action: Option<&[u8]>,
+    version: i64,
+    one_way: bool,
+) -> Res<(bool, Option<Value>)> {
+    let (buf, _) = Save::doc(request, 0, false, None);
+    let Some(buf) = buf else {
+        add_soap_fault(
+            req,
+            this,
+            b"HTTP",
+            b"Error build soap request",
+            None,
+            None,
+            b"en",
+        )?;
+        return Ok((false, None));
+    };
+    let p0 = Value::string(PhpString::new(req, &buf)?);
+    let p1 = Value::string(PhpString::new(req, location)?);
+    let p2 = Value::string(PhpString::new(req, action.unwrap_or_default())?);
+    let params = [p0, p1, p2, Value::int(version), Value::bool(one_way)];
+    let trace = matches!(
+        client_slot(this, ClientSlot::Trace).as_ref(),
+        ValueRef::Bool(true)
+    );
+    if trace {
+        req.addref(&p0);
+        set_client_slot(req, this, ClientSlot::LastRequest, p0)?;
+    }
+    let response = call_method(req, &this, b"__dorequest", &params);
+    for p in [p2, p1, p0] {
+        req.release(p);
+    }
+    let response = response?;
+    let mut ret = true;
+    if response.as_str_bytes().is_none() {
+        let fault_set = client_slot(this, ClientSlot::SoapFault)
+            .as_object()
+            .is_some();
+        if !fault_set {
+            add_soap_fault(
+                req,
+                this,
+                b"Client",
+                b"SoapClient::__doRequest() returned non string value",
+                None,
+                None,
+                b"en",
+            )?;
+        }
+        ret = false;
+    } else if trace {
+        req.addref(&response);
+        set_client_slot(req, this, ClientSlot::LastResponse, response)?;
+    }
+    if ret
+        && client_slot(this, ClientSlot::SoapFault)
+            .as_object()
+            .is_some()
+    {
+        ret = false;
+    }
+    Ok((ret, Some(response)))
+}
+
+/// `do_soap_call`.
+fn do_soap_call(
+    req: &mut Request,
+    this: PhpObject,
+    function: &[u8],
+    args: &[Value],
+    location: Option<&[u8]>,
+    soap_action: Option<&[u8]>,
+    call_uri: Option<&[u8]>,
+    soap_headers: Option<&[Value]>,
+    output_headers: Option<&Ref<Untyped<Value>>>,
+) -> R<Value> {
+    let saved = begin(req, this);
+    if matches!(
+        client_slot(this, ClientSlot::Trace).as_ref(),
+        ValueRef::Bool(true)
+    ) {
+        set_client_slot(req, this, ClientSlot::LastRequest, Value::null())?;
+        set_client_slot(req, this, ClientSlot::LastResponse, Value::null())?;
+    }
+    let soap_version = match client_slot(this, ClientSlot::SoapVersion).as_ref() {
+        ValueRef::Int(2) => SOAP_1_2,
+        _ => SOAP_1_1,
+    };
+    let location: Option<Vec<u8>> = location.map(<[u8]>::to_vec).or_else(|| {
+        client_slot(this, ClientSlot::Location)
+            .as_str_bytes()
+            .map(<[u8]>::to_vec)
+    });
+    let sdl = this_sdl(req, this);
+    let typemap = this.native::<Client>(req).and_then(|c| c.typemap.clone());
+    // `clear_soap_fault`.
+    set_client_slot(req, this, ClientSlot::SoapFault, Value::null())?;
+    let encoding = client_slot(this, ClientSlot::Encoding)
+        .as_str_bytes()
+        .map(<[u8]>::to_vec);
+    let class_map = {
+        let v = client_slot(this, ClientSlot::Classmap);
+        v.as_array().is_some().then_some(v)
+    };
+    let features = match client_slot(this, ClientSlot::Features).as_ref() {
+        ValueRef::Int(f) => f,
+        _ => 0,
+    };
+    let state = req.state::<State>();
+    state.soap_version = soap_version;
+    let old_sdl = std::mem::replace(&mut state.sdl, sdl.clone());
+    let old_encoding = std::mem::replace(&mut state.encoding, encoding);
+    let old_class_map = std::mem::replace(&mut state.class_map, class_map);
+    let old_typemap = std::mem::replace(&mut state.typemap, typemap);
+    let old_features = std::mem::replace(&mut state.features, features);
+    let r = soap_call_body(
+        req,
+        this,
+        sdl.as_deref(),
+        function,
+        args,
+        location.as_deref(),
+        soap_action,
+        call_uri,
+        soap_headers,
+        output_headers,
+        soap_version,
+    );
+    let r = settle(req, this, r);
+    let state = req.state::<State>();
+    state.features = old_features;
+    state.typemap = old_typemap;
+    state.class_map = old_class_map;
+    state.encoding = old_encoding;
+    state.sdl = old_sdl;
+    end(req, &saved);
+    r
+}
+
+#[expect(clippy::too_many_lines, reason = "the body of one C function")]
+fn soap_call_body(
+    req: &mut Request,
+    this: PhpObject,
+    sdl: Option<&Sdl>,
+    function: &[u8],
+    args: &[Value],
+    location: Option<&[u8]>,
+    soap_action: Option<&[u8]>,
+    call_uri: Option<&[u8]>,
+    soap_headers: Option<&[Value]>,
+    output_headers: Option<&Ref<Untyped<Value>>>,
+    soap_version: i64,
+) -> Res<Value> {
+    let mut ret = false;
+    let mut return_value = Value::null();
+    if let Some(sdl_ref) = sdl {
+        if let Some(fn_) = get_function(Some(sdl_ref), function) {
+            let binding = crate::message::binding_of(sdl_ref, fn_);
+            let one_way = fn_.response_name.is_none()
+                && fn_.response_parameters.is_none()
+                && soap_headers.is_none();
+            let loc: Vec<u8> = match location {
+                Some(l) => l.to_vec(),
+                None => binding.and_then(|b| b.location.clone()).unwrap_or_default(),
+            };
+            let request;
+            let action: Option<Vec<u8>>;
+            if binding.is_some_and(|b| b.binding_type == BindingType::Soap) {
+                let fnb = soap_binding(Some(sdl_ref), Some(fn_));
+                request = serialize_function_call(
+                    req,
+                    this,
+                    Some(sdl_ref),
+                    Some(fn_),
+                    None,
+                    fnb.and_then(|b| b.input.ns.as_deref()),
+                    args,
+                    soap_version,
+                    soap_headers,
+                )?;
+                action = fnb.and_then(|b| b.soap_action.clone());
+            } else {
+                request = serialize_function_call(
+                    req,
+                    this,
+                    Some(sdl_ref),
+                    Some(fn_),
+                    None,
+                    sdl_ref.target_ns.as_deref(),
+                    args,
+                    soap_version,
+                    soap_headers,
+                )?;
+                action = None;
+            }
+            let done = do_request(
+                req,
+                this,
+                request,
+                &loc,
+                action.as_deref(),
+                soap_version,
+                one_way,
+            );
+            request.free_document();
+            let (ok, response) = done?;
+            ret = ok;
+            if let Some(resp) = response {
+                if ret && let Some(body) = resp.as_str_bytes() {
+                    let body = body.to_vec();
+                    let parsed = crate::packet::parse_packet_soap(
+                        req,
+                        this,
+                        &body,
+                        Some(fn_),
+                        sdl,
+                        output_headers,
+                    );
+                    req.release(resp);
+                    let (r, v) = parsed?;
+                    ret = r;
+                    return_value = v;
+                } else {
+                    req.release(resp);
+                }
+            }
+        } else {
+            let mut error = b"Function (\"".to_vec();
+            error.extend_from_slice(function);
+            error.extend_from_slice(b"\") is not a valid method for this service");
+            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?;
+        }
+    } else {
+        let uri = client_slot(this, ClientSlot::Uri);
+        if uri.as_str_bytes().is_none() {
+            add_soap_fault(
+                req,
+                this,
+                b"Client",
+                b"Error finding \"uri\" property",
+                None,
+                None,
+                b"en",
+            )?;
+        } else if location.is_none() {
+            add_soap_fault(
+                req,
+                this,
+                b"Client",
+                b"Error could not find \"location\" property",
+                None,
+                None,
+                b"en",
+            )?;
+        } else {
+            let call_uri = call_uri
+                .map(<[u8]>::to_vec)
+                .or_else(|| uri.as_str_bytes().map(<[u8]>::to_vec))
+                .unwrap_or_default();
+            let request = serialize_function_call(
+                req,
+                this,
+                None,
+                None,
+                Some(function),
+                Some(&call_uri),
+                args,
+                soap_version,
+                soap_headers,
+            )?;
+            let action = if let Some(a) = soap_action {
+                a.to_vec()
+            } else {
+                let mut a = call_uri.clone();
+                a.push(b'#');
+                a.extend_from_slice(function);
+                a
+            };
+            let done = do_request(
+                req,
+                this,
+                request,
+                location.unwrap_or_default(),
+                Some(&action),
+                soap_version,
+                false,
+            );
+            request.free_document();
+            let (ok, response) = done?;
+            ret = ok;
+            if let Some(resp) = response {
+                if ret && let Some(body) = resp.as_str_bytes() {
+                    let body = body.to_vec();
+                    let parsed = crate::packet::parse_packet_soap(
+                        req,
+                        this,
+                        &body,
+                        None,
+                        None,
+                        output_headers,
+                    );
+                    req.release(resp);
+                    let (r, v) = parsed?;
+                    ret = r;
+                    return_value = v;
+                } else {
+                    req.release(resp);
+                }
+            }
+        }
+    }
+    let fault = client_slot(this, ClientSlot::SoapFault);
+    if !ret {
+        req.release(return_value);
+        if fault.as_object().is_some() {
+            return_value = owned(req, fault);
+        } else {
+            let made = add_soap_fault(req, this, b"Client", b"Unknown Error", None, None, b"en")?;
+            return_value = made.as_value();
+            req.addref(&return_value);
+        }
+    } else if fault.as_object().is_some() {
+        req.release(return_value);
+        return_value = owned(req, fault);
+    }
+    if let ValueRef::Object(o) = return_value.as_ref()
+        && instance_of(req, *o, "SoapFault")
+        && !matches!(
+            client_slot(this, ClientSlot::Exceptions).as_ref(),
+            ValueRef::Bool(false)
+        )
+    {
+        let thrown = throw_value(req, &return_value);
+        req.release(return_value);
+        return Err(Error::Thrown(thrown));
+    }
+    Ok(return_value)
+}
+
+#[allow(dead_code)]
+fn _unused(_: Option<&Resource>) -> bool {
+    is_null(&Value::null())
+}

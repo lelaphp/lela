@@ -23,6 +23,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── fileinfo
 ├── filter
 ├── ftp
+├── gd
 ├── gmp
 ├── hash
 ├── iconv
@@ -47,6 +48,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── session
 ├── shmop
 ├── simplexml
+├── soap
 ├── sockets
 ├── spl
 ├── sqlite3
@@ -64,12 +66,12 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── zip
 └── zlib
 ```
-<!-- /computed in=d2e4c8065a2b066096e80d9b1807862a6142e4da03292431ef7709f60029e7b9 out=ffd8fd686a06c537806863f229b5778f2896665f2c54ac490915882e3426ef8a -->
+<!-- /computed in=9e985f1ebed450479293efa320022d82229836d11008ff08ea144b46ac29f993 out=1d5106ec82e93dd65376b579ab79e301bfb6f2c0ae5c39da8cc6894e932ed56a -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 
 | crate | order | extensions | reading | message |
 |---|---|---|---|---|
-| php_bundle | topological | 48 | pass | 49 workspace dependencies within its edges |
+| php_bundle | topological | 52 | pass | 53 workspace dependencies within its edges |
 
-<!-- /computed in=132df0e49fd32770596ac15339d41d0ae8b776f32adca96aa7a9e8ea9a3469c2 out=b0d8e67b88b1fc2f9de8e644d712fc8a6bbaeaff89f1078952497bf609f6cc46 -->
+<!-- /computed in=9b24155e0e53bc2983ebdc76d8312986e99c3f0a23b34c619cf10bdc6b7c8b5d out=1be442024278bae133fd854847ab183d417ecf0e090d93454d30ab394d857b65 -->

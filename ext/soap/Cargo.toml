@@ -1,0 +1,34 @@
+# ext/soap: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_soap"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The soap extension, php-src/ext/soap"
+
+[lints]
+workspace = true
+
+# The facade, libxml and standard. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# libxml2 through `ext/libxml`'s surface, `php_libxml.h`'s, as php's soap
+# includes it (`ZEND_MOD_REQUIRED("libxml")`, design §4.10, revision 72);
+# no `src/ffi/` of its own (§7.2).
+php_ext_libxml = { path = "../libxml" }
+# `base64.h`, `md5.h` and `php_stream_context_get_option`, which
+# `php_http.c`, `php_encoding.c` and `php_sdl.c` include and call
+# (design §4.10).
+php_ext_standard = { path = "../standard" }
+# `php_uri.h`, which `php_http.c` includes to parse the location with the
+# parser `__doRequest`'s `uriParserClass` names (design §4.10).
+php_ext_uri = { path = "../uri" }
+# The digest's `cnonce`, `php_random_bytes_throw`'s host bytes, as
+# ext/random and ext/zip read them.
+getrandom = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

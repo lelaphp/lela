@@ -126,6 +126,10 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xsl::extension,
         #[cfg(feature = "tidy")]
         php_ext_tidy::extension,
+        #[cfg(feature = "soap")]
+        php_ext_soap::extension,
+        #[cfg(feature = "gd")]
+        php_ext_gd::extension,
         #[cfg(feature = "intl")]
         php_ext_intl::extension,
     ]
@@ -157,6 +161,10 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-fileinfo",
     #[cfg(not(feature = "filter"))]
     "--disable-filter",
+    #[cfg(feature = "gd")]
+    "--enable-gd",
+    #[cfg(feature = "gd")]
+    "--with-external-gd",
     #[cfg(not(feature = "iconv"))]
     "--without-iconv",
     #[cfg(not(feature = "libxml"))]
@@ -183,6 +191,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-session",
     #[cfg(not(feature = "simplexml"))]
     "--disable-simplexml",
+    #[cfg(feature = "soap")]
+    "--enable-soap",
     #[cfg(feature = "sockets")]
     "--enable-sockets",
     "--without-sqlite3",

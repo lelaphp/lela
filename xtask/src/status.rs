@@ -93,7 +93,11 @@ pub fn render(
         ),
         Section::Divergence => return divergence(registry, format, uncut),
         Section::Phpt => {
-            let rows = fold_uncreated(standing(store, root)?, "scope")?;
+            let rows = standing(store, root)?
+                .into_iter()
+                .filter(|row| !outlived(manifest, row))
+                .collect();
+            let rows = fold_uncreated(rows, "scope")?;
             match format {
                 Format::Md => (compared(outermost(rows)), PHPT),
                 Format::Json => (rows, INSTRUMENT),
@@ -614,6 +618,18 @@ fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
     Ok(rows
         .map(|r| Row::new(&[("scope", json!(r.scope))], Some(r.clone())))
         .collect())
+}
+
+/// Whether a phpt row is the reading of a crate whose row owns no subset
+/// any more, as `php_sapi`'s is since each host's row took its own
+/// directory (ADR-0008, #1269): those tests are the hosts' rows' now, and
+/// the reading that outlived its subset would stand beside them for good.
+fn outlived(manifest: &Manifest, row: &Row) -> bool {
+    let scope = row.facts.get("scope").and_then(Value::as_str).unwrap_or("");
+    let base = scope.split('@').next().unwrap_or(scope);
+    manifest
+        .crate_named(base)
+        .is_some_and(|krate| krate.subsets().is_empty())
 }
 
 /// The rows of the phpt section a session is handed: each subset's, but
@@ -1490,7 +1506,7 @@ fn table((head, line): Columns, rows: &[Row]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOCAL_SECTIONS, Row, local_template, outermost};
+    use super::{LOCAL_SECTIONS, Row, local_template, outermost, outlived};
     use serde_json::json;
 
     /// The opener of a region by name, if the text has one.
@@ -1551,5 +1567,26 @@ mod tests {
                 "ext/pdo_sqlite"
             ]
         );
+    }
+
+    /// A reading of a crate whose row names no subset outlived its subset,
+    /// its comparisons with it; a host's, a directory's and an extension's
+    /// stand (#1269).
+    #[test]
+    fn a_reading_of_a_crate_with_no_subset_outlived_it() {
+        let manifest = crate::manifest::Manifest::load(&crate::built_root()).unwrap();
+        let row = |scope: &str| Row::new(&[("scope", json!(scope))], None);
+        let dropped: Vec<&str> = [
+            "php_sapi",
+            "php_sapi@control",
+            "sapi/cli",
+            "Zend/tests",
+            "tests/lang",
+            "ext/pdo",
+        ]
+        .into_iter()
+        .filter(|scope| outlived(&manifest, &row(scope)))
+        .collect();
+        assert_eq!(dropped, ["php_sapi", "php_sapi@control"]);
     }
 }

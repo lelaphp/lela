@@ -537,6 +537,12 @@ pub(crate) struct xmlTextWriter {
 /// `XML_READER_TYPE_ELEMENT`.
 pub(crate) const XML_READER_TYPE_ELEMENT: c_int = 1;
 
+/// `xmlBuffer`, never read through.
+#[repr(C)]
+pub(crate) struct xmlBuffer {
+    _opaque: [u8; 0],
+}
+
 /// `xmlParserInputBuffer`, never read through.
 #[repr(C)]
 pub(crate) struct xmlParserInputBuffer {
@@ -595,6 +601,9 @@ pub(crate) type xmlOutputBufferCreateFilenameFunc = unsafe extern "C" fn(
 #[link(name = "xml2")]
 unsafe extern "C" {
     pub(crate) safe static xmlParserVersion: *const c_char;
+    /// `xmlStringTextNoenc`, the name of a text node written out unescaped;
+    /// only its address is read.
+    pub(crate) safe static xmlStringTextNoenc: [xmlChar; 10];
 
     pub(crate) fn xmlInitParser();
     /// `xmlFree`: libxml2 is built without per-thread allocators, so the
@@ -809,6 +818,23 @@ unsafe extern "C" {
     ) -> c_int;
     pub(crate) fn xmlFindCharEncodingHandler(name: *const c_char) -> *mut xmlCharEncodingHandler;
     pub(crate) fn xmlCharEncCloseFunc(handler: *mut xmlCharEncodingHandler) -> c_int;
+    pub(crate) fn xmlCharEncOutFunc(
+        handler: *mut xmlCharEncodingHandler,
+        out: *mut xmlBuffer,
+        input: *mut xmlBuffer,
+    ) -> c_int;
+    pub(crate) fn xmlCharEncInFunc(
+        handler: *mut xmlCharEncodingHandler,
+        out: *mut xmlBuffer,
+        input: *mut xmlBuffer,
+    ) -> c_int;
+
+    // tree.h's buffers
+    pub(crate) fn xmlBufferCreate() -> *mut xmlBuffer;
+    pub(crate) fn xmlBufferAdd(buf: *mut xmlBuffer, s: *const xmlChar, len: c_int) -> c_int;
+    pub(crate) fn xmlBufferContent(buf: *const xmlBuffer) -> *const xmlChar;
+    pub(crate) fn xmlBufferLength(buf: *const xmlBuffer) -> c_int;
+    pub(crate) fn xmlBufferFree(buf: *mut xmlBuffer);
     pub(crate) fn xmlXIncludeProcessFlags(doc: *mut xmlDoc, flags: c_int) -> c_int;
     pub(crate) fn xmlXIncludeProcessFlagsData(
         doc: *mut xmlDoc,

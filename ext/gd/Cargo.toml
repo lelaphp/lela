@@ -1,0 +1,30 @@
+# ext/gd: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_gd"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The gd extension, php-src/ext/gd"
+# The one crate that links libgd.
+links = "gd"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+
+# libgd is the keg's, the one the oracle links, found by `build.rs`
+# through pkg-config and bound in `src/ffi/` alone (`unsafe.homes`;
+# design §7.2, revision 75). `src/ffi/error.c` is php's error method,
+# which libgd hands a `va_list`, built by `cc` against libgd's header.
+[build-dependencies]
+pkg-config = { workspace = true }
+cc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

@@ -129,6 +129,13 @@ pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_ses
 pub use file::{fclose, feof, fgetc, fgets, fpassthru, fread, fseek, ftell, fwrite, rewind};
 pub use streamsfuncs::{default_stream_ctx, stream_ctx_option};
 
+/// What `php_sdl.c` takes of `main/` beyond the option read above:
+/// `php_stream_context_alloc`, the `stream_context` it fetches a WSDL with, and
+/// `php_get_current_user`, which names its cache files (ADR-0004;
+/// design §4.10).
+pub use basic_functions::php_get_current_user;
+pub use streamsfuncs::stream_ctx_alloc;
+
 /// What `openssl.c` and `xp_ssl.c` take of `standard` (ADR-0004; design
 /// §4.10): `php_fopen_wrappers.h`'s `php_stream_http_wrapper` and
 /// `php_stream_ftp_wrapper`, which openssl's `MINIT` registers again as

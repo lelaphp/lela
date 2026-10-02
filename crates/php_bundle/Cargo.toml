@@ -72,6 +72,8 @@ linked = [
     "gmp",
     "xsl",
     "tidy",
+    "soap",
+    "gd",
     "intl",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
@@ -125,6 +127,8 @@ zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt la
 gmp = ["dep:php_ext_gmp", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links; gmp.c includes ext/standard/php_var.h for the `C:` unserializer (design §7.2, revision 72; #1540, #1563)
 xsl = ["dep:php_ext_xsl", "libxml", "dom"] # php_xsl.c: ZEND_MOD_REQUIRED("libxml") and ("dom"), over the platform's libxslt and libexslt (design §7.2, revision 72; #1564)
 tidy = ["dep:php_ext_tidy"] # the `php` binary and the phpt lane, as php builds it with --with-tidy over the keg's libtidy (design §7.2, revision 72; #1540)
+soap = ["dep:php_ext_soap", "libxml", "date"] # the `php` binary and the phpt lane, as php builds it with --enable-soap; soap.c ZEND_MOD_REQUIRED("date") and ("libxml"), php's own C ported over ext/libxml (design §7.2, revision 72; #1540, #1562)
+gd = ["dep:php_ext_gd"] # the `php` binary and the phpt lane, as php builds it with --enable-gd --with-external-gd over the keg's libgd (design §7.2, revision 75; #1573, #1575)
 intl = ["dep:php_ext_intl"] # the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
@@ -181,6 +185,8 @@ php_ext_zip = { path = "../../ext/zip", optional = true }
 php_ext_gmp = { path = "../../ext/gmp", optional = true }
 php_ext_xsl = { path = "../../ext/xsl", optional = true }
 php_ext_tidy = { path = "../../ext/tidy", optional = true }
+php_ext_soap = { path = "../../ext/soap", optional = true }
+php_ext_gd = { path = "../../ext/gd", optional = true }
 php_ext_intl = { path = "../../ext/intl", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
