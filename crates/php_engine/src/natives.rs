@@ -2324,7 +2324,7 @@ fn ini_set(
         req.release(Value::string(value));
         return Ok(OrFalse::False);
     }
-    let set = req.ini_set(option.as_bytes(), value.as_bytes());
+    let set = req.ini_set_string(option.as_bytes(), value);
     req.release(Value::string(value));
     Ok(match set? {
         Some(previous) => OrFalse::Value(PhpString::new(req, &previous)?),

@@ -1780,6 +1780,10 @@ impl Message<'_> {
     }
 }
 
+/// One entry of `EG(modified_ini_directives)`: its name, the value it
+/// holds, and the request string that value is where it is one.
+type IniChanged = (Vec<u8>, Option<Vec<u8>>, Option<PhpString>);
+
 /// `PG(last_error_type)`, `last_error_message`, `last_error_file` and
 /// `last_error_lineno`: what `php_error_cb` keeps for `error_get_last()`,
 /// the message and the file one owner each of strings of the request's,
@@ -1842,9 +1846,11 @@ pub struct Request {
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     /// `EG(modified_ini_directives)`: each entry the request changed,
     /// in the order it first changed, with the value it holds now, `None`
-    /// where it has none (php's `NULL`); the value it started with is the
-    /// engine's ([`Request::ini_deactivate`]).
-    ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// where it has none (php's `NULL`), and the request string that value
+    /// is where it is one, php's `ini_entry->value` once it is not
+    /// `orig_value`; the value it started with is the engine's
+    /// ([`Request::ini_deactivate`]).
+    ini: Vec<IniChanged>,
     /// The bytes `EG(modified_ini_directives)` takes on the request's
     /// heap, laid down by the first entry the request changes, a `@`'s
     /// `error_reporting` among them, and freed by the request's end.
@@ -18040,8 +18046,25 @@ impl Request {
     /// (`Z/Zend/zend_builtin_functions.c:470-497`): the entry's value
     /// replaced by the number's decimal text, `zend_long_to_str`, past
     /// its `on_modify`, and the word set to the number.
+    ///
+    /// The entry's value is the request string `zend_long_to_str` makes,
+    /// and the one it held before is released, so a change after the
+    /// table exists costs the string:
+    ///
+    /// ```php
+    /// ini_set('precision', '14');
+    /// $m = memory_get_usage(); error_reporting(30711); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); error_reporting(-1); error_reporting(30719); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// 0
+    /// ```
     pub(crate) fn alter_error_reporting(&mut self, level: i64) {
-        self.ini_hold(b"error_reporting", Some(level.to_string().as_bytes()));
+        let text = level.to_string();
+        // The memory limit's fatal is recorded and ends the request.
+        let string = PhpString::new(self, text.as_bytes()).ok();
+        self.ini_hold_string(b"error_reporting", Some(text.as_bytes()), string);
         self.error_reporting = level;
     }
 
@@ -19815,9 +19838,9 @@ impl Request {
                 || decl.default.clone(),
                 |(_, v)| v.as_deref().map(Into::into),
             );
-        let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+        let changed = self.ini.iter().find(|(n, ..)| n.as_slice() == name);
         IniEntry {
-            value: changed.map_or_else(|| master.clone(), |(_, v)| v.as_deref().map(Into::into)),
+            value: changed.map_or_else(|| master.clone(), |(_, v, _)| v.as_deref().map(Into::into)),
             master,
             modified: changed.is_some(),
             decl,
@@ -20557,8 +20580,8 @@ impl Request {
     /// value (php's `NULL`); `None` where php has no such entry.
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<&[u8]> {
-        match self.ini.iter().find(|(n, _)| n.as_slice() == name) {
-            Some((_, value)) => Some(value.as_deref().unwrap_or_default()),
+        match self.ini.iter().find(|(n, ..)| n.as_slice() == name) {
+            Some((_, value, _)) => Some(value.as_deref().unwrap_or_default()),
             None => self.shared.ini_default(name),
         }
     }
@@ -20581,8 +20604,8 @@ impl Request {
     /// ```
     #[must_use]
     pub fn ini_value(&self, name: &[u8]) -> Option<&[u8]> {
-        match self.ini.iter().find(|(n, _)| n.as_slice() == name) {
-            Some((_, value)) => value.as_deref(),
+        match self.ini.iter().find(|(n, ..)| n.as_slice() == name) {
+            Some((_, value, _)) => value.as_deref(),
             None => self.shared.ini_default_value(name),
         }
     }
@@ -20624,7 +20647,34 @@ impl Request {
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let allowed =
             Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
-        self.ini_alter(name, Some(value), allowed)
+        self.ini_alter(name, Some(value), allowed, None)
+    }
+
+    /// [`Request::ini_set`] over a request string, `ini_set()`'s: the entry
+    /// that takes it is one more owner of it, `zend_string_copy`, until
+    /// its next change, `ini_restore()` or the request's end releases it
+    /// (`Z/Zend/zend_ini.c:398-411`), so a string made for it stays and
+    /// one a variable held outlives the variable:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); ini_set('precision', str_repeat('1', 2)); echo memory_get_usage() - $m, "\n";
+    /// $v = str_repeat('a', 40); $m = memory_get_usage(); ini_set('user_agent', $v); unset($v); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ini_set('precision', '14'); ini_restore('user_agent'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 40
+    /// 0
+    /// -120
+    /// ```
+    pub(crate) fn ini_set_string(
+        &mut self,
+        name: &[u8],
+        value: PhpString,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
+        let allowed =
+            Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
+        self.ini_alter(name, Some(value.as_bytes()), allowed, Some(value))
     }
 
     /// The host's entries for this request, each as its
@@ -20634,7 +20684,10 @@ impl Request {
         for (name, value, mode) in std::mem::take(&mut self.description.ini) {
             let allowed =
                 mode != IniOrigin::PerDir || (self.ini_per_dir(&name) && !self.ini_locked(&name));
-            let taken = matches!(self.ini_alter(&name, Some(&value), allowed), Ok(Some(_)));
+            let taken = matches!(
+                self.ini_alter(&name, Some(&value), allowed, None),
+                Ok(Some(_))
+            );
             if taken && mode == IniOrigin::Admin {
                 self.locked.push(name);
             }
@@ -20665,11 +20718,14 @@ impl Request {
     /// `modifiable` for the stage, over `new_value`, `None` for php's
     /// `NULL`: the previous value as `ini_get()` reads it, or `None` where
     /// the entry does not exist, is not allowed, or refuses the value.
+    /// `string` is the request string the value is, which the entry takes
+    /// one more owner of where it takes the value as it is.
     fn ini_alter(
         &mut self,
         name: &[u8],
         new_value: Option<&[u8]>,
         allowed: bool,
+        string: Option<PhpString>,
     ) -> Result<Option<Vec<u8>>, Thrown> {
         let Some(previous) = self.ini_get(name).map(<[u8]>::to_vec) else {
             return Ok(None);
@@ -20744,7 +20800,11 @@ impl Request {
         {
             return Ok(None);
         }
-        self.ini_hold(name, value);
+        let string = string.filter(|s| Some(s.as_bytes()) == value);
+        if let Some(string) = string {
+            self.addref(&Value::string(string));
+        }
+        self.ini_hold_string(name, value, string);
         match name {
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
@@ -20761,11 +20821,27 @@ impl Request {
     /// changed it yet.
     fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
         let value = value.map(<[u8]>::to_vec);
-        if let Some((_, held)) = self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
+        if let Some((_, held, _)) = self.ini.iter_mut().find(|(n, ..)| n.as_slice() == name) {
             *held = value;
         } else {
-            self.ini.push((name.to_vec(), value));
+            self.ini.push((name.to_vec(), value, None));
             self.ini_modified_bytes();
+        }
+    }
+
+    /// [`Request::ini_hold`] with the entry the owner `string` hands it,
+    /// a request string or none where the value is no request's, and the
+    /// string it held before released, as `zend_alter_ini_entry_ex`
+    /// releases a value that is not `orig_value`.
+    fn ini_hold_string(&mut self, name: &[u8], value: Option<&[u8]>, string: Option<PhpString>) {
+        self.ini_hold(name, value);
+        let before = self
+            .ini
+            .iter_mut()
+            .find(|(n, ..)| n.as_slice() == name)
+            .and_then(|(.., held)| std::mem::replace(held, string));
+        if let Some(before) = before {
+            self.release(Value::string(before));
         }
     }
 
@@ -20773,7 +20849,7 @@ impl Request {
     /// the entry marked changed, holding the value it holds, as the
     /// handler adds it to `EG(modified_ini_directives)`.
     pub(crate) fn silence_modifies_error_reporting(&mut self) {
-        if !self.ini.iter().any(|(n, _)| n == b"error_reporting") {
+        if !self.ini.iter().any(|(n, ..)| n == b"error_reporting") {
             let held = self.ini_value(b"error_reporting").map(<[u8]>::to_vec);
             self.ini_hold(b"error_reporting", held.as_deref());
         }
@@ -20812,12 +20888,14 @@ impl Request {
     /// ```
     pub fn ini_restore(&mut self, name: &[u8]) -> Result<(), Thrown> {
         let user = Request::ini_modifiable(name).0 && self.ini_user(name);
-        if !user || self.ini_locked(name) || !self.ini.iter().any(|(n, _)| n == name) {
+        if !user || self.ini_locked(name) || !self.ini.iter().any(|(n, ..)| n == name) {
             return Ok(());
         }
         let original = self.shared.ini_default_value(name).map(<[u8]>::to_vec);
-        if self.ini_alter(name, original.as_deref(), true)?.is_some()
-            && let Some(at) = self.ini.iter().position(|(n, _)| n == name)
+        if self
+            .ini_alter(name, original.as_deref(), true, None)?
+            .is_some()
+            && let Some(at) = self.ini.iter().position(|(n, ..)| n == name)
         {
             self.ini.remove(at);
             self.ini_unmodified_bytes(at == self.ini.len());
@@ -20863,7 +20941,7 @@ impl Request {
     /// ```
     pub(crate) fn ini_deactivate(&mut self) {
         self.ini_stage = IniStage::Deactivate;
-        let changed: Vec<Vec<u8>> = self.ini.iter().map(|(n, _)| n.clone()).collect();
+        let changed: Vec<Vec<u8>> = self.ini.iter().map(|(n, ..)| n.clone()).collect();
         for name in changed {
             if let Some(handler) = self.ini_handler(&name) {
                 let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
@@ -20872,7 +20950,12 @@ impl Request {
                 let _ = handler(self, original.as_deref());
                 self.catch_bailout();
             }
-            self.ini.retain(|(n, _)| *n != name);
+            if let Some(at) = self.ini.iter().position(|(n, ..)| *n == name) {
+                let (.., string) = self.ini.remove(at);
+                if let Some(string) = string {
+                    self.release(Value::string(string));
+                }
+            }
             if name == b"error_reporting" {
                 self.update_error_reporting();
             }
