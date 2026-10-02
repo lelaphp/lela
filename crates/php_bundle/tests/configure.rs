@@ -52,6 +52,10 @@ const BY_DEFAULT: &[&str] = &[
     "xmlwriter",
 ];
 
+/// The extensions whose `config.m4` names their switch otherwise:
+/// readline's is `PHP_ARG_WITH([libedit])`, the library the oracle links.
+const SPELLED: &[(&str, &str)] = &[("readline", "libedit")];
+
 /// Each feature of the manifest that names an `ext/*` crate, as
 /// `name = ["dep:php_ext_<crate>", ...]`.
 fn extension_features() -> Vec<&'static str> {
@@ -103,7 +107,10 @@ fn every_extension_php_does_not_always_build_has_its_switch() {
         if ALWAYS.contains(&feature) {
             continue;
         }
-        let spelled = feature.replace('_', "-");
+        let spelled = SPELLED
+            .iter()
+            .find_map(|&(name, switch)| (name == feature).then(|| switch.to_owned()))
+            .unwrap_or_else(|| feature.replace('_', "-"));
         let (cfg, switches) = if BY_DEFAULT.contains(&feature) {
             (
                 format!("#[cfg(not(feature = \"{feature}\"))]"),

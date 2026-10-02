@@ -7,13 +7,16 @@
 //! so what follows still runs (`Z/Zend/zend_execute_API.c:1402`). A fatal
 //! the program raises leaves the whole of it, as `zend_bailout` leaves
 //! `do_cli`'s `zend_try`. The CLI host's tests hold the three switches to
-//! what the oracle prints (`sapi/cli/tests/process_stdin.rs`).
+//! what the oracle prints (`sapi/cli/tests/process_stdin.rs`). `-a` is
+//! the shell an extension provides ([`Shell`](crate::api::abi::Shell)),
+//! served where `do_cli` serves it, each block of its code through
+//! [`Request::eval_stringl`].
 
 use std::sync::Arc;
 
 use php_compile::SourceKind;
 
-use crate::api::raising::Level;
+use crate::api::raising::{Level, Thrown};
 use crate::api::request::Request;
 use crate::api::values::{PhpString, Value};
 use crate::engine::{Engine, Observables, OutputSink, RequestDescription};
@@ -33,6 +36,12 @@ pub enum CommandLine {
         each: Option<EachLine>,
         end: Option<Vec<u8>>,
     },
+    /// `-a`: `cli_shell_callbacks.cli_shell_run()` in a request of its
+    /// own, after `auto_prepend_file` as `readline_shell_run` requires
+    /// it, with the status 0 that function sets first, and the request's
+    /// exit status what it answers; nothing where the engine has no shell
+    /// ([`Engine::has_shell`]).
+    Shell,
 }
 
 /// What runs for each line of stdin.
@@ -63,10 +72,20 @@ impl Engine {
         };
         match command {
             CommandLine::Direct(code) => {
-                self.eval_string(&mut req, &code, b"Command line code");
+                eval_string(&mut req, &code, b"Command line code");
             }
             CommandLine::Lines { begin, each, end } => {
                 self.lines(&mut req, begin.as_deref(), each.as_ref(), end.as_deref());
+            }
+            CommandLine::Shell => {
+                if let Some(shell) = self.shared.shell {
+                    crate::engine::auto_file(&mut req, b"auto_prepend_file", self.shared.entry);
+                    if !req.bailing_out() {
+                        req.end_in_exit(0);
+                        let status = (shell.serve)(&mut req);
+                        req.end_in_exit(status);
+                    }
+                }
             }
         }
         self.shutdown(&mut req, sink).0
@@ -84,7 +103,7 @@ impl Engine {
         end: Option<&[u8]>,
     ) {
         if let Some(begin) = begin
-            && !self.eval_string(req, begin, b"Command line begin code")
+            && !eval_string(req, begin, b"Command line begin code")
         {
             return;
         }
@@ -105,7 +124,7 @@ impl Engine {
             req.set_global(b"argn", Some(Value::string(line)));
             req.set_global(b"argi", Some(Value::int(index)));
             let goes_on = match each {
-                Some(EachLine::Code(code)) => self.eval_string(req, code, b"Command line run code"),
+                Some(EachLine::Code(code)) => eval_string(req, code, b"Command line run code"),
                 Some(EachLine::File) => {
                     self.execute_script(req, None);
                     !req.bailing_out()
@@ -117,18 +136,52 @@ impl Engine {
             }
         }
         if let Some(end) = end {
-            self.eval_string(req, end, b"Command line end code");
+            eval_string(req, end, b"Command line end code");
         }
     }
+}
 
-    /// `zend_eval_string_ex(code, NULL, name, 1)`: the code compiled as an
-    /// `eval` names it and served at the top of the request, an `exit`
-    /// and what it leaves uncaught taken as `zend_exception_error` takes
-    /// them, at `E_ERROR` and not bailing out; whether the request goes
-    /// on, which a fatal it raised, or a compile error other than a
-    /// parse error, ends.
-    fn eval_string(&self, req: &mut Request, code: &[u8], name: &[u8]) -> bool {
-        let unit = match self.shared.compile_for(req, code, name, SourceKind::Eval) {
+/// `zend_eval_string_ex(code, NULL, name, 1)`: the code compiled as an
+/// `eval` names it and served at the top of the request, an `exit` and
+/// what it leaves uncaught taken as `zend_exception_error` takes them, at
+/// `E_ERROR` and not bailing out; whether the request goes on, which a
+/// fatal it raised, or a compile error other than a parse error, ends.
+fn eval_string(req: &mut Request, code: &[u8], name: &[u8]) -> bool {
+    eval(req, code, name, Some(Level::Error))
+}
+
+impl Request {
+    /// `zend_eval_stringl(code, len, NULL, name)` in a `zend_try`, as
+    /// the shell serves each block of code (`readline_shell_run`): the
+    /// code compiled as an `eval` names it and served at the top of the
+    /// request, a parse error rendered as the compiler raised it, a fatal
+    /// rendered and caught, so the request goes on with the status 255 it
+    /// left, and an `exit` taken without a word. What the code left
+    /// uncaught is the `Err`, `EG(exception)` for the caller to render
+    /// with [`uncaught_at`](crate::api::raising::uncaught_at) where php's
+    /// does.
+    pub fn eval_stringl(&mut self, code: &[u8], name: &[u8]) -> Result<(), Thrown> {
+        eval(self, code, name, None);
+        self.catch_bailout();
+        if let Some(exception) = self.take_pending() {
+            return Err(Thrown::of(Some(exception)));
+        }
+        if self.is_pending() {
+            // The unwind exit, which `zend_exception_error` gives up.
+            let _ = self.exception_error(Level::Warning);
+        }
+        Ok(())
+    }
+}
+
+/// `zend_eval_string_ex(code, NULL, name, 1)`'s body with what the code
+/// leaves uncaught rendered at `uncaught`, or left pending for `None`;
+/// whether the request goes on, which a fatal, or a compile error other
+/// than a parse error, ends.
+fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
+    let shared = Arc::clone(&req.shared);
+    {
+        let unit = match shared.compile_for(req, code, name, SourceKind::Eval) {
             Ok(unit) => unit,
             Err(refused) => {
                 crate::engine::refused_program(req, &refused, name);
@@ -136,7 +189,7 @@ impl Engine {
             }
         };
         if !crate::engine::note_compiled(req, &unit, SourceKind::Eval) {
-            return take_uncaught(req);
+            return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
         }
         let standing = req.vm().frames().len();
         let frame = match req.push_frame(Arc::clone(&unit)) {
@@ -146,7 +199,7 @@ impl Engine {
                 return false;
             }
         };
-        let served = (self.shared.entry)(req, frame);
+        let served = (shared.entry)(req, frame);
         // What a fatal left standing above the main frame, as
         // `serve_unit` pops it.
         while req.vm().frames().len() > standing + 1 {
@@ -158,22 +211,22 @@ impl Engine {
             req.end_in(&fatal);
             return false;
         }
-        take_uncaught(req)
+        uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level))
     }
 }
 
-/// `zend_exception_error(EG(exception), E_ERROR)` over what the code
+/// `zend_exception_error(EG(exception), severity)` over what the code
 /// left: the unwind exit given up, a throwable rendered uncaught with
 /// `E_DONT_BAIL`; whether the request goes on, which a fatal raised on
 /// the way ends.
-fn take_uncaught(req: &mut Request) -> bool {
+fn take_uncaught(req: &mut Request, severity: Level) -> bool {
     if req.bailing_out() {
         return false;
     }
     if !req.is_pending() {
         return true;
     }
-    match req.exception_error(Level::Error) {
+    match req.exception_error(severity) {
         Ok(()) => true,
         Err(_) => dont_bail(req),
     }

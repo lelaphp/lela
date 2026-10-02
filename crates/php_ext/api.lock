@@ -85,6 +85,7 @@ abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::resolve_path
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
+abi::ExtensionBuilder::shell
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::ExtensionBuilder::treat_data
@@ -192,6 +193,7 @@ abi::Ref::is_given
 abi::Ref::reference
 abi::Ref::separated
 abi::Ref::set
+abi::Shell
 abi::StartupIni
 abi::Static
 abi::Std
@@ -489,6 +491,7 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::eval_stringl
 request::Request::evaluated_default
 request::Request::execution
 request::Request::execution_trace
@@ -515,6 +518,7 @@ request::Request::gc_enable
 request::Request::gc_enabled
 request::Request::gc_status
 request::Request::global
+request::Request::global_names
 request::Request::header_add
 request::Request::header_remove
 request::Request::header_remove_prefix
@@ -789,6 +793,7 @@ test::Engine::command_line
 test::Engine::dispatch
 test::Engine::dump_before_optimizer
 test::Engine::frameless
+test::Engine::has_shell
 test::Engine::highlight
 test::Engine::ini_get
 test::Engine::lint

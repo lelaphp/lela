@@ -725,6 +725,7 @@ dependencies = [
  "php_ext_phar",
  "php_ext_posix",
  "php_ext_random",
+ "php_ext_readline",
  "php_ext_reflection",
  "php_ext_session",
  "php_ext_shmop",
@@ -1063,6 +1064,15 @@ version = "0.0.0"
 dependencies = [
  "getrandom",
  "php_ext",
+]
+
+[[package]]
+name = "php_ext_readline"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "php_ext",
+ "pkg-config",
 ]
 
 [[package]]

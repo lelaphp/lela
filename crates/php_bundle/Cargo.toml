@@ -76,6 +76,7 @@ linked = [
     "gd",
     "sodium",
     "gettext",
+    "readline",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -132,6 +133,7 @@ soap = ["dep:php_ext_soap", "libxml", "date"] # the `php` binary and the phpt la
 gd = ["dep:php_ext_gd"] # the `php` binary and the phpt lane, as php builds it with --enable-gd --with-external-gd over the keg's libgd (design §7.2, revision 75; #1573, #1575)
 sodium = ["dep:php_ext_sodium", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-sodium, over the libsodium the pinned keg links; libsodium.c ZEND_MOD_REQUIRED("standard") (design §7.2, revision 72; #1540, #1566)
 gettext = ["dep:php_ext_gettext"] # the `php` binary and the phpt lane, as php builds it with --with-gettext over the keg's libintl (design §7.2, revision 72; #1540, #1568)
+readline = ["dep:php_ext_readline"] # the `php` binary and the phpt lane, as php builds it with --with-libedit, over the platform's libedit; readline_cli.c's shell is `php -a` (design §7.2, revision 72; #1540, #1567)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -191,6 +193,7 @@ php_ext_soap = { path = "../../ext/soap", optional = true }
 php_ext_gd = { path = "../../ext/gd", optional = true }
 php_ext_sodium = { path = "../../ext/sodium", optional = true }
 php_ext_gettext = { path = "../../ext/gettext", optional = true }
+php_ext_readline = { path = "../../ext/readline", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

@@ -16868,8 +16868,16 @@ impl Request {
 
     /// `sapi_module.ub_write`: bytes past the `php_output` layer, the
     /// host's, handed to the sink as they come; one the host could not
-    /// write is [`Request::handle_aborted_connection`].
+    /// write is [`Request::handle_aborted_connection`]. Where the host
+    /// carries php's shell callbacks, the shell's `write` sees each
+    /// write first, as `sapi_cli_ub_write` calls `cli_shell_ub_write`
+    /// and `cli_shell_write` for every write that is not empty.
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
+        if let Some(shell) = self.shared.shell
+            && !bytes.is_empty()
+        {
+            (shell.write)(self, bytes);
+        }
         if let Err(aborted) = self.sink.get().write(bytes) {
             self.handle_aborted_connection(aborted);
         }

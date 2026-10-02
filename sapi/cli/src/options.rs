@@ -108,6 +108,10 @@ pub enum Ask {
     Report(Report, Option<PathBuf>),
     /// `-S`: the built-in web server.
     Server(Server),
+    /// `-a`: the interactive shell, the file a bare word or `-f` named
+    /// opened first and not served, as `do_repeat` opens it, and the
+    /// words after it as `$argv[1..]`.
+    Shell(Option<PathBuf>, Vec<OsString>),
 }
 
 /// What `do_cli_server` reads off the line: `-S`'s address, `-t`'s
@@ -120,6 +124,11 @@ pub struct Server {
     pub router: Option<PathBuf>,
     pub quiet: u8,
 }
+
+/// Whether the engine the line's ini entries build has a shell, as
+/// `do_cli` asks `cli_shell_callbacks.cli_shell_run` once php's modules
+/// have started.
+pub type HasShell = dyn Fn(&[(String, String)]) -> bool;
 
 /// The command line, read: the engine's switches and what is asked of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +145,9 @@ pub struct Options {
     /// `--repeat <count>`: the request served this many times, php's
     /// `num_repeats`, `atoi` of the value.
     pub repeat: i64,
+    /// `-a` taken, which `do_cli` answers with `Interactive shell` and
+    /// a blank line on stdout before it serves whatever the mode is.
+    pub interactive: bool,
     pub ask: Ask,
 }
 
@@ -209,6 +221,8 @@ struct Settled {
     lines: Lines,
     report: Option<Report>,
     param_error: Option<&'static str>,
+    /// `-a` taken, php's `interactive`.
+    interactive: bool,
     repeat: i64,
     /// A switch this host refuses with the usage and exit 1.
     usage: bool,
@@ -232,8 +246,10 @@ impl Options {
     /// for itself; `do_cli`'s second loop settles what is being done
     /// with the line, then the program, then what is left as its
     /// arguments. `--` ends the switches; a word after it is the program
-    /// unless one was named already.
-    pub fn parse(argv: &[OsString]) -> Result<Options, Refused> {
+    /// unless one was named already. `-a` asks `shell` of the line's ini
+    /// entries, the engine's answer to whether the bundle filled php's
+    /// shell callbacks, which php has started its modules to know.
+    pub fn parse(argv: &[OsString], shell: &HasShell) -> Result<Options, Refused> {
         let argv: Vec<Vec<u8>> = argv
             .iter()
             .map(|word| word.as_encoded_bytes().to_vec())
@@ -242,6 +258,7 @@ impl Options {
             ini_ignore: false,
             ini: Vec::new(),
             repeat: 1,
+            interactive: false,
             ask: Ask::Serve(Program::Stdin, Vec::new()),
         };
         match options.main_pass(&argv)? {
@@ -255,11 +272,14 @@ impl Options {
             }
             Host::Cli => {}
         }
-        let settled = mode_pass(&argv);
+        let mut has_shell = None;
+        let ini = options.ini.clone();
+        let settled = mode_pass(&argv, &mut || *has_shell.get_or_insert_with(|| shell(&ini)));
         if settled.usage {
             return Err(usage(1));
         }
         options.repeat = settled.repeat;
+        options.interactive = settled.interactive && settled.param_error.is_none();
         let after_dashes = settled.optind > 0
             && argv.get(settled.optind - 1).map(Vec::as_slice) == Some(b"--".as_slice());
         let mut rest = argv[settled.optind.min(argv.len())..].iter();
@@ -324,6 +344,9 @@ impl Options {
             }
             Mode::Highlight => Ask::Highlight(program, rest.map(|word| os(word)).collect()),
             Mode::Strip => Ask::Strip(program, rest.map(|word| os(word)).collect()),
+            Mode::Standard if settled.interactive => {
+                Ask::Shell(file, rest.map(|word| os(word)).collect())
+            }
             Mode::Standard | Mode::Direct => {
                 Ask::Serve(program, rest.map(|word| os(word)).collect())
             }
@@ -412,7 +435,7 @@ impl Settled {
 /// and the rest of what the switches name, each switch read as php reads
 /// it. A `param_error` does not end the loop: the last one set is the one
 /// `do_cli` puts.
-fn mode_pass(argv: &[Vec<u8>]) -> Settled {
+fn mode_pass(argv: &[Vec<u8>], shell: &mut dyn FnMut() -> bool) -> Settled {
     let mut settled = Settled {
         mode: Mode::Standard,
         script_file: None,
@@ -420,6 +443,7 @@ fn mode_pass(argv: &[Vec<u8>]) -> Settled {
         lines: Lines::default(),
         report: None,
         param_error: None,
+        interactive: false,
         repeat: 1,
         usage: false,
         optind: 0,
@@ -428,9 +452,18 @@ fn mode_pass(argv: &[Vec<u8>]) -> Settled {
     while let Ok(Taken::Switch(code, given)) = getopt.next(argv) {
         let value = given.clone().unwrap_or_default();
         let mode = settled.mode;
+        let interactive = settled.interactive;
         let error = &mut settled.param_error;
         match code {
-            b'a' => *error = Some(NO_SHELL),
+            b'a' if !shell() => *error = Some(NO_SHELL),
+            b'a' if !interactive => {
+                if mode == Mode::Standard {
+                    settled.interactive = true;
+                } else {
+                    *error = Some(CONFLICT);
+                }
+            }
+            b'B' | b'E' if interactive && mode != Mode::ProcessStdin => *error = Some(CONFLICT),
             b'F' | b'R' | b'B' | b'E' => settled.process_stdin(code, value),
             b'f' => {
                 if matches!(mode, Mode::Direct | Mode::ProcessStdin) {
@@ -445,7 +478,7 @@ fn mode_pass(argv: &[Vec<u8>]) -> Settled {
             b'r' => {
                 if mode == Mode::Direct {
                     *error = Some("You can use -r only once.\n");
-                } else if mode != Mode::Standard {
+                } else if mode != Mode::Standard || interactive {
                     *error = Some(CONFLICT);
                 } else {
                     settled.mode = Mode::Direct;
@@ -615,7 +648,55 @@ mod tests {
 
     fn parse(words: &[&str]) -> Result<Options, Refused> {
         let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
-        Options::parse(&argv)
+        Options::parse(&argv, &|_| false)
+    }
+
+    /// What the line asks of a binary whose engine has a shell.
+    fn ask_shell(words: &[&str]) -> Result<(bool, Ask), (String, String, i32)> {
+        let argv: Vec<OsString> = words.iter().map(OsString::from).collect();
+        Options::parse(&argv, &|_| true)
+            .map(|o| (o.interactive, o.ask))
+            .map_err(|r| (r.stdout, r.stderr, r.exit_code))
+    }
+
+    #[test]
+    fn the_shell_is_asked_for_where_the_engine_has_one() {
+        let shell = |words: &[&str]| ask_shell(words);
+        assert_eq!(
+            shell(&["-n", "-a"]),
+            Ok((true, Ask::Shell(None, Vec::new())))
+        );
+        assert_eq!(
+            shell(&["-n", "-a", "a.php", "x"]),
+            Ok((
+                true,
+                Ask::Shell(Some(PathBuf::from("a.php")), vec![OsString::from("x")])
+            ))
+        );
+        assert_eq!(
+            shell(&["-n", "-a", "-a", "--", "x"]),
+            Ok((true, Ask::Shell(None, vec![OsString::from("x")])))
+        );
+        for conflict in [
+            &["-n", "-a", "-r", "echo 1;"][..],
+            &["-n", "-r", "echo 1;", "-a"],
+            &["-n", "-a", "-B", "x"],
+            &["-n", "-a", "-E", "x"],
+            &["-n", "-R", "x", "-a"],
+        ] {
+            assert_eq!(
+                shell(conflict).map_err(|e| e.0).err().as_deref(),
+                Some(CONFLICT)
+            );
+        }
+        assert!(matches!(
+            shell(&["-n", "-a", "-l", "a.php"]),
+            Ok((true, Ask::Lint { refused: None, .. }))
+        ));
+        assert!(matches!(
+            shell(&["-n", "-l", "-a", "a.php"]),
+            Ok((false, Ask::Lint { refused: Some(sentence), .. })) if sentence == CONFLICT
+        ));
     }
 
     fn ask(words: &[&str]) -> Result<Ask, (String, String, i32)> {
@@ -648,6 +729,7 @@ mod tests {
             Ok(Options {
                 ini_ignore: true,
                 repeat: 1,
+                interactive: false,
                 ini: vec![
                     ("precision".to_owned(), "10".to_owned()),
                     ("foo".to_owned(), "1".to_owned())

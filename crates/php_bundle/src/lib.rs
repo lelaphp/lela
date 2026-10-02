@@ -22,6 +22,8 @@ mod refusals;
     clippy::too_many_lines,
     reason = "a list of two lines per extension, as long as php's internal_functions.c"
 )]
+// Two lines an extension, as `new-ext` writes them; the list is the length
+// of the bundle.
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
         #[cfg(feature = "date")]
@@ -134,6 +136,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_sodium::extension,
         #[cfg(feature = "gettext")]
         php_ext_gettext::extension,
+        #[cfg(feature = "readline")]
+        php_ext_readline::extension,
     ]
 }
 
@@ -200,6 +204,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-phar",
     #[cfg(not(feature = "posix"))]
     "--disable-posix",
+    #[cfg(feature = "readline")]
+    "--with-libedit",
     #[cfg(not(feature = "session"))]
     "--disable-session",
     #[cfg(feature = "shmop")]
