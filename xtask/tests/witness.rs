@@ -496,31 +496,10 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     );
 }
 
-/// A `request fpm` fence whose oracle server resets the connection is a
-/// failed run of the witness, its bork line printing the transport's
-/// error, and never a native without a witness (#1426): the fixture's one
-/// native carries such a fence, and the pin's php-fpm here is a stand-in
-/// that accepts the request on the socket the configuration names and
-/// drops it unanswered, as a reset leaves it. The control: a runner that
-/// reads the fence as having entered nothing counts the native `missing`.
-#[test]
-fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witness() {
-    if oracle().is_none() {
-        return;
-    }
-    let root = fixture_at("witness", "request-reset");
-    let hosts = Tree::new("witness-reset-host").unwrap();
-    let host = hosts.join("php-fpm");
-    fs::write(
-        &host,
-        "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $path);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $path = $1 if /^listen = (\\S+)/; }\nsocket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;\nbind($s, sockaddr_un($path)) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); close($c); }\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+/// The one reading of the `request fpm` fixture `name`, run with `host`
+/// standing in for the pin's php-fpm.
+fn served_by_a_stand_in(name: &str, host: PathBuf) -> Reading {
+    let root = fixture_at("witness", name);
     let mut manifest = Manifest::load(&root).unwrap();
     let mut fpm = manifest.pin.sapi.fpm.clone().unwrap_or_default();
     fpm.path = host;
@@ -538,14 +517,19 @@ fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witnes
     )
     .unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
-    let reading = &readings[0];
+    readings.into_iter().next().unwrap()
+}
+
+/// That `reading` is one failed run of the fixture's one fence, and no
+/// native without a witness.
+fn a_failed_run_and_no_missing_witness(reading: &Reading) {
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(reading, "failed"), 1, "{reading:#?}");
     assert_eq!(count(reading, "subjects"), 1, "{reading:#?}");
     assert_eq!(
         count(reading, "missing"),
         0,
-        "a reset is a failed run, not a missing witness: {reading:#?}"
+        "a transport failure is a failed run, not a missing witness: {reading:#?}"
     );
     assert!(
         reading.message.contains("1 of 1 witnesses missed")
@@ -553,6 +537,49 @@ fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witnes
         "the fence's run failed, and no native is without one: {}",
         reading.message
     );
+}
+
+/// A `request fpm` fence whose oracle server resets the connection is a
+/// failed run of the witness, its bork line printing the transport's
+/// error, and never a native without a witness (#1426): the fixture's one
+/// native carries such a fence, and the pin's php-fpm here is a stand-in
+/// that accepts the request on the socket the configuration names and
+/// drops it unanswered, as a reset leaves it. The control: a runner that
+/// reads the fence as having entered nothing counts the native `missing`.
+#[test]
+fn a_request_fence_whose_server_resets_fails_the_run_and_is_not_a_missing_witness() {
+    if oracle().is_none() {
+        return;
+    }
+    let hosts = Tree::new("witness-reset-host").unwrap();
+    let host = hosts.join("php-fpm");
+    fs::write(
+        &host,
+        "#!/usr/bin/perl\nuse Socket;\nmy ($conf, $path);\nfor my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }\nopen(my $f, '<', $conf) or die;\nwhile (<$f>) { $path = $1 if /^listen = (\\S+)/; }\nsocket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;\nbind($s, sockaddr_un($path)) or die;\nlisten($s, 5) or die;\nwhile (accept(my $c, $s)) { my $b; sysread($c, $b, 8); close($c); }\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    a_failed_run_and_no_missing_witness(&served_by_a_stand_in("request-reset", host));
+}
+
+/// The same for the two ways a server can fail a fence once it has read
+/// the whole request (#1493): the fixture `request-reset-sent`'s stand-in
+/// ends the connection partway through the first record of its response,
+/// and `request-empty`'s closes it with no response at all. Each fixture
+/// carries its stand-in as `php-fpm` beside its manifest.
+#[test]
+fn a_request_fence_whose_server_fails_after_the_request_is_sent_is_a_failed_run() {
+    if oracle().is_none() {
+        return;
+    }
+    for name in ["request-reset-sent", "request-empty"] {
+        let host = fixture_at("witness", name).join("php-fpm");
+        a_failed_run_and_no_missing_witness(&served_by_a_stand_in(name, host));
+    }
 }
 
 /// A native the build that links the engine compiled out is no subject

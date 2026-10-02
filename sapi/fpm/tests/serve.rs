@@ -179,7 +179,9 @@ fn masked(line: &str) -> String {
 
 /// The lines the oracle's php-fpm writes for a static pool of one child
 /// at `log_level = debug`, started and sent `SIGQUIT`, times and pids
-/// masked (#1382).
+/// masked (#1382): the pin's php-fpm (`oracle.toml`'s `[sapi]`) run under
+/// the configuration `quit_at_debug` writes, its log put through
+/// [`masked`]. Captured again on #1502, byte for byte these lines.
 const QUIT_AT_DEBUG: &str = "\
 DEBUG: pid N, fpm_scoreboard_init_main(), line 38: got clock tick '100'
 DEBUG: pid N, fpm_signals_init_main(), line 219: Unblocking all signals
@@ -205,49 +207,109 @@ DEBUG: pid N, fpm_children_bury(), line 300: [pool www] child N exited on signal
 NOTICE: pid N, fpm_pctl_exit(), line 69: exiting, bye-bye!
 ";
 
+/// How many loopback ports [`quit_at_debug`] tries before it gives up.
+const TRIES: usize = 5;
+
+/// A loopback port the system found free, let go at once: free for anyone
+/// until the master binds it.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The masked log of a static pool of one child at `log_level = debug`
+/// listening on the first port of `ports` its master binds, started and
+/// sent `SIGQUIT` once ready.
+///
+/// The pool listens on a loopback address of its own, since the lines
+/// held are the oracle's for an inet socket, and a port found free and let
+/// go is anyone's until the master binds it (#1502). A master that finds
+/// its port taken logs php's `unable to bind listening socket` and exits
+/// before it is ready; its log is set aside and the pool starts again on
+/// the next port, up to [`TRIES`] times. The oracle's lines are the same
+/// for any port, so the port the pool ends on is never held.
+#[cfg(target_os = "macos")]
+fn quit_at_debug(dir: &Path, ports: impl IntoIterator<Item = u16>) -> String {
+    let mut tried = Vec::new();
+    for (attempt, port) in ports.into_iter().take(TRIES).enumerate() {
+        let path = dir.join(format!("php-fpm-{attempt}.conf"));
+        let log = dir.join(format!("fpm-{attempt}.log"));
+        std::fs::write(
+            &path,
+            format!(
+                "[global]\nerror_log = {}\nlog_level = debug\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+            .args(["-n", "-F", "-y"])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let mut ended = None;
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("ready to handle connections")
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            ended = master.try_wait().unwrap();
+            if ended.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        if ended.is_some() && written.contains("unable to bind listening socket") {
+            tried.push(port);
+            continue;
+        }
+        let _ = Command::new("kill")
+            .arg("-QUIT")
+            .arg(master.id().to_string())
+            .status();
+        let _ = master.wait();
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        return written.lines().map(|l| masked(l) + "\n").collect();
+    }
+    panic!("every port the pool tried was taken before its master bound it: {tried:?}");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_static_pool_at_debug_sent_sigquit_writes_the_oracle_s_lines() {
     let dir = tree("debug");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let path = dir.join("php-fpm.conf");
-    let log = dir.join("fpm.log");
-    std::fs::write(
-        &path,
-        format!(
-            "[global]\nerror_log = {}\nlog_level = debug\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\n",
-            log.display()
-        ),
-    )
-    .unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
-        .args(["-n", "-F", "-y"])
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let started = Instant::now();
-    while !std::fs::read_to_string(&log)
-        .unwrap_or_default()
-        .contains("ready to handle connections")
-        && started.elapsed() < Duration::from_secs(10)
-    {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = Command::new("kill")
-        .arg("-QUIT")
-        .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
-    let written = std::fs::read_to_string(&log).unwrap_or_default();
+    let lines = quit_at_debug(&dir, std::iter::repeat_with(free_port));
     let _ = std::fs::remove_dir_all(&dir);
-    let lines: String = written.lines().map(|l| masked(l) + "\n").collect();
+    assert_eq!(lines, QUIT_AT_DEBUG);
+}
+
+/// A port another process takes before the master binds it is given up
+/// for the next (#1502): the first port offered is held by a listener of
+/// the test's own for the master's whole life, as a process that took it
+/// in the window would hold it, and the lines are still the oracle's.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_port_taken_before_the_master_binds_it_is_given_up_for_another() {
+    let dir = tree("debug-taken");
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let held = taken.local_addr().unwrap().port();
+    let ports = std::iter::once(held).chain(std::iter::repeat_with(free_port));
+    let lines = quit_at_debug(&dir, ports);
+    let first = std::fs::read_to_string(dir.join("fpm-0.log")).unwrap_or_default();
+    drop(taken);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        first.contains("unable to bind listening socket"),
+        "the held port was not the first the master tried: {first}"
+    );
     assert_eq!(lines, QUIT_AT_DEBUG);
 }
 

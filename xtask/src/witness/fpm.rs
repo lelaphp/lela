@@ -373,6 +373,31 @@ mod tests {
         );
     }
 
+    /// A server that fails the request once it has read all of it fails
+    /// the fence in the transport's words (#1493): the stand-ins of the
+    /// fixtures `request-reset-sent`, which ends the connection partway
+    /// through its first record, and `request-empty`, which sends nothing,
+    /// each say where the response broke off.
+    #[test]
+    fn a_response_that_breaks_off_names_where() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pin =
+            Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
+        for name in ["request-reset-sent", "request-empty"] {
+            let host = workspace
+                .join("fixtures/witness")
+                .join(name)
+                .join("php-fpm");
+            let failed = super::served_as_fpm(&pin.oracle(), &host, "echo 1;", "--GET--\nq=1", &[])
+                .unwrap_err();
+            let said = format!("{failed:#}");
+            assert!(
+                said.contains("reading php-fpm's response") && said.contains("fill whole buffer"),
+                "{name}: {said}"
+            );
+        }
+    }
+
     /// What the child appends after the response has ended is there when
     /// the fence returns, though the master is ended where its child
     /// stands. The stand-in answers the request with its last record at

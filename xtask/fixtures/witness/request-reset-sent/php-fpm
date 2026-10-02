@@ -1,0 +1,32 @@
+#!/usr/bin/perl
+# A stand-in for the pin's php-fpm (#1493): it listens on the socket the
+# configuration `-y` names and reads each request to its empty FCGI_STDIN
+# record, the whole of what a web server sends, then writes the header of
+# an FCGI_STDOUT record of 100 bytes and 12 of them, and closes.
+
+use Socket;
+my ($conf, $path);
+for my $i (0 .. $#ARGV) { $conf = $ARGV[$i + 1] if $ARGV[$i] eq '-y'; }
+open(my $f, '<', $conf) or die;
+while (<$f>) { $path = $1 if /^listen = (\S+)/; }
+socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die;
+bind($s, sockaddr_un($path)) or die;
+listen($s, 5) or die;
+sub full {
+    my ($c, $n) = @_;
+    my $b = '';
+    while (length($b) < $n) {
+        my $got = sysread($c, $b, $n - length($b), length($b));
+        return undef unless $got;
+    }
+    return $b;
+}
+while (accept(my $c, $s)) {
+    while (defined(my $h = full($c, 8))) {
+        my ($v, $type, $id, $len, $pad) = unpack('CCnnC', $h);
+        full($c, $len + $pad);
+        last if $type == 5 && $len == 0;
+    }
+    syswrite($c, pack('CCnnCC', 1, 6, 1, 100, 0, 0) . 'Content-type');
+    close($c);
+}
