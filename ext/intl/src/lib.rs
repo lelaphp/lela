@@ -34,6 +34,7 @@ mod collator;
 mod error;
 #[allow(dead_code)]
 mod ffi;
+mod formatter;
 #[allow(dead_code)]
 mod iterator;
 mod locale;
@@ -306,6 +307,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = formatter::functions(builder);
     let builder = locale::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
@@ -314,9 +316,10 @@ pub fn extension() -> Extension {
     // IntlGregorianCalendar, Spoofchecker, IntlException, IntlIterator,
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
-    let builder = builder.class::<collator::Collator>();
-    let builder = builder.class::<locale::Locale>();
     let builder = builder
+        .class::<collator::Collator>()
+        .class::<formatter::NumberFormatter>()
+        .class::<locale::Locale>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>();
     builder

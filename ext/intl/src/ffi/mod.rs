@@ -36,6 +36,7 @@ pub(crate) use icu;
 
 pub(crate) mod collator;
 pub(crate) mod enumeration;
+pub(crate) mod formatter;
 pub(crate) mod locale;
 
 mod sys {
