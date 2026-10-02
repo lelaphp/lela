@@ -3248,7 +3248,7 @@ impl Engine {
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => req.cached_file(path, Some(path), crate::api::request::HandlePath::Opened),
+            Ok(None) => req.cached_file(path, Some(path), crate::api::request::HandlePath::Host),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None

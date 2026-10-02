@@ -17212,6 +17212,59 @@ impl Request {
         }
     }
 
+    /// The stream `php_stream_open_for_zend_ex` opens over a plain file
+    /// an include or `spl_autoload` compiles, or looks up by its full
+    /// path in opcache's ([`Request::cached_file`]): a `stream` resource under
+    /// the next id, freed when `zend_destroy_file_handle` closes it
+    /// before the file runs, so the id is spent and `EG(regular_list)`
+    /// grows as php's does, here from its packed table of eight to a
+    /// hash at id 8, 160 bytes more that the list keeps:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/spent.inc'; file_put_contents($f, '<?php $x = 1;');
+    /// include $f;
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, "\n";
+    /// function g($f) { $a = 1; include $f; return $a; }
+    /// $m = memory_get_usage(); g($f); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); g($f); echo memory_get_usage() - $m, " ";
+    /// echo get_resource_id(fopen('php://memory', 'r')), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// 0 160 0
+    /// 376 0 12
+    /// ```
+    ///
+    /// Under opcache the first include compiles the file and spends the
+    /// one id, and every hit after it, served by the path as written,
+    /// opens nothing:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/spent.inc'; file_put_contents($f, '<?php $x = 1;');
+    /// include $f;
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); include $f; echo memory_get_usage() - $m, "\n";
+    /// echo get_resource_id(fopen('php://memory', 'r')), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0 0 0
+    /// 7
+    /// ```
+    ///
+    /// A refusal has recorded the memory limit's fatal, which ends the
+    /// request.
+    fn spend_include_stream(&mut self) {
+        let kind = self.stream_type;
+        let made = self.heap_mut().resource(kind);
+        if let Ok(opened) = self.fatal_of(made) {
+            self.release(Resource::of(opened).as_value());
+        }
+    }
+
     /// `php_plain_files_stream_opener`'s guard over the path an include
     /// opens (`Z/main/streams/plain_wrapper.c:1265`), its warning named by
     /// the construct: the resolved path, or the path as written where
