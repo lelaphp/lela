@@ -6,54 +6,80 @@
 //! ([`crate::ffi`]) and answering as php answers, a throwable handed
 //! back for the call to carry out.
 
-use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpRef, PhpString, Value, ValueRef};
 
-use crate::ffi::{Argument, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE, SQLITE_OK};
+use crate::ffi::{
+    Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
+    SQLITE_OK,
+};
 
-/// A callable kept past the call it was given to, `zend_fcc_dup`: the
-/// resolved callee and the value it came from, one owner of the value.
-#[derive(Clone)]
-pub(crate) struct Handler {
-    pub(crate) callable: Callable,
-    pub(crate) value: Value,
-}
+/// `pdo_sqlite`'s callbacks, what every connection it opens serves with.
+pub(crate) struct PdoSqlite;
 
-impl Handler {
-    /// The callable and one more owner of `value`.
-    pub(crate) fn keep(req: &Request, callable: Callable, value: Value) -> Handler {
-        let value = value.deref();
-        req.addref(&value);
-        Handler { callable, value }
+pub(crate) static PDO_SQLITE: PdoSqlite = PdoSqlite;
+
+impl Callbacks for PdoSqlite {
+    fn scalar(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        call: &mut Invocation<'_>,
+    ) -> Result<(), Thrown> {
+        scalar(req, handler, call)
     }
 
-    /// `zend_fcc_dtor`.
-    pub(crate) fn release(self, req: &mut Request) {
-        req.release(self.value);
+    fn step(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        state: &mut Option<Box<Aggregate>>,
+        args: Vec<Argument>,
+    ) -> Result<(), Thrown> {
+        step(req, handler, state, args)
     }
-}
 
-/// What a registered function serves.
-pub(crate) enum Function {
-    Scalar(Handler),
-    Aggregate { step: Handler, finalize: Handler },
-}
+    fn finalize(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        state: Option<Box<Aggregate>>,
+        call: &mut Invocation<'_>,
+    ) -> Result<(), Thrown> {
+        finalize(req, handler, state, call)
+    }
 
-/// `aggregate_context`: the reference the step and the final are
-/// handed, and the rows counted so far.
-pub(crate) struct Aggregate {
-    context: PhpRef,
-    row: i64,
+    fn collate(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<i32, Thrown> {
+        collate(req, handler, left, right)
+    }
+
+    fn authorize(
+        &self,
+        req: &mut Request,
+        handler: Option<&Handler>,
+        action: i32,
+        names: [Option<Vec<u8>>; 4],
+        pending: bool,
+    ) -> Result<i32, Thrown> {
+        authorize(req, handler, action, names, pending)
+    }
 }
 
 /// An argument as the callback is handed it.
 fn argument(req: &mut Request, argument: Argument) -> Result<Value, Thrown> {
     Ok(match argument {
-        Argument::Int(n) => Value::int(i64::from(n)),
+        // `sqlite3_value_int`, the library's 32 bits.
+        #[allow(clippy::cast_possible_truncation)]
+        Argument::Int(n) => Value::int(i64::from(n as i32)),
         Argument::Float(f) => Value::float(f),
         Argument::Null => Value::null(),
         Argument::Text(bytes) => Value::string(PhpString::new(req, &bytes)?),
@@ -81,25 +107,25 @@ fn result(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Resu
         // php hands `sqlite3_result_int` its `zend_long`.
         #[allow(clippy::cast_possible_truncation)]
         ValueRef::Int(n) => {
-            call.result_int(n as i32);
+            call.return_int(n as i32);
             Ok(())
         }
         ValueRef::Null => {
-            call.result_null();
+            call.return_null();
             Ok(())
         }
         ValueRef::Float(f) => {
-            call.result_double(f);
+            call.return_double(f);
             Ok(())
         }
-        _ => to_string(req, &returned.deref()).map(|text| call.result_text(text.as_bytes())),
+        _ => to_string(req, &returned.deref()).map(|text| call.return_text(text.as_bytes())),
     };
     req.release(returned);
     answered
 }
 
 /// `do_callback` for a scalar function.
-pub(super) fn scalar(
+fn scalar(
     req: &mut Request,
     handler: &Handler,
     invocation: &mut Invocation<'_>,
@@ -123,23 +149,28 @@ fn state_of(
     state: &mut Option<Box<Aggregate>>,
 ) -> Result<(PhpRef, i64), Thrown> {
     if state.is_none() {
-        let context = PhpRef::new(req, Value::null())?;
-        *state = Some(Box::new(Aggregate { context, row: 0 }));
+        let context = PhpRef::new(req, Value::null())?.as_value();
+        *state = Some(Box::new(Aggregate {
+            value: context,
+            row: 0,
+        }));
     }
-    let Some(held) = state.as_mut() else {
-        return Err(php_ext::raising::fatal(
-            req,
-            "InternalError: an aggregate without its state",
-        ));
-    };
-    held.row += 1;
-    Ok((held.context, held.row))
+    let held = state.as_mut().and_then(|held| {
+        held.row += 1;
+        let ValueRef::Reference(context) = held.value.as_ref() else {
+            return None;
+        };
+        Some((*context, held.row))
+    });
+    held.ok_or_else(|| {
+        php_ext::raising::fatal(req, "InternalError: an aggregate without its reference")
+    })
 }
 
 /// `do_callback` for an aggregate's step: the aggregate's reference, the row number
 /// and the arguments handed over, and what it returns kept in the
 /// reference.
-pub(super) fn step(
+fn step(
     req: &mut Request,
     handler: &Handler,
     state: &mut Option<Box<Aggregate>>,
@@ -158,7 +189,7 @@ pub(super) fn step(
 /// `do_callback` for an aggregate's final: the aggregate's reference and
 /// the row number, which counts this call too, and its return as the
 /// answer; the reference given up.
-pub(super) fn finalize(
+fn finalize(
     req: &mut Request,
     handler: &Handler,
     mut state: Option<Box<Aggregate>>,
@@ -180,21 +211,9 @@ pub(super) fn finalize(
     }
 }
 
-/// An aggregate's state given up without its final served.
-pub(super) fn drop_aggregate(req: &mut Request, state: Option<Box<Aggregate>>) {
-    if let Some(state) = state {
-        req.release(state.context.as_value());
-    }
-}
-
 /// `php_sqlite3_collation_callback`: the two strings compared by the
 /// callback, whose answer must be an integer.
-pub(super) fn collate(
-    req: &mut Request,
-    handler: &Handler,
-    left: &[u8],
-    right: &[u8],
-) -> Result<i32, Thrown> {
+fn collate(req: &mut Request, handler: &Handler, left: &[u8], right: &[u8]) -> Result<i32, Thrown> {
     let values = [
         Value::string(PhpString::new(req, left)?),
         Value::string(PhpString::new(req, right)?),
@@ -224,7 +243,7 @@ pub(super) fn collate(
 /// `authorizer`'s user half: the action and its four names handed to
 /// the callback, whose answer must be one of the three the library
 /// takes.
-pub(super) fn authorize(
+fn authorize(
     req: &mut Request,
     handler: Option<&Handler>,
     action: i32,

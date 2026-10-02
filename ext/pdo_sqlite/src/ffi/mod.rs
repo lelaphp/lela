@@ -1,25 +1,31 @@
 //! The binding of libsqlite3 through `libsqlite3-sys` with its `bundled`
 //! feature (design §7.2, `unsafe.homes`' `ext/*/src/ffi/`): the calls
-//! `sqlite_driver.c`, `sqlite_statement.c` and `pdo_sqlite.c` make and
-//! nothing beside them.
+//! `sqlite_driver.c`, `sqlite_statement.c` and `pdo_sqlite.c` make, and
+//! the calls `ext/sqlite3`'s `sqlite3.c` makes over the same library,
+//! which reaches it through these safe types and keeps no binding of its
+//! own (design §4.10, §7.2), and nothing beside them.
 //!
 //! **Owners.** A connection is a [`Db`], shared by the connection that
-//! opened it, each statement prepared on it and each blob opened on it,
-//! and closed with `sqlite3_close` when the last of them goes, which is
-//! what `sqlite3_close_v2` gives php: a statement outliving its connection
-//! in the cycle collector's order still finalizes against an open
-//! connection. The count is not atomic because every owner of one `Db`
-//! belongs to one request, which is single-threaded and moves between
-//! threads only whole (ADR-0005).
+//! opened it, each statement prepared on it, each blob opened on it and
+//! each call in progress that holds it, and closed with `sqlite3_close`
+//! when the last of them goes, which is what `sqlite3_close_v2` gives
+//! php: a statement outliving its connection in the cycle collector's
+//! order still finalizes against an open connection. [`Db::close`]
+//! closes it sooner, where nothing else holds it. The count is not atomic
+//! because every owner of one `Db` belongs to one request, which is
+//! single-threaded and moves between threads only whole (ADR-0005).
 //!
 //! **Callbacks.** A user function, an aggregate, a collation and the
 //! authorizer are called by the library from inside `sqlite3_step`,
 //! `sqlite3_exec`, `sqlite3_prepare_v2` or `sqlite3_reset`. Each of
-//! those calls is made through [`Db::enter`], which leaves the request
+//! those calls is made through `Db::enter`, which leaves the request
 //! where a trampoline finds it for the length of the call, and hands
 //! back what a callback threw, which the library cannot carry; a
 //! trampoline outside such a call reaches no request and answers as php
-//! answers a callback that was not served.
+//! answers a callback that was not served. What a callback does in PHP
+//! is the extension's, a [`Callbacks`] value the connection serves with,
+//! since `pdo_sqlite`'s and `sqlite3`'s callbacks are two algorithms over
+//! the one library.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -30,25 +36,151 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 
 use libsqlite3_sys as sys;
+use php_ext::abi::Callable;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::Value;
 
-use crate::callbacks::{self, Aggregate, Handler};
-
-pub(crate) use sys::{
-    SQLITE_ATTACH, SQLITE_BLOB, SQLITE_CONSTRAINT, SQLITE_DENY, SQLITE_DONE, SQLITE_ERROR,
-    SQLITE_FLOAT, SQLITE_IGNORE, SQLITE_INTEGER, SQLITE_INTERRUPT, SQLITE_NOLFS, SQLITE_NOTFOUND,
-    SQLITE_NULL, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE,
-    SQLITE_OPEN_URI, SQLITE_ROW, SQLITE_TOOBIG,
+pub use sys::{
+    SQLITE_ATTACH, SQLITE_BLOB, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_DENY, SQLITE_DETERMINISTIC,
+    SQLITE_DONE, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_IGNORE, SQLITE_INTEGER, SQLITE_INTERRUPT,
+    SQLITE_LOCKED, SQLITE_NOLFS, SQLITE_NOTFOUND, SQLITE_NULL, SQLITE_OK, SQLITE_OPEN_CREATE,
+    SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, SQLITE_OPEN_URI, SQLITE_ROW, SQLITE_TEXT,
+    SQLITE_TOOBIG,
 };
 
+/// A callable kept past the call it was given to, `zend_fcc_dup`: the
+/// resolved callee and the value it came from, one owner of the value.
+#[derive(Clone)]
+pub struct Handler {
+    pub callable: Callable,
+    pub value: Value,
+}
+
+impl Handler {
+    /// The callable and one more owner of `value`.
+    pub fn keep(req: &Request, callable: Callable, value: Value) -> Handler {
+        let value = value.deref();
+        req.addref(&value);
+        Handler { callable, value }
+    }
+
+    /// `zend_fcc_dtor`.
+    pub fn release(self, req: &mut Request) {
+        req.release(self.value);
+    }
+}
+
+/// What a registered function serves.
+pub enum Function {
+    Scalar(Handler),
+    Aggregate { step: Handler, finalize: Handler },
+}
+
+impl Function {
+    /// The handlers it holds.
+    pub fn handlers(&self) -> Vec<Handler> {
+        match self {
+            Function::Scalar(handler) => vec![handler.clone()],
+            Function::Aggregate { step, finalize } => vec![step.clone(), finalize.clone()],
+        }
+    }
+
+    /// Its handlers given up.
+    pub fn release(self, req: &mut Request) {
+        match self {
+            Function::Scalar(handler) => handler.release(req),
+            Function::Aggregate { step, finalize } => {
+                step.release(req);
+                finalize.release(req);
+            }
+        }
+    }
+}
+
+/// One group's aggregate state, which the library keeps between the
+/// step calls and hands the final: the value the callbacks are handed,
+/// one owner of it, and the rows counted so far.
+pub struct Aggregate {
+    pub value: Value,
+    pub row: i64,
+}
+
+/// An aggregate's state given up without its final served.
+pub fn drop_aggregate(req: &mut Request, state: Option<Box<Aggregate>>) {
+    if let Some(state) = state {
+        req.release(state.value);
+    }
+}
+
+/// What an extension does in PHP when the library calls back: the
+/// bodies of its `do_callback`, collation and authorizer, served with
+/// the request of the call in progress. A connection serves with one
+/// static value, set when it opens and changed with
+/// [`Db::serve_with`].
+pub trait Callbacks: Sync {
+    /// A scalar function's call, its answer set on `call`.
+    fn scalar(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        call: &mut Invocation<'_>,
+    ) -> Result<(), Thrown>;
+
+    /// An aggregate's step over the group's state, empty the first time.
+    fn step(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        state: &mut Option<Box<Aggregate>>,
+        args: Vec<Argument>,
+    ) -> Result<(), Thrown>;
+
+    /// An aggregate's final, the state handed over, its answer set on
+    /// `call`.
+    fn finalize(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        state: Option<Box<Aggregate>>,
+        call: &mut Invocation<'_>,
+    ) -> Result<(), Thrown>;
+
+    /// A collation's comparison of two strings.
+    fn collate(
+        &self,
+        req: &mut Request,
+        handler: &Handler,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<i32, Thrown>;
+
+    /// The authorizer's answer to one action and its four names, with
+    /// the handler set, if any, and whether a callback already threw
+    /// during the call in progress.
+    fn authorize(
+        &self,
+        req: &mut Request,
+        handler: Option<&Handler>,
+        action: i32,
+        names: [Option<Vec<u8>>; 4],
+        pending: bool,
+    ) -> Result<i32, Thrown>;
+}
+
 /// `sqlite3_libversion()`.
-pub(super) fn version() -> String {
+pub fn version() -> String {
     // SAFETY: no argument and no state.
     let raw = unsafe { sys::sqlite3_libversion() };
     // SAFETY: the library's version is a static NUL-terminated string.
     let text = unsafe { CStr::from_ptr(raw) };
     text.to_string_lossy().into_owned()
+}
+
+/// `sqlite3_libversion_number()`.
+pub fn version_number() -> i64 {
+    // SAFETY: no argument and no state.
+    i64::from(unsafe { sys::sqlite3_libversion_number() })
 }
 
 /// A C string of the bytes up to the first NUL, as php hands
@@ -86,10 +218,12 @@ struct Inner {
     pending: Option<Thrown>,
     /// `authorizer_fcc`, what `setAuthorizer()` set.
     authorizer: Option<Handler>,
+    /// What the callbacks do in PHP.
+    callbacks: &'static dyn Callbacks,
 }
 
 /// `sqlite3 *`, one owner of it.
-pub(crate) struct Db(NonNull<Inner>);
+pub struct Db(NonNull<Inner>);
 
 // SAFETY: every owner of one `Db` (the handle, its statements, its
 // blobs and the callbacks registered on it) is reachable only from the
@@ -133,16 +267,24 @@ impl Db {
     }
 
     /// `sqlite3_open_v2(filename, &db, flags, NULL)` with the authorizer
-    /// installed as `pdo_sqlite_handle_factory` installs it: the code and
-    /// the text of the error where it failed.
-    pub(crate) fn open(filename: &[u8], flags: i32) -> Result<Db, (i32, Vec<u8>)> {
+    /// installed as `pdo_sqlite_handle_factory` and `SQLite3::open`
+    /// install it, serving its callbacks with `callbacks`: the code and
+    /// the text of the error where it failed, `sqlite3_errstr(rc)` where
+    /// the library made no connection to ask.
+    pub fn open(
+        filename: &[u8],
+        flags: i32,
+        callbacks: &'static dyn Callbacks,
+    ) -> Result<Db, (i32, Vec<u8>)> {
         let name = c_string(filename);
         let mut raw = ptr::null_mut();
         // SAFETY: the name is NUL-terminated and outlives the call, the
         // out-pointer a live local, the VFS the default.
         let rc = unsafe { sys::sqlite3_open_v2(name.as_ptr(), &raw mut raw, flags, ptr::null()) };
         let Some(raw) = NonNull::new(raw) else {
-            return Err((rc, b"out of memory".to_vec()));
+            // SAFETY: the library's static text for a code.
+            let text = bytes_of(unsafe { sys::sqlite3_errstr(rc) });
+            return Err((rc, text.unwrap_or_default()));
         };
         let inner = Box::into_raw(Box::new(Inner {
             raw,
@@ -150,6 +292,7 @@ impl Db {
             req: ptr::null_mut(),
             pending: None,
             authorizer: None,
+            callbacks,
         }));
         // SAFETY: `into_raw` never answers null.
         let db = Db(unsafe { NonNull::new_unchecked(inner) });
@@ -164,44 +307,123 @@ impl Db {
     }
 
     /// `sqlite3_errcode`.
-    pub(crate) fn errcode(&self) -> i32 {
+    pub fn errcode(&self) -> i32 {
         // SAFETY: a live connection.
         unsafe { sys::sqlite3_errcode(self.inner_raw()) }
     }
 
     /// `sqlite3_errmsg`.
-    pub(crate) fn errmsg(&self) -> Vec<u8> {
+    pub fn errmsg(&self) -> Vec<u8> {
         // SAFETY: a live connection; the message is copied at once.
         bytes_of(unsafe { sys::sqlite3_errmsg(self.inner_raw()) }).unwrap_or_default()
     }
 
+    /// `sqlite3_extended_errcode`.
+    pub fn extended_errcode(&self) -> i32 {
+        // SAFETY: a live connection.
+        unsafe { sys::sqlite3_extended_errcode(self.inner_raw()) }
+    }
+
+    /// The callbacks served from here on: `SQLite3::enableExceptions`
+    /// changes what its authorizer raises.
+    pub fn serve_with(&self, callbacks: &'static dyn Callbacks) {
+        // SAFETY: an owner's allocation; the write is the only access, and
+        // a trampoline copies the reference out before it calls back.
+        unsafe { (*self.0.as_ptr()).callbacks = callbacks };
+    }
+
+    /// `sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, NULL)`,
+    /// `sqlite3.defensive`.
+    pub fn defensive(&self) {
+        // SAFETY: a live connection; the option takes an `int` and an
+        // `int *` it may leave null.
+        unsafe {
+            sys::sqlite3_db_config(
+                self.inner_raw(),
+                sys::SQLITE_DBCONFIG_DEFENSIVE,
+                1,
+                ptr::null_mut::<c_int>(),
+            )
+        };
+    }
+
+    /// `sqlite3_close` now, where this is the connection's last owner:
+    /// `Err` with the connection still open, the code and the library's
+    /// text, where it is not, which is the text `sqlite3_close` sets for
+    /// a connection a statement, a blob or a call in progress still holds.
+    pub fn close(self) -> Result<(), (Db, i32, Vec<u8>)> {
+        // SAFETY: `self` is an owner; the field is read.
+        let owners = unsafe { (*self.0.as_ptr()).owners };
+        if owners > 1 {
+            let text = b"unable to close due to unfinalized statements or unfinished backups";
+            return Err((self, SQLITE_BUSY, text.to_vec()));
+        }
+        // SAFETY: the last owner, so no statement, blob or registration's
+        // call can reach the connection after it is closed.
+        let rc = unsafe { sys::sqlite3_close(self.inner_raw()) };
+        if rc != SQLITE_OK {
+            let failed = (self.errcode(), self.errmsg());
+            return Err((self, failed.0, failed.1));
+        }
+        let inner = self.0;
+        std::mem::forget(self);
+        // SAFETY: the allocation `open` leaked, its connection closed and
+        // its last owner forgotten, freed once.
+        drop(unsafe { Box::from_raw(inner.as_ptr()) });
+        Ok(())
+    }
+
+    /// `sqlite3_backup_init`, `sqlite3_backup_step(-1)` until it stops
+    /// answering `SQLITE_OK`, and `sqlite3_backup_finish`: the finish's
+    /// code, or this connection's error code where the backup could not
+    /// start.
+    pub fn backup(&self, to: &Db, from_name: &[u8], to_name: &[u8]) -> i32 {
+        let (from_name, to_name) = (c_string(from_name), c_string(to_name));
+        // SAFETY: two live connections and two NUL-terminated names.
+        let backup = unsafe {
+            sys::sqlite3_backup_init(
+                to.inner_raw(),
+                to_name.as_ptr(),
+                self.inner_raw(),
+                from_name.as_ptr(),
+            )
+        };
+        if backup.is_null() {
+            return self.errcode();
+        }
+        // SAFETY: the backup made above, live until its finish.
+        while unsafe { sys::sqlite3_backup_step(backup, -1) } == SQLITE_OK {}
+        // SAFETY: as above, finished once.
+        unsafe { sys::sqlite3_backup_finish(backup) }
+    }
+
     /// `sqlite3_changes`.
-    pub(crate) fn changes(&self) -> i64 {
+    pub fn changes(&self) -> i64 {
         // SAFETY: a live connection.
         i64::from(unsafe { sys::sqlite3_changes(self.inner_raw()) })
     }
 
     /// `sqlite3_last_insert_rowid`.
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
+    pub fn last_insert_rowid(&self) -> i64 {
         // SAFETY: a live connection.
         unsafe { sys::sqlite3_last_insert_rowid(self.inner_raw()) }
     }
 
     /// `sqlite3_get_autocommit`.
-    pub(crate) fn autocommit(&self) -> bool {
+    pub fn autocommit(&self) -> bool {
         // SAFETY: a live connection.
         unsafe { sys::sqlite3_get_autocommit(self.inner_raw()) != 0 }
     }
 
     /// `sqlite3_busy_timeout`.
-    pub(crate) fn busy_timeout(&self, ms: i64) {
+    pub fn busy_timeout(&self, ms: i64) {
         let ms = c_int::try_from(ms).unwrap_or(if ms < 0 { c_int::MIN } else { c_int::MAX });
         // SAFETY: a live connection.
         unsafe { sys::sqlite3_busy_timeout(self.inner_raw(), ms) };
     }
 
     /// `sqlite3_extended_result_codes`.
-    pub(crate) fn extended_result_codes(&self, on: i64) {
+    pub fn extended_codes(&self, on: i64) {
         // php hands the library its `zend_long` as an `int`.
         #[allow(clippy::cast_possible_truncation)]
         // SAFETY: a live connection.
@@ -230,7 +452,7 @@ impl Db {
     }
 
     /// `sqlite3_exec(db, sql, NULL, NULL, NULL)`.
-    pub(crate) fn exec(&self, req: &mut Request, sql: &[u8]) -> (i32, Option<Thrown>) {
+    pub fn exec(&self, req: &mut Request, sql: &[u8]) -> (i32, Option<Thrown>) {
         let sql = c_string(sql);
         self.enter(req, |raw| {
             // SAFETY: a live connection and a NUL-terminated statement that
@@ -239,13 +461,13 @@ impl Db {
         })
     }
 
-    /// `sqlite3_prepare_v2(db, sql, len, &stmt, &tail)`: the statement, or
-    /// the library's code.
-    pub(crate) fn prepare(
+    /// `sqlite3_prepare_v2(db, sql, len, &stmt, &tail)`: the statement,
+    /// none for a text with no statement in it, or the library's code.
+    pub fn prepare(
         &self,
         req: &mut Request,
         sql: &[u8],
-    ) -> (Result<Stmt, i32>, Option<Thrown>) {
+    ) -> (Result<Option<Stmt>, i32>, Option<Thrown>) {
         let mut raw = ptr::null_mut();
         let (rc, thrown) = self.enter(req, |db| {
             let mut tail = ptr::null();
@@ -262,16 +484,16 @@ impl Db {
             }
         });
         let prepared = match NonNull::new(raw) {
-            Some(raw) if rc == SQLITE_OK => Ok(Stmt {
+            Some(raw) if rc == SQLITE_OK => Ok(Some(Stmt {
                 raw,
                 db: self.clone(),
-            }),
+            })),
             Some(raw) => {
                 // SAFETY: a statement the library made and nothing else holds.
                 unsafe { sys::sqlite3_finalize(raw.as_ptr()) };
                 Err(rc)
             }
-            None if rc == SQLITE_OK => Err(SQLITE_ERROR),
+            None if rc == SQLITE_OK => Ok(None),
             None => Err(rc),
         };
         (prepared, thrown)
@@ -279,14 +501,14 @@ impl Db {
 
     /// `sqlite3_create_function` for a scalar or an aggregate, the
     /// registration the connection keeps until it closes.
-    pub(crate) fn create_function(
+    pub fn create_function(
         &self,
         name: &[u8],
         argc: i32,
         flags: i32,
-        function: callbacks::Function,
-    ) -> Result<Registration, i32> {
-        let aggregate = matches!(function, callbacks::Function::Aggregate { .. });
+        function: Function,
+    ) -> Result<Registration, (Box<Function>, i32)> {
+        let aggregate = matches!(function, Function::Aggregate { .. });
         let registered = Box::into_raw(Box::new(Registered {
             inner: self.0,
             function,
@@ -315,8 +537,8 @@ impl Db {
         };
         if rc != SQLITE_OK {
             // SAFETY: the box made above, which the library did not take.
-            drop(unsafe { Box::from_raw(registered) });
-            return Err(rc);
+            let registered = unsafe { Box::from_raw(registered) };
+            return Err((Box::new(registered.function), rc));
         }
         Ok(Registration {
             name: c_name,
@@ -326,11 +548,11 @@ impl Db {
     }
 
     /// `sqlite3_create_collation(db, name, SQLITE_UTF8, collation, callback)`.
-    pub(crate) fn create_collation(
+    pub fn create_collation(
         &self,
         name: &[u8],
         handler: Handler,
-    ) -> Result<Registration, i32> {
+    ) -> Result<Registration, (Handler, i32)> {
         let registered = Box::into_raw(Box::new(Collation {
             inner: self.0,
             handler,
@@ -349,8 +571,8 @@ impl Db {
         };
         if rc != SQLITE_OK {
             // SAFETY: the box made above, which the library did not take.
-            drop(unsafe { Box::from_raw(registered) });
-            return Err(rc);
+            let registered = unsafe { Box::from_raw(registered) };
+            return Err((registered.handler, rc));
         }
         Ok(Registration {
             name: c_name,
@@ -362,7 +584,7 @@ impl Db {
     /// A registration taken off the library, `sqlite3_create_function`
     /// or `sqlite3_create_collation` with no callback, and the handlers
     /// it held handed back for the caller to release.
-    pub(crate) fn unregister(&self, registration: Registration) -> Vec<Handler> {
+    pub fn unregister(&self, registration: Registration) -> Vec<Handler> {
         let Registration { name, argc, kind } = registration;
         match kind {
             Kind::Function(registered) => {
@@ -385,8 +607,8 @@ impl Db {
                 // library's data.
                 let registered = unsafe { Box::from_raw(registered) };
                 match registered.function {
-                    callbacks::Function::Scalar(handler) => vec![handler],
-                    callbacks::Function::Aggregate { step, finalize } => vec![step, finalize],
+                    Function::Scalar(handler) => vec![handler],
+                    Function::Aggregate { step, finalize } => vec![step, finalize],
                 }
             }
             Kind::Collation(registered) => {
@@ -409,13 +631,13 @@ impl Db {
     }
 
     /// `authorizer_fcc`: the handler set, the one it replaced handed back.
-    pub(crate) fn set_authorizer(&self, handler: Option<Handler>) -> Option<Handler> {
+    pub fn set_authorizer(&self, handler: Option<Handler>) -> Option<Handler> {
         // SAFETY: an owner's allocation; the write is the only access.
         unsafe { std::mem::replace(&mut (*self.0.as_ptr()).authorizer, handler) }
     }
 
     /// Every handler the connection holds, for the cycle collector.
-    pub(crate) fn authorizer(&self) -> Option<Handler> {
+    pub fn authorizer(&self) -> Option<Handler> {
         // SAFETY: an owner's allocation; the field is copied out.
         unsafe { (*self.0.as_ptr()).authorizer.clone() }
     }
@@ -423,7 +645,7 @@ impl Db {
     /// `sqlite3_load_extension` with the C API's loading enabled for the
     /// call alone, `pdosqlite` `loadExtension`'s dance: the library's
     /// error text where it failed.
-    pub(crate) fn load_extension(&self, path: &[u8]) -> Result<(), Vec<u8>> {
+    pub fn load_extension(&self, path: &[u8]) -> Result<(), Vec<u8>> {
         let path = c_string(path);
         self.load_config(1);
         let mut error: *mut c_char = ptr::null_mut();
@@ -465,7 +687,7 @@ impl Db {
     }
 
     /// `sqlite3_blob_open`: the blob, or the library's error text.
-    pub(crate) fn blob_open(
+    pub fn blob_open(
         &self,
         dbname: &[u8],
         table: &[u8],
@@ -508,7 +730,7 @@ type Final = Option<unsafe extern "C" fn(*mut sys::sqlite3_context)>;
 /// state and what it serves.
 struct Registered {
     inner: NonNull<Inner>,
-    function: callbacks::Function,
+    function: Function,
 }
 
 /// A collation's data as the library holds it.
@@ -525,7 +747,7 @@ enum Kind {
 /// One function or collation registered on a connection, php's
 /// `pdo_sqlite_func` or `pdo_sqlite_collation`, which the connection
 /// keeps until it closes, [`Db::unregister`].
-pub(crate) struct Registration {
+pub struct Registration {
     name: CString,
     argc: i32,
     kind: Kind,
@@ -537,17 +759,12 @@ unsafe impl Send for Registration {}
 
 impl Registration {
     /// The handlers it holds, for the cycle collector.
-    pub(crate) fn handlers(&self) -> Vec<Handler> {
+    pub fn handlers(&self) -> Vec<Handler> {
         match self.kind {
             Kind::Function(registered) => {
                 // SAFETY: a registration's box, live until `unregister`.
                 let registered = unsafe { &*registered };
-                match &registered.function {
-                    callbacks::Function::Scalar(handler) => vec![handler.clone()],
-                    callbacks::Function::Aggregate { step, finalize } => {
-                        vec![step.clone(), finalize.clone()]
-                    }
-                }
+                registered.function.handlers()
             }
             Kind::Collation(registered) => {
                 // SAFETY: as above.
@@ -570,6 +787,12 @@ fn request<'a>(inner: NonNull<Inner>) -> Option<&'a mut Request> {
     unsafe { req.as_mut() }
 }
 
+/// What `inner`'s connection serves its callbacks with.
+fn callbacks(inner: NonNull<Inner>) -> &'static dyn Callbacks {
+    // SAFETY: as in `request`; the reference is copied out.
+    unsafe { (*inner.as_ptr()).callbacks }
+}
+
 /// Whether a callback already threw during the call in progress.
 fn pending(inner: NonNull<Inner>) -> bool {
     // SAFETY: as in `request`.
@@ -587,15 +810,16 @@ fn throw_out(inner: NonNull<Inner>, thrown: Thrown) {
 }
 
 /// One call of a user function, `sqlite3_context` with its arguments.
-pub(crate) struct Invocation<'a> {
+pub struct Invocation<'a> {
     ctx: *mut sys::sqlite3_context,
     args: &'a [*mut sys::sqlite3_value],
 }
 
 /// An argument as `do_callback` reads it.
-pub(crate) enum Argument {
-    /// `sqlite3_value_int`, the library's 32 bits.
-    Int(i32),
+pub enum Argument {
+    /// `sqlite3_value_int64`; `pdo_sqlite` reads the library's 32 bits,
+    /// `sqlite3_value_int`, which is this truncated.
+    Int(i64),
     Float(f64),
     Null,
     Text(Vec<u8>),
@@ -603,7 +827,7 @@ pub(crate) enum Argument {
 
 impl Invocation<'_> {
     /// The arguments, each as its storage class reads.
-    pub(crate) fn arguments(&self) -> Vec<Argument> {
+    pub fn arguments(&self) -> Vec<Argument> {
         self.args
             .iter()
             .map(|&value| {
@@ -612,7 +836,7 @@ impl Invocation<'_> {
                 match class {
                     SQLITE_INTEGER => {
                         // SAFETY: as above.
-                        Argument::Int(unsafe { sys::sqlite3_value_int(value) })
+                        Argument::Int(unsafe { sys::sqlite3_value_int64(value) })
                     }
                     SQLITE_FLOAT => {
                         // SAFETY: as above.
@@ -632,25 +856,31 @@ impl Invocation<'_> {
     }
 
     /// `sqlite3_result_int`.
-    pub(crate) fn result_int(&mut self, n: i32) {
+    pub fn return_int(&mut self, n: i32) {
         // SAFETY: this call's context.
         unsafe { sys::sqlite3_result_int(self.ctx, n) };
     }
 
+    /// `sqlite3_result_int64`.
+    pub fn return_int64(&mut self, n: i64) {
+        // SAFETY: this call's context.
+        unsafe { sys::sqlite3_result_int64(self.ctx, n) };
+    }
+
     /// `sqlite3_result_double`.
-    pub(crate) fn result_double(&mut self, f: f64) {
+    pub fn return_double(&mut self, f: f64) {
         // SAFETY: this call's context.
         unsafe { sys::sqlite3_result_double(self.ctx, f) };
     }
 
     /// `sqlite3_result_null`.
-    pub(crate) fn result_null(&mut self) {
+    pub fn return_null(&mut self) {
         // SAFETY: this call's context.
         unsafe { sys::sqlite3_result_null(self.ctx) };
     }
 
     /// `sqlite3_result_text(..., SQLITE_TRANSIENT)`.
-    pub(crate) fn result_text(&mut self, text: &[u8]) {
+    pub fn return_text(&mut self, text: &[u8]) {
         // SAFETY: this call's context; the library copies the bytes.
         unsafe {
             sys::sqlite3_result_text(
@@ -665,7 +895,7 @@ impl Invocation<'_> {
     /// `sqlite3_result_error(context, "failed to invoke callback", 0)`,
     /// php's text and php's length of zero, which the library takes as
     /// the empty message.
-    pub(crate) fn failed(&mut self) {
+    pub fn failed(&mut self) {
         // SAFETY: this call's context and a static message.
         unsafe { sys::sqlite3_result_error(self.ctx, c"failed to invoke callback".as_ptr(), 0) };
     }
@@ -735,14 +965,14 @@ unsafe extern "C" fn scalar(
     let Some(registered) = registered(ctx) else {
         return call.failed();
     };
-    let callbacks::Function::Scalar(handler) = &registered.function else {
+    let Function::Scalar(handler) = &registered.function else {
         return call.failed();
     };
     let inner = registered.inner;
     let Some(req) = request(inner).filter(|_| !pending(inner)) else {
         return call.failed();
     };
-    if let Err(thrown) = callbacks::scalar(req, handler, &mut call) {
+    if let Err(thrown) = callbacks(inner).scalar(req, handler, &mut call) {
         throw_out(inner, thrown);
     }
 }
@@ -760,7 +990,7 @@ unsafe extern "C" fn step(
     let Some(registered) = registered(ctx) else {
         return;
     };
-    let callbacks::Function::Aggregate { step, .. } = &registered.function else {
+    let Function::Aggregate { step, .. } = &registered.function else {
         return;
     };
     let inner = registered.inner;
@@ -771,7 +1001,7 @@ unsafe extern "C" fn step(
     let Some(state) = call.aggregate() else {
         return;
     };
-    if let Err(thrown) = callbacks::step(req, step, state, args) {
+    if let Err(thrown) = callbacks(inner).step(req, step, state, args) {
         throw_out(inner, thrown);
     }
 }
@@ -782,7 +1012,7 @@ unsafe extern "C" fn finalize(ctx: *mut sys::sqlite3_context) {
     let Some(registered) = registered(ctx) else {
         return;
     };
-    let callbacks::Function::Aggregate { finalize, .. } = &registered.function else {
+    let Function::Aggregate { finalize, .. } = &registered.function else {
         return;
     };
     let inner = registered.inner;
@@ -791,10 +1021,10 @@ unsafe extern "C" fn finalize(ctx: *mut sys::sqlite3_context) {
         return;
     };
     if pending(inner) {
-        callbacks::drop_aggregate(req, state);
+        drop_aggregate(req, state);
         return call.failed();
     }
-    if let Err(thrown) = callbacks::finalize(req, finalize, state, &mut call) {
+    if let Err(thrown) = callbacks(inner).finalize(req, finalize, state, &mut call) {
         throw_out(inner, thrown);
     }
 }
@@ -818,7 +1048,7 @@ unsafe extern "C" fn collate(
     };
     let left = slice(left.cast(), left_len);
     let right = slice(right.cast(), right_len);
-    match callbacks::collate(req, &collation.handler, &left, &right) {
+    match callbacks(inner).collate(req, &collation.handler, &left, &right) {
         Ok(order) => order,
         Err(thrown) => {
             throw_out(inner, thrown);
@@ -847,7 +1077,8 @@ unsafe extern "C" fn authorize(
         return SQLITE_OK;
     };
     let names = [first, second, third, fourth].map(bytes_of);
-    match callbacks::authorize(req, handler.as_ref(), action, names, pending(inner)) {
+    let served = callbacks(inner).authorize(req, handler.as_ref(), action, names, pending(inner));
+    match served {
         Ok(answer) => answer,
         Err(thrown) => {
             throw_out(inner, thrown);
@@ -857,7 +1088,7 @@ unsafe extern "C" fn authorize(
 }
 
 /// `sqlite3_stmt *`, holding its connection.
-pub(crate) struct Stmt {
+pub struct Stmt {
     raw: NonNull<sys::sqlite3_stmt>,
     db: Db,
 }
@@ -879,32 +1110,62 @@ impl Stmt {
     }
 
     /// The connection.
-    pub(crate) fn db(&self) -> &Db {
+    pub fn db(&self) -> &Db {
         &self.db
     }
 
     /// `sqlite3_step`.
-    pub(crate) fn step(&self, req: &mut Request) -> (i32, Option<Thrown>) {
+    pub fn step(&self, req: &mut Request) -> (i32, Option<Thrown>) {
         let raw = self.raw();
         // SAFETY: a live statement on the live connection.
         self.db.enter(req, |_| unsafe { sys::sqlite3_step(raw) })
     }
 
     /// `sqlite3_reset`, which may finish an aggregate and so call back.
-    pub(crate) fn reset(&self, req: &mut Request) -> Option<Thrown> {
+    pub fn reset(&self, req: &mut Request) -> (i32, Option<Thrown>) {
         let raw = self.raw();
         // SAFETY: as in `step`.
-        self.db.enter(req, |_| unsafe { sys::sqlite3_reset(raw) }).1
+        self.db.enter(req, |_| unsafe { sys::sqlite3_reset(raw) })
+    }
+
+    /// `sqlite3_clear_bindings`.
+    pub fn clear_bindings(&self) -> i32 {
+        // SAFETY: a live statement.
+        unsafe { sys::sqlite3_clear_bindings(self.raw()) }
+    }
+
+    /// `sqlite3_bind_parameter_count`.
+    pub fn parameter_count(&self) -> i64 {
+        // SAFETY: a live statement.
+        i64::from(unsafe { sys::sqlite3_bind_parameter_count(self.raw()) })
+    }
+
+    /// `sqlite3_sql`, the text the statement was prepared from.
+    pub fn sql(&self) -> Vec<u8> {
+        // SAFETY: a live statement; the text is copied at once.
+        bytes_of(unsafe { sys::sqlite3_sql(self.raw()) }).unwrap_or_default()
+    }
+
+    /// `sqlite3_expanded_sql`: the text with the bound values in place.
+    pub fn expanded_sql(&self) -> Vec<u8> {
+        // SAFETY: a live statement.
+        let raw = unsafe { sys::sqlite3_expanded_sql(self.raw()) };
+        let text = bytes_of(raw).unwrap_or_default();
+        if !raw.is_null() {
+            // SAFETY: the text the library allocated for us to free.
+            unsafe { sys::sqlite3_free(raw.cast()) };
+        }
+        text
     }
 
     /// `sqlite3_data_count`.
-    pub(crate) fn data_count(&self) -> usize {
+    pub fn data_count(&self) -> usize {
         // SAFETY: a live statement.
         usize::try_from(unsafe { sys::sqlite3_data_count(self.raw()) }).unwrap_or(0)
     }
 
     /// `sqlite3_column_count`.
-    pub(crate) fn column_count(&self) -> usize {
+    pub fn column_count(&self) -> usize {
         // SAFETY: a live statement.
         usize::try_from(unsafe { sys::sqlite3_column_count(self.raw()) }).unwrap_or(0)
     }
@@ -913,33 +1174,32 @@ impl Stmt {
         c_len(column)
     }
 
-    /// `sqlite3_column_name`.
-    pub(crate) fn column_name(&self, column: usize) -> Vec<u8> {
+    /// `sqlite3_column_name`, none past the last column.
+    pub fn column_name(&self, column: usize) -> Option<Vec<u8>> {
         // SAFETY: a live statement; the name is copied at once.
         bytes_of(unsafe { sys::sqlite3_column_name(self.raw(), Self::column(column)) })
-            .unwrap_or_default()
     }
 
     /// `sqlite3_column_type`.
-    pub(crate) fn column_type(&self, column: usize) -> i32 {
+    pub fn column_type(&self, column: usize) -> i32 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_column_type(self.raw(), Self::column(column)) }
     }
 
     /// `sqlite3_column_int64`.
-    pub(crate) fn column_int64(&self, column: usize) -> i64 {
+    pub fn column_int64(&self, column: usize) -> i64 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_column_int64(self.raw(), Self::column(column)) }
     }
 
     /// `sqlite3_column_double`.
-    pub(crate) fn column_double(&self, column: usize) -> f64 {
+    pub fn column_double(&self, column: usize) -> f64 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_column_double(self.raw(), Self::column(column)) }
     }
 
     /// `sqlite3_column_blob` and its length.
-    pub(crate) fn column_blob(&self, column: usize) -> Vec<u8> {
+    pub fn column_blob(&self, column: usize) -> Vec<u8> {
         // SAFETY: a live statement; the bytes first, then their length.
         let at = unsafe { sys::sqlite3_column_blob(self.raw(), Self::column(column)) };
         // SAFETY: as above.
@@ -948,7 +1208,7 @@ impl Stmt {
     }
 
     /// `sqlite3_column_text` and its length.
-    pub(crate) fn column_text(&self, column: usize) -> Vec<u8> {
+    pub fn column_text(&self, column: usize) -> Vec<u8> {
         // SAFETY: as in `column_blob`.
         let at = unsafe { sys::sqlite3_column_text(self.raw(), Self::column(column)) };
         // SAFETY: as above.
@@ -957,19 +1217,19 @@ impl Stmt {
     }
 
     /// `sqlite3_column_decltype`.
-    pub(crate) fn column_decltype(&self, column: usize) -> Option<Vec<u8>> {
+    pub fn column_decltype(&self, column: usize) -> Option<Vec<u8>> {
         // SAFETY: a live statement; the name is copied at once.
         bytes_of(unsafe { sys::sqlite3_column_decltype(self.raw(), Self::column(column)) })
     }
 
     /// `sqlite3_column_table_name`.
-    pub(crate) fn column_table_name(&self, column: usize) -> Option<Vec<u8>> {
+    pub fn column_table_name(&self, column: usize) -> Option<Vec<u8>> {
         // SAFETY: as above.
         bytes_of(unsafe { sys::sqlite3_column_table_name(self.raw(), Self::column(column)) })
     }
 
     /// `sqlite3_bind_parameter_index`.
-    pub(crate) fn parameter_index(&self, name: &[u8]) -> i64 {
+    pub fn parameter_index(&self, name: &[u8]) -> i64 {
         let name = c_string(name);
         // SAFETY: a live statement and a NUL-terminated name.
         i64::from(unsafe { sys::sqlite3_bind_parameter_index(self.raw(), name.as_ptr()) })
@@ -980,19 +1240,25 @@ impl Stmt {
     }
 
     /// `sqlite3_bind_null`.
-    pub(crate) fn bind_null(&self, position: i64) -> i32 {
+    pub fn bind_null(&self, position: i64) -> i32 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_bind_null(self.raw(), Self::position(position)) }
     }
 
     /// `sqlite3_bind_int64`.
-    pub(crate) fn bind_int(&self, position: i64, n: i64) -> i32 {
+    pub fn bind_int(&self, position: i64, n: i64) -> i32 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_bind_int64(self.raw(), Self::position(position), n) }
     }
 
+    /// `sqlite3_bind_double`.
+    pub fn bind_double(&self, position: i64, f: f64) -> i32 {
+        // SAFETY: a live statement.
+        unsafe { sys::sqlite3_bind_double(self.raw(), Self::position(position), f) }
+    }
+
     /// `sqlite3_bind_blob`, copied by the library.
-    pub(crate) fn bind_blob(&self, position: i64, bytes: &[u8]) -> i32 {
+    pub fn bind_blob(&self, position: i64, bytes: &[u8]) -> i32 {
         // SAFETY: a live statement; the library copies the bytes.
         unsafe {
             sys::sqlite3_bind_blob(
@@ -1006,7 +1272,7 @@ impl Stmt {
     }
 
     /// `sqlite3_bind_text`, copied by the library.
-    pub(crate) fn bind_text(&self, position: i64, bytes: &[u8]) -> i32 {
+    pub fn bind_text(&self, position: i64, bytes: &[u8]) -> i32 {
         // SAFETY: as in `bind_blob`.
         unsafe {
             sys::sqlite3_bind_text(
@@ -1020,32 +1286,32 @@ impl Stmt {
     }
 
     /// `sqlite3_stmt_readonly`.
-    pub(crate) fn readonly(&self) -> bool {
+    pub fn readonly(&self) -> bool {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_stmt_readonly(self.raw()) != 0 }
     }
 
     /// `sqlite3_stmt_busy`.
-    pub(crate) fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_stmt_busy(self.raw()) != 0 }
     }
 
     /// `sqlite3_stmt_isexplain`.
-    pub(crate) fn explain_mode(&self) -> i64 {
+    pub fn explain(&self) -> i64 {
         // SAFETY: a live statement.
         i64::from(unsafe { sys::sqlite3_stmt_isexplain(self.raw()) })
     }
 
     /// `sqlite3_stmt_explain`.
-    pub(crate) fn set_explain_mode(&self, mode: i64) -> i32 {
+    pub fn set_explain(&self, mode: i64) -> i32 {
         // SAFETY: a live statement.
         unsafe { sys::sqlite3_stmt_explain(self.raw(), c_int::try_from(mode).unwrap_or(0)) }
     }
 }
 
 /// `sqlite3_blob *`, holding its connection: what `openBlob()` streams.
-pub(crate) struct Blob {
+pub struct Blob {
     raw: NonNull<sys::sqlite3_blob>,
     db: Db,
 }
@@ -1063,13 +1329,13 @@ impl Drop for Blob {
 
 impl Blob {
     /// `sqlite3_blob_bytes`.
-    pub(crate) fn len(&self) -> usize {
+    pub fn size(&self) -> usize {
         // SAFETY: a live blob.
         usize::try_from(unsafe { sys::sqlite3_blob_bytes(self.raw.as_ptr()) }).unwrap_or(0)
     }
 
     /// `sqlite3_blob_read` of `buf.len()` bytes at `offset`.
-    pub(crate) fn read(&self, buf: &mut [u8], offset: usize) -> bool {
+    pub fn read(&self, buf: &mut [u8], offset: usize) -> bool {
         // SAFETY: a live blob and a buffer of the length given.
         let rc = unsafe {
             sys::sqlite3_blob_read(
@@ -1083,7 +1349,7 @@ impl Blob {
     }
 
     /// `sqlite3_blob_write` of `buf` at `offset`.
-    pub(crate) fn write(&self, buf: &[u8], offset: usize) -> bool {
+    pub fn write(&self, buf: &[u8], offset: usize) -> bool {
         // SAFETY: a live blob and the bytes given.
         let rc = unsafe {
             sys::sqlite3_blob_write(

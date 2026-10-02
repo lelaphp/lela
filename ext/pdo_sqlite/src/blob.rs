@@ -164,7 +164,7 @@ pub(super) fn open_blob(
                 return Ok(Value::bool(false));
             }
         };
-        let size = blob.len();
+        let size = blob.size();
         let stream = BlobStream {
             blob: Some(blob),
             position: 0,
