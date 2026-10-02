@@ -155,6 +155,10 @@ pub struct Session {
     /// `run <file`: the file the program reads as its stdin.
     pub stdin_file: Option<PathBuf>,
     pub breaks: Breakpoints,
+    /// `bp_tmp`: the breakpoints a cycle that ended exported as `break`
+    /// lines, which the next cycle runs once its init files have
+    /// (`Z/sapi/phpdbg/phpdbg.c:1604-1615, 1556-1562`).
+    pub carried: Option<Vec<u8>>,
     pub watches: Watches,
     /// `register`'s functions, lowered.
     pub registered: Vec<Vec<u8>>,
@@ -168,6 +172,11 @@ pub struct Session {
     pub stepping: bool,
     /// `PHPDBG_G(last_line)`.
     pub last_line: u32,
+    /// `PHPDBG_G(vmret)`: what the last handler the loop ran answered,
+    /// which a cycle starts at zero.
+    pub vmret: i32,
+    /// `PHPDBG_IS_QUIET`, which `-v` clears.
+    pub quiet: bool,
     pub seek: Option<Seek>,
     /// `PHPDBG_G(handled_exception)`: the handle of the throwable the
     /// session last stopped on as uncaught.
@@ -237,6 +246,7 @@ impl Session {
             args: Vec::new(),
             stdin_file: None,
             breaks: Breakpoints::default(),
+            carried: None,
             watches: Watches::default(),
             registered: Vec::new(),
             plan: None,
@@ -244,6 +254,8 @@ impl Session {
             execution: Execution::Not,
             stepping: false,
             last_line: 0,
+            vmret: 0,
+            quiet: true,
             seek: None,
             handled: None,
             queued: Vec::new(),

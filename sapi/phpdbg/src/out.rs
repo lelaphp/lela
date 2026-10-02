@@ -124,6 +124,18 @@ thread_local! {
     /// A write of the debugger's own through the program's output is
     /// under way, [`interruptible`].
     static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
+    /// `PHPDBG_DISCARD_OUTPUT`, [`discarded`].
+    static DISCARDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f` with `PHPDBG_DISCARD_OUTPUT` set: what phpdbg writes in it goes
+/// nowhere and leaves the newline fact as it stood, as `phpdbg_print`,
+/// `phpdbg_out` and `phpdbg_xml_internal` return first
+/// (`Z/sapi/phpdbg/phpdbg_out.c:178-233`).
+pub fn discarded(f: impl FnOnce()) {
+    let outer = DISCARDING.replace(true);
+    f();
+    DISCARDING.set(outer);
 }
 
 /// Whether notices and errors are coloured.
@@ -182,6 +194,9 @@ fn raw(bytes: &[u8]) {
 
 /// `phpdbg_out`: the bytes as they are, the newline fact untouched.
 pub fn out(bytes: &[u8]) {
+    if DISCARDING.get() {
+        return;
+    }
     raw(bytes);
 }
 
@@ -195,7 +210,7 @@ pub fn dump(bytes: &[u8]) {
 
 /// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their last.
 pub fn write(bytes: &[u8]) {
-    if bytes.is_empty() {
+    if bytes.is_empty() || DISCARDING.get() {
         return;
     }
     raw(bytes);
@@ -204,6 +219,9 @@ pub fn write(bytes: &[u8]) {
 
 /// `phpdbg_writeln`, `P_WRITELN`: the bytes and a newline.
 pub fn writeln(bytes: &[u8]) {
+    if DISCARDING.get() {
+        return;
+    }
     let mut line = bytes.to_vec();
     line.push(b'\n');
     raw(&line);
@@ -214,7 +232,7 @@ pub fn writeln(bytes: &[u8]) {
 /// where the last byte was none, then `[message]`, inside the element's
 /// colour while colours are on.
 fn bracketed(message: &[u8], pick: fn(&Palette) -> &'static Colour) {
-    if message.is_empty() {
+    if message.is_empty() || DISCARDING.get() {
         return;
     }
     let mut line = Vec::with_capacity(message.len() + 16);

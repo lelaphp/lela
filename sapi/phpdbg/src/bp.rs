@@ -88,6 +88,22 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// `"name"` with `php_addcslashes_str(name, "\\\"\n")` between: a
+/// backslash before each of the three, the newline written `\n`.
+fn quoted(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + 2);
+    out.push(b'"');
+    for byte in name {
+        match byte {
+            b'\\' | b'"' => out.extend_from_slice(&[b'\\', *byte]),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            _ => out.push(*byte),
+        }
+    }
+    out.push(b'"');
+    out
+}
+
 impl Breakpoints {
     /// `PHPDBG_BREAK_INIT`: the next number.
     pub fn next_id(&mut self) -> u32 {
@@ -499,6 +515,76 @@ impl Breakpoints {
                 out::writeln(line.as_bytes());
             }
         }
+    }
+
+    /// `phpdbg_export_breakpoints_to_string`: a `break` line for each
+    /// breakpoint in the order of its number, the file a pending line
+    /// names as it was named, and none for an opline php keys by its
+    /// address, which no line names; none where no line is written. The
+    /// next cycle runs them into tables that start empty, so a deleted
+    /// breakpoint leaves no gap in the numbers.
+    ///
+    /// ```php
+    /// function foo() { echo "foo\n"; }
+    /// function bar() { echo "bar\n"; }
+    /// foo();
+    /// bar();
+    /// ```
+    /// ```request phpdbg
+    /// b foo
+    /// b bar
+    /// b del 0
+    /// r
+    /// c
+    /// b ZEND_ECHO
+    /// b bar
+    /// b foo
+    /// q
+    /// ```
+    /// ```expect
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> [Breakpoint #0 added at foo]
+    /// prompt> [Breakpoint #1 added at bar]
+    /// prompt> [Deleted breakpoint #0]
+    /// prompt> foo
+    /// [Breakpoint #1 in bar() at %SCRATCH%/witness.php:3, hits: 1]
+    /// >00003: function bar() { echo "bar\n"; }
+    ///  00004: foo();
+    ///  00005: bar();
+    /// prompt> bar
+    /// [Script ended normally]
+    /// prompt> [Breakpoint #1 added at ZEND_ECHO]
+    /// prompt> [Breakpoint exists at bar]
+    /// prompt> [Breakpoint #2 added at foo]
+    /// prompt>
+    /// ```
+    pub fn export(&self) -> Option<Vec<u8>> {
+        let mut text = Vec::new();
+        for brake in &self.list {
+            let line: Vec<u8> = match &brake.kind {
+                Kind::File { file, line } | Kind::PendingFile { file, line } => {
+                    [&quoted(file)[..], format!(":{line}").as_bytes()].concat()
+                }
+                Kind::FileOpline { file, opline } => {
+                    [&quoted(file)[..], format!(":#{opline}").as_bytes()].concat()
+                }
+                Kind::Symbol { name } | Kind::Opcode { name } => name.clone(),
+                Kind::Method { class, name } => [&class[..], b"::", name].concat(),
+                Kind::MethodOpline {
+                    class,
+                    name,
+                    opline,
+                } => [&class[..], b"::", name, format!("#{opline}").as_bytes()].concat(),
+                Kind::FunctionOpline { name, opline } => {
+                    [&name[..], format!("#{opline}").as_bytes()].concat()
+                }
+                Kind::Opline { .. } => continue,
+            };
+            text.extend_from_slice(b"break ");
+            text.extend_from_slice(&line);
+            text.push(b'\n');
+        }
+        (!text.is_empty()).then_some(text)
     }
 
     /// Whether a line waits on a file not compiled yet.

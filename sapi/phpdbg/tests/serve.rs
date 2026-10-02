@@ -313,3 +313,148 @@ fn notices_and_errors_are_coloured_unless_boring() {
         )
     );
 }
+
+/// A cycle's end exports the breakpoints as `break` lines, and the next
+/// cycle starts its tables empty and its count at zero: the init file
+/// numbers its line #0 again, the lines run again after it with nothing
+/// written, and the breakpoints still stop; a deleted one is not
+/// carried, and the numbers close up (the pinned phpdbg's bytes for
+/// `phpdbg -qrb -n -i<file>` and `phpdbg -qIb -n`). The file's lines are
+/// past the eighth: under it php lists a file's breakpoints off a packed
+/// table it reads as a hash, which drops rows or crashes.
+#[test]
+fn a_cycle_starts_the_breakpoints_over_and_carries_them() {
+    let program = "<?php\n\n\n\n\n\n\n$a = 1;\n$b = 2;\n$c = 3;\necho \"x\\n\";\n";
+    let (out, file, _) = initialized(
+        "cycle-init",
+        &["-qrb", "-n"],
+        "b 9\n",
+        program,
+        "c\nb 9\nb 10\ninfo break\nq\n",
+    );
+    assert_eq!(
+        out,
+        format!(
+            "[Breakpoint #0 added at {file}:9]\n\
+             [Breakpoint #0 at {file}:9, hits: 1]\n\
+             >00009: $b = 2;\n \
+             00010: $c = 3;\n \
+             00011: echo \"x\\n\";\n\
+             prompt> x\n\
+             [Script ended normally]\n\
+             [Breakpoint #0 added at {file}:9]\n\
+             prompt> [Breakpoint at {file}:9 exists]\n\
+             prompt> [Breakpoint #1 added at {file}:10]\n\
+             prompt> ------------------------------------------------\n\
+             File Breakpoints:\n\
+             #0\t\t{file}:9\n\
+             #1\t\t{file}:10\n\
+             prompt> "
+        )
+    );
+    let (out, file) = debugged(
+        "cycle-numbers",
+        "<?php\nfunction foo() { echo \"foo\\n\"; }\nfunction bar() { echo \"bar\\n\"; }\nfunction baz() { echo \"baz\\n\"; }\nfoo();\nbar();\nbaz();\n",
+        "b foo\nb bar\nb del 0\nr\nc\nb baz\ninfo break\nr\nq\n",
+    );
+    assert_eq!(
+        out,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Breakpoint #0 added at foo]\n\
+             prompt> [Breakpoint #1 added at bar]\n\
+             prompt> [Deleted breakpoint #0]\n\
+             prompt> foo\n\
+             [Breakpoint #1 in bar() at {file}:3, hits: 1]\n\
+             >00003: function bar() {{ echo \"bar\\n\"; }}\n \
+             00004: function baz() {{ echo \"baz\\n\"; }}\n \
+             00005: foo();\n\
+             prompt> bar\n\
+             baz\n\
+             [Script ended normally]\n\
+             prompt> [Breakpoint #1 added at baz]\n\
+             prompt> ------------------------------------------------\n\
+             Function Breakpoints:\n\
+             #0\t\tbar\n\
+             #1\t\tbaz\n\
+             prompt> foo\n\
+             [Breakpoint #0 in bar() at {file}:3, hits: 1]\n\
+             >00003: function bar() {{ echo \"bar\\n\"; }}\n \
+             00004: function baz() {{ echo \"baz\\n\"; }}\n \
+             00005: foo();\n\
+             prompt> "
+        )
+    );
+}
+
+/// The overview with each table's size cut to `N`: the engine's tables
+/// hold what its bundle loads, which is not the oracle's build.
+fn counts_cut(out: &str) -> String {
+    out.lines()
+        .map(|line| {
+            match ["Classes    ", "Functions  ", "Constants  "]
+                .iter()
+                .find(|label| line.starts_with(**label))
+            {
+                Some(label) => format!("{label}N"),
+                None => line.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `info` with no sub-command writes the execution context's overview:
+/// in the init file, before the context is compiled; at the prompt the
+/// compile left, with the main op array's sizes; and at a breakpoint,
+/// executing, with what the last handler answered (the pinned phpdbg's
+/// bytes for `phpdbg -qb -n -i<file>`, the table sizes aside).
+#[test]
+fn info_writes_the_execution_context_overview() {
+    let overview = |file: &str, sizes: Option<&str>, executing: &str| {
+        let compiled = if sizes.is_some() { "yes" } else { "no" };
+        let sizes = sizes.unwrap_or_default();
+        format!(
+            "Execution Context Information\n\
+             \n\
+             Readline   no\n\
+             Libedit    yes\n\
+             Exec       {file}\n\
+             Compiled   {compiled}\n\
+             Stepping   off\n\
+             Quietness  on\n\
+             {sizes}\
+             {executing}\
+             Classes    N\n\
+             Functions  N\n\
+             Constants  N\n\
+             Included   0"
+        )
+    };
+    let (out, file, _) = initialized(
+        "info",
+        &["-qb", "-n"],
+        "info\n",
+        "<?php\n$a = 1;\nfunction f($x) { $y = $x; return $y; }\nf(1);\n",
+        "info\nb f\nr\ninfo\nq\n",
+    );
+    let sizes = Some("Opcodes    5\nVariables  0\n");
+    assert_eq!(
+        counts_cut(&out),
+        format!(
+            "{}\n\
+             [Successful compilation of {file}]\n\
+             prompt> {}\n\
+             prompt> [Breakpoint #0 added at f]\n\
+             prompt> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
+             >00003: function f($x) {{ $y = $x; return $y; }}\n \
+             00004: f(1);\n \
+             00005: \n\
+             prompt> {}\n\
+             prompt> ",
+            overview(&file, None, "Executing  no\n"),
+            overview(&file, sizes, "Executing  no\n"),
+            overview(&file, sizes, "Executing  yes\nVM Return  1\n"),
+        )
+    );
+}

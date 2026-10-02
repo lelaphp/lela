@@ -35,7 +35,9 @@ pub fn files(named: Option<&[u8]>, default: bool) -> Vec<Vec<u8>> {
 /// `phpdbg_init` with `PHPDBG_IS_INITIALIZING` set, where the session
 /// says a cycle has started: each file read a line at a time, with
 /// nothing of the execution context compiled. A `quit` among them ends
-/// the reading.
+/// the reading; else the breakpoints the last cycle carried are set
+/// again, their lines run as php's `phpdbg_string_init` runs them, with
+/// nothing written, after the init files have numbered theirs.
 pub fn run(s: &mut Session, here: &mut Here<'_>) {
     if !std::mem::take(&mut s.init_due) {
         return;
@@ -56,19 +58,27 @@ pub fn run(s: &mut Session, here: &mut Here<'_>) {
             );
             continue;
         };
-        if !lines(s, here, &file, &text) {
+        if !lines(s, here, Some(&file), &text) {
             break;
         }
+    }
+    if s.stopped.is_none()
+        && let Some(carried) = s.carried.take()
+    {
+        out::discarded(|| {
+            lines(s, here, None, &carried);
+        });
     }
     s.initializing = false;
 }
 
-/// `phpdbg_try_file_init`'s lines through `phpdbg_line_init`: trailing
+/// `phpdbg_try_file_init`'s lines, or `phpdbg_string_init`'s where no
+/// file is named, through `phpdbg_line_init`: trailing
 /// blanks cut, an empty line and one that starts with `#` skipped, and
 /// every other line run on its own, so a line that fails leaves the
 /// next to run; a code block between `<:` and `:>` is not run. False
 /// where the session stopped.
-fn lines(s: &mut Session, here: &mut Here<'_>, file: &[u8], text: &[u8]) -> bool {
+fn lines(s: &mut Session, here: &mut Here<'_>, file: Option<&[u8]>, text: &[u8]) -> bool {
     let mut in_code = false;
     let mut text = text;
     if text.last() == Some(&b'\n') {
@@ -101,15 +111,21 @@ fn lines(s: &mut Session, here: &mut Here<'_>, file: &[u8], text: &[u8]) -> bool
         match prompt::init_line(s, here, commands) {
             InitLine::Done => {}
             InitLine::Stopped => return false,
-            InitLine::Unrecognized(message) => out::error(
-                format!(
-                    "Unrecognized command in {}:{}: {}, {message}!",
-                    String::from_utf8_lossy(file),
-                    at + 1,
-                    String::from_utf8_lossy(line)
-                )
-                .as_bytes(),
-            ),
+            InitLine::Unrecognized(message) => {
+                let line = String::from_utf8_lossy(line);
+                let message = match file {
+                    Some(file) => format!(
+                        "Unrecognized command in {}:{}: {line}, {message}!",
+                        String::from_utf8_lossy(file),
+                        at + 1
+                    ),
+                    None => format!(
+                        "Unrecognized command on line {}: {line}, {message}!",
+                        at + 1
+                    ),
+                };
+                out::error(message.as_bytes());
+            }
         }
     }
     true

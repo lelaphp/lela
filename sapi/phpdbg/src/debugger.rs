@@ -387,6 +387,10 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
             Next::Unwind => tier::unwind(req, at.frame),
             Next::Step => tier::step(req, at.frame),
         };
+        if let Ok(edge) = &stepped {
+            let vmret = vm_return(req, at.frame, *edge);
+            session::with(|s| s.vmret = vmret);
+        }
         match stepped {
             Ok(
                 Stepped::Same(frame)
@@ -407,6 +411,29 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
             Ok(Stepped::Done) => return Flow::Returned,
             Err(fatal) => return Flow::Bail(fatal),
         }
+    }
+}
+
+/// `PHPDBG_G(vmret)`, what `zend_vm_call_opcode_handler` answered for
+/// the handler run from `before`: 0 where the loop stays in the frame,
+/// 1 where it entered one whose caller is `before`, 2 where it went to
+/// any other, and -1 where the serving ended
+/// (`Z/Zend/zend_vm_execute.h`'s hybrid `zend_vm_call_opcode_handler`).
+fn vm_return(req: &Request, before: FrameRef, edge: Stepped) -> i32 {
+    let (Stepped::Same(after)
+    | Stepped::Pushed(after)
+    | Stepped::Popped(after)
+    | Stepped::Moved(after)
+    | Stepped::Threw(after)) = edge
+    else {
+        return -1;
+    };
+    if after == before {
+        0
+    } else if tier::caller(req, after) == Some(before) {
+        1
+    } else {
+        2
     }
 }
 
