@@ -45,7 +45,7 @@ fn imagerotate(
     let im = im(req, image)?;
     #[allow(clippy::cast_possible_truncation)]
     let angle = angle as f32;
-    let rotated = gd(req, || im.rotate(angle, int(background_color)));
+    let rotated = gd(req, || im.rotate(angle, int(background_color)))?;
     wrap(req, rotated)
 }
 
@@ -100,7 +100,7 @@ fn ttf(
         text: text.as_bytes().to_vec(),
         linespacing,
     };
-    match gd(req, || Im::string_ft(im, &ft)) {
+    match gd(req, || Im::string_ft(im, &ft))? {
         Ok(brect) => {
             let values = brect.map(|n| Value::int(i64::from(n)));
             Ok(OrFalse::Value(crate::list(req, &values)?))
@@ -300,7 +300,7 @@ fn imagefilter(
         12 => return scatter(req, im, args),
         _ => {}
     }
-    Ok(gd(req, || im.filter(filter, ints, weight)) == 1)
+    Ok(gd(req, || im.filter(filter, ints, weight))? == 1)
 }
 
 /// `php_image_filter_scatter`: the two amounts, then the colours to
@@ -328,9 +328,9 @@ fn scatter(req: &mut Request, im: Im, args: &[Untyped<Value>]) -> Result<bool, T
         }
     }
     if list.is_empty() {
-        return Ok(gd(req, || im.filter(12, [sub, plus, 0, 0], 0.0)) != 0);
+        return Ok(gd(req, || im.filter(12, [sub, plus, 0, 0], 0.0))? != 0);
     }
-    Ok(gd(req, || im.scatter_color(sub, plus, &mut list)))
+    gd(req, || im.scatter_color(sub, plus, &mut list))
 }
 
 /// `imageconvolution(GdImage $image, array $matrix, float $divisor,
@@ -405,7 +405,7 @@ fn imageconvolution(
     }
     #[allow(clippy::cast_possible_truncation)]
     let offset = offset as f32;
-    Ok(gd(req, || im.convolution(m, div, offset)))
+    gd(req, || im.convolution(m, div, offset))
 }
 
 /// `imageflip(GdImage $image, int $mode): true`.
@@ -430,7 +430,7 @@ fn imageflip(req: &mut Request, image: Instance<GdImage>, mode: i64) -> Result<T
             "be one of IMG_FLIP_VERTICAL, IMG_FLIP_HORIZONTAL, or IMG_FLIP_BOTH",
         ));
     }
-    gd(req, || im.flip(mode));
+    gd(req, || im.flip(mode))?;
     Ok(True)
 }
 
@@ -524,7 +524,7 @@ fn imagecrop(
     if let Some((_, text)) = checks.iter().find(|(bad, _)| *bad) {
         return Err(argument_error(req, "ValueError", 2, text));
     }
-    let cropped = gd(req, || im.crop(r));
+    let cropped = gd(req, || im.crop(r))?;
     wrap(req, cropped)
 }
 
@@ -554,7 +554,7 @@ fn imagecropauto(
 ) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
     let im = im(req, image)?;
     let cropped = match mode {
-        0..=4 => gd(req, || im.crop_auto(u32::try_from(mode).unwrap_or(0))),
+        0..=4 => gd(req, || im.crop_auto(u32::try_from(mode).unwrap_or(0)))?,
         5 => {
             if color < 0 || (!im.true_color() && color >= i64::from(im.colors_total())) {
                 return Err(arg_value_error(
@@ -565,7 +565,7 @@ fn imagecropauto(
             }
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let (color, threshold) = (color as u32, threshold as f32);
-            gd(req, || im.crop_threshold(color, threshold))
+            gd(req, || im.crop_threshold(color, threshold))?
         }
         _ => return Err(arg_value_error(req, 2, "be a valid mode")),
     };
@@ -646,7 +646,7 @@ fn imagescale(
         };
         im.set_interpolation(old);
         scaled
-    });
+    })?;
     wrap(req, scaled)
 }
 
@@ -717,7 +717,7 @@ fn imageaffine(
         Some(clip) => Some(rect(req, clip, 3)?),
         None => None,
     };
-    let made = gd(req, || im.affine(area, &m));
+    let made = gd(req, || im.affine(area, &m))?;
     wrap(req, made)
 }
 
@@ -871,7 +871,7 @@ fn imagesetinterpolation(
 ) -> Result<bool, Thrown> {
     let im = im(req, image)?;
     let method = if method == -1 { 3 } else { method };
-    Ok(gd(req, || im.set_interpolation(int(method))))
+    gd(req, || im.set_interpolation(int(method)))
 }
 
 /// `imageresolution(GdImage $image, ?int $resolution_x = null, ?int
