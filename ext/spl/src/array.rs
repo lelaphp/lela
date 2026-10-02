@@ -703,6 +703,19 @@ impl ArrayObject {
     /// int(1)
     /// Incomplete or ill-typed serialization data
     /// ```
+    ///
+    /// The storage `unserialize()` read is held with one more owner, and
+    /// the members' empty array is the process's own, so the peak is
+    /// php's:
+    ///
+    /// ```php
+    /// $s = serialize(new ArrayObject([1, 2, 3]));
+    /// unserialize($s); $u = memory_get_usage(); memory_reset_peak_usage(); $x = unserialize($s);
+    /// echo memory_get_peak_usage() - $u, " ", memory_get_usage() - $u, "\n";
+    /// ```
+    /// ```expect
+    /// 17352 568
+    /// ```
     #[php(tentative)]
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();

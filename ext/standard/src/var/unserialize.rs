@@ -1573,7 +1573,19 @@ impl State<'_> {
         Ok(true)
     }
 
-    /// `"a:" uiv ":" "{"`.
+    /// `"a:" uiv ":" "{"`: a table of the elements' count laid down as a
+    /// hash, or, for none, the process's empty array, which costs
+    /// nothing.
+    ///
+    /// ```php
+    /// debug_zval_dump(unserialize('a:0:{}'));
+    /// $m = memory_get_usage(); $x = unserialize('a:1:{i:0;a:0:{}}'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// array(0) interned {
+    /// }
+    /// 376
+    /// ```
     fn array(
         &mut self,
         req: &mut Request,
@@ -1595,10 +1607,11 @@ impl State<'_> {
             return Ok(false);
         }
         // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
-        // convert from packed to hash during unserialization".
+        // convert from packed to hash during unserialization"; and
+        // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
         let array = match u32::try_from(elements) {
             Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
-            _ => PhpArray::new(req)?,
+            _ => PhpArray::empty(),
         };
         self.write(req, slot, entry, Value::array(array))?;
         if elements == 0 {
