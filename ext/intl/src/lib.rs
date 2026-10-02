@@ -262,10 +262,13 @@ fn constants() -> Vec<ConstDecl> {
 
 /// `zend_intl_globals`, request-scoped (ADR-0005): the request's
 /// `intl_error`. `default_locale`, `error_level` and `use_exceptions`
-/// are the ini entries themselves.
+/// are the ini entries themselves, overridden while a constructor runs.
 #[derive(Default)]
 pub(crate) struct State {
     error: IntlError,
+    /// Inside a constructor's [`error::constructing`]: php's
+    /// `INTL_G(use_exceptions) = true; INTL_G(error_level) = 0;`.
+    constructing: bool,
 }
 
 /// The extension value (design §7.1): `intl_module_entry`, its ini

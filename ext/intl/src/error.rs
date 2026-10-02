@@ -77,7 +77,10 @@ pub(crate) fn code(req: &mut Request) -> Code {
 }
 
 /// `INTL_G(error_level)`: `intl.error_level` as a quantity.
-fn error_level(req: &Request) -> Option<Level> {
+fn error_level(req: &mut Request) -> Option<Level> {
+    if req.state::<State>().constructing {
+        return None;
+    }
     let value = req.ini_get(b"intl.error_level")?;
     let (bits, _) = Request::ini_parse_quantity(value);
     [
@@ -102,9 +105,22 @@ fn error_level(req: &Request) -> Option<Level> {
 }
 
 /// `INTL_G(use_exceptions)`.
-pub(crate) fn use_exceptions(req: &Request) -> bool {
+pub(crate) fn use_exceptions(req: &mut Request) -> bool {
+    if req.state::<State>().constructing {
+        return true;
+    }
     req.ini_get(b"intl.use_exceptions")
         .is_some_and(Request::ini_parse_bool)
+}
+
+/// A constructor's body, as php's `__construct`s wrap theirs: errors
+/// thrown as `IntlException` and raised at no level while it runs,
+/// whatever the ini entries say, and the previous setting restored.
+pub(crate) fn constructing<T>(req: &mut Request, f: impl FnOnce(&mut Request) -> T) -> T {
+    let old = std::mem::replace(&mut req.state::<State>().constructing, true);
+    let answer = f(req);
+    req.state::<State>().constructing = old;
+    answer
 }
 
 /// `intl_error_set_custom_msg(NULL, msg)`: raised at `intl.error_level`,
