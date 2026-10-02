@@ -20,14 +20,20 @@ use crate::api::call::constant;
 use crate::api::coerce::to_string;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::Value;
-use crate::ini_syntax::Host;
+use crate::api::values::{Emalloc, PhpString, Value};
+use crate::ini_syntax::{Held, Host, Val};
 use php_compile::multibyte::{self, Filter, Step};
 use php_compile::syntax::Colours;
 
 /// `zend_parse_ini_string` over `text` in a request, the one INI grammar
-/// the engine reads its startup entries by: each callback's event in
-/// order, or bison's message and the line the scanner stood at. A
+/// the engine reads its startup entries by: `callback` called with each
+/// statement's event as it is reduced, then nothing, or bison's message
+/// and the line the scanner stood at. The event's strings are the
+/// request's, made as the scanner's `zend_ini_copy_value` and the
+/// grammar's actions make them and given up after the callback, so a
+/// callback keeps one by taking an owner of it (`Z_TRY_ADDREF`), and the
+/// scanner's state stack is allocated as `zend_stack` grows it, which
+/// `memory_get_peak_usage()` sees. A
 /// constant is the request's, a `${…}` reads what the host's ini text
 /// set under the name (`zend_get_configuration_directive`), not the
 /// entry's value, and then the environment, and a double is written at
@@ -76,23 +82,75 @@ pub fn parse_ini(
     req: &mut Request,
     text: &[u8],
     scanner: IniScanner,
-) -> Result<Result<Vec<IniEvent>, (String, u32)>, Thrown> {
+    callback: impl FnMut(&mut Request, IniEvent<Value>) -> Result<(), Thrown>,
+) -> Result<Result<(), (String, u32)>, Thrown> {
     let mut host = InRequest {
         req,
-        events: Vec::new(),
+        strings: Vec::new(),
+        stack: None,
+        callback,
     };
-    Ok(crate::ini_syntax::parse(text, scanner, &mut host)?.map(|()| host.events))
+    let parsed = crate::ini_syntax::parse(text, scanner, &mut host);
+    // `shutdown_ini_scanner`, and what bison's destructors free of a
+    // parse a syntax error stopped.
+    let InRequest {
+        req,
+        strings,
+        stack,
+        ..
+    } = host;
+    for fresh in strings.into_iter().flatten() {
+        req.heap_mut().release_string(fresh.finish());
+    }
+    if let Some(stack) = stack {
+        stack.free(req);
+    }
+    parsed
 }
 
-/// The grammar's host inside a request: the callback collects.
-struct InRequest<'r> {
+/// The grammar's host inside a request: the strings the parse holds, by
+/// [`Held`], the state stack's allocation, and the callback.
+struct InRequest<'r, F> {
     req: &'r mut Request,
-    events: Vec<IniEvent>,
+    strings: Vec<Option<php_heap::FreshStr>>,
+    stack: Option<Emalloc>,
+    callback: F,
 }
 
-impl Host for InRequest<'_> {
-    type Error = Thrown;
+impl<F> InRequest<'_, F> {
+    /// The string `held` names, taken out.
+    fn take(&mut self, held: Held) -> Option<php_heap::FreshStr> {
+        self.strings.get_mut(held.0).and_then(Option::take)
+    }
 
+    /// A value of the event: the held string handed out as the
+    /// request's, kept in `given` to give up after the callback.
+    fn value(&mut self, val: Val, given: &mut Vec<PhpString>) -> Result<Value, Thrown> {
+        if let Some(fresh) = val.held.and_then(|held| self.take(held)) {
+            let s = PhpString::of(fresh.finish());
+            given.push(s);
+            return Ok(Value::string(s));
+        }
+        Ok(match val.value {
+            // `zend_ini_init_string`'s interned empty string.
+            IniValue::Str(bytes) => {
+                let s = self.req.string(&bytes)?;
+                given.push(s);
+                Value::string(s)
+            }
+            IniValue::Bool(b) => Value::bool(b),
+            IniValue::Null => Value::null(),
+            IniValue::Long(n) => Value::int(n),
+            IniValue::Double(d) => Value::float(d),
+        })
+    }
+}
+
+impl<F> Host for InRequest<'_, F>
+where
+    F: FnMut(&mut Request, IniEvent<Value>) -> Result<(), Thrown>,
+{
+    type Error = Thrown;
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         match constant(self.req, name)? {
             Some(value) => Ok(Some(to_string(self.req, &value)?.as_bytes().to_vec())),
@@ -112,8 +170,61 @@ impl Host for InRequest<'_> {
         Ok(to_string(self.req, &Value::float(d))?.as_bytes().to_vec())
     }
 
-    fn event(&mut self, event: IniEvent) {
-        self.events.push(event);
+    fn event(&mut self, event: IniEvent<Val>) -> Result<(), Thrown> {
+        let mut given = Vec::new();
+        let mut failed = None;
+        let event = event.map(|val| match self.value(val, &mut given) {
+            Ok(value) => value,
+            Err(thrown) => {
+                failed.get_or_insert(thrown);
+                Value::null()
+            }
+        });
+        let called = match failed {
+            Some(thrown) => Err(thrown),
+            None => (self.callback)(self.req, event),
+        };
+        for s in given {
+            self.req.release(Value::string(s));
+        }
+        called
+    }
+
+    fn hold(&mut self, bytes: &[u8], size: usize) -> Result<Option<Held>, Thrown> {
+        let fresh = self.req.heap_mut().string_fresh(size);
+        let mut fresh = self.req.fatal_of(fresh)?;
+        fresh.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        fresh.set_len(bytes.len());
+        self.strings.push(Some(fresh));
+        Ok(Some(Held(self.strings.len() - 1)))
+    }
+
+    fn extend(&mut self, held: Held, bytes: &[u8]) -> Result<Option<Held>, Thrown> {
+        let Some(fresh) = self.take(held) else {
+            return self.hold(bytes, bytes.len());
+        };
+        let grown = self.req.heap_mut().string_extend(fresh, bytes.len());
+        let mut grown = self.req.fatal_of(grown)?;
+        grown.bytes_mut().copy_from_slice(bytes);
+        if let Some(slot) = self.strings.get_mut(held.0) {
+            *slot = Some(grown);
+        }
+        Ok(Some(held))
+    }
+
+    fn free(&mut self, held: Held) {
+        if let Some(fresh) = self.take(held) {
+            self.req.heap_mut().release_string(fresh.finish());
+        }
+    }
+
+    fn stack(&mut self, slots: usize) -> Result<(), Thrown> {
+        let size = slots * std::mem::size_of::<i32>();
+        self.stack = Some(match self.stack.take() {
+            Some(stack) => stack.resize(self.req, size)?,
+            None => Emalloc::new(self.req, size)?,
+        });
+        Ok(())
     }
 }
 

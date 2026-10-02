@@ -1256,26 +1256,16 @@ impl PhpStream {
         (!line.is_empty()).then_some(line)
     }
 
-    /// `zend_stream_fixup` over `php_zend_stream_reader`
-    /// (`Z/Zend/zend_stream.c:198-262`): the size asked first,
-    /// `php_zend_stream_fsizer`'s `php_stream_stat` on a stream with no
-    /// read filter (`Z/main/main.c:1661-1675`), which a user wrapper
-    /// serves with `stream_stat`; then the whole stream read for the
-    /// compiler, a chunk at a time until a read gives nothing, and `None`
-    /// where any read fails, which `compile_file` reports as the file it
-    /// could not open.
-    pub(crate) fn read_for_compile(&mut self, req: &mut Request) -> Option<Vec<u8>> {
-        if self.readfilters.is_empty() {
-            let _ = self.stat(req);
+    /// `php_zend_stream_fsizer` (`Z/main/main.c:1661-1675`): the size
+    /// `php_stream_stat` gives a stream with no read filter, which a user
+    /// wrapper serves with `stream_stat`, and zero for one with a filter
+    /// or no size, since what a filter gives need not be the file's size.
+    pub(crate) fn zend_fsize(&mut self, req: &mut Request) -> usize {
+        if !self.readfilters.is_empty() {
+            return 0;
         }
-        let mut out = Vec::new();
-        let mut chunk = vec![0; CHUNK_SIZE];
-        loop {
-            match self.read(req, &mut chunk)? {
-                0 => return Some(out),
-                n => out.extend_from_slice(chunk.get(..n)?),
-            }
-        }
+        self.stat(req)
+            .map_or(0, |sb| usize::try_from(sb[7]).unwrap_or(0))
     }
 
     /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
@@ -3072,6 +3062,10 @@ pub(crate) struct OpenOptions {
     pub(crate) disable_open_basedir: bool,
     /// `STREAM_ONLY_GET_HEADERS`: the open `get_headers` makes.
     pub(crate) only_get_headers: bool,
+    /// `STREAM_OPEN_FOR_ZEND_STREAM`: the open `php_stream_open_for_zend_ex`
+    /// makes for the engine's scanner, whose caller holds the
+    /// `*opened_path` the opener sets ([`Request::open_wrapper_named`]).
+    pub(crate) for_zend_stream: bool,
 }
 
 impl OpenOptions {
@@ -3085,6 +3079,7 @@ impl OpenOptions {
         will_cast: false,
         disable_open_basedir: false,
         only_get_headers: false,
+        for_zend_stream: false,
     };
 
     /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
@@ -3098,10 +3093,9 @@ impl OpenOptions {
     /// The bits as php numbers them, what a user-space wrapper's
     /// `stream_open` is handed: `STREAM_USE_PATH` 1, `REPORT_ERRORS` 8,
     /// `STREAM_MUST_SEEK` 16, `STREAM_WILL_CAST` 32,
-    /// `STREAM_OPEN_FOR_INCLUDE` 128, `STREAM_USE_URL` 256 and
-    /// `STREAM_ONLY_GET_HEADERS` 512, with `STREAM_OPEN_FOR_ZEND_STREAM`
-    /// 0x10000 beside the include's, since it is the one open that sets it
-    /// here (`php_stream_open_for_zend_ex`).
+    /// `STREAM_OPEN_FOR_INCLUDE` 128, `STREAM_USE_URL` 256,
+    /// `STREAM_ONLY_GET_HEADERS` 512 and `STREAM_OPEN_FOR_ZEND_STREAM`
+    /// 0x10000.
     const fn bits(self) -> i64 {
         (self.use_path as i64)
             | (self.report as i64) << 3
@@ -3110,7 +3104,7 @@ impl OpenOptions {
             | (self.for_include as i64) << 7
             | (self.use_url as i64) << 8
             | (self.only_get_headers as i64) << 9
-            | (self.for_include as i64) << 16
+            | (self.for_zend_stream as i64) << 16
     }
 }
 
@@ -3921,22 +3915,65 @@ impl Request {
         mode: &[u8],
         options: OpenOptions,
     ) -> Result<Option<Stream>, Thrown> {
+        Ok(self
+            .open_wrapper_named(path, mode, options)?
+            .map(|(stream, _)| stream))
+    }
+
+    /// `_php_stream_open_wrapper_ex` with the `*opened_path` beside the
+    /// stream where `options.for_zend_stream` asks for it: the name the
+    /// opener set, a string of the request's (`_php_stream_fopen`'s
+    /// `zend_string_init` of the real path for a plain file), or the
+    /// path `USE_PATH` resolved where the opener set none. The resolved
+    /// path is `zend_resolve_path`'s string of the request's, held while
+    /// the wrapper opens and freed after unless handed out so, which an
+    /// open's peak stands on.
+    pub(crate) fn open_wrapper_named(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown> {
         if path.is_empty() {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
-        let mut to_open = path.to_vec();
-        let mut use_path = options.use_path;
+        let mut resolved = None;
         if options.use_path {
             match self.resolve_path(path) {
-                Ok(resolved) => {
-                    to_open = resolved;
-                    use_path = false;
+                Ok(found) => {
+                    resolved = Some(self.string_with(found.len(), |b| b.copy_from_slice(&found))?);
                 }
                 Err(crate::api::request::Unresolved::Threw(thrown)) => return Err(thrown),
                 Err(crate::api::request::Unresolved::Missing(_)) => {}
             }
         }
-        let (wrapper, path_to_open) = self.locate(&to_open, options);
+        let to_open = resolved.map_or_else(|| path.to_vec(), |found| found.as_bytes().to_vec());
+        let opened = self.open_located(&to_open, mode, options, resolved.is_some());
+        match opened {
+            Ok(Some((stream, None))) if options.for_zend_stream && resolved.is_some() => {
+                Ok(Some((stream, resolved)))
+            }
+            opened => {
+                if let Some(found) = resolved {
+                    self.release(Value::string(found));
+                }
+                opened
+            }
+        }
+    }
+
+    /// The wrapper `to_open` names located and asked, past
+    /// `_php_stream_open_wrapper_ex`'s `USE_PATH`; `resolved` is whether
+    /// that found the path, php's `STREAM_ASSUME_REALPATH`.
+    fn open_located(
+        &mut self,
+        to_open: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+        resolved: bool,
+    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown> {
+        let use_path = options.use_path && !resolved;
+        let (wrapper, path_to_open) = self.locate(to_open, options);
         if options.use_url && !wrapper.is_url(self) {
             let text = format!(
                 "{}(): This function may only be used against URLs",
@@ -3945,6 +3982,7 @@ impl Request {
             warning(self, &text);
             return Ok(None);
         }
+        let outer = options.for_zend_stream.then(|| self.opened_path.take());
         let (label, opened) = match wrapper {
             Located::Plain => (
                 PLAIN_FILES,
@@ -3953,7 +3991,16 @@ impl Request {
                         // `_php_stream_fopen`'s `php_clear_stat_cache`
                         // (`Z/main/streams/plain_wrapper.c:1209`).
                         self.forget_stats();
-                        Ok(self.stream_alloc(stream)?)
+                        let stream = self.stream_alloc(stream)?;
+                        if options.for_zend_stream {
+                            let real = if resolved {
+                                Some(path_to_open.clone())
+                            } else {
+                                self.expand_filepath(&path_to_open)
+                            };
+                            self.opened_path = real;
+                        }
+                        Ok(stream)
                     }
                     Err(message) => Err(message),
                 },
@@ -3976,24 +4023,37 @@ impl Request {
             ),
             Located::Nothing => ("", Err(String::from("no suitable wrapper could be found"))),
         };
+        // The name the opener set, `*opened_path`, as the string php's
+        // opener allocates; only the open that asks for one keeps it.
+        let named = match outer {
+            Some(outer) => std::mem::replace(&mut self.opened_path, outer),
+            None => None,
+        };
+        let named = match (&opened, named) {
+            (Ok(_), Some(name)) => {
+                Some(self.string_with(name.len(), |b| b.copy_from_slice(&name))?)
+            }
+            _ => None,
+        };
         match opened {
             Ok(stream) => {
                 self.stream_op(stream, |req, s| {
                     s.wrapper = label;
-                    s.set_orig_path(req, &to_open)
+                    s.set_orig_path(req, to_open)
                 })
                 .transpose()?;
                 if options.must_seek {
-                    return self.make_seekable(stream, &to_open, options);
+                    let seekable = self.make_seekable(stream, to_open, options)?;
+                    return Ok(seekable.map(|stream| (stream, named)));
                 }
                 if mode.contains(&b'a') {
                     self.learn_append_position(stream);
                 }
-                Ok(Some(stream))
+                Ok(Some((stream, named)))
             }
             Err(message) => {
                 if options.report {
-                    self.display_wrapper_errors(&to_open, "Failed to open stream", &message);
+                    self.display_wrapper_errors(to_open, "Failed to open stream", &message);
                 }
                 Ok(None)
             }

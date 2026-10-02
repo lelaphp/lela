@@ -1291,6 +1291,7 @@ impl Emit<'_> {
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
+                constants_before: class.constants.len(),
             });
         }
         Ok(())
@@ -1685,6 +1686,10 @@ pub(super) struct Property {
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
+    /// How many constants the class declared before this property, the
+    /// ones `CG(active_class_entry)->constants_table` holds while its
+    /// default compiles.
+    pub(super) constants_before: usize,
 }
 
 /// One class constant declarator, php's `ZEND_AST_CONST_ELEM` with the

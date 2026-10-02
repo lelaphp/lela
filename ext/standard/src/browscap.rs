@@ -287,8 +287,25 @@ fn loaded(req: &mut Request) -> Result<(), Thrown> {
     let Ok(bytes) = std::fs::read(path) else {
         return Ok(());
     };
-    let events: Vec<Event> =
-        php_ext::syntax::parse_ini(req, &bytes, IniScanner::Raw)?.unwrap_or_default();
+    let mut events: Vec<Event> = Vec::new();
+    let parsed = php_ext::syntax::parse_ini(req, &bytes, IniScanner::Raw, |_, event| {
+        // The raw scanner's values are strings, kept as bytes.
+        let text = |value: Value| match value.as_str_bytes() {
+            Some(bytes) => Scalar::Str(bytes.to_vec()),
+            None => Scalar::Null,
+        };
+        events.push(match event {
+            Event::Section(name) => Event::Section(text(name)),
+            Event::Entry(label, value) => Event::Entry(text(label), value.map(text)),
+            Event::PopEntry(label, value, offset) => {
+                Event::PopEntry(text(label), text(value), text(offset))
+            }
+        });
+        Ok(())
+    })?;
+    if parsed.is_err() {
+        events.clear();
+    }
     req.state::<State>().browscap.entries = load(events);
     Ok(())
 }

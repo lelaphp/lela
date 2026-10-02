@@ -1728,8 +1728,9 @@ impl crate::ini_syntax::Host for Configure<'_> {
         Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
     }
 
-    fn event(&mut self, event: IniEvent) {
-        self.events.push(event);
+    fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
+        self.events.push(event.map(|val| val.value));
+        Ok(())
     }
 }
 
@@ -1758,7 +1759,15 @@ impl crate::ini_syntax::Host for Startup<'_> {
         Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
     }
 
-    fn event(&mut self, event: IniEvent) {
+    fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
+        self.entry(event.map(|val| val.value));
+        Ok(())
+    }
+}
+
+impl Startup<'_> {
+    /// `php_ini_parser_cb` over one statement of the startup entries.
+    fn entry(&mut self, event: IniEvent) {
         match event {
             IniEvent::Section(name) => {
                 let name = ini_text(&name);

@@ -825,7 +825,9 @@ fn strlen(string: PhpString) -> i64 {
 /// true is the 8.0 warning that it is ignored. An array value is
 /// walked for a reference back into itself, the `ValueError` for a
 /// recursive array, and copied with every reference in it followed
-/// (`copy_constant_array`); every other value takes one more owner. The
+/// (`copy_constant_array`) where it is refcounted; an immutable array,
+/// one the unit holds, is kept as it stands, and every other value
+/// takes one more owner. The
 /// name's namespace, the bytes before its last `\`, is lowered, as the
 /// table is keyed; `true`, `false`, `null` in any case,
 /// `__COMPILER_HALT_OFFSET__` and a name the table has are the
@@ -870,6 +872,29 @@ fn strlen(string: PhpString) -> i64 {
 /// bool(false)
 /// ```
 ///
+/// An array the unit folded is defined as it stands, and a nested one is kept
+/// in the copy of an array of the request's:
+///
+/// ```php
+/// define('H', ['h']); debug_zval_dump(H);
+/// $a = [['x']]; $a[] = 2; define('N', $a); debug_zval_dump(N);
+/// ```
+/// ```expect regime=immutable-literals
+/// array(1) packed interned {
+///   [0]=>
+///   string(1) "h" interned
+/// }
+/// array(2) packed refcount(2){
+///   [0]=>
+///   array(1) packed interned {
+///     [0]=>
+///     string(1) "x" interned
+///   }
+///   [1]=>
+///   int(2)
+/// }
+/// ```
+///
 /// ```php
 /// define("A::B", 1);
 /// ```
@@ -912,7 +937,9 @@ fn define(
             "define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported",
         );
     }
-    let value = if let Some(array) = value.as_array() {
+    let value = if let Some(array) = value.as_array()
+        && value.is_refcounted()
+    {
         if !constant_array_is_acyclic(req, *array)? {
             return Err(throw(
                 req,
@@ -976,12 +1003,15 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
 
 /// `copy_constant_array`: a new array of the request's with the same
 /// keys, each value with its reference followed, a nested array copied
-/// the same way and everything else one more owner.
+/// the same way where it is refcounted, and everything else, an
+/// immutable array among it, one more owner.
 fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
     crate::api::raising::call_stack_end(req)?;
     let mut copy = PhpArray::new(req)?;
     for (key, value) in array.snapshot() {
-        let value = if let Some(nested) = value.as_array() {
+        let value = if let Some(nested) = value.as_array()
+            && value.is_refcounted()
+        {
             Value::array(copy_constant_array(req, *nested)?)
         } else {
             req.addref(&value);
