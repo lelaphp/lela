@@ -198,6 +198,10 @@ pub struct WebRequest {
     /// before the request starts: 200, or php-cgi's 404 for a file it
     /// could not open.
     pub response_code: i64,
+    /// The ini entries the host's `send_headers` reads at the send, as
+    /// php's CGI hosts read `cgi.nph` and `cgi.rfc2616_headers`: each
+    /// one's value then rides in [`ResponseHead::ini`].
+    pub head_ini: &'static [&'static [u8]],
 }
 
 /// What a host's `sapi_module.read_post` hands out over one request.
@@ -271,6 +275,9 @@ pub struct ResponseHead {
     pub status_line: Option<Vec<u8>>,
     /// `SG(sapi_headers).headers`, each line without its line end.
     pub lines: Vec<Vec<u8>>,
+    /// The entries [`WebRequest::head_ini`] names, each with its value at
+    /// the send.
+    pub ini: Vec<(&'static [u8], Vec<u8>)>,
 }
 
 /// What `do_cli` registers for a request it serves a program in

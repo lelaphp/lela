@@ -6809,10 +6809,20 @@ impl Request {
         {
             return;
         }
+        let names = self
+            .description
+            .web
+            .as_ref()
+            .map_or(&[][..], |web| web.head_ini);
+        let ini = names
+            .iter()
+            .filter_map(|name| Some((*name, self.ini_get(name)?.to_vec())))
+            .collect();
         let head = ResponseHead {
             code: self.output.response_code(),
             status_line: self.output.status_line().map(<[u8]>::to_vec),
             lines: self.output.headers().to_vec(),
+            ini,
         };
         self.sink.get().send_headers(&head);
     }
