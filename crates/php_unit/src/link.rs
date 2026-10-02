@@ -1255,6 +1255,17 @@ fn is_variadic(function: &FunctionDecl) -> bool {
 /// ```expect exit=255
 /// Fatal error: Declaration of S::t() must be compatible with B::t($x = 3.1415926535898, $y = 1, $z = 1.0E+100) in %s on line 3
 /// ```
+///
+/// An array is `[]` or `[...]` where the compiler folded it, and an
+/// `<expression>` where an element is still to evaluate:
+///
+/// ```php
+/// class B { function t($x = [FOO], $y = [1], $z = [], $w = [[]]) {} }
+/// class S extends B { function t() {} }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Declaration of S::t() must be compatible with B::t($x = <expression>, $y = [...], $z = [], $w = [...]) in %s on line 3
+/// ```
 fn default_text(default: &ConstExpr) -> String {
     match default {
         ConstExpr::Null => String::from("null"),
@@ -1269,8 +1280,12 @@ fn default_text(default: &ConstExpr) -> String {
             let more = if bytes.len() > 10 { "..." } else { "" };
             format!("'{}{more}'", String::from_utf8_lossy(shown))
         }
+        // An array the compiler folded is a value, `[]` or `[...]`; one
+        // still to evaluate is the `<expression>` below, as php prints
+        // a `ZEND_AST_ARRAY`, and a native's empty one is its stub's `[]`.
+        ConstExpr::ImmutableArray(array) if array.is_empty() => String::from("[]"),
+        ConstExpr::ImmutableArray(_) => String::from("[...]"),
         ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
-        ConstExpr::Array { .. } => String::from("[...]"),
         ConstExpr::Constant { name, .. } => text(&name.resolved().0),
         ConstExpr::ClassConstant { class, name, .. } => {
             format!("{}::{}", text(&class.0), text(&name.0))
