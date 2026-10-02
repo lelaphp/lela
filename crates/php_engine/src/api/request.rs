@@ -20728,10 +20728,27 @@ impl Request {
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
     /// NAN
     /// ```
+    ///
+    /// The bytes are `zend_alter_ini_entry_chars`'s: a new request
+    /// string, `zend_string_init` and never an interned one, which the
+    /// entry that takes it keeps and which is released where it does not
+    /// (`Z/Zend/zend_ini.c:339-349`), so `ignore_user_abort(true)` costs
+    /// the entry's string of one byte:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); ignore_user_abort(true); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); ignore_user_abort(false); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// 0
+    /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-        let allowed =
-            Request::ini_modifiable(name).0 && self.ini_user(name) && !self.ini_locked(name);
-        self.ini_alter(name, Some(value), allowed, None)
+        let string = self.string_with(value.len(), |bytes| bytes.copy_from_slice(value))?;
+        let set = self.ini_set_string(name, string);
+        self.release(Value::string(string));
+        set
     }
 
     /// [`Request::ini_set`] over a request string, `ini_set()`'s: the entry
@@ -20751,7 +20768,11 @@ impl Request {
     /// 0
     /// -120
     /// ```
-    pub(crate) fn ini_set_string(
+    ///
+    /// The caller keeps its own owner: a native hands the string it was
+    /// passed, as `set_include_path()`, `mb_language()` and
+    /// `session_name()` hand theirs to `zend_alter_ini_entry`.
+    pub fn ini_set_string(
         &mut self,
         name: &[u8],
         value: PhpString,
@@ -21529,9 +21550,26 @@ impl Request {
     /// `max_execution_time` at runtime (`Z/main/main.c:1631`): the
     /// entry moved through [`Self::ini_set`], so the timer is re-armed
     /// as it is there, and `true` when the entry took the value.
+    ///
+    /// The value is `zend_long_to_str`'s, the interned string of one
+    /// digit or a new one, which the entry keeps:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); set_time_limit(100); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); set_time_limit(5); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// -32
+    /// ```
     pub fn set_time_limit(&mut self, seconds: i64) -> bool {
-        self.ini_set(b"max_execution_time", seconds.to_string().as_bytes())
-            .is_ok_and(|previous| previous.is_some())
+        let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
+            return false;
+        };
+        let set = self.ini_set_string(b"max_execution_time", string);
+        self.release(Value::string(string));
+        set.is_ok_and(|previous| previous.is_some())
     }
 
     /// `register_shutdown_function()`, `append_user_shutdown_function`
@@ -22332,9 +22370,27 @@ impl Request {
     /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose
     /// `OnUpdateGCEnabled` is `gc_enable`, so `ini_get` reads what the
     /// call left.
+    ///
+    /// The value is `zend_alter_ini_entry_chars`'s new string of one
+    /// byte (`Z/Zend/zend_builtin_functions.c:184-206`), which the entry
+    /// keeps in place of the one it held:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); gc_disable(); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); gc_enable(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// 0
+    /// ```
     pub fn gc_enable(&mut self, enabled: bool) {
         let value: &[u8] = if enabled { b"1" } else { b"0" };
-        self.ini_hold(b"zend.enable_gc", Some(value));
+        // The memory limit's fatal is recorded and ends the request.
+        let string = self
+            .string_with(value.len(), |bytes| bytes.copy_from_slice(value))
+            .ok();
+        self.ini_hold_string(b"zend.enable_gc", Some(value), string);
         self.heap.gc_enable(enabled);
     }
 

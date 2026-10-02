@@ -52,11 +52,12 @@ pub(crate) enum Command {
         session_id: Option<String>,
         /// Every row. Without it, what the local facts render: the
         /// divergence section is the counts and the `open` rows alone, their
-        /// reasons cut to the message width, and `budget`, `phpt`, `witness`
+        /// reasons cut to the message width, `budget`, `phpt`, `witness`
         /// and `mutants` render the rows a session acts on and count the
-        /// passing rest in one line. With it, every divergence row with its
-        /// reason whole, as `docs/divergence.md` shows the registry, and
-        /// every row of the other four.
+        /// passing rest in one line, and `permits` names a rule's newest
+        /// sessions and counts the rest. With it, every divergence row with
+        /// its reason whole, as `docs/divergence.md` shows the registry,
+        /// every row of the other four, and every session of `permits`.
         #[arg(long)]
         uncut: bool,
         /// Print AGENTS.md and .claude/harness.local.md for the function

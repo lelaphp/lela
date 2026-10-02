@@ -597,7 +597,11 @@ fn bcscale(req: &mut Request, #[php(default = null)] scale: Option<i64>) -> Resu
     let old = default_scale(req);
     if let Some(scale) = scale {
         let scale = check_scale(req, scale, 1)?;
-        req.ini_set(SCALE, scale.to_string().as_bytes())?;
+        // `zend_long_to_str`'s string, which the entry keeps.
+        let text = php_ext::coerce::int_to_string(req, i64::try_from(scale).unwrap_or(i64::MAX))?;
+        let set = req.ini_set_string(SCALE, text);
+        req.release(php_ext::values::Value::string(text));
+        set?;
     }
     Ok(i64::try_from(old).unwrap_or(i64::from(i32::MAX)))
 }
