@@ -22704,7 +22704,7 @@ fn level_name(level: Level) -> &'static str {
 /// and leaves `'` alone. php's retry with the invalid bytes substituted
 /// is for a message that is not its charset, and a message this engine
 /// renders is a `&str`.
-fn escape_html(message: &str) -> String {
+pub(crate) fn escape_html(message: &str) -> String {
     let mut escaped = String::with_capacity(message.len());
     for letter in message.chars() {
         match letter {
