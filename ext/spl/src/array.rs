@@ -591,7 +591,7 @@ impl ArrayObject {
             return Ok(());
         }
         sorting_refused(req, this)?;
-        let mut reader = php_ext_standard::Unserializer::new(req, &data);
+        let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut pending = None;
         let read = read_record(req, this, &mut reader, &data, &mut pending);
         let finished = reader.finish(req);

@@ -564,7 +564,7 @@ fn shm_get_var(
         docref(req, Level::Warning, &text);
         return Ok(Value::bool(false));
     };
-    let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default());
+    let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
     let read = reader.local(req);
     let finished = reader.finish(req);
     let read = read?;

@@ -14,7 +14,7 @@ use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Level, Thrown, call_stack_end, deprecated, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+    ClassId, Emalloc, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
 
 use super::{
@@ -54,15 +54,73 @@ enum Dtor {
     Unserialize(PhpObject, PhpArray),
 }
 
-/// `php_unserialize_data`: the slots in push order, each with the value
-/// last written into it, `None` once a failure has forbidden it; the
-/// root of each reader open over it, innermost last; the dtor list; the
-/// options, which a nested `unserialize()` sets and restores.
+impl Dtor {
+    /// The zvals the entry takes of its block, `tmp_var`'s `num`: the
+    /// array an `__unserialize()` is handed sits in the zval after its
+    /// object's.
+    const fn width(&self) -> usize {
+        match self {
+            Dtor::Unserialize(..) => 2,
+            Dtor::Kept(_) | Dtor::Wakeup(_) => 1,
+        }
+    }
+}
+
+/// `VAR_ENTRIES_MAX`: the slots one `var_entries` block numbers.
+const VAR_ENTRIES_MAX: usize = 1018;
+
+/// `VAR_DTOR_ENTRIES_MAX`: the zvals one `var_dtor_entries` block holds.
+const VAR_DTOR_ENTRIES_MAX: usize = 255;
+
+/// `sizeof(var_entries)`: `used_slots`, `next` and a pointer per slot.
+const VAR_ENTRIES_SIZE: usize = 16 + VAR_ENTRIES_MAX * 8;
+
+/// `sizeof(var_dtor_entries)`: `used_slots`, `next` and a zval per entry.
+const VAR_DTOR_ENTRIES_SIZE: usize = 16 + VAR_DTOR_ENTRIES_MAX * 16;
+
+/// `sizeof(struct php_unserialize_data)`: seven words before the first
+/// `var_entries` block, which it holds inline.
+const UNSERIALIZE_DATA_SIZE: usize = 56 + VAR_ENTRIES_SIZE;
+
+/// One `var_dtor_entries` block `tmp_var` `emalloc`s: its allocation and
+/// the entries it holds, [`VAR_DTOR_ENTRIES_MAX`] zvals' worth at most.
+struct DtorBlock {
+    block: Emalloc,
+    entries: Vec<Dtor>,
+}
+
+impl DtorBlock {
+    /// `used_slots`.
+    fn used(&self) -> usize {
+        self.entries.iter().map(Dtor::width).sum()
+    }
+}
+
+/// Where `tmp_var` put one entry: its block and its place in it.
+#[derive(Clone, Copy)]
+struct DtorAt {
+    block: usize,
+    entry: usize,
+}
+
+/// `php_unserialize_data`, `emalloc`'d by `php_var_unserialize_init` at
+/// [`UNSERIALIZE_DATA_SIZE`] and held while the var hash stands; the
+/// slots in push order, each with the value last written into it, `None`
+/// once a failure has forbidden it, and the `var_entries` block `var_push`
+/// `emalloc`s for each [`VAR_ENTRIES_MAX`] slots past the first, the
+/// first being the data's own; the root of each reader open over it,
+/// innermost last; the dtor list in its blocks; the owners of the keys
+/// the slots name, which php's slots, pointers into the tables, need
+/// none of; the options, which a nested `unserialize()` sets and
+/// restores.
 #[derive(Default)]
 pub(crate) struct VarHash {
+    data: Option<Emalloc>,
     slots: Vec<Option<(Slot, Value)>>,
+    entries: Vec<Emalloc>,
     roots: Vec<Value>,
-    dtors: Vec<Dtor>,
+    dtors: Vec<DtorBlock>,
+    keys: Vec<PhpString>,
     allowed: Allowed,
     max_depth: i64,
     depth: i64,
@@ -93,12 +151,125 @@ impl Allowed {
 
 impl VarHash {
     /// `php_var_unserialize_init`'s fresh var hash: every class allowed
-    /// and the depth `unserialize_max_depth` sets.
+    /// and the depth `unserialize_max_depth` sets. Its data is asked for
+    /// by [`VarHash::lay_down`] once it is the one a reader holds.
     fn fresh(req: &Request) -> VarHash {
         VarHash {
             max_depth: default_depth(req),
             ..VarHash::default()
         }
+    }
+
+    /// `php_var_unserialize_init`'s `emalloc(sizeof(struct
+    /// php_unserialize_data))`, freed after `var_destroy`, which an
+    /// `unserialize()`'s peak stands on; the `Err` is the memory limit's
+    /// fatal.
+    ///
+    /// ```php
+    /// class Q { public $a = 1; }
+    /// $s = serialize(new Q); $e = 'O:1:"E":0:{}';
+    /// unserialize($s); unserialize($e);
+    /// memory_reset_peak_usage(); $m = memory_get_usage(); $x = unserialize($s);
+    /// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+    /// memory_reset_peak_usage(); $m = memory_get_usage(); $y = unserialize($e);
+    /// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(12720)
+    /// int(432)
+    /// int(12760)
+    /// int(472)
+    /// ```
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        self.data = Some(Emalloc::new(req, UNSERIALIZE_DATA_SIZE)?);
+        Ok(())
+    }
+
+    /// `var_push`: the slot numbered for `R:` and `r:`, in a fresh
+    /// `var_entries` block where the last is full; the `Err` is the
+    /// memory limit's fatal.
+    ///
+    /// An array of 1017 elements numbers 1018 slots, its own among them.
+    ///
+    /// ```php
+    /// function peak($s) { unserialize($s); memory_reset_peak_usage(); $x = unserialize($s); return memory_get_peak_usage() - memory_get_usage(); }
+    /// var_dump(peak(serialize(range(1, 1017))), peak(serialize(range(1, 1018))), peak(serialize(range(1, 2036))));
+    /// ```
+    /// ```expect
+    /// int(12288)
+    /// int(20480)
+    /// int(28672)
+    /// ```
+    fn push(&mut self, req: &mut Request, slot: &Slot, value: Value) -> Result<usize, Thrown> {
+        let at = self.slots.len();
+        if at > 0 && at.is_multiple_of(VAR_ENTRIES_MAX) {
+            self.entries.push(Emalloc::new(req, VAR_ENTRIES_SIZE)?);
+        }
+        self.slots.push(Some((slot.clone(), value)));
+        Ok(at)
+    }
+
+    /// `tmp_var`: `dtor` in the last `var_dtor_entries` block, or in a
+    /// fresh one where it does not fit; the `Err` is the memory limit's
+    /// fatal.
+    ///
+    /// A delayed `__wakeup()` takes one zval and a delayed
+    /// `__unserialize()` two, so 127 of those fill a block to 254 and the
+    /// 128th opens another.
+    ///
+    /// ```php
+    /// class W { function __wakeup() {} }
+    /// class U { function __unserialize(array $a): void {} }
+    /// function of($class, $n) { $a = []; for ($i = 0; $i < $n; $i++) { $a[] = new $class; } return serialize($a); }
+    /// function peak($s) { unserialize($s); memory_reset_peak_usage(); $x = unserialize($s); return memory_get_peak_usage() - memory_get_usage(); }
+    /// var_dump(peak(serialize(new W)), peak(of('W', 255)), peak(of('W', 256)), peak(of('U', 127)), peak(of('U', 128)));
+    /// ```
+    /// ```expect
+    /// int(16384)
+    /// int(16384)
+    /// int(20480)
+    /// int(64136)
+    /// int(68608)
+    /// ```
+    fn tmp_var(&mut self, req: &mut Request, dtor: Dtor) -> Result<DtorAt, Thrown> {
+        let fits = self
+            .dtors
+            .last()
+            .is_some_and(|last| last.used() + dtor.width() <= VAR_DTOR_ENTRIES_MAX);
+        if !fits {
+            self.dtors.push(DtorBlock {
+                block: Emalloc::new(req, VAR_DTOR_ENTRIES_SIZE)?,
+                entries: Vec::new(),
+            });
+        }
+        let block = self.dtors.len() - 1;
+        let entries = &mut self.dtors[block].entries;
+        entries.push(dtor);
+        Ok(DtorAt {
+            block,
+            entry: entries.len() - 1,
+        })
+    }
+
+    /// The `var_tmp_var` taken at `at` holding `value`, whose owner the
+    /// var hash keeps from here.
+    fn fill(&mut self, at: DtorAt, value: Value) {
+        if let Some(entry) = self
+            .dtors
+            .get_mut(at.block)
+            .and_then(|block| block.entries.get_mut(at.entry))
+        {
+            *entry = Dtor::Kept(value);
+        }
+    }
+
+    /// `var_push_dtor_value`: `value`'s owner the var hash's until it is
+    /// destroyed, where it counts owners at all.
+    fn push_dtor_value(&mut self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+        if value.is_refcounted() {
+            self.tmp_var(req, Dtor::Kept(value))?;
+        }
+        Ok(())
     }
 
     /// `var_destroy`: the dtor list walked in order, each delayed call
@@ -127,36 +298,50 @@ impl VarHash {
     /// end
     /// ```
     fn destroy(self, req: &mut Request) -> Result<(), Thrown> {
+        for block in self.entries {
+            block.free(req);
+        }
         let mut failed: Option<Thrown> = None;
-        for dtor in self.dtors {
-            let (object, argument) = match dtor {
-                Dtor::Kept(value) => {
-                    req.release(value);
-                    continue;
+        for DtorBlock { block, entries } in self.dtors {
+            for dtor in entries {
+                let (object, argument) = match dtor {
+                    Dtor::Kept(value) => {
+                        req.release(value);
+                        continue;
+                    }
+                    Dtor::Wakeup(object) => (object, None),
+                    Dtor::Unserialize(object, array) => (object, Some(array)),
+                };
+                if failed.is_none() {
+                    let called = locked(req, |req| match argument {
+                        None => call_method(req, &object, b"__wakeup", &[]),
+                        Some(array) => {
+                            call_method(req, &object, b"__unserialize", &[array.to_value()])
+                        }
+                    });
+                    match called {
+                        Ok(answer) => req.release(answer),
+                        Err(thrown) => failed = Some(thrown),
+                    }
                 }
-                Dtor::Wakeup(object) => (object, None),
-                Dtor::Unserialize(object, array) => (object, Some(array)),
-            };
-            if failed.is_none() {
-                let called = locked(req, |req| match argument {
-                    None => call_method(req, &object, b"__wakeup", &[]),
-                    Some(array) => call_method(req, &object, b"__unserialize", &[array.to_value()]),
-                });
-                match called {
-                    Ok(answer) => req.release(answer),
-                    Err(thrown) => failed = Some(thrown),
+                if failed.is_some() {
+                    object.mark_destructor_called();
+                }
+                req.release(object.as_value());
+                if let Some(array) = argument {
+                    req.release(array.to_value());
                 }
             }
-            if failed.is_some() {
-                object.mark_destructor_called();
-            }
-            req.release(object.as_value());
-            if let Some(array) = argument {
-                req.release(array.to_value());
-            }
+            block.free(req);
+        }
+        for key in self.keys {
+            req.release(Value::string(key));
         }
         for root in self.roots {
             req.release(root);
+        }
+        if let Some(data) = self.data {
+            data.free(req);
         }
         failed.map_or(Ok(()), Err)
     }
@@ -184,29 +369,40 @@ impl<'a> State<'a> {
     /// `PHP_VAR_UNSERIALIZE_INIT` over `buf`: the var hash an
     /// unserializer already open shares, where one is and
     /// `BG(serialize_lock)` is not held, a fresh one otherwise; the
-    /// reader's root laid down in it.
-    fn open(req: &mut Request, buf: &'a [u8]) -> State<'a> {
+    /// reader's root laid down in it. The `Err` is the memory limit's
+    /// fatal, met laying a fresh one down.
+    fn open(req: &mut Request, buf: &'a [u8]) -> Result<State<'a>, Thrown> {
         let fresh = VarHash::fresh(req);
         let nesting = &mut req.state::<crate::State>().var;
         let (mut hash, holder) = nesting.unserialize.open(nesting.lock, fresh);
+        if holder != Holder::Joined {
+            hash.lay_down(req)?;
+        }
         let root = hash.roots.len();
         hash.roots.push(Value::null());
-        State {
+        Ok(State {
             buf,
             p: 0,
             hash,
             holder,
             root,
-        }
+        })
     }
 
-    /// The root handed on, php's `var_tmp_var`: the slots that named it
-    /// name the value the var hash holds from here, and the reader's
-    /// next value is a root of its own. A view, which lives as long as
-    /// the var hash.
-    fn hand_on(&mut self) -> Value {
+    /// php's `var_tmp_var` for the reader's next value, taken before it
+    /// is read, which [`State::hand_on`] fills; the `Err` is the memory
+    /// limit's fatal.
+    fn tmp_var(&mut self, req: &mut Request) -> Result<DtorAt, Thrown> {
+        self.hash.tmp_var(req, Dtor::Kept(Value::null()))
+    }
+
+    /// The root handed on into the `var_tmp_var` taken for it at `at`:
+    /// the slots that named it name the value the var hash holds from
+    /// here, and the reader's next value is a root of its own. A view,
+    /// which lives as long as the var hash.
+    fn hand_on(&mut self, at: DtorAt) -> Value {
         let root = self.hand_over();
-        self.hash.dtors.push(Dtor::Kept(root));
+        self.hash.fill(at, root);
         root
     }
 
@@ -486,8 +682,16 @@ pub fn php_unserialize_with_options(
     if data.is_empty() {
         return Ok(Value::bool(false));
     }
-    let given = self::options(req, options, function)?;
-    let mut state = State::open(req, data);
+    let mut state = State::open(req, data)?;
+    let given = match self::options(req, options, function) {
+        Ok(given) => given,
+        Err(thrown) => {
+            // php's `goto cleanup`: the var hash it laid down first is
+            // destroyed under the refusal.
+            state.close(req)?;
+            return Err(thrown);
+        }
+    };
     let previous = (
         state.hash.allowed.clone(),
         state.hash.max_depth,
@@ -503,6 +707,12 @@ pub fn php_unserialize_with_options(
         state.hash.depth = 0;
     }
     let root = state.root;
+    // Inside another unserializer the value is read into a `var_tmp_var`.
+    let tmp = if state.holder == Holder::Joined {
+        Some(state.tmp_var(req)?)
+    } else {
+        None
+    };
     let parsed = state.read(req, Slot::Root(root));
     let total = data.len();
     if let Ok(ok) = parsed {
@@ -523,13 +733,13 @@ pub fn php_unserialize_with_options(
     // Inside another unserializer the root is `var_tmp_var`'s, which the
     // var hash keeps, and the caller has a copy of it; outside, it is the
     // return value, and a failure frees it before the delayed calls.
-    let answer = match parsed {
-        Ok(true) if state.holder == Holder::Joined => {
-            let root = state.hand_on();
+    let answer = match (&parsed, tmp) {
+        (Ok(true), Some(tmp)) => {
+            let root = state.hand_on(tmp);
             req.addref(&root);
             Some(root)
         }
-        Ok(true) => Some(state.take_root()),
+        (Ok(true), None) => Some(state.take_root()),
         _ => {
             if state.holder != Holder::Joined {
                 req.release(state.take_root());
@@ -619,12 +829,12 @@ pub struct Unserializer<'a> {
 impl<'a> Unserializer<'a> {
     /// `PHP_VAR_UNSERIALIZE_INIT` over `data`: the var hash an
     /// unserializer already open shares, or a fresh one with every class
-    /// allowed and the depth `unserialize_max_depth` sets.
-    #[must_use]
-    pub fn new(req: &mut Request, data: &'a [u8]) -> Unserializer<'a> {
-        Unserializer {
-            state: State::open(req, data),
-        }
+    /// allowed and the depth `unserialize_max_depth` sets. The `Err` is
+    /// the memory limit's fatal.
+    pub fn new(req: &mut Request, data: &'a [u8]) -> Result<Unserializer<'a>, Thrown> {
+        Ok(Unserializer {
+            state: State::open(req, data)?,
+        })
     }
 
     /// Where the scanner stands, php's `*p` after the last value.
@@ -670,16 +880,17 @@ impl<'a> Unserializer<'a> {
     ) -> Result<bool, Thrown> {
         let written = key.clone();
         if let Key::Str(s) = &key {
-            self.state.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+            self.state.hash.keys.push(*s);
         }
         let held = array.get(&written);
         if let Some(old) = &held {
             req.addref(old);
         }
+        let tmp = self.state.tmp_var(req)?;
         let read = self.state.read(req, Slot::Element(array, key));
         if let Some(value) = array.get(&written) {
             req.addref(&value);
-            self.state.hash.dtors.push(Dtor::Kept(value));
+            self.state.hash.fill(tmp, value);
         }
         if let Some(old) = held {
             req.release(old);
@@ -693,8 +904,9 @@ impl<'a> Unserializer<'a> {
     /// caller that keeps it takes an owner of its own.
     pub fn value(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
         let root = self.state.root;
+        let tmp = self.state.tmp_var(req)?;
         let read = self.state.read(req, Slot::Root(root));
-        let value = self.state.hand_on();
+        let value = self.state.hand_on(tmp);
         if !read? {
             return Ok(None);
         }
@@ -948,12 +1160,6 @@ impl State<'_> {
         (value, at)
     }
 
-    /// `var_push`: the slot numbered for `R:` and `r:`.
-    fn push(&mut self, slot: &Slot, value: Value) -> usize {
-        self.hash.slots.push(Some((slot.clone(), value)));
-        self.hash.slots.len() - 1
-    }
-
     /// The value written into `slot`, which from here holds it, and the
     /// var hash entry updated.
     fn write(
@@ -1013,7 +1219,7 @@ impl State<'_> {
         let entry = if self.at(start) == b'R' {
             None
         } else {
-            Some(self.push(&slot, Value::null()))
+            Some(self.hash.push(req, &slot, Value::null())?)
         };
         let c0 = self.at(start);
         let c1 = self.at(start + 1);
@@ -1453,13 +1659,13 @@ impl State<'_> {
             // The key's own owner is the var hash's, whose slots name it
             // until it is destroyed; each write takes one of its own.
             if let Key::Str(s) = &key {
-                self.hash.dtors.push(Dtor::Kept(Value::string(*s)));
+                self.hash.keys.push(*s);
             }
             // `var_push_dtor_value`: a key the string repeats leaves what
             // it held to the var hash, which frees it with the rest.
             if let Some(old) = array.get(&key) {
                 req.addref(&old);
-                self.hash.dtors.push(Dtor::Kept(old));
+                self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Element(array, key.clone()));
             }
             if let Key::Str(s) = &key {
@@ -1643,7 +1849,7 @@ impl State<'_> {
                 return Ok(false);
             }
             req.addref(&object.as_value());
-            self.hash.dtors.push(Dtor::Unserialize(object, array));
+            self.hash.tmp_var(req, Dtor::Unserialize(object, array))?;
             return Ok(self.finish());
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
@@ -1660,7 +1866,7 @@ impl State<'_> {
         }
         if has_wakeup {
             req.addref(&object.as_value());
-            self.hash.dtors.push(Dtor::Wakeup(object));
+            self.hash.tmp_var(req, Dtor::Wakeup(object))?;
         }
         Ok(self.finish())
     }
@@ -1857,10 +2063,10 @@ impl State<'_> {
             // A key is `zend_string_init_existing_interned`'s, so a name
             // a unit already holds costs nothing.
             let name = PhpString::existing_interned(req, &key)?;
-            self.hash.dtors.push(Dtor::Kept(Value::string(name)));
+            self.hash.keys.push(name);
             if let Some(old) = object.prop(req, &key) {
                 req.addref(&old);
-                self.hash.dtors.push(Dtor::Kept(old));
+                self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Property(object, name));
             }
             req.addref(&Value::string(name));

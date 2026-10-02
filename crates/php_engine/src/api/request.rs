@@ -62,6 +62,8 @@ mod class_data;
 mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
+mod scanner_file;
+pub use scanner_file::ScannerFile;
 mod hold;
 pub(crate) use hold::Hold;
 mod hooks;
@@ -17066,7 +17068,7 @@ impl Request {
     ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
-    /// (`zend_stream_fixup`, [`crate::streams::PhpStream::read_for_compile`]).
+    /// (`zend_stream_fixup`, [`ScannerFile::load`]).
     ///
     /// ```php
     /// class F extends php_user_filter { }
@@ -17088,46 +17090,36 @@ impl Request {
         if kind.once() {
             self.included_files.push(path.to_vec());
         }
-        let options = crate::streams::OpenOptions {
-            use_path: true,
-            for_include: true,
-            ..crate::streams::OpenOptions::REPORT
-        };
         let outer = self.including.replace((kind, self.vm.call_depth()));
-        self.opened_path = None;
-        let opened = self.open_wrapper_ex(path, b"rb", options);
-        let opened_path = self.opened_path.take();
-        let source = match &opened {
-            Ok(Some(stream)) => {
-                // "Disable buffering to avoid double buffering between PHP
-                // and Zend streams."
-                let unbuffered = StreamOption::ReadBuffer {
-                    buffered: false,
-                    size: php_heap::BUFSIZ,
+        let opened = ScannerFile::open(self, path);
+        let read = match opened {
+            Ok(Some(mut fh)) => {
+                let read = match fh.load(self) {
+                    Ok(Some(source)) => Ok(Some(source.to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(thrown) => Err(thrown),
                 };
-                stream.set_option(self, unbuffered);
-                let source = self
-                    .stream_op(*stream, |req, s| s.read_for_compile(req))
-                    .flatten();
-                // A read that bailed out leaves the stream open, as
+                let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
+                // A read that bailed out leaves the file open, as
                 // `zend_bailout` leaves `zend_destroy_file_handle`
-                // unreached: it stands among the request's resources,
-                // which close it at shutdown.
+                // unreached: its stream stands among the request's
+                // resources, which close it at shutdown.
                 if !self.bailing_out() {
-                    stream.free(self);
+                    fh.destroy(self);
                 }
-                source
+                read.map(|source| source.map(|source| (source, opened_path)))
             }
-            _ => None,
+            Ok(None) => Ok(None),
+            Err(thrown) => Err(thrown),
         };
         self.including = outer;
-        opened?;
+        let read = read?;
         // `compile_file` reports the file it could not open or read only
         // where nothing is pending (`if (!EG(exception))`).
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
-        let Some(source) = source else {
+        let Some((source, opened_path)) = read else {
             // A read a fatal ended is no file php reports: the bailout
             // jumps past `compile_file`'s message.
             if self.bailing_out() {
