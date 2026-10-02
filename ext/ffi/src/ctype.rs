@@ -12,6 +12,7 @@ use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
+use crate::cdata::free_types;
 use crate::types::{Kind, TypeId};
 use crate::{classes, ffi_error, types};
 
@@ -19,6 +20,8 @@ use crate::{classes, ffi_error, types};
 #[derive(Debug, Default)]
 pub(crate) struct TypeRef {
     pub(crate) ty: TypeId,
+    /// The types it owns ([`crate::cdata::hold_types`]).
+    pub(crate) held: Box<[usize]>,
 }
 
 /// `final class FFI\CType`, `@not-serializable`.
@@ -32,7 +35,9 @@ pub(crate) struct TypeRef {
 /// }
 /// bool(true)
 /// ```
-#[php_class(namespace(FFI), final, not_serializable, payload = TypeRef, size = 64, handlers = crate::ctype::HANDLERS)]
+// `size = 80`: php's `zend_ffi_ctype_new` asks `emalloc` for
+// `sizeof(zend_ffi_ctype)`, 64, whole, not `zend_object_alloc`.
+#[php_class(namespace(FFI), final, not_serializable, payload = TypeRef, size = 80, handlers = crate::ctype::HANDLERS)]
 pub(crate) struct CType;
 
 #[php_class]
@@ -421,10 +426,20 @@ pub(crate) fn ctype_of(req: &Request, object: PhpObject) -> TypeId {
 
 /// A new `FFI\CType` over `ty`.
 pub(crate) fn make_ctype(req: &mut Request, ty: TypeId) -> Result<Instance<CType>, Thrown> {
+    make_owning(req, ty, Box::default())
+}
+
+/// A `FFI\CType` of `ty` that owns the types `held`.
+pub(crate) fn make_owning(
+    req: &mut Request,
+    ty: TypeId,
+    held: Box<[usize]>,
+) -> Result<Instance<CType>, Thrown> {
     let class = classes(req)?.ctype;
     let object = new_object(req, class)?;
     if let Some(slot) = object.native_mut::<TypeRef>(req) {
         slot.ty = ty;
+        slot.held = held;
     }
     Ok(Instance::of(object))
 }
@@ -455,6 +470,25 @@ impl ObjectHandlers for Handlers {
 
     fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
         None
+    }
+
+    /// `zend_ffi_ctype_free_obj`: the types it owns given back.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef();
+    /// $a = memory_get_usage(); $t = $ffi->type("char[4]"); $b = memory_get_usage(); $t = null; $c = memory_get_usage();
+    /// var_dump($b - $a, $c - $b);
+    /// ```
+    /// ```expect
+    /// int(160)
+    /// int(-160)
+    /// ```
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let Some(slot) = object.native_mut::<TypeRef>(req) else {
+            return;
+        };
+        let held = std::mem::take(&mut slot.held);
+        free_types(req, &held);
     }
 
     /// `zend_fake_read_property`.

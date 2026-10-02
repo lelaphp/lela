@@ -182,7 +182,7 @@ pub(crate) fn c_string(addr: usize) -> Vec<u8> {
         .to_vec()
 }
 
-/// Memory a `FFI\CData` owns: `calloc`'s, zeroed as `FFI::new` zeroes
+/// Memory of the process's: `calloc`'s, zeroed as `FFI::new` zeroes
 /// it, aligned for any C type, and freed when the owner goes.
 #[derive(Debug)]
 pub(crate) struct Block {
@@ -196,12 +196,6 @@ impl Block {
         // SAFETY: `calloc` takes any count and size and answers null or
         // memory of its own.
         let addr = unsafe { libc::calloc(1, size.max(1)) } as usize;
-        NonZeroUsize::new(addr).map(|addr| Block { addr })
-    }
-
-    /// The memory at `addr`, which `calloc` gave another block that gave
-    /// it up, owned from here.
-    pub(crate) fn adopt(addr: usize) -> Option<Block> {
         NonZeroUsize::new(addr).map(|addr| Block { addr })
     }
 
@@ -224,8 +218,7 @@ impl Drop for Block {
     }
 }
 
-/// `free(addr)`: what `FFI::free` hands back of memory `FFI::new`
-/// allocated unowned.
+/// `free(addr)`: what `FFI::free` hands back of the process's memory.
 pub(crate) fn free(addr: usize) {
     // SAFETY: `addr` is memory `calloc` gave a block, or one PHP code
     // names as such, which `FFI::free` frees as php's `pefree` does.

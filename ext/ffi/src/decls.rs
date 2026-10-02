@@ -15,10 +15,10 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
-    CData, Data, Fetch, OwnedTarget, Place, as_cdata, make, to_value, view, write_value,
+    CData, Data, Fetch, Place, alloc, as_cdata, free, hold_types, make, to_value, view, write_value,
 };
-use crate::ctype::{CType, ctype_of, make_ctype};
-use crate::ffi::{self, Block, Library};
+use crate::ctype::{CType, ctype_of, make_ctype, make_owning};
+use crate::ffi::{self, Library};
 use crate::parse::{BIGGEST_ALIGNMENT, Dcl, Parser, Scope, SymbolKind};
 use crate::preload::Fail;
 use crate::types::{Kind, Type, TypeId, attr};
@@ -43,7 +43,9 @@ pub(crate) struct Decls {
 /// int(8)
 /// bool(true)
 /// ```
-#[php_class(final, not_serializable, payload = Decls, size = 88, handlers = crate::decls::HANDLERS)]
+// `size = 104`: php's `zend_ffi_new` asks `emalloc` for
+// `sizeof(zend_ffi)`, 88, whole, not `zend_object_alloc`.
+#[php_class(final, not_serializable, payload = Decls, size = 104, handlers = crate::decls::HANDLERS)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) struct FFI;
 
@@ -196,20 +198,19 @@ impl FFI {
             if v.ptr == 0 {
                 return Err(ffi_error(req, "NULL pointer dereference"));
             }
-            ffi::free(ffi::read::<usize>(v.ptr));
+            free(req, ffi::read::<usize>(v.ptr));
             ffi::write(v.ptr, 0usize);
             if let Some(data) = object.native_mut::<Data>(req)
                 && let Place::Holder { target, .. } = &mut data.place
-                && let Some(owned) = target.take()
             {
-                std::mem::forget(owned);
+                *target = None;
             }
             return Ok(());
         }
         if v.owned {
             return Err(ffi_error(req, "free() non a C pointer"));
         }
-        ffi::free(v.ptr);
+        free(req, v.ptr);
         if let Some(data) = object.native_mut::<Data>(req) {
             data.place = Place::Freed;
             data.persistent = false;
@@ -387,19 +388,17 @@ impl FFI {
                 "FFI::addr() cannot create a reference to a temporary pointer",
             ));
         }
+        let from = types(req).len();
         let ty = types(req).pointer_to(v.ty, 0);
         let mut data = Data::holding(ty, v.ptr, false);
+        data.held = hold_types(req, from)?;
         if temporary
             && let Some(old) = object.native_mut::<Data>(req)
-            && let Place::Owned(_) = old.place
+            && let Place::Owned(addr) = old.place
         {
-            let Place::Owned(block) = std::mem::take(&mut old.place) else {
-                return Err(ffi_error(req, "NULL pointer dereference"));
-            };
-            let addr = block.release();
             old.place = Place::Borrowed(addr);
             if let Place::Holder { target, .. } = &mut data.place {
-                *target = OwnedTarget::adopt(addr);
+                *target = std::num::NonZeroUsize::new(addr);
             }
         }
         made_cdata(req, data)
@@ -883,18 +882,18 @@ fn ffi_new(
 ) -> Result<Instance<CData>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "new")?;
+    let from = types(req).len();
     let (ty, is_const) = type_argument(req, scope_of, ty)?;
     let size = types(req).get(ty).size;
     if size == 0 {
         return Err(ffi_error(req, "Cannot instantiate FFI\\CData of zero size"));
     }
-    let Some(block) = Block::zeroed(size) else {
-        return Err(ffi_error(req, "Out of memory"));
-    };
+    let held = hold_types(req, from)?;
+    let addr = alloc(req, size, persistent)?;
     let place = if owned {
-        Place::Owned(block)
+        Place::Owned(addr)
     } else {
-        Place::Borrowed(block.release())
+        Place::Borrowed(addr)
     };
     made_cdata(
         req,
@@ -903,6 +902,7 @@ fn ffi_new(
             place,
             is_const,
             persistent,
+            held,
         },
     )
 }
@@ -916,6 +916,7 @@ fn ffi_cast(
 ) -> Result<Instance<CData>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "cast")?;
+    let from = types(req).len();
     let (ty, is_const) = type_argument(req, scope_of, ty)?;
     let value = given.deref();
     let Some(old_object) = as_cdata(req, &value)? else {
@@ -928,17 +929,17 @@ fn ffi_cast(
             ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_)
         );
         if scalar && simple {
-            let Some(block) = Block::zeroed(size) else {
-                return Err(ffi_error(req, "Out of memory"));
-            };
-            write_value(req, block.addr(), ty, &value)?;
+            let addr = alloc(req, size, false)?;
+            write_value(req, addr, ty, &value)?;
+            let held = hold_types(req, from)?;
             return made_cdata(
                 req,
                 Data {
                     ty,
-                    place: Place::Owned(block),
+                    place: Place::Owned(addr),
                     is_const,
                     persistent: false,
+                    held,
                 },
             );
         }
@@ -981,6 +982,7 @@ fn ffi_cast(
         place,
         is_const,
         persistent: false,
+        held: hold_types(req, from)?,
     };
     if old.owned && temporary(req, 2, old_object) {
         transfer(req, old_object, &mut data);
@@ -995,24 +997,14 @@ fn transfer(req: &mut Request, old: PhpObject, data: &mut Data) {
         return;
     };
     match std::mem::take(&mut old.place) {
-        Place::Owned(block) => old.place = Place::Borrowed(block.release()),
-        Place::Holder { cell, target } => {
-            if let Some(target) = target {
-                std::mem::forget(target);
-            }
-            old.place = Place::Holder { cell, target: None };
-        }
+        Place::Owned(addr) => old.place = Place::Borrowed(addr),
+        Place::Holder { cell, .. } => old.place = Place::Holder { cell, target: None },
         other => old.place = other,
     }
     match std::mem::take(&mut data.place) {
-        Place::Borrowed(addr) => {
-            data.place = match Block::adopt(addr) {
-                Some(block) => Place::Owned(block),
-                None => Place::Borrowed(addr),
-            };
-        }
+        Place::Borrowed(addr) if addr != 0 => data.place = Place::Owned(addr),
         Place::Holder { cell, .. } => {
-            let target = OwnedTarget::adopt(ffi::read::<usize>(cell.addr()));
+            let target = std::num::NonZeroUsize::new(ffi::read::<usize>(cell.addr()));
             data.place = Place::Holder { cell, target };
         }
         other => data.place = other,
@@ -1027,8 +1019,10 @@ fn ffi_type(
 ) -> Result<Instance<CType>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "type")?;
+    let from = types(req).len();
     let (ty, _) = parse_type(req, scope_of, text.as_bytes())?;
-    make_ctype(req, ty)
+    let held = hold_types(req, from)?;
+    make_owning(req, ty, held)
 }
 
 /// `GC_REFCOUNT(obj) == 1 && Z_REFCOUNT_P(arg) == 1`: the argument at
