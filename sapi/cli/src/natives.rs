@@ -95,17 +95,64 @@ pub(crate) fn server(builder: EngineBuilder) -> EngineBuilder {
         ])
 }
 
-/// `cli_server_module_entry`: its one `PHP_INI_BEGIN` row.
+/// `cli_server_module_entry`: its one `PHP_INI_BEGIN` row and its `MINFO`.
 fn server_extension() -> Extension {
     ExtensionBuilder::default()
         .ini(vec![IniDecl {
-            name: Name(b"cli_server.color".as_slice().into()),
+            name: Name(COLOR.as_bytes().into()),
             default: Some(b"0".as_slice().into()),
             user: true,
             per_dir: true,
             system: true,
         }])
+        .info(server_info)
         .build("cli_server")
+}
+
+/// The built-in server's one entry, a `STD_PHP_INI_BOOLEAN`
+/// (`Z/sapi/cli/php_cli_server.c:469`).
+const COLOR: &str = "cli_server.color";
+
+/// `PHP_MINFO_FUNCTION(cli_server)` (`Z/sapi/cli/php_cli_server.c:485`):
+/// `DISPLAY_INI_ENTRIES()` alone, `cli_server.color` through
+/// `zend_ini_boolean_displayer_cb`, `On` or `Off` in both columns, so the
+/// server writes no `Version` row.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+/// mkdir($dir);
+/// file_put_contents("$dir/index.php", '<?php ini_set("cli_server.color", "0"); (new ReflectionExtension("cli_server"))->info();');
+/// $port = 18000 + random_int(0, 999);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'cli_server.color=1', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+/// usleep(300000);
+/// echo file_get_contents("http://127.0.0.1:$port/");
+/// proc_terminate($p); proc_close($p);
+/// unlink("$dir/index.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// <h2><a name="module_cli_server" href="#module_cli_server">cli_server</a></h2>
+/// <table>
+/// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+/// <tr><td class="e">cli_server.color</td><td class="v">Off</td><td class="v">On</td></tr>
+/// </table>
+/// ```
+fn server_info(req: &mut Request) {
+    let shown = |value: Option<&[u8]>| {
+        let on = Request::ini_parse_bool(value.unwrap_or_default());
+        if on { "On" } else { "Off" }
+    };
+    let entries = req.ini_entries();
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.decl.name.0.as_ref() == COLOR.as_bytes())
+    else {
+        return;
+    };
+    let (local, master) = (
+        shown(entry.value.as_deref()),
+        shown(entry.master.as_deref()),
+    );
+    req.info_ini_table(&[[COLOR, local, master]]);
 }
 
 /// `cli_set_process_title(string $title): bool`
