@@ -2095,8 +2095,11 @@ pub struct Request {
     /// here keeps the key's identity while the entry stands.
     function_callables: Vec<(php_unit::UnitCell, u32, Function)>,
     autoloaders: Vec<Callable>,
-    /// `EG(in_autoload)`: the lowered names an autoloader is loading.
-    in_autoload: Vec<Vec<u8>>,
+    /// `EG(in_autoload)`: the lowered names an autoloader is loading,
+    /// each a key of php's table, which the first lookup that may
+    /// autoload lays down on the request's heap and which stands, its
+    /// data with it, until the request ends.
+    in_autoload: Option<PhpArray>,
     assert_callback: Option<Value>,
     umask: u32,
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
@@ -2734,7 +2737,7 @@ impl Request {
             ticks_count: 0,
             function_callables: Vec::new(),
             autoloaders: Vec::new(),
-            in_autoload: Vec::new(),
+            in_autoload: None,
             assert_callback: None,
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
@@ -18898,19 +18901,52 @@ impl Request {
         self.autoloaders.get(at).cloned()
     }
 
-    /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`: `false`
-    /// for a name an autoloader is loading already.
-    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> bool {
-        if self.in_autoload.iter().any(|name| name == lowered) {
-            return false;
+    /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`, the
+    /// table laid down first where this is the request's first lookup
+    /// that may autoload (`ALLOC_HASHTABLE`, `zend_hash_init(8)`): the
+    /// lowered name as the request string php's `lc_name` is, which the
+    /// caller hands back to [`Request::autoload_leave`], or `None` for a
+    /// name an autoloader is loading already. The `Err` is the memory
+    /// limit.
+    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> Result<Option<PhpString>, Thrown> {
+        let name = PhpString::new(self, lowered)?;
+        let made = match self.in_autoload {
+            Some(table) => Ok(table),
+            None => PhpArray::new(self).inspect(|table| self.in_autoload = Some(*table)),
+        };
+        let mut table = match made {
+            Ok(table) => table,
+            Err(thrown) => {
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        if table.find(lowered).is_some() {
+            self.release(Value::string(name));
+            return Ok(None);
         }
-        self.in_autoload.push(lowered.to_vec());
-        true
+        self.addref(&Value::string(name));
+        if let Err(thrown) = table.add_new(self, Key::Str(name), Value::null()) {
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        Ok(Some(name))
     }
 
-    /// `zend_hash_del(EG(in_autoload), lc_name)`.
-    pub(crate) fn autoload_leave(&mut self, lowered: &[u8]) {
-        self.in_autoload.retain(|name| name != lowered);
+    /// `zend_hash_del(EG(in_autoload), lc_name)`, and `lc_name` released.
+    pub(crate) fn autoload_leave(&mut self, name: PhpString) {
+        if let Some(table) = self.in_autoload {
+            self.array_del(table.heap(), php_heap::Key::Str(name.heap()));
+        }
+        self.release(Value::string(name));
+    }
+
+    /// `zend_hash_destroy(EG(in_autoload))` and `FREE_HASHTABLE` in
+    /// `shutdown_executor`, after the object storage.
+    pub(crate) fn free_in_autoload(&mut self) {
+        if let Some(table) = self.in_autoload.take() {
+            self.release(Value::array(table));
+        }
     }
 
     /// `spl_autoload_functions()`: each loader as its

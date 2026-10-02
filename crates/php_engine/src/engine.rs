@@ -3429,6 +3429,7 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         req.free_object_storage();
+        req.free_in_autoload();
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
