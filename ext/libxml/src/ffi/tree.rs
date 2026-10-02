@@ -1162,6 +1162,25 @@ impl Node {
         Node::from_raw(unsafe { sys::xmlNewDocTextLen(doc_ptr(doc), content.as_ptr(), len) })
     }
 
+    /// `xmlNewTextLen(content, len)` named `xmlStringTextNoenc`, so the
+    /// save writes its bytes unescaped, as php's soap `to_xml_any` makes
+    /// the text of an `<anyXML>` value.
+    pub fn new_text_noenc(content: &[u8]) -> Option<Node> {
+        let len = c_int::try_from(content.len()).unwrap_or(c_int::MAX);
+        // SAFETY: `len` readable bytes.
+        let node = Node::from_raw(unsafe { sys::xmlNewTextLen(content.as_ptr(), len) })?;
+        let name = sys::xmlStringTextNoenc.as_ptr();
+        node.write(|n| n.name = name);
+        Some(node)
+    }
+
+    /// Whether a node is named `xmlStringTextNoenc`, by address as libxml
+    /// compares it.
+    pub fn is_text_noenc(self) -> bool {
+        let name = sys::xmlStringTextNoenc.as_ptr();
+        self.read(|n| ptr::eq(n.name, name))
+    }
+
     /// `xmlNewDocComment(doc, content)`.
     pub fn new_comment(doc: Option<Node>, content: &[u8]) -> Option<Node> {
         let c = cstr(content);

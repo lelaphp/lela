@@ -601,6 +601,9 @@ pub(crate) type xmlOutputBufferCreateFilenameFunc = unsafe extern "C" fn(
 #[link(name = "xml2")]
 unsafe extern "C" {
     pub(crate) safe static xmlParserVersion: *const c_char;
+    /// `xmlStringTextNoenc`, the name of a text node written out unescaped;
+    /// only its address is read.
+    pub(crate) safe static xmlStringTextNoenc: [xmlChar; 10];
 
     pub(crate) fn xmlInitParser();
     /// `xmlFree`: libxml2 is built without per-thread allocators, so the
