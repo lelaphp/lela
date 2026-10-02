@@ -155,6 +155,10 @@ pub struct Session {
     /// `run <file`: the file the program reads as its stdin.
     pub stdin_file: Option<PathBuf>,
     pub breaks: Breakpoints,
+    /// `bp_tmp`: the breakpoints a cycle that ended exported as `break`
+    /// lines, which the next cycle runs once its init files have
+    /// (`Z/sapi/phpdbg/phpdbg.c:1604-1615, 1556-1562`).
+    pub carried: Option<Vec<u8>>,
     pub watches: Watches,
     /// `register`'s functions, lowered.
     pub registered: Vec<Vec<u8>>,
@@ -237,6 +241,7 @@ impl Session {
             args: Vec::new(),
             stdin_file: None,
             breaks: Breakpoints::default(),
+            carried: None,
             watches: Watches::default(),
             registered: Vec::new(),
             plan: None,
