@@ -17,8 +17,9 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 php_ext_pdo = { path = "../pdo" }
-# libsqlite3 built from the source the crate bundles, one version on every
-# machine (design §7.2), bound in `src/ffi/` alone (`unsafe.homes`).
+# The platform's libsqlite3, the keg the oracle links, found through
+# pkg-config and never vendored (design §7.2, #1510), bound in `src/ffi/`
+# alone (`unsafe.homes`).
 libsqlite3-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
