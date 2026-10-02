@@ -33,6 +33,7 @@ mod breakiterator;
 mod calendar;
 mod collator;
 mod common_date;
+mod dateformat;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -319,6 +320,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = dateformat::functions(builder);
     let builder = formatter::functions(builder);
     let builder = grapheme::functions(builder);
     let builder = idn::functions(builder);
@@ -339,6 +341,7 @@ pub fn extension() -> Extension {
         .class::<listformatter::IntlListFormatter>()
         .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
+        .class::<dateformat::IntlDateFormatter>()
         .class::<transliterator::Transliterator>()
         .class::<timezone::IntlTimeZone>()
         .class::<calendar::IntlCalendar>()

@@ -165,7 +165,7 @@ fn fetch(req: &mut Request, o: Of) -> Result<(), Thrown> {
 }
 
 /// The calendar an object holds.
-fn held(req: &Request, object: PhpObject) -> Option<&Calendar> {
+pub(crate) fn held(req: &Request, object: PhpObject) -> Option<&Calendar> {
     object.native::<CalendarObject>(req)?.cal.as_deref()
 }
 
@@ -225,7 +225,7 @@ fn day_of_week(req: &mut Request, value: i64, position: u32) -> Result<i32, Thro
 /// `calendar_object_create`: a new `IntlGregorianCalendar` for a
 /// Gregorian calendar and an `IntlCalendar` for any other, holding
 /// `calendar`.
-fn made(req: &mut Request, mut calendar: Cal) -> Result<Instance<IntlCalendar>, Thrown> {
+pub(crate) fn made(req: &mut Request, mut calendar: Cal) -> Result<Instance<IntlCalendar>, Thrown> {
     let name: &[u8] = if cal::php_intl_cal_is_gregorian(&mut calendar) {
         b"IntlGregorianCalendar"
     } else {

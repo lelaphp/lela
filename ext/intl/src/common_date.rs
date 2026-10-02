@@ -1,17 +1,23 @@
 //! `common/common_date.cpp` and the conversions `timezone_class.cpp`
-//! keeps beside it: ext/date's zones made ICU's and back, and the time
-//! zone argument every date class takes. ext/date's objects are read through its `php_date.h` surface
+//! keeps beside it: ext/date's zones made ICU's and back, a
+//! `DateTimeInterface` taken apart into its instant and zone, a value
+//! read as milliseconds, and the time zone argument every date class
+//! takes. ext/date's objects are read through its `php_date.h` surface
 //! (design §4.10).
 
-use php_ext::abi::{Instance, Union};
+use php_ext::abi::{Instance, ObjectHandlers, Std, Union};
 use php_ext::attr::php_class;
-use php_ext::call::{instantiate, lookup_class};
+use php_ext::call::{call_method, instantiate, lookup_class};
+use php_ext::coerce::{coerce_param, numeric_string, to_string};
+use php_ext::decl::Type;
 use php_ext::raising::{Thrown, fatal, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 use php_ext_date::TzKind;
 
+use crate::calendar::CalendarObject;
 use crate::error::Outside;
+use crate::ffi::calendar as cal;
 use crate::ffi::cpp::Text;
 use crate::ffi::timezone::{self as tz, TimeZone, Zone};
 use crate::ffi::{self, Code, c_string, to_utf16};
@@ -75,6 +81,127 @@ pub(crate) fn gmt() -> Option<Zone> {
     tz::php_intl_tz_special(1)
 }
 
+/// `U_MILLIS_PER_SECOND`.
+const MILLIS: f64 = 1000.0;
+
+/// `instanceof_function(ce, <class named name>)`.
+pub(crate) fn is_a(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<bool, Thrown> {
+    Ok(lookup_class(req, name)?.is_some_and(|class| object.instance_of(req, class)))
+}
+
+/// `intl_datetime_decompose`: a `DateTimeInterface`'s instant in
+/// milliseconds, through its own `getTimestamp()`, and its zone where
+/// `want_zone`; none where either fails, with the error set on `outside`.
+pub(crate) fn datetime_decompose(
+    req: &mut Request,
+    object: PhpObject,
+    want_zone: bool,
+    outside: &mut Outside,
+) -> Result<Option<(f64, Option<Zone>)>, Thrown> {
+    if outside.code(req).is_failure() {
+        return Ok(None);
+    }
+    let class = Std.get_class_name(req, object);
+    let stamp = call_method(req, &object, b"getTimestamp", &[])?;
+    let Some(seconds) = stamp.as_int() else {
+        req.release(stamp);
+        let message = format!("{class}::getTimestamp() did not return an int");
+        outside.set(req, Code::INTERNAL_PROGRAM, &message)?;
+        return Ok(None);
+    };
+    let parts = php_ext_date::date_obj(req, object);
+    let us = parts.as_ref().map_or(0, |p| p.us);
+    #[allow(clippy::cast_precision_loss, reason = "php's (double) cast")]
+    let millis = MILLIS * seconds as f64 + (us / 1000) as f64;
+    if !want_zone {
+        return Ok(Some((millis, None)));
+    }
+    let Some(parts) = parts else {
+        let message = format!("the {class} object is not properly initialized");
+        outside.set(req, Code::ILLEGAL_ARGUMENT, &message)?;
+        return Ok(None);
+    };
+    let zone = match &parts.zone {
+        None => gmt(),
+        Some(kind) => convert_datetimezone(req, Some(kind), &mut Outside::Request)?,
+    };
+    if zone.is_none() {
+        let message = "could not convert DateTime's time zone";
+        outside.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+        return Ok(None);
+    }
+    Ok(Some((millis, zone)))
+}
+
+/// `intl_zval_to_millis`: a number of seconds, a numeric string, a
+/// `DateTimeInterface` or an `IntlCalendar` as milliseconds; `NAN` where
+/// the value is none of these, with the error set on `outside`.
+pub(crate) fn zval_to_millis(
+    req: &mut Request,
+    value: Value,
+    outside: &mut Outside,
+) -> Result<f64, Thrown> {
+    if outside.code(req).is_failure() {
+        return Ok(f64::NAN);
+    }
+    #[allow(clippy::cast_precision_loss, reason = "php's (double) cast")]
+    match value.deref().as_ref() {
+        ValueRef::Str(text) => match numeric_string(text.as_bytes()) {
+            Some(n) if n.as_int().is_some() => Ok(MILLIS * n.as_int().unwrap_or(0) as f64),
+            Some(n) => Ok(n.as_float().unwrap_or(f64::NAN) * MILLIS),
+            None => {
+                let message = format!(
+                    "string '{}' is not numeric, which would be required for it to be a valid date",
+                    String::from_utf8_lossy(c_string(text.as_bytes()).as_bytes())
+                );
+                outside.set(req, Code::ILLEGAL_ARGUMENT, &message)?;
+                Ok(f64::NAN)
+            }
+        },
+        ValueRef::Int(n) => Ok(MILLIS * n as f64),
+        ValueRef::Float(d) => Ok(MILLIS * d),
+        ValueRef::Object(object) => {
+            let object = *object;
+            if is_a(req, object, b"DateTimeInterface")? {
+                let parts = datetime_decompose(req, object, false, outside)?;
+                return Ok(parts.map_or(f64::NAN, |(millis, _)| millis));
+            }
+            if object.native::<CalendarObject>(req).is_some() {
+                return calendar_millis(req, object, outside);
+            }
+            let message = "invalid object type for date/time (only IntlCalendar and DateTimeInterface permitted)";
+            outside.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+            Ok(f64::NAN)
+        }
+        _ => {
+            outside.set(req, Code::ILLEGAL_ARGUMENT, "invalid PHP type for date")?;
+            Ok(f64::NAN)
+        }
+    }
+}
+
+/// An `IntlCalendar`'s `getTime()`, through a clone of its calendar.
+fn calendar_millis(
+    req: &mut Request,
+    object: PhpObject,
+    outside: &mut Outside,
+) -> Result<f64, Thrown> {
+    let Some(mut copy) =
+        crate::calendar::held(req, object).and_then(|c| cal::php_intl_cal_clone(c))
+    else {
+        let message = "IntlCalendar object is not properly constructed";
+        outside.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+        return Ok(f64::NAN);
+    };
+    let mut status = Code::ZERO;
+    let millis = cal::php_intl_cal_time(&mut copy, 0, 0.0, &mut status);
+    if status.is_failure() {
+        let message = "call to internal Calendar::getTime() has failed";
+        outside.set(req, status, message)?;
+    }
+    Ok(millis)
+}
+
 /// `timezone_convert_to_datetimezone`: ext/date's `DateTimeZone` for an
 /// ICU zone, an offset zone laid down by hand for a `GMT` id, which the
 /// constructor would refuse, and the id through the constructor
@@ -113,6 +240,30 @@ pub(crate) fn convert_to_datetimezone(
             Err(throw_chained(req, thrown, "IntlException", message))
         }
     }
+}
+
+/// The time zone argument as `Z_PARAM_OBJ_OR_STR_OR_NULL` holds it:
+/// any object, a string or null, a scalar read as a string.
+pub(crate) fn zone_held(req: &mut Request, value: Value, position: u32) -> Result<Value, Thrown> {
+    let ty = Type::Union(vec![Type::Object, Type::String, Type::Null]);
+    coerce_param(req, &value, &ty, position)
+}
+
+/// A held time zone argument sorted as `timezone_process_timezone_argument`
+/// sorts it: an `IntlTimeZone`, a `DateTimeZone`, or a string, another
+/// object by its string cast.
+pub(crate) fn zone_sorted(req: &mut Request, value: Value) -> Result<ZoneArg, Thrown> {
+    Ok(match value.as_ref() {
+        ValueRef::Object(object) if object.native::<TimeZoneObject>(req).is_some() => {
+            Some(Union::A(Instance::of(*object)))
+        }
+        ValueRef::Object(object) if is_a(req, *object, b"DateTimeZone")? => {
+            Some(Union::B(Union::A(Instance::of(*object))))
+        }
+        ValueRef::Object(_) => Some(Union::B(Union::B(to_string(req, &value)?))),
+        ValueRef::Str(text) => Some(Union::B(Union::B(*text))),
+        _ => None,
+    })
 }
 
 /// `timezone_throw_exception_with_call_location`: an `IntlException`
