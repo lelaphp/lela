@@ -17,7 +17,7 @@ use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
 use php_ext::request::{Request, ScannerFile};
 use php_ext::syntax::Scanning;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
 pub(crate) use constants::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
@@ -616,14 +616,17 @@ fn parse_ini(
         req.release(Value::array(into));
         return Ok(OrFalse::False);
     };
-    let parsed = php_ext::syntax::parse_ini(req, bytes, scanner).and_then(|parsed| match parsed {
-        Ok(events) => crate::ini::assemble(req, into, events, sections).map(|()| true),
-        Err((message, line)) => {
-            let file = String::from_utf8_lossy(file);
-            warning(req, &format!("{message} in {file} on line {line}\n"));
-            Ok(false)
-        }
-    });
+    let mut callback = crate::ini::Callback::new(into, sections);
+    let parsed =
+        php_ext::syntax::parse_ini(req, bytes, scanner, |req, event| callback.event(req, event))
+            .map(|parsed| match parsed {
+                Ok(()) => true,
+                Err((message, line)) => {
+                    let file = String::from_utf8_lossy(file);
+                    warning(req, &format!("{message} in {file} on line {line}\n"));
+                    false
+                }
+            });
     if matches!(parsed, Ok(true)) {
         return Ok(OrFalse::Value(into));
     }
@@ -760,10 +763,33 @@ fn parse_ini_string(
     #[php(default = INI_SCANNER_NORMAL)] scanner_mode: i64,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
     let (text, sections, mode) = (ini_string, process_sections, scanner_mode);
-    let bytes = c_string(text.as_bytes()).to_vec();
-    let into = PhpArray::new(req)?;
-    parse_ini(req, into, &bytes, b"Unknown", sections, mode)
+    // "Setup string": a copy with `ZEND_MMAP_AHEAD` zero bytes past it,
+    // held while it is parsed.
+    let len = text.as_bytes().len();
+    let mut string = Emalloc::new(req, len.saturating_add(ZEND_MMAP_AHEAD))?;
+    string.bytes_mut()[..len].copy_from_slice(text.as_bytes());
+    let into = match PhpArray::new(req) {
+        Ok(into) => into,
+        Err(thrown) => {
+            string.free(req);
+            return Err(thrown);
+        }
+    };
+    let parsed = parse_ini(
+        req,
+        into,
+        c_string(&string.bytes()[..len]),
+        b"Unknown",
+        sections,
+        mode,
+    );
+    string.free(req);
+    parsed
 }
+
+/// `ZEND_MMAP_AHEAD`: the zero bytes php keeps past a string it hands the
+/// scanner.
+const ZEND_MMAP_AHEAD: usize = 32;
 
 /// The file's entries, the file opened on the include path as
 /// `zend_stream_open` opens it, then read as `parse_ini_string` reads a

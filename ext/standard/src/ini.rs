@@ -1,14 +1,15 @@
 //! The callbacks `parse_ini_string` and `parse_ini_file` hand php's INI
 //! grammar, `php_simple_ini_parser_cb` and
 //! `php_ini_parser_cb_with_sections` (`Z/ext/standard/basic_functions.c`),
-//! over the events of the one grammar there is, the engine's
-//! ([`php_ext::syntax::parse_ini`]), which reads its startup entries and
-//! every `-d` by the same rules.
+//! called with each statement of the one grammar there is, the engine's
+//! ([`php_ext::syntax::parse_ini`]), as it is reduced, so the array grows
+//! beside the scanner's strings as php's does.
 
+use php_ext::coerce::numeric_string;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::syntax::{IniEvent as Event, IniScanner, IniValue as Scalar};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::syntax::{IniEvent as Event, IniScanner};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::basic_functions::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
 
@@ -22,198 +23,133 @@ pub(super) fn scanner(mode: i64) -> Option<IniScanner> {
     }
 }
 
-/// A key of the table the callbacks build.
-#[derive(Clone, PartialEq, Debug)]
-enum Slot {
-    Int(i64),
-    Str(Vec<u8>),
-}
-
-impl Slot {
-    /// `zend_symtable_update`'s key: a canonical decimal integer in
-    /// range is an index, anything else the string.
-    fn symtable(bytes: &[u8]) -> Slot {
-        let digits = bytes.strip_prefix(b"-").unwrap_or(bytes);
-        let canonical = !digits.is_empty()
-            && digits.iter().all(u8::is_ascii_digit)
-            && (digits[0] != b'0' || (digits.len() == 1 && digits.len() == bytes.len()));
-        if canonical && let Ok(n) = std::str::from_utf8(bytes).unwrap_or("x").parse::<i64>() {
-            return Slot::Int(n);
-        }
-        Slot::Str(bytes.to_vec())
-    }
-}
-
-/// One element: a value or a nested table.
-enum Node {
-    Leaf(Scalar),
-    Table(Table),
-}
-
-/// The array a callback writes into, in insertion order with php's
-/// `nNextFreeElement`.
-struct Table {
-    entries: Vec<(Slot, Node)>,
-    next: Option<i64>,
-}
-
-impl Table {
-    fn new() -> Table {
-        Table {
-            entries: Vec::new(),
-            next: None,
-        }
-    }
-
-    fn find(&self, key: &Slot) -> Option<usize> {
-        self.entries.iter().position(|(k, _)| k == key)
-    }
-
-    /// `zend_hash_update`: in place where present, at the end otherwise.
-    fn update(&mut self, key: Slot, node: Node) -> usize {
-        if let Slot::Int(n) = key
-            && self.next.is_none_or(|next| n >= next)
-        {
-            self.next = Some(n.saturating_add(1));
-        }
-        if let Some(at) = self.find(&key) {
-            self.entries[at].1 = node;
-            at
-        } else {
-            self.entries.push((key, node));
-            self.entries.len() - 1
-        }
-    }
-
-    /// `add_next_index_zval`.
-    fn append(&mut self, node: Node) {
-        let key = self.next.unwrap_or(0);
-        self.update(Slot::Int(key), node);
-    }
-
-    /// `php_simple_ini_parser_cb`.
-    fn simple(&mut self, event: Event) {
-        match event {
-            Event::Entry(label, Some(value)) => {
-                self.update(Slot::symtable(&label_bytes(&label)), Node::Leaf(value));
-            }
-            Event::PopEntry(label, value, offset) => {
-                let name = label_bytes(&label);
-                let numeric = !(name.len() > 1 && name[0] == b'0')
-                    && matches!(
-                        php_ext::coerce::numeric_string(&name)
-                            .as_ref()
-                            .map(Value::as_ref),
-                        Some(php_ext::values::ValueRef::Int(_))
-                    );
-                let key = match php_ext::coerce::numeric_string(&name)
-                    .as_ref()
-                    .map(Value::as_ref)
-                {
-                    Some(php_ext::values::ValueRef::Int(n)) if numeric => Slot::Int(n),
-                    _ => Slot::Str(name),
-                };
-                let at = match self.find(&key) {
-                    Some(at) => at,
-                    None => self.update(key, Node::Table(Table::new())),
-                };
-                if !matches!(self.entries[at].1, Node::Table(_)) {
-                    self.entries[at].1 = Node::Table(Table::new());
-                }
-                let Node::Table(inner) = &mut self.entries[at].1 else {
-                    return;
-                };
-                match &offset {
-                    Scalar::Str(o) if !o.is_empty() => {
-                        inner.update(Slot::symtable(o), Node::Leaf(value));
-                    }
-                    _ => inner.append(Node::Leaf(value)),
-                }
-            }
-            Event::Entry(_, None) | Event::Section(_) => {}
-        }
-    }
-}
-
-/// A label's bytes: labels are strings from the scanner.
-fn label_bytes(val: &Scalar) -> Vec<u8> {
-    match val {
-        Scalar::Str(s) => s.clone(),
-        _ => Vec::new(),
-    }
-}
-
-/// The callbacks' array for the parse's events:
-/// `php_simple_ini_parser_cb` over them all, or with `sections`
-/// `php_ini_parser_cb_with_sections`, a section's entries into the
-/// section's own array from its header on.
-pub(super) fn assemble(
-    req: &mut Request,
-    into: PhpArray,
-    events: Vec<Event>,
+/// The callback's array and, with sections, `BG(active_ini_file_section)`,
+/// the section array a header laid down, which entries go into from
+/// there on.
+pub(super) struct Callback {
+    top: PhpArray,
     sections: bool,
-) -> Result<(), Thrown> {
-    let mut top = Table::new();
-    let mut active: Option<usize> = None;
-    for event in events {
-        if !sections {
-            top.simple(event);
-            continue;
+    active: Option<PhpArray>,
+}
+
+impl Callback {
+    /// The callback over `top`, `php_ini_parser_cb_with_sections` where
+    /// `sections` is set and `php_simple_ini_parser_cb` otherwise.
+    pub(super) const fn new(top: PhpArray, sections: bool) -> Callback {
+        Callback {
+            top,
+            sections,
+            active: None,
+        }
+    }
+
+    /// One statement's event. The strings are the parser's, given up
+    /// after; what the array keeps takes an owner of its own.
+    ///
+    /// The scanner's token strings are made, kept and given up as php's
+    /// grammar does, and its state stack allocated as it grows, so a
+    /// parse that is its own peak reads php's:
+    ///
+    /// ```php
+    /// $p = tempnam(sys_get_temp_dir(), 'ini');
+    /// foreach (["a = 1\nb = on\nc = \"q\"\n", "d[] = 1\nd[] = 2\n"] as $c) {
+    ///     file_put_contents($p, $c); parse_ini_file($p, true);
+    ///     memory_reset_peak_usage(); $m = memory_get_usage(); $a = parse_ini_file($p, true);
+    ///     var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m); unset($a);
+    ///     memory_reset_peak_usage(); $m = memory_get_usage(); $a = parse_ini_string($c, true);
+    ///     var_dump(memory_get_peak_usage() - $m); unset($a);
+    /// }
+    /// unlink($p);
+    /// ```
+    /// ```expect
+    /// int(1304)
+    /// int(568)
+    /// int(720)
+    /// int(1352)
+    /// int(688)
+    /// int(768)
+    /// ```
+    pub(super) fn event(&mut self, req: &mut Request, event: Event<Value>) -> Result<(), Thrown> {
+        if !self.sections {
+            return simple(req, self.top, &event);
         }
         match event {
             Event::Section(name) => {
-                let at = top.update(
-                    Slot::symtable(&label_bytes(&name)),
-                    Node::Table(Table::new()),
-                );
-                active = Some(at);
+                let section = PhpArray::new(req)?;
+                let key = key_of(req, &name)?;
+                self.top.set(req, key, Value::array(section))?;
+                self.active = Some(section);
+                Ok(())
             }
-            Event::Entry(_, None) => {}
-            event => match active {
-                Some(at) => {
-                    if let Node::Table(section) = &mut top.entries[at].1 {
-                        section.simple(event);
-                    }
-                }
-                None => top.simple(event),
-            },
+            Event::Entry(_, None) => Ok(()),
+            event => simple(req, self.active.unwrap_or(self.top), &event),
         }
     }
-    fill(req, into, top)
 }
 
-/// The table written into `array`. Every name and string value is a
-/// string of the request's however short, as the scanner's
-/// `zend_ini_copy_value` makes each token's with `zend_string_init` and
-/// the callbacks keep it.
-fn fill(req: &mut Request, mut array: PhpArray, table: Table) -> Result<(), Thrown> {
-    for (slot, node) in table.entries {
-        let key = match slot {
-            Slot::Int(n) => Key::Int(n),
-            Slot::Str(s) => Key::Str(token(req, &s)?),
-        };
-        let value = match node {
-            Node::Table(inner) => {
-                let nested = PhpArray::new(req)?;
-                fill(req, nested, inner).inspect_err(|_| req.release(Value::array(nested)))?;
-                Value::array(nested)
-            }
-            Node::Leaf(val) => match val {
-                Scalar::Str(s) => Value::string(token(req, &s)?),
-                Scalar::Bool(b) => Value::bool(b),
-                Scalar::Null => Value::null(),
-                Scalar::Long(n) => Value::int(n),
-                Scalar::Double(d) => Value::float(d),
-            },
-        };
-        array.set(req, key, value)?;
+/// `zend_symtable_update`'s key for a label: an index for a canonical
+/// decimal integer, the string otherwise, with the owner the table takes.
+fn key_of(req: &mut Request, label: &Value) -> Result<Key, Thrown> {
+    let s = match label.as_php_string() {
+        Some(s) => *s,
+        None => PhpString::new(req, b"")?,
+    };
+    let key = Key::from_string(s);
+    if matches!(key, Key::Str(_)) {
+        req.addref(&Value::string(s));
     }
-    Ok(())
+    Ok(key)
 }
 
-/// `zend_ini_copy_value`'s `zend_string_init(str, len, ZEND_SYSTEM_INI)`
-/// for a request's parse: no interned string for the empty one or one of
-/// a byte.
-fn token(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
-    PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))
+/// `php_simple_ini_parser_cb` into `arr`.
+fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<(), Thrown> {
+    match event {
+        Event::Entry(label, Some(value)) => {
+            req.addref(value);
+            let key = key_of(req, label)?;
+            arr.set(req, key, *value)
+        }
+        Event::PopEntry(label, value, offset) => {
+            let name = label.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
+            // `x[a]=b` where `x` might need to be an array index.
+            let index = match numeric_string(&name).as_ref().map(Value::as_ref) {
+                Some(ValueRef::Int(n)) if !(name.len() > 1 && name[0] == b'0') => Some(n),
+                _ => None,
+            };
+            let key = match (index, label.as_php_string()) {
+                (Some(n), _) => Key::Int(n),
+                (None, Some(s)) => Key::Str(*s),
+                (None, None) => Key::Str(PhpString::new(req, b"")?),
+            };
+            let found = arr.get(&key).and_then(|v| v.as_array().copied());
+            let mut inner = if let Some(inner) = found {
+                inner
+            } else {
+                let inner = PhpArray::new(req)?;
+                if let Key::Str(s) = &key {
+                    req.addref(&Value::string(*s));
+                }
+                arr.set(req, key, Value::array(inner))?;
+                inner
+            };
+            req.addref(value);
+            match offset.as_php_string() {
+                Some(o) if !o.as_bytes().is_empty() => {
+                    let o = *o;
+                    let key = Key::from_string(o);
+                    if matches!(key, Key::Str(_)) {
+                        req.addref(&Value::string(o));
+                    }
+                    inner.set(req, key, *value)
+                }
+                _ => {
+                    if !inner.try_append(req, *value)? {
+                        req.release(*value);
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Event::Entry(_, None) | Event::Section(_) => Ok(()),
+    }
 }
