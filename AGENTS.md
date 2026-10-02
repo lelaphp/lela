@@ -236,6 +236,7 @@ Options:
 ├── simplexml
 ├── sockets
 ├── spl
+├── sqlite3
 ├── standard
 ├── sysvmsg
 ├── sysvsem
@@ -247,7 +248,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=2014347006ec25e95e32adce9d33940117df139324982f20522d1ef24937333b out=fa1e0031c44f48d89ab6d93bf78741fd77c547afa820775e4766a45ff85e1c49 -->
+<!-- /computed in=39b9a33a3fb88deb5b44e7af66968cdaac25c5451cbb33c9ccf7c1c870842645 out=ac26230fef9e4b4c708117615a3eb61db4eecfe474db3ad8f1b85375b335c4a1 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

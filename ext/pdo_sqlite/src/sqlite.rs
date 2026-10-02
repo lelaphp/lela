@@ -14,8 +14,7 @@ use php_ext_pdo::connector::{
 };
 
 use crate::Sqlite;
-use crate::callbacks::Handler;
-use crate::ffi::{self, Db, Registration};
+use crate::ffi::{self, Db, Function, Handler, Registration};
 
 /// `PDO_ATTR_TIMEOUT` and `PDO_ATTR_CURSOR`, which the connector reads.
 const ATTR_TIMEOUT: i64 = 2;
@@ -149,7 +148,7 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
         if !open_basedir(req) {
             flags |= ffi::SQLITE_OPEN_URI;
         }
-        let db = match Db::open(&filename, flags) {
+        let db = match Db::open(&filename, flags, &crate::callbacks::PDO_SQLITE) {
             Ok(db) => db,
             Err((code, message)) => {
                 return Err(Failure::error(SqlError {
@@ -250,7 +249,7 @@ impl Connection for Handle {
             return Err(failed(&self.db, None));
         }
         match self.db.prepare(req, sql) {
-            (Ok(stmt), thrown) => {
+            (Ok(Some(stmt)), thrown) => {
                 if let Some(thrown) = thrown {
                     return Err(Failure::from(thrown));
                 }
@@ -268,7 +267,7 @@ impl Connection for Handle {
                     parameter_map: None,
                 })
             }
-            (Err(_), thrown) => Err(failed(&self.db, thrown)),
+            (Ok(None) | Err(_), thrown) => Err(failed(&self.db, thrown)),
         }
     }
 
@@ -356,7 +355,7 @@ impl Connection for Handle {
             }
             ATTR_EXTENDED_RESULT_CODES => {
                 let n = long_attribute(req, value)?;
-                self.db.extended_result_codes(n);
+                self.db.extended_codes(n);
                 Ok(())
             }
             ATTR_TRANSACTION_MODE => match long_attribute(req, value)? {
@@ -415,7 +414,7 @@ impl Connection for Handle {
             handler.release(req);
         }
         for registration in std::mem::take(&mut self.registrations) {
-            for handler in self.db.unregister(registration) {
+            for handler in registration.unregister() {
                 handler.release(req);
             }
         }
@@ -442,7 +441,7 @@ impl Stmt {
 
     /// `sqlite3_reset` with what an aggregate's final threw carried.
     fn reset(&self, req: &mut Request) -> Result<(), Failure> {
-        match self.handle.reset(req) {
+        match self.handle.reset(req).1 {
             Some(thrown) => Err(Failure::from(thrown)),
             None => Ok(()),
         }
@@ -550,7 +549,7 @@ impl Statement for Stmt {
             return Err(self.failed(None));
         }
         Ok(Column {
-            name: self.handle.column_name(column),
+            name: self.handle.column_name(column).unwrap_or_default(),
             max_len: u64::MAX,
             precision: 0,
         })
@@ -695,7 +694,7 @@ impl Statement for Stmt {
                 "explain mode must be one of the Pdo\\Sqlite::EXPLAIN_MODE_* constants",
             )));
         }
-        if self.handle.set_explain_mode(mode) != ffi::SQLITE_OK {
+        if self.handle.set_explain(mode) != ffi::SQLITE_OK {
             return Err(Failure::silent());
         }
         Ok(())
@@ -707,7 +706,7 @@ impl Statement for Stmt {
         Ok(match attr {
             ATTR_READONLY_STATEMENT => Some(Value::bool(self.handle.readonly())),
             ATTR_BUSY_STATEMENT => Some(Value::bool(self.handle.busy())),
-            ATTR_EXPLAIN_STATEMENT => Some(Value::int(self.handle.explain_mode())),
+            ATTR_EXPLAIN_STATEMENT => Some(Value::int(self.handle.explain())),
             _ => None,
         })
     }
@@ -788,11 +787,11 @@ pub(super) fn register(
     name: &[u8],
     argc: i64,
     flags: i64,
-    function: crate::callbacks::Function,
+    function: Function,
 ) -> Result<bool, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            release(req, function);
+            function.release(req);
             return Ok(false);
         };
         // php hands the library its `zend_long`s as `int`s.
@@ -805,20 +804,12 @@ pub(super) fn register(
                 handle.registrations.push(registration);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err((function, _)) => {
+                function.release(req);
+                Ok(false)
+            }
         }
     })
-}
-
-/// The handlers of a function that was not registered, given up.
-fn release(req: &mut Request, function: crate::callbacks::Function) {
-    match function {
-        crate::callbacks::Function::Scalar(handler) => handler.release(req),
-        crate::callbacks::Function::Aggregate { step, finalize } => {
-            step.release(req);
-            finalize.release(req);
-        }
-    }
 }
 
 /// `pdo_sqlite_create_collation_internal`.
@@ -838,7 +829,10 @@ pub(super) fn register_collation(
                 handle.registrations.push(registration);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err((handler, _)) => {
+                handler.release(req);
+                Ok(false)
+            }
         }
     })
 }

@@ -11,7 +11,8 @@
 //! `sqliteCreate*` methods laid on `PDO` as the connector's methods
 //! (`sqlite_driver.stub.php`), and the deprecated `PDO::SQLITE_*`
 //! aliases on `PDO`. The `unsafe` the library needs is `src/ffi/`'s
-//! alone.
+//! alone, and [`ffi`] is the one binding of libsqlite3, which `ext/sqlite3`
+//! reaches through its safe types (design §4.10, §7.2).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -27,7 +28,9 @@
 
 mod blob;
 mod callbacks;
-mod ffi;
+pub mod ffi;
+
+pub use blob::BlobStream;
 mod sqlite;
 
 use php_ext::abi::{
@@ -39,7 +42,7 @@ use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_pdo::connector::Connector;
 
-use callbacks::{Function, Handler};
+use ffi::{Function, Handler};
 
 /// The extension value (design §7.1): the connector registered, `Pdo\Sqlite`,
 /// the connector's methods and the aliases laid on `PDO`, `pdo` as the one

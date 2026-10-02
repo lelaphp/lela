@@ -628,6 +628,7 @@ dependencies = [
  "php_ext_simplexml",
  "php_ext_sockets",
  "php_ext_spl",
+ "php_ext_sqlite3",
  "php_ext_standard",
  "php_ext_sysvmsg",
  "php_ext_sysvsem",
@@ -959,6 +960,14 @@ dependencies = [
  "php_ext",
  "php_ext_pcre",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_sqlite3"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_pdo_sqlite",
 ]
 
 [[package]]

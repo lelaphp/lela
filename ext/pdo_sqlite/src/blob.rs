@@ -1,6 +1,9 @@
 //! `Pdo\Sqlite::openBlob()` and `php_stream_pdosqlite3_ops`: a blob of
 //! one row opened as a stream, read, written in place within its size,
-//! and sought, as `pdo_sqlite.c` serves it.
+//! and sought, as `pdo_sqlite.c` serves it, and as `sqlite3.c`'s
+//! `php_stream_sqlite3_ops` serves `SQLite3::openBlob()`, the same
+//! operations under another label, which `ext/sqlite3` opens with
+//! [`BlobStream`].
 
 use php_ext::abi::Raw;
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_null_deprecated, docref, warning};
@@ -10,18 +13,35 @@ use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 use crate::ffi::{self, Blob};
 use crate::sqlite::Handle;
 
-/// `php_stream_pdosqlite3_data`.
-struct BlobStream {
+/// `php_stream_pdosqlite3_data` and `php_stream_sqlite3_data`.
+pub struct BlobStream {
     blob: Option<Blob>,
     position: usize,
     size: usize,
     /// `flags & SQLITE_OPEN_READONLY`, the refusal php's write reads.
     read_only: bool,
+    /// The ops' label, `PDOSQLite` or `SQLite3`.
+    label: &'static str,
+}
+
+impl BlobStream {
+    /// A stream over `blob` from its first byte, refusing writes where
+    /// the bits it was opened with ask to read only.
+    #[must_use]
+    pub fn new(blob: Blob, read_only: bool, label: &'static str) -> BlobStream {
+        BlobStream {
+            size: blob.size(),
+            blob: Some(blob),
+            position: 0,
+            read_only,
+            label,
+        }
+    }
 }
 
 impl StreamOps for BlobStream {
     fn label(&self) -> &'static str {
-        "PDOSQLite"
+        self.label
     }
 
     /// `php_pdosqlite3_stream_write`.
@@ -164,13 +184,8 @@ pub(super) fn open_blob(
                 return Ok(Value::bool(false));
             }
         };
-        let size = blob.len();
-        let stream = BlobStream {
-            blob: Some(blob),
-            position: 0,
-            size,
-            read_only: flags & i64::from(ffi::SQLITE_OPEN_READONLY) != 0,
-        };
+        let read_only = flags & i64::from(ffi::SQLITE_OPEN_READONLY) != 0;
+        let stream = BlobStream::new(blob, read_only, "PDOSQLite");
         let mode: &[u8] = if writable { b"r+b" } else { b"rb" };
         Ok(req.new_stream(Box::new(stream), mode)?.as_value())
     })
