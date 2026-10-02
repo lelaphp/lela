@@ -29,6 +29,7 @@
 
 // The error state and the binding's base are what every area calls; the
 // areas land one at a time over them (#1574).
+mod breakiterator;
 mod collator;
 #[allow(dead_code)]
 mod error;
@@ -42,6 +43,7 @@ mod iterator;
 mod listformatter;
 mod locale;
 mod normalizer;
+mod transliterator;
 mod uchar;
 mod utf8;
 
@@ -318,6 +320,7 @@ pub fn extension() -> Extension {
     let builder = idn::functions(builder);
     let builder = locale::functions(builder);
     let builder = normalizer::functions(builder);
+    let builder = transliterator::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -331,8 +334,13 @@ pub fn extension() -> Extension {
         .class::<listformatter::IntlListFormatter>()
         .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
+        .class::<transliterator::Transliterator>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
+        .class::<breakiterator::IntlBreakIterator>()
+        .class::<breakiterator::IntlRuleBasedBreakIterator>()
+        .class::<breakiterator::IntlCodePointBreakIterator>()
+        .class::<breakiterator::IntlPartsIterator>()
         .class::<uchar::IntlChar>()
         .class_constants(b"IntlChar", uchar::constants());
     builder

@@ -34,6 +34,7 @@ macro_rules! icu {
 #[allow(unused_imports)]
 pub(crate) use icu;
 
+pub(crate) mod breakiterator;
 pub(crate) mod collator;
 pub(crate) mod enumeration;
 pub(crate) mod formatter;
@@ -42,7 +43,19 @@ pub(crate) mod idn;
 pub(crate) mod listformatter;
 pub(crate) mod locale;
 pub(crate) mod normalizer;
+pub(crate) mod transliterator;
 pub(crate) mod uchar;
+
+/// `UParseError`: where a rule or pattern parse stopped, and the UTF-16
+/// around it, which `intl_parse_error_to_string` words.
+#[repr(C)]
+#[derive(Default)]
+pub(crate) struct ParseError {
+    pub(crate) line: i32,
+    pub(crate) offset: i32,
+    pub(crate) pre: [u16; 16],
+    pub(crate) post: [u16; 16],
+}
 
 mod sys {
     use std::ffi::c_char;
