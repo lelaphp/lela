@@ -1934,10 +1934,13 @@ impl State<'_> {
             return Ok(self.finish());
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
-        // `Z_OBJPROP_P(rval)` and `zend_hash_extend` over it: the table
-        // laid down at the declared slots and grown for the elements
-        // before one is read. `elements` is held to half the bytes left
-        // above, far inside `HT_MAX_SIZE`.
+        // `Z_OBJPROP_P(rval)` and `zend_hash_extend` over it: the class's
+        // `get_properties` served, which may write rows of its own
+        // (`php_zip_get_properties`), then the table laid down at the
+        // declared slots and grown for the elements before one is read.
+        // `elements` is held to half the bytes left above, far inside
+        // `HT_MAX_SIZE`.
+        object.handlers(req).get_properties(req, object)?;
         object.extend_properties(req, u32::try_from(elements).unwrap_or(u32::MAX))?;
         if !self.object_properties(req, object, elements)? {
             if has_wakeup {
