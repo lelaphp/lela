@@ -236,6 +236,7 @@ Options:
 ├── session
 ├── shmop
 ├── simplexml
+├── soap
 ├── sockets
 ├── spl
 ├── sqlite3
@@ -251,7 +252,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=d24dbb6165d002e35c6a5288c449300599b28b325c1557f486ba2e072093f097 out=0f45504b6dba3324311db5c4e5d36150990dbd599b21bcb1ff8d3dffa55f8aed -->
+<!-- /computed in=26723c6f2adb6d4677a1529c2515400b9a3f7bef4e681891c14ff6f0a6d17da2 out=7827b64e67e85c61f7e426d079cc70c9d9c1a499095af9a21cd9ff7c95d71aa4 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

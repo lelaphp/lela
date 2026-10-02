@@ -42,7 +42,7 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `pcntl` and `posix` are in every host whose serving process is
 # single-threaded, as php-fpm's children are (design §7.2, revision 66).
 # The test `the_bundle_is_the_clis` holds the two lists equal.
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip"] }
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "soap"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 # The face its `cgi_module_entry`'s natives are declared with, as an
