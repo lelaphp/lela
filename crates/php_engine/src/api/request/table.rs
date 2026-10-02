@@ -138,6 +138,34 @@ impl Request {
         }
     }
 
+    /// [`PhpObject::update_row`]: `zend_hash_update`, a declared row
+    /// written raw and marked plain ([`php_heap::PropBit::PlainRow`]),
+    /// any other key [`Request::table_set_row`]'s.
+    pub(crate) fn table_update_row(
+        &mut self,
+        object: PhpObject,
+        key: &Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let slot = match self.table_owner(object) {
+            Ok(owner) => match self.table_row_of(owner, key) {
+                Row::Slot(i) => Some((owner, i)),
+                Row::Dynamic(_) => None,
+            },
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        };
+        let Some((owner, i)) = slot else {
+            return self.table_set_row(object, key, value);
+        };
+        let o = owner.heap();
+        self.write_declared_slot(o, i, value)?;
+        o.set_slot_bit(i, php_heap::PropBit::PlainRow, true);
+        Ok(())
+    }
+
     /// [`PhpObject::unset_row`]: `zend_symtable_del_ind`, a slot left
     /// `UNDEF` and a dynamic key removed, what either held released.
     pub(crate) fn table_unset_row(&mut self, object: PhpObject, key: &Key) -> Result<(), Thrown> {

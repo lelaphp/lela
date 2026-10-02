@@ -1487,6 +1487,48 @@ impl PhpObject {
         req.table_set_row(*self, key, value)
     }
 
+    /// `zend_hash_update` over the property table, where
+    /// [`PhpObject::set_row`] is `zend_hash_update_ind`: a declared row
+    /// under its mangled name is written raw as there and left a plain
+    /// value from then on ([`php_heap::PropBit::PlainRow`]), which
+    /// `unserialize()` writes with no declared type to hold it to, while
+    /// every other declared row stays the slot's; any other key is
+    /// [`PhpObject::set_row`]'s. What `php_zip_get_properties` writes the
+    /// six with, a subclass's own properties going on as slots.
+    ///
+    /// ```php
+    /// class Z extends ZipArchive { public $x = 1; public int $n = 0; }
+    /// var_dump(unserialize('O:1:"Z":2:{s:8:"filename";a:0:{}s:1:"x";a:1:{i:0;i:1;}}'));
+    /// try { unserialize('O:1:"Z":1:{s:1:"n";a:0:{}}'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Z)#1 (8) {
+    ///   ["lastId"]=>
+    ///   int(-1)
+    ///   ["status"]=>
+    ///   int(0)
+    ///   ["statusSys"]=>
+    ///   int(0)
+    ///   ["numFiles"]=>
+    ///   int(0)
+    ///   ["filename"]=>
+    ///   string(0) ""
+    ///   ["comment"]=>
+    ///   string(0) ""
+    ///   ["x"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(1)
+    ///   }
+    ///   ["n"]=>
+    ///   int(0)
+    /// }
+    /// Cannot assign array to property Z::$n of type int
+    /// ```
+    pub fn update_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
+        req.table_update_row(*self, key, value)
+    }
+
     /// One row of the property table removed by key,
     /// `zend_hash_del_ind` (`zend_hash_index_del` for an integer key): a
     /// declared slot left uninitialised with no `__unset` served, a

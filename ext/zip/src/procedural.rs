@@ -9,8 +9,9 @@ use php_ext::request::Request;
 use php_ext::values::{PhpString, Resource, ResourceType, Value};
 
 use crate::State;
-use crate::archive::{Archive, Opened, Stat};
+use crate::archive::{Archive, Stat};
 use crate::object::{basedir_refuses, expand};
+use crate::read::Reader;
 
 /// `zip_rsrc`: the archive, the index `zip_read` reaches next, and the
 /// count it stops at.
@@ -20,11 +21,10 @@ pub(crate) struct Dir {
     num_files: usize,
 }
 
-/// `zip_read_rsrc`: the entry's opened data and how far it was read,
-/// its stat, and the id of the directory resource it came from.
+/// `zip_read_rsrc`: the entry opened for reading, its stat, and the id
+/// of the directory resource it came from.
 pub(crate) struct Entry {
-    data: Option<Opened>,
-    cursor: usize,
+    data: Option<Reader>,
     sb: Stat,
     dir: i64,
 }
@@ -190,7 +190,6 @@ fn zip_read(req: &mut Request, zip: Resource) -> Result<Untyped<Value>, Thrown> 
     let kind = entry_type(req);
     let entry = Entry {
         data: Some(opened),
-        cursor: 0,
         sb,
         dir: id,
     };
@@ -278,13 +277,10 @@ fn zip_entry_read(
     let Some(e) = entry.native_mut::<Entry>(req) else {
         return Ok(OrFalse::False);
     };
-    let Some(data) = &e.data else {
+    let Some(zf) = &mut e.data else {
         return Ok(OrFalse::False);
     };
-    let rest = data.data.get(e.cursor..).unwrap_or_default();
-    let n = rest.len().min(len);
-    let chunk = rest[..n].to_vec();
-    e.cursor += n;
+    let chunk = zf.read(len).unwrap_or_default();
     Ok(OrFalse::Value(PhpString::new(req, &chunk)?))
 }
 

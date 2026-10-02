@@ -21,8 +21,9 @@ php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
 php_ext_pcre = { path = "../pcre" }
 # libzip's behaviour re-derived over the pure-Rust zip crate, no `src/ffi/`
-# (design §7.2, revision 70; #1515): the zip crate reads, the codecs and
-# ciphers it reads with write.
+# (design §7.2, revision 70; #1515): the zip crate finds the central
+# directory, and the codecs and ciphers it reads with read and write each
+# entry, a buffer at a time (#1545).
 zip = { workspace = true }
 flate2 = { workspace = true }
 bzip2 = { workspace = true }
