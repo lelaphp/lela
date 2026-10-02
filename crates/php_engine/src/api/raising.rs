@@ -346,6 +346,19 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     raise(req, level, &text);
 }
 
+/// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
+/// with `parameter` between the parentheses, `function(parameter):
+/// message`, as
+/// php's stream layer names the path it could not open and ext/fileinfo
+/// raises what libmagic's opens of a magic file raise.
+pub fn docref_parameter(req: &mut Request, level: Level, parameter: &[u8], message: &str) {
+    let function = req.active_native();
+    let parameter = escaped(req, &String::from_utf8_lossy(parameter));
+    let message = escaped(req, message);
+    let text = format!("{}: {message}", origin(req, &function, &parameter));
+    raise(req, level, &text);
+}
+
 /// `php_verror`'s `escape_html` of its message and its parameters under
 /// `html_errors` (`Z/main/main.c:1074`, `:1139`): `&`, `<`, `>` and `"`
 /// as entities, a byte that was not UTF-8 already the replacement
