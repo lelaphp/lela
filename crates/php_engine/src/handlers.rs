@@ -12926,6 +12926,25 @@ fn assign_text_dim(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// An append of an undefined CV warns under one more owner of the
+/// table ([`append_value`]), and where the warning's handler freed it
+/// nothing is written and the temporary takes `null`.
+///
+/// ```php
+/// set_error_handler(function ($code, $msg) use (&$a) { echo "$msg\n"; $a = 0; });
+/// $a[] = $y;
+/// var_dump($a);
+/// $b = [[1]];
+/// set_error_handler(function ($code, $msg) use (&$b) { echo "$msg\n"; $b = 0; });
+/// var_dump($b[0][] = $y);
+/// ```
+/// ```expect
+/// Undefined variable $y
+/// int(0)
+/// Undefined variable $y
+/// NULL
+/// ```
 pub(crate) fn assign_dim<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -13037,21 +13056,6 @@ pub(crate) fn assign_dim<T: Tier>(
 /// under one more owner of the table, and where the handler it reached
 /// gave up the last other one the table is freed and nothing is
 /// appended, `None`, which is `assign_dim_error`.
-///
-/// ```php
-/// set_error_handler(function ($code, $msg) use (&$a) { echo "$msg\n"; $a = 0; });
-/// $a[] = $y;
-/// var_dump($a);
-/// $b = [[1]];
-/// set_error_handler(function ($code, $msg) use (&$b) { echo "$msg\n"; $b = 0; });
-/// var_dump($b[0][] = $y);
-/// ```
-/// ```expect
-/// Undefined variable $y
-/// int(0)
-/// Undefined variable $y
-/// NULL
-/// ```
 fn append_value(
     req: &mut Request,
     (frame, code): (FrameRef, &OpArray),
