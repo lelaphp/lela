@@ -1,0 +1,25 @@
+# ext/sqlite3: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_sqlite3"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The sqlite3 extension, php-src/ext/sqlite3"
+
+[lints]
+workspace = true
+
+# The facade, and `pdo_sqlite`, whose `src/ffi/` is the one binding of
+# libsqlite3 (design §4.10, §7.2): this crate reaches the library through
+# its safe types and binds nothing itself. php's sqlite3 links the library
+# beside pdo_sqlite and requires no module, so the edge is the library's.
+# The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+php_ext_pdo_sqlite = { path = "../pdo_sqlite" }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

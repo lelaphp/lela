@@ -108,6 +108,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xmlwriter::extension,
         #[cfg(feature = "mysqli")]
         php_ext_mysqli::extension,
+        #[cfg(feature = "sqlite3")]
+        php_ext_sqlite3::extension,
     ]
 }
 
