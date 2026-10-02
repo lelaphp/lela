@@ -1770,7 +1770,7 @@ impl<'a> Parser<'a> {
     fn parse_array_or_function_declarators(&mut self, sym: u8, dcl: &mut Dcl) -> Parse<u8> {
         let mut dummy = Dcl::default();
         let mut len = Val::EMPTY;
-        let mut args: Option<Vec<TypeId>> = None;
+        let mut args: Option<Vec<(TypeId, bool)>> = None;
         let mut flags = 0;
         if sym == tok::LBRACK {
             let mut sym = self.get_sym()?;
@@ -1917,7 +1917,7 @@ impl<'a> Parser<'a> {
     fn parse_parameter_declaration(
         &mut self,
         sym: u8,
-        args: &mut Option<Vec<TypeId>>,
+        args: &mut Option<Vec<(TypeId, bool)>>,
     ) -> Parse<u8> {
         let old_allow_vla = self.allow_vla;
         self.allow_vla = true;
@@ -2874,6 +2874,7 @@ impl<'a> Parser<'a> {
             bits: 0,
             ty: field_ty,
         };
+        self.types.own(struct_id, field_ty, field_dcl.owned);
         field_dcl.owned = false;
         if let Some(Type {
             kind: Kind::Struct(record),
@@ -2956,6 +2957,7 @@ impl<'a> Parser<'a> {
                     None => record.fields.push((None, field)),
                 }
             }
+            self.types.move_owned(field_ty, struct_id, field.ty);
         }
         if let Some(st) = self.types.get_mut(struct_id) {
             if union {
@@ -2963,6 +2965,9 @@ impl<'a> Parser<'a> {
             } else {
                 st.size += fsize;
             }
+        }
+        if field_dcl.owned {
+            self.types.free(field_ty);
         }
         field_dcl.ty = None;
         Ok(())
@@ -3083,6 +3088,7 @@ impl<'a> Parser<'a> {
                     };
             }
         }
+        self.types.own(struct_id, field_ty, field_dcl.owned);
         field_dcl.owned = false;
         if let Some(Type {
             kind: Kind::Struct(record),
@@ -3127,6 +3133,7 @@ impl<'a> Parser<'a> {
         let to = self.finalize(dcl)?;
         self.validate_vla(to)?;
         let id = self.types.pointer_to(to, attr);
+        self.types.own(id, to, dcl.owned);
         dcl.ty = Some(id);
         dcl.owned = true;
         dcl.flags &= !dcl::TYPE_QUALIFIERS;
@@ -3185,6 +3192,7 @@ impl<'a> Parser<'a> {
             align: ealign,
             attr: self.default_attr | (dcl.attr & attr::ARRAY_ATTRS),
         });
+        self.types.own(id, element, dcl.owned);
         dcl.ty = Some(id);
         dcl.owned = true;
         dcl.flags &= !dcl::TYPE_QUALIFIERS;
@@ -3209,11 +3217,15 @@ impl<'a> Parser<'a> {
     }
 
     /// `zend_ffi_make_func_type`.
-    fn make_func_type(&mut self, dcl: &mut Dcl, mut args: Option<Vec<TypeId>>) -> Parse<()> {
+    fn make_func_type(
+        &mut self,
+        dcl: &mut Dcl,
+        mut args: Option<Vec<(TypeId, bool)>>,
+    ) -> Parse<()> {
         let ret = self.finalize(dcl)?;
         if let Some(list) = &args {
             let mut no_args = false;
-            for arg in list {
+            for (arg, _) in list {
                 if matches!(self.types.get(*arg).kind, Kind::Void) {
                     if list.len() != 1 {
                         return Err(Bail(format!(
@@ -3238,12 +3250,18 @@ impl<'a> Parser<'a> {
                 )));
             }
         };
+        let owned = args.iter().flatten().copied().collect::<Vec<_>>();
+        let args = args.map(|list| list.into_iter().map(|(arg, _)| arg).collect());
         let id = self.types.add(Type {
             kind: Kind::Func(Func { ret, args, abi }),
             size: 8,
             align: 1,
             attr: self.default_attr | (dcl.attr & attr::FUNC_ATTRS),
         });
+        self.types.own(id, ret, dcl.owned);
+        for (arg, is_owned) in owned {
+            self.types.own(id, arg, is_owned);
+        }
         dcl.ty = Some(id);
         dcl.owned = true;
         dcl.attr &= !attr::FUNC_ATTRS;
@@ -3254,7 +3272,7 @@ impl<'a> Parser<'a> {
 
     /// `zend_ffi_add_arg`: a parameter, an array adjusted to a pointer to
     /// its element and a function to a pointer to it.
-    fn add_arg(&mut self, args: &mut Option<Vec<TypeId>>, arg_dcl: &mut Dcl) -> Parse<()> {
+    fn add_arg(&mut self, args: &mut Option<Vec<(TypeId, bool)>>, arg_dcl: &mut Dcl) -> Parse<()> {
         let list = args.get_or_insert_with(Vec::new);
         let ty = self.finalize(arg_dcl)?;
         match self.types.get(ty).kind {
@@ -3273,6 +3291,7 @@ impl<'a> Parser<'a> {
             }
             Kind::Func(_) => {
                 let id = self.types.pointer_to(ty, self.default_attr);
+                self.types.own(id, ty, arg_dcl.owned);
                 arg_dcl.ty = Some(id);
                 arg_dcl.owned = true;
             }
@@ -3282,7 +3301,7 @@ impl<'a> Parser<'a> {
             *args = None;
             return Err(bail);
         }
-        list.push(arg_dcl.ty.unwrap_or(ty));
+        list.push((arg_dcl.ty.unwrap_or(ty), arg_dcl.owned));
         Ok(())
     }
 
@@ -3382,9 +3401,25 @@ impl<'a> Parser<'a> {
     }
 
     /// `zend_ffi_type_dtor(dcl->type)` where the declaration owns its
-    /// type: the type no longer counted on the request's heap. What it
-    /// owned in turn stays counted, an approximation the arena, which
-    /// records no nested owner, keeps.
+    /// type: the type, and what it owns in turn, no longer counted on
+    /// the request's heap.
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $f = FFI::cdef("static int *x[3];"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $f = FFI::cdef("struct { struct { int a; } in; };"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $f = FFI::cdef("struct s { struct { int *p; long q; }; int r; };"); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($f); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 152
+    /// -152
+    /// 96
+    /// -96
+    /// 1200
+    /// -1200
+    /// ```
     fn cleanup(&mut self, dcl: &Dcl) {
         if dcl.owned
             && let Some(ty) = dcl.ty
@@ -3582,16 +3617,17 @@ impl<'a> Parser<'a> {
 
     /// `zend_ffi_nested_type`: the outer type laid into the hole the
     /// nested declarator left, where its `char` stands.
-    fn nested_type(&mut self, ty: TypeId, nested: TypeId) -> Parse<()> {
+    fn nested_type(&mut self, ty: TypeId, owned: bool, nested: TypeId) -> Parse<()> {
         match self.types.get(nested).kind.clone() {
             Kind::Pointer(to) => {
                 if to == TypeId::CHAR {
                     if let Some(t) = self.types.get_mut(nested) {
                         t.kind = Kind::Pointer(ty);
                     }
+                    self.types.own(nested, ty, owned);
                     self.validate_vla(ty)
                 } else {
-                    self.nested_type(ty, to)
+                    self.nested_type(ty, owned, to)
                 }
             }
             Kind::Array { of, len } => {
@@ -3599,10 +3635,11 @@ impl<'a> Parser<'a> {
                     if let Some(t) = self.types.get_mut(nested) {
                         t.kind = Kind::Array { of: ty, len };
                     }
+                    self.types.own(nested, ty, owned);
                     self.validate_array_element_type(ty)?;
                     ty
                 } else {
-                    self.nested_type(ty, of)?;
+                    self.nested_type(ty, owned, of)?;
                     of
                 };
                 let (esize, ealign) = {
@@ -3624,9 +3661,10 @@ impl<'a> Parser<'a> {
                     {
                         f.ret = ty;
                     }
+                    self.types.own(nested, ty, owned);
                     self.validate_func_ret_type(ty)
                 } else {
-                    self.nested_type(ty, func.ret)
+                    self.nested_type(ty, owned, func.ret)
                 }
             }
             _ => Ok(()),
@@ -3641,7 +3679,7 @@ impl<'a> Parser<'a> {
                 nested_dcl.ty = Some(ty);
                 nested_dcl.owned = dcl.owned;
             }
-            Some(nested) => self.nested_type(ty, nested)?,
+            Some(nested) => self.nested_type(ty, dcl.owned, nested)?,
         }
         dcl.ty = nested_dcl.ty;
         dcl.owned = nested_dcl.owned;
