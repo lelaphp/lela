@@ -1,10 +1,10 @@
 //! What libzip's algorithms and encryption sources do to an entry's data
 //! on the way out (`zip_algorithm_*.c`, `zip_source_compress.c`,
 //! `zip_source_pkware_encode.c`, `zip_source_winzip_aes_encode.c`), over
-//! the codecs and ciphers the zip crate reads with; and ZSTD on the way
-//! in, which the crate reads only through a C library.
+//! the codecs and ciphers the zip crate reads with; and the ciphers'
+//! state on the way in, which [`crate::read`] decrypts with.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use crate::error::{Er, Status};
 
@@ -96,19 +96,6 @@ pub(crate) fn compress(
     })
 }
 
-/// A ZSTD entry's data, and the error a read of it would meet.
-pub(crate) fn unzstd(raw: &[u8]) -> (Vec<u8>, Option<Status>) {
-    let mut out = Vec::new();
-    let fault = match ruzstd::decoding::StreamingDecoder::new(raw) {
-        Ok(mut d) => d
-            .read_to_end(&mut out)
-            .err()
-            .map(|_| Status::of(Er::CompressedData, 0)),
-        Err(_) => Some(Status::of(Er::CompressedData, 0)),
-    };
-    (out, fault)
-}
-
 /// `get_crc_table`: the CRC-32 table PKWARE's keys update through.
 const CRC_TABLE: [u32; 256] = {
     let mut t = [0u32; 256];
@@ -181,6 +168,26 @@ pub(crate) fn pkware(data: &[u8], password: &[u8], dostime: u16) -> Result<Vec<u
     Ok(out)
 }
 
+/// `_zip_pkware_decrypt`'s keys, the password fed through them
+/// (`zip_source_pkware_decode.c`).
+pub(crate) struct PkwareKeys(Keys);
+
+impl PkwareKeys {
+    pub(crate) fn of(password: &[u8]) -> PkwareKeys {
+        PkwareKeys(Keys::of(password))
+    }
+
+    /// `_zip_pkware_decrypt` in place.
+    pub(crate) fn decrypt(&mut self, buf: &mut [u8]) {
+        for b in buf {
+            let t = (self.0.0[2] | 2) & 0xffff;
+            let p = *b ^ (((t * (t ^ 1)) >> 8) & 0xff) as u8;
+            self.0.update(p);
+            *b = p;
+        }
+    }
+}
+
 /// AES at one of `WinZip`'s three strengths.
 enum Cipher {
     A128(aes::Aes128),
@@ -188,43 +195,103 @@ enum Cipher {
     A256(aes::Aes256),
 }
 
-/// `zip_source_winzip_aes_encode`: the salt, the password verifier, the
-/// data under AES-CTR with `WinZip`'s little-endian block number, and ten bytes
-/// of HMAC-SHA1 over it. `strength` is 1, 2 or 3.
-pub(crate) fn winzip_aes(data: &[u8], password: &[u8], strength: u8) -> Result<Vec<u8>, Status> {
-    use aes::cipher::{BlockCipherEncrypt, KeyInit};
-    use hmac::Mac;
-    let key_len = 8 * usize::from(strength) + 8;
-    let mut salt = vec![0u8; key_len / 2];
-    random(&mut salt)?;
-    let mut keys = vec![0u8; 2 * key_len + 2];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, &salt, 1000, &mut keys);
-    let (enc_key, rest) = keys.split_at(key_len);
-    let (mac_key, verifier) = rest.split_at(key_len);
-    let fail = |_| Status::of(Er::Internal, 0);
-    let mut out = salt;
-    out.extend_from_slice(verifier);
-    let cipher = match strength {
-        1 => Cipher::A128(aes::Aes128::new_from_slice(enc_key).map_err(fail)?),
-        2 => Cipher::A192(aes::Aes192::new_from_slice(enc_key).map_err(fail)?),
-        _ => Cipher::A256(aes::Aes256::new_from_slice(enc_key).map_err(fail)?),
-    };
-    let mut body = data.to_vec();
-    for (n, chunk) in body.chunks_mut(16).enumerate() {
-        let mut block = aes::Block::from((n as u128 + 1).to_le_bytes());
-        match &cipher {
-            Cipher::A128(c) => c.encrypt_block(&mut block),
-            Cipher::A192(c) => c.encrypt_block(&mut block),
-            Cipher::A256(c) => c.encrypt_block(&mut block),
-        }
-        for (b, k) in chunk.iter_mut().zip(block.iter()) {
-            *b ^= k;
+/// `zip_winzip_aes_t`: AES-CTR with `WinZip`'s little-endian block
+/// number, the keystream carried across calls, and the HMAC-SHA1 over
+/// the encrypted bytes.
+pub(crate) struct WinzipAes {
+    cipher: Cipher,
+    mac: hmac::Hmac<sha1::Sha1>,
+    counter: u128,
+    pad: [u8; 16],
+    pad_offset: usize,
+}
+
+impl WinzipAes {
+    /// `_zip_winzip_aes_new`: the keys PBKDF2 derives from `password`
+    /// and `salt` at `strength` 1, 2 or 3, and the two bytes that verify
+    /// the password.
+    pub(crate) fn new(
+        password: &[u8],
+        salt: &[u8],
+        strength: u8,
+    ) -> Result<(WinzipAes, [u8; 2]), Status> {
+        use aes::cipher::KeyInit;
+        let key_len = 8 * usize::from(strength) + 8;
+        let mut keys = vec![0u8; 2 * key_len + 2];
+        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, salt, 1000, &mut keys);
+        let (enc_key, rest) = keys.split_at(key_len);
+        let (mac_key, verifier) = rest.split_at(key_len);
+        let fail = |_| Status::of(Er::Internal, 0);
+        let cipher = match strength {
+            1 => Cipher::A128(aes::Aes128::new_from_slice(enc_key).map_err(fail)?),
+            2 => Cipher::A192(aes::Aes192::new_from_slice(enc_key).map_err(fail)?),
+            _ => Cipher::A256(aes::Aes256::new_from_slice(enc_key).map_err(fail)?),
+        };
+        let mac = <hmac::Hmac<sha1::Sha1> as KeyInit>::new_from_slice(mac_key).map_err(fail)?;
+        let ctx = WinzipAes {
+            cipher,
+            mac,
+            counter: 0,
+            pad: [0; 16],
+            pad_offset: 16,
+        };
+        Ok((ctx, [verifier[0], verifier[1]]))
+    }
+
+    /// `buf` exclusive-or'd with the keystream.
+    fn xor(&mut self, buf: &mut [u8]) {
+        use aes::cipher::BlockCipherEncrypt;
+        for b in buf {
+            if self.pad_offset == 16 {
+                self.counter += 1;
+                let mut block = aes::Block::from(self.counter.to_le_bytes());
+                match &self.cipher {
+                    Cipher::A128(c) => c.encrypt_block(&mut block),
+                    Cipher::A192(c) => c.encrypt_block(&mut block),
+                    Cipher::A256(c) => c.encrypt_block(&mut block),
+                }
+                self.pad.copy_from_slice(&block);
+                self.pad_offset = 0;
+            }
+            *b ^= self.pad[self.pad_offset];
+            self.pad_offset += 1;
         }
     }
-    let mut mac = <hmac::Hmac<sha1::Sha1> as KeyInit>::new_from_slice(mac_key).map_err(fail)?;
-    mac.update(&body);
-    let code = mac.finalize().into_bytes();
+
+    /// `_zip_winzip_aes_encrypt`.
+    fn encrypt(&mut self, buf: &mut [u8]) {
+        use hmac::Mac;
+        self.xor(buf);
+        self.mac.update(buf);
+    }
+
+    /// `_zip_winzip_aes_decrypt`.
+    pub(crate) fn decrypt(&mut self, buf: &mut [u8]) {
+        use hmac::Mac;
+        self.mac.update(buf);
+        self.xor(buf);
+    }
+
+    /// `_zip_winzip_aes_finish`: the authentication code, whose first ten
+    /// bytes the entry ends with.
+    pub(crate) fn finish(self) -> [u8; 20] {
+        use hmac::Mac;
+        self.mac.finalize().into_bytes().into()
+    }
+}
+
+/// `zip_source_winzip_aes_encode`: the salt, the password verifier, the
+/// data under AES-CTR, and ten bytes of HMAC-SHA1 over it. `strength`
+/// is 1, 2 or 3.
+pub(crate) fn winzip_aes(data: &[u8], password: &[u8], strength: u8) -> Result<Vec<u8>, Status> {
+    let mut salt = vec![0u8; 4 * usize::from(strength) + 4];
+    random(&mut salt)?;
+    let (mut ctx, verifier) = WinzipAes::new(password, &salt, strength)?;
+    let mut out = salt;
+    out.extend_from_slice(&verifier);
+    let mut body = data.to_vec();
+    ctx.encrypt(&mut body);
     out.extend_from_slice(&body);
-    out.extend_from_slice(&code[..10]);
+    out.extend_from_slice(&ctx.finish()[..10]);
     Ok(out)
 }

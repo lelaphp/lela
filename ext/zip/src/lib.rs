@@ -4,9 +4,11 @@
 //! re-derived in Rust where php's tests read it (design §7.2, revision
 //! 70): the archive and its changes held until `close` ([`archive`],
 //! [`write`]), libzip's codes and sentences ([`error`]), its strings
-//! ([`strings`]) and DOS times ([`dostime`]); every entry read through
-//! the pure-Rust zip crate, and written through the codecs and ciphers
-//! it reads with ([`codec`]). No `src/ffi/`, no `unsafe`. The phpt
+//! ([`strings`]) and DOS times ([`dostime`]); the central directory
+//! found by the pure-Rust zip crate, every entry read as its stream is
+//! read through libzip's layers over the crate's codecs and ciphers
+//! ([`read`]), and written through them ([`codec`]). No `src/ffi/`, no
+//! `unsafe`. The phpt
 //! subset is `php-src/ext/zip/tests`, through `xtask phpt --subset`.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -29,6 +31,7 @@ mod extract;
 mod object;
 mod pattern;
 mod procedural;
+mod read;
 mod stream;
 mod strings;
 mod write;

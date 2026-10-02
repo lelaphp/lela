@@ -62,6 +62,18 @@ pub enum PropBit {
     /// `clone with`, may write once more; set on each slot of the clone
     /// before the method runs and cleared after it, and by a write.
     Reinitable,
+    /// The property table's row under the slot's name is a plain value,
+    /// as `zend_hash_update` over that key leaves php's where the row
+    /// was an `IS_INDIRECT` to the slot: the slot holds the row's value,
+    /// read by every reader of the table as before, and written by
+    /// `unserialize()` with no declared type to hold it to. php has no
+    /// bit for it, since its table says it by the row's type, and this
+    /// table holds no row for a slot; it sits past `IS_PROP_LAZY`. A
+    /// write of the slot clears it and the row stands for the slot again,
+    /// where php's row would keep the plain value apart from the slot:
+    /// the one class that makes such a row, `ZipArchive`, refuses every
+    /// write of those properties but its own.
+    PlainRow,
 }
 
 impl PropBit {
@@ -69,6 +81,7 @@ impl PropBit {
         match self {
             PropBit::Uninit => 1,
             PropBit::Reinitable => 1 << 1,
+            PropBit::PlainRow => 1 << 3,
         }
     }
 }
