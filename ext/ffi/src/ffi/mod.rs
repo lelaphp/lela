@@ -15,8 +15,9 @@
 
 use std::ffi::{CStr, c_char, c_uint, c_ushort, c_void};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
-use php_ext::request::Request;
+use php_ext::request::{DEFERRED_WORDS, Deferred, Reentry, Request};
 
 mod sys {
     use std::ffi::{c_int, c_uint, c_ushort, c_void};
@@ -318,6 +319,20 @@ pub(crate) enum Layout {
     },
 }
 
+impl Layout {
+    /// The bytes a value of the layout takes, `ffi_type.size`.
+    fn size(&self) -> usize {
+        match self {
+            Layout::Void => 0,
+            Layout::U8 | Layout::I8 => 1,
+            Layout::U16 | Layout::I16 => 2,
+            Layout::U32 | Layout::I32 | Layout::Float => 4,
+            Layout::U64 | Layout::I64 | Layout::Double | Layout::Pointer => 8,
+            Layout::Struct { size, .. } => *size,
+        }
+    }
+}
+
 /// A call interface libffi prepared, `ffi_cif`, with the types it
 /// points at kept beside it for as long as it stands.
 #[allow(
@@ -330,6 +345,12 @@ pub(crate) struct Signature {
     nodes: Vec<Box<sys::Type>>,
     lists: Vec<Box<[*mut sys::Type]>>,
     arity: usize,
+    /// Each argument's size: what a deferred call copies.
+    sizes: Box<[usize]>,
+    /// What a deferred call zeroes of the return: a struct's size, a
+    /// scalar's widened to `ffi_arg` as libffi's buffer holds it, and
+    /// nothing for void.
+    returns: usize,
 }
 
 // SAFETY: every pointer a signature holds is into its own boxes or at
@@ -385,12 +406,19 @@ impl Signature {
             // SAFETY: as above.
             None => unsafe { sys::ffi_prep_cif(&raw mut *cif, abi, total, rtype, atypes) },
         };
+        let returns = match ret {
+            Layout::Void => 0,
+            Layout::Struct { size, .. } => *size,
+            scalar => scalar.size().max(8),
+        };
         (status == 0).then_some(Signature {
             cif,
             args: arg_types,
             nodes,
             lists,
             arity: args.len(),
+            sizes: args.iter().map(Layout::size).collect(),
+            returns,
         })
     }
 }
@@ -446,11 +474,11 @@ fn place(
 
 /// `ffi_call(&cif, target, ret, args)`: the C function at `target`
 /// called with the argument values at `args`, the return written into
-/// `ret`. `slot` holds the request while C runs, for a callback C makes
-/// back into PHP code, and what it held before once C returns.
+/// `ret`. The request is lent to `reentry` while C runs, for a callback
+/// C makes back into PHP code, and taken back once C returns.
 pub(crate) fn call(
     req: &mut Request,
-    slot: usize,
+    reentry: &Reentry,
     sig: &mut Signature,
     target: usize,
     args: &[usize],
@@ -462,8 +490,8 @@ pub(crate) fn call(
     } else {
         values.as_mut_ptr()
     };
-    let before = read::<usize>(slot);
-    write(slot, std::ptr::from_mut(req) as usize);
+    let lent = NonZeroUsize::new(std::ptr::from_mut(req).expose_provenance())
+        .map(|at| (at, reentry.lend(at)));
     // SAFETY: the cif was prepared for exactly these argument values,
     // each standing across the call, and `ret` holds at least
     // `sizeof(ffi_arg)` and the return type's size; `target` is the
@@ -476,21 +504,37 @@ pub(crate) fn call(
             values,
         );
     }
-    write(slot, before);
+    if let Some((at, before)) = lent {
+        reentry.reclaim(at, before);
+    }
     let _ = (&sig.args, &sig.nodes, &sig.lists);
 }
 
-/// What a closure's code hands back to PHP code: the request the call
-/// into C came from, read off `slot`, the callback's own number, where
-/// to write the return, and each argument's address.
+/// What a closure's code hands back to PHP code: the request lent to
+/// it, the callback's own number, where to write the return (zero where
+/// nobody reads it), and each argument's address.
 pub(crate) type Callback = fn(&mut Request, usize, usize, &[usize]);
 
-/// What a closure's code reaches through `user_data`.
+/// What a closure's code reaches through `user_data`: the request's
+/// [`Reentry`], the thread the request is served on, and where each
+/// argument goes in a [`Deferred`] call, in words.
 struct Thunk {
-    slot: usize,
+    reentry: Arc<Reentry>,
+    thread: usize,
     callback: Callback,
     data: usize,
     arity: usize,
+    sizes: Box<[usize]>,
+    offsets: Box<[usize]>,
+    words: usize,
+    returns: usize,
+}
+
+/// The calling thread, `pthread_self()`.
+fn thread() -> usize {
+    // SAFETY: `pthread_self` takes nothing and answers the calling
+    // thread, from any context.
+    unsafe { libc::pthread_self() as usize }
 }
 
 /// A C function pointer libffi made of a PHP callable,
@@ -519,10 +563,11 @@ pub(crate) enum ClosureError {
 }
 
 impl Closure {
-    /// A closure over `sig` whose code calls `callback` with `data`.
+    /// A closure over `sig` whose code calls `callback` with `data`,
+    /// made on the thread its request is served on.
     pub(crate) fn new(
         sig: Signature,
-        slot: usize,
+        reentry: Arc<Reentry>,
         callback: Callback,
         data: usize,
     ) -> Result<Closure, ClosureError> {
@@ -534,15 +579,28 @@ impl Closure {
             return Err(ClosureError::Alloc);
         }
         let arity = sig.arity;
+        let sizes = sig.sizes.clone();
+        let mut offsets = Vec::with_capacity(sizes.len());
+        let mut words = 0;
+        for size in &sizes {
+            offsets.push(words);
+            words += size.div_ceil(8);
+        }
+        let returns = sig.returns;
         let mut closure = Closure {
             writable: writable as usize,
             code: code as usize,
             sig,
             thunk: Box::new(Thunk {
-                slot,
+                reentry,
+                thread: thread(),
                 callback,
                 data,
                 arity,
+                sizes,
+                offsets: offsets.into(),
+                words,
+                returns,
             }),
         };
         let user = std::ptr::from_ref::<Thunk>(&closure.thunk)
@@ -563,6 +621,16 @@ impl Closure {
     pub(crate) fn code(&self) -> usize {
         self.code
     }
+
+    /// Each argument's address in `deferred`, where [`enter`] copied it.
+    pub(crate) fn args_in(&self, deferred: &mut Deferred) -> Vec<usize> {
+        let base = std::ptr::from_mut(&mut deferred.words).expose_provenance();
+        self.thunk
+            .offsets
+            .iter()
+            .map(|offset| base + offset * 8)
+            .collect()
+    }
 }
 
 impl Drop for Closure {
@@ -573,8 +641,16 @@ impl Drop for Closure {
     }
 }
 
-/// `zend_ffi_callback_trampoline`'s entry from C: the thunk, the
-/// argument addresses, and the request the call into C was made from.
+/// `zend_ffi_callback_trampoline`'s entry from C: the thunk and the
+/// argument addresses. Where the request is lent, during a call into C,
+/// the callback takes it and calls PHP code at once, as php does. At any
+/// other time C called it from a signal handler that interrupted the
+/// request, or from another thread while the request runs: the first is
+/// deferred, its arguments copied and the return zeroed for C, and
+/// served at the request's interrupt check; the second returns without
+/// calling PHP code, since php would serve the request on two threads at
+/// once. Nothing here allocates outside the lent case, so a signal
+/// handler may enter it.
 extern "C" fn enter(
     _cif: *mut sys::Cif,
     ret: *mut c_void,
@@ -584,25 +660,49 @@ extern "C" fn enter(
     // SAFETY: `user` is the thunk the closure was prepared with, which
     // stands as long as the closure's code can be entered.
     let thunk = unsafe { &*user.cast::<Thunk>() };
-    let addrs: Vec<usize> = if thunk.arity == 0 || args.is_null() {
-        Vec::new()
+    let addrs: &[*mut c_void] = if thunk.arity == 0 || args.is_null() {
+        &[]
     } else {
         // SAFETY: libffi hands one argument address per argument of the
         // cif the closure was prepared with.
         unsafe { std::slice::from_raw_parts(args, thunk.arity) }
-            .iter()
-            .map(|addr| *addr as usize)
-            .collect()
     };
-    let request = read::<usize>(thunk.slot);
-    if request == 0 {
+    if let Some(at) = thunk.reentry.take_lent() {
+        let addrs: Vec<usize> = addrs.iter().map(|addr| *addr as usize).collect();
+        // SAFETY: `call` lent the request's address, exposed from the
+        // `&mut Request` it holds and uses no further until C returns and
+        // it takes the address back, which waits for `give_back`. The swap
+        // in `take_lent` hands it to this callback alone, so this is the
+        // one reference to the request until then.
+        let req = unsafe { &mut *std::ptr::with_exposed_provenance_mut::<Request>(at.get()) };
+        (thunk.callback)(req, thunk.data, ret as usize, &addrs);
+        thunk.reentry.give_back(at);
         return;
     }
-    // SAFETY: the slot holds the request whose call into C is on this
-    // thread's stack, set by `call` around `ffi_call`; the request is
-    // reached through nothing else until C returns.
-    let req = unsafe { &mut *(request as *mut Request) };
-    (thunk.callback)(req, thunk.data, ret as usize, &addrs);
+    if thunk.returns != 0 {
+        // SAFETY: libffi's return buffer holds a struct's size, or a
+        // scalar widened to `ffi_arg`, which `returns` is.
+        unsafe { std::ptr::write_bytes(ret.cast::<u8>(), 0, thunk.returns) };
+    }
+    if thread() != thunk.thread || thunk.words > DEFERRED_WORDS {
+        return;
+    }
+    thunk.reentry.defer(|deferred| {
+        deferred.callback = thunk.data;
+        let base = std::ptr::from_mut(&mut deferred.words).cast::<u8>();
+        for ((addr, size), offset) in addrs.iter().zip(&thunk.sizes).zip(&thunk.offsets) {
+            // SAFETY: libffi's argument address holds a value of the
+            // argument's size; it lands at its offset in the record's
+            // words, which `words`, checked above, says it fits in.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    addr.cast::<u8>(),
+                    base.wrapping_add(offset * 8),
+                    *size,
+                );
+            }
+        }
+    });
 }
 
 /// `ZEND_FFI_SIZEOF_ARG`: the room each argument value takes.

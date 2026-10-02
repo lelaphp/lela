@@ -413,6 +413,8 @@ request::CryptoSocket
 request::CryptoSocket::set_blocking
 request::CryptoSocket::shutdown
 request::CryptoSocket::wait
+request::DEFERRED_WORDS
+request::Deferred
 request::DirListing
 request::EngineWrapper
 request::Execution
@@ -447,6 +449,14 @@ request::PreloadStatistics
 request::Readiness
 request::RealpathEntry
 request::Receiving
+request::Reentry
+request::Reentry::defer
+request::Reentry::give_back
+request::Reentry::lend
+request::Reentry::new
+request::Reentry::reclaim
+request::Reentry::take_deferred
+request::Reentry::take_lent
 request::Refused
 request::Request
 request::Request::absolutize

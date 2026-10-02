@@ -15,7 +15,7 @@ use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, wri
 use crate::decls::function_symbol;
 use crate::ffi::{self, ARG_SIZE, Closure, ClosureError, Layout, Signature};
 use crate::types::{Int, Kind, Scalar, TypeId, attr};
-use crate::{State, ffi_error, slot, types};
+use crate::{State, ffi_error, reentry, types};
 
 /// A callback C may call: libffi's closure over the PHP callable, kept
 /// until the request ends as php keeps `FFI_G(callbacks)`.
@@ -174,8 +174,8 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Valu
     };
     let ret_size = types(req).get(shape.ret).size;
     let mut buffer = vec![0u64; ret_size.max(8).div_ceil(8)];
-    let cell = slot(req)?;
-    ffi::call(req, cell, &mut sig, addr, &frame.addrs, &mut buffer);
+    let reentry = reentry(req);
+    ffi::call(req, &reentry, &mut sig, addr, &frame.addrs, &mut buffer);
     drop(frame.strings);
     if let Some(thrown) = frame.pending {
         return Err(thrown);
@@ -475,9 +475,9 @@ pub(crate) fn create_callback(
     let Some(sig) = Signature::prepare(shape.abi, &ret, &layouts, None) else {
         return Err(ffi_error(req, "Cannot prepare callback CIF"));
     };
-    let cell = slot(req)?;
+    let reentry = reentry(req);
     let index = req.state::<State>().callbacks.len();
-    let closure = match Closure::new(sig, cell, callback, index) {
+    let closure = match Closure::new(sig, reentry, callback, index) {
         Ok(closure) => closure,
         Err(ClosureError::Alloc) => return Err(ffi_error(req, "Cannot allocate callback")),
         Err(ClosureError::Prepare) => return Err(ffi_error(req, "Cannot prepare callback")),
@@ -496,7 +496,8 @@ pub(crate) fn create_callback(
 
 /// `zend_ffi_callback_trampoline`: C called a callback; its arguments
 /// are read into PHP values, the callable called, and its return
-/// written back where C reads it. A throwable the callable leaves is
+/// written back where C reads it, unless `ret` is zero because C was
+/// given a zeroed return already. A throwable the callable leaves is
 /// php's fatal, since it cannot unwind through C.
 fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
     let Some((callable, ty)) = req
@@ -535,10 +536,53 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
         let _ = fatal(req, "Throwing from FFI callbacks is not allowed");
         return;
     };
-    if !matches!(types(req).get(shape.ret).kind, Kind::Void) {
+    if ret != 0 && !matches!(types(req).get(shape.ret).kind, Kind::Void) {
         let _ = write_value(req, ret, shape.ret, &returned);
     }
     req.release(returned);
+}
+
+/// The calls C made of this request's callbacks while it ran PHP code,
+/// from a signal handler the kernel entered in another extension's
+/// native here, served at the request's interrupt check as pcntl's
+/// dispatch serves the signals delivered: php's handler called PHP
+/// code inside `posix_kill()`, and this one when it returns, which is
+/// the same place in the program. C read a zeroed return and the
+/// return PHP code makes is dropped, which a signal handler's caller
+/// never reads either.
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
+/// $ffi->signal(SIGUSR1, function ($sig) { echo "caught $sig\n"; });
+/// $ffi->raise(SIGUSR1);
+/// posix_kill(posix_getpid(), SIGUSR1);
+/// echo "done\n";
+/// ```
+/// ```expect process
+/// caught 30
+/// caught 30
+/// done
+/// ```
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the interrupt hook's signature; a throwable a callback leaves is php's fatal, not thrown"
+)]
+pub(crate) fn serve_deferred(req: &mut Request) -> Result<(), Thrown> {
+    let Some(reentry) = req.state::<State>().reentry.clone() else {
+        return Ok(());
+    };
+    for mut deferred in reentry.take_deferred() {
+        let Some(addrs) = req
+            .state::<State>()
+            .callbacks
+            .get(deferred.callback)
+            .map(|callback| callback.closure.args_in(&mut deferred))
+        else {
+            continue;
+        };
+        callback(req, deferred.callback, 0, &addrs);
+    }
+    Ok(())
 }
 
 /// The callbacks given up at the end of the request, each callable's
