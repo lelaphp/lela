@@ -1845,6 +1845,10 @@ pub struct Request {
     /// where it has none (php's `NULL`); the value it started with is the
     /// engine's ([`Request::ini_deactivate`]).
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// The bytes `EG(modified_ini_directives)` takes on the request's
+    /// heap, laid down by the first entry the request changes, a `@`'s
+    /// `error_reporting` among them, and freed by the request's end.
+    ini_bytes: Option<hash_bytes::HashBytes>,
     /// The entries this request's host locked past the engine's
     /// ([`crate::engine::IniOrigin::Admin`]).
     locked: Vec<Vec<u8>>,
@@ -2728,6 +2732,7 @@ impl Request {
             tables: vec![SymbolTable::default()],
             included_files: hash_bytes::IncludedFiles::default(),
             symtable_cache: Vec::new(),
+            ini_bytes: None,
             constants: Vec::new(),
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
@@ -7160,6 +7165,32 @@ impl Request {
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
     /// masked, logged and displayed, with the trace
     /// [`Request::note_error_in`] fetched, if one, under `Stack trace:`.
+    ///
+    /// The last error keeps its message, one more owner of the string
+    /// raised or the one formatted, and its file, the string the file
+    /// was opened under, so what an error leaves is php's: the first
+    /// `@` lays down `EG(modified_ini_directives)` as it replaces the
+    /// warning's message by `trigger_error()`'s interned `'x'`, a
+    /// deprecated method's message replaces that, a repeat replaces it by
+    /// its twin, and `error_get_last()` takes no string of its own:
+    ///
+    /// ```php
+    /// $s = new SplObjectStorage; $o = new stdClass; echo $w;
+    /// $m = memory_get_usage(); @trigger_error('x', E_USER_DEPRECATED); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// error_clear_last();
+    /// $m = memory_get_usage(); @$s->contains($o); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $e = error_get_last(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $w in %s on line 2
+    /// 328
+    /// 160
+    /// 0
+    /// 160
+    /// 376
+    /// ```
     fn error_cb(&mut self, level: Level, string: PhpString, message: &str, file: &[u8], line: u32) {
         if !self.displayed(string, file, line) {
             return;
@@ -7168,9 +7199,14 @@ impl Request {
         // php stores the diagnostic before it masks it, which is why
         // `error_get_last()` answers one `error_reporting` hid: the
         // message with one more owner and the file name the op array's,
-        // `zend_string_copy` of each.
+        // `zend_string_copy` of each; the string a file was opened under
+        // is the one `EG(included_files)` holds.
         self.clear_last_error_strings();
-        if let Ok(file) = self.interned(file) {
+        let held = self.included_files.held(file);
+        if let Some(path) = held {
+            self.addref(&Value::string(path));
+        }
+        if let Some(file) = held.map_or_else(|| self.interned(file).ok(), Some) {
             self.addref(&Value::string(string));
             self.last_error = Some(LastError {
                 level,
@@ -17781,13 +17817,14 @@ impl Request {
             (b"file", Value::string(last.file)),
             (b"line", Value::int(i64::from(last.line))),
         ] {
-            let key = Key::Str(PhpString::new(self, name)?);
+            // `ZSTR_KNOWN`, the four names permanent.
+            let key = Key::Str(self.interned(name)?);
             array.set(self, key, value)?;
         }
         if let Some((Some(trace), _)) = self.last_fatal_error_backtrace {
             let trace = Value::array(trace);
             self.addref(&trace);
-            let key = Key::Str(PhpString::new(self, b"trace")?);
+            let key = Key::Str(self.interned(b"trace")?);
             array.set(self, key, trace)?;
         }
         Ok(Some(array))
@@ -20577,9 +20614,21 @@ impl Request {
     /// changed it yet.
     fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
         let value = value.map(<[u8]>::to_vec);
-        match self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
-            Some((_, held)) => *held = value,
-            None => self.ini.push((name.to_vec(), value)),
+        if let Some((_, held)) = self.ini.iter_mut().find(|(n, _)| n.as_slice() == name) {
+            *held = value;
+        } else {
+            self.ini.push((name.to_vec(), value));
+            self.ini_modified_bytes();
+        }
+    }
+
+    /// `BEGIN_SILENCE` over an `error_reporting` entry not yet changed:
+    /// the entry marked changed, holding the value it holds, as the
+    /// handler adds it to `EG(modified_ini_directives)`.
+    pub(crate) fn silence_modifies_error_reporting(&mut self) {
+        if !self.ini.iter().any(|(n, _)| n == b"error_reporting") {
+            let held = self.ini_value(b"error_reporting").map(<[u8]>::to_vec);
+            self.ini_hold(b"error_reporting", held.as_deref());
         }
     }
 
@@ -20620,8 +20669,11 @@ impl Request {
             return Ok(());
         }
         let original = self.shared.ini_default_value(name).map(<[u8]>::to_vec);
-        if self.ini_alter(name, original.as_deref(), true)?.is_some() {
-            self.ini.retain(|(n, _)| n.as_slice() != name);
+        if self.ini_alter(name, original.as_deref(), true)?.is_some()
+            && let Some(at) = self.ini.iter().position(|(n, _)| n == name)
+        {
+            self.ini.remove(at);
+            self.ini_unmodified_bytes(at == self.ini.len());
         }
         Ok(())
     }
@@ -20678,6 +20730,7 @@ impl Request {
                 self.update_error_reporting();
             }
         }
+        self.free_modified_ini_bytes();
     }
 
     /// Whether an extension's entry is `PHP_INI_USER`, its declaration's

@@ -6233,6 +6233,7 @@ pub(crate) fn begin_silence<T: Tier>(
     req.release(previous);
     if !has_only_fatal_errors(standing) {
         req.set_error_reporting(standing & E_FATAL_ERRORS);
+        req.silence_modifies_error_reporting();
     }
     Ok(advance(req, frame))
 }
