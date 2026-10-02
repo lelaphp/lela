@@ -798,8 +798,8 @@ fn locale_get_default(req: &mut Request) -> Result<PhpString, Thrown> {
 /// string(5) "fr_CA"
 /// ```
 #[php_function]
-fn locale_set_default(req: &mut Request, locale: Path) -> Result<bool, Thrown> {
-    set_default(req, locale)
+fn locale_set_default(req: &mut Request, locale: Path) -> Result<True, Thrown> {
+    set_default(req, locale).map(|_| True)
 }
 
 /// `locale_get_primary_language(string $locale): ?string`.
