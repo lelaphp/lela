@@ -34,7 +34,9 @@ macro_rules! icu {
 #[allow(unused_imports)]
 pub(crate) use icu;
 
+pub(crate) mod collator;
 pub(crate) mod enumeration;
+pub(crate) mod locale;
 
 mod sys {
     use std::ffi::c_char;

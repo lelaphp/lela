@@ -50,6 +50,11 @@ impl Enumeration {
         Some(bytes.to_vec())
     }
 
+    /// The open enumeration, for a call that reads it (`uloc_acceptLanguageFromHTTP`).
+    pub(crate) fn raw(&mut self) -> *mut UEnumeration {
+        self.0
+    }
+
     /// `StringEnumeration::reset`.
     pub(crate) fn reset(&mut self, status: &mut Code) {
         // SAFETY: the enumeration is open.
