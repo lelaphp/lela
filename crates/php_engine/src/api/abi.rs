@@ -1765,6 +1765,24 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(req.std_method(object.class(), lowered))
     }
 
+    /// php's `get_method` as the slot is handed the name the call wrote
+    /// beside its lowered key (`zend_object_handlers.h`: `zend_string
+    /// *method_name, const zval *key`): a class whose methods are names
+    /// it learns only when a call names them, and holds by case, as `FFI`
+    /// holds the C functions a declaration names (`zend_ffi_get_func`),
+    /// reads `written`. At `Std` and at every class keyed by the lowered
+    /// name, [`ObjectHandlers::get_method`].
+    fn get_method_as(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let _ = written;
+        self.get_method(req, object, lowered)
+    }
+
     /// The object a method `get_method` did not find is looked up on
     /// and called on in its place, the `*object` php's `get_method`
     /// may replace: `spl_dual_it_get_method` hands an outer iterator's

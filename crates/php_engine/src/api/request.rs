@@ -4179,6 +4179,7 @@ impl Request {
                 (Via::Magic(_), Served::ClosureCall) => {
                     Some(crate::trampoline::closure_call_magic as crate::api::abi::Entry)
                 }
+                (Via::Native(entry), _) => Some(entry),
                 (Via::Magic(_), Served::Trampoline) | (Via::Invoke(_), Served::ClosureCall) => None,
             };
         }
@@ -4280,6 +4281,7 @@ impl Request {
             return match trampoline.via {
                 crate::trampoline::Via::Magic(magic) => self.method_class(magic),
                 crate::trampoline::Via::Invoke(_) => self.class_named(b"Closure"),
+                crate::trampoline::Via::Native(_) => None,
             };
         }
         self.user_function(function)?
@@ -20448,6 +20450,45 @@ impl Request {
     #[must_use]
     pub fn trampoline(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         self.trampoline_named(class, lowered)
+    }
+
+    /// `zend_ffi_get_func`'s trampoline (`Z/ext/ffi/ffi.c:2951-2975`): a
+    /// native named `name` whose body is `entry`, with no scope, every
+    /// argument by value, made on a lookup by a class's
+    /// [`ObjectHandlers::get_method`] or [`ObjectHandlers::get_closure`]
+    /// for a name it learns only when a call names it; the one the
+    /// request already made for that entry and name where it made one.
+    /// The body reads its name off [`Request::active_function_name`] and
+    /// its arguments off [`Request::argument`].
+    ///
+    /// [`ObjectHandlers::get_method`]: crate::api::abi::ObjectHandlers::get_method
+    /// [`ObjectHandlers::get_closure`]: crate::api::abi::ObjectHandlers::get_closure
+    pub fn native_trampoline(
+        &mut self,
+        name: &[u8],
+        entry: fn(&mut Request) -> Result<Value, crate::api::raising::Thrown>,
+    ) -> Option<Function> {
+        let held = self.trampolines.iter().position(|made| {
+            matches!(made.via, crate::trampoline::Via::Native(made_entry)
+                if std::ptr::fn_addr_eq(made_entry, entry))
+                && *made.decl.function.name.0 == *name
+        });
+        let at = if let Some(at) = held {
+            at
+        } else {
+            self.trampolines
+                .push(crate::trampoline::CallTrampoline::native(entry, name));
+            self.trampolines.len().checked_sub(1)?
+        };
+        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+    }
+
+    /// Whether `function` is a native [`Request::native_trampoline`]
+    /// made, php's `ZEND_ACC_CALL_VIA_TRAMPOLINE` on a function no
+    /// magic method serves.
+    pub(crate) fn via_native_trampoline(&self, function: Function) -> bool {
+        self.trampoline_of(function)
+            .is_some_and(|(made, _)| matches!(made.via, crate::trampoline::Via::Native(_)))
     }
 
     /// The request's resource types, for an extension registering one.

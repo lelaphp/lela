@@ -1508,7 +1508,7 @@ fn dynamic_call_array(
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let found = match table.get_method(req, object, &method.to_ascii_lowercase())? {
+    let found = match table.get_method_as(req, object, &method.to_ascii_lowercase(), &method)? {
         Some(function) => Some(function),
         None => req.call_trampoline(class, &method, false),
     };
@@ -5421,7 +5421,7 @@ fn method_found(
     let mut receiver = None;
     loop {
         let table = req.object_handlers(on.heap());
-        if let Some(function) = table.get_method(req, on, lowered)? {
+        if let Some(function) = table.get_method_as(req, on, lowered, written)? {
             return Ok(Some((function, receiver)));
         }
         if let Some(trampoline) = req.call_trampoline(on.class(), written, false) {

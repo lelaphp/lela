@@ -152,6 +152,7 @@ abi::ObjectHandlers::get_debug_info
 abi::ObjectHandlers::get_gc
 abi::ObjectHandlers::get_iterator
 abi::ObjectHandlers::get_method
+abi::ObjectHandlers::get_method_as
 abi::ObjectHandlers::get_properties
 abi::ObjectHandlers::get_properties_for
 abi::ObjectHandlers::get_property_ptr_ptr
@@ -546,6 +547,7 @@ request::Request::memory_peak
 request::Request::memory_usage
 request::Request::multibyte_provider
 request::Request::named_arguments
+request::Request::native_trampoline
 request::Request::new_stream
 request::Request::open_dir
 request::Request::open_stream
