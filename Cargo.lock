@@ -600,8 +600,10 @@ dependencies = [
  "php_ext_ctype",
  "php_ext_curl",
  "php_ext_date",
+ "php_ext_dba",
  "php_ext_dom",
  "php_ext_exif",
+ "php_ext_fileinfo",
  "php_ext_filter",
  "php_ext_ftp",
  "php_ext_hash",
@@ -719,6 +721,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_ext_dba"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+]
+
+[[package]]
 name = "php_ext_dom"
 version = "0.0.0"
 dependencies = [
@@ -733,6 +742,15 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_fileinfo"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "pcre2-sys",
+ "php_ext",
 ]
 
 [[package]]

@@ -107,12 +107,12 @@ third-engine-design.md
 | heap | heap.lock | 378 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 984 | 1500 | pass |
+| api | api.lock | 985 | 1500 | pass |
 | sapi | sapi.lock | 24 |  | pass |
 | tier | tier.lock | 61 |  | pass |
 | harness | xtask.lock | 359 |  | pass |
 
-<!-- /computed in=4d8c1a9f007cd1d9eda82cd81a4fb3a1833db6e6253dd1935859bd46c52105b6 out=3014ae5ae3dd0531cb3536d911cfc7064ef6b1674b510eb5b772118299f79e6b -->
+<!-- /computed in=2142b62e0f423436b5f91a414e7d35ed1612a6027aa5212c4e92537f0d6c34a5 out=264e8ca576e96c983193e93c3589e61d195640e466f160a13013f2bf94948e59 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -208,8 +208,10 @@ Options:
 ├── ctype
 ├── curl
 ├── date
+├── dba
 ├── dom
 ├── exif
+├── fileinfo
 ├── filter
 ├── ftp
 ├── hash
@@ -248,7 +250,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=39b9a33a3fb88deb5b44e7af66968cdaac25c5451cbb33c9ccf7c1c870842645 out=ac26230fef9e4b4c708117615a3eb61db4eecfe474db3ad8f1b85375b335c4a1 -->
+<!-- /computed in=21e20895d9c081a5cc0eb0effd6d12512eb5a0982ba65da09efc5a7ac26a472c out=e9c922e1f530670de2d88f9dd4ce6fc9a1df207689620c26522c8d8e72f792f4 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

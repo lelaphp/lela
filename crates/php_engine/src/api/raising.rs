@@ -316,6 +316,8 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
 /// ```
 pub fn docref(req: &mut Request, level: Level, message: &str) {
+    let escaped = escaped(req, message);
+    let message = escaped.as_str();
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
     // A fatal in flight is no native served: `_zend_bailout` empties
@@ -342,6 +344,32 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         format!("{origin}: {message}")
     };
     raise(req, level, &text);
+}
+
+/// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
+/// with `parameter` between the parentheses, `function(parameter):
+/// message`, as
+/// php's stream layer names the path it could not open and ext/fileinfo
+/// raises what libmagic's opens of a magic file raise.
+pub fn docref_parameter(req: &mut Request, level: Level, parameter: &[u8], message: &str) {
+    let function = req.active_native();
+    let parameter = escaped(req, &String::from_utf8_lossy(parameter));
+    let message = escaped(req, message);
+    let text = format!("{}: {message}", origin(req, &function, &parameter));
+    raise(req, level, &text);
+}
+
+/// `php_verror`'s `escape_html` of its message and its parameters under
+/// `html_errors` (`Z/main/main.c:1074`, `:1139`): `&`, `<`, `>` and `"`
+/// as entities, a byte that was not UTF-8 already the replacement
+/// character the message was read with. ext/fileinfo's `bug68996.phpt`
+/// is the witness.
+fn escaped(req: &Request, text: &str) -> String {
+    if req.ini_flag(b"html_errors") {
+        crate::api::request::escape_html(text)
+    } else {
+        text.to_owned()
+    }
 }
 
 /// `php_verror`'s origin for a function's diagnostic, `function(params)`,

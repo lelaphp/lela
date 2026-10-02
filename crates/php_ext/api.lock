@@ -353,6 +353,7 @@ raising::call_stack_limit
 raising::clear
 raising::deprecated
 raising::docref
+raising::docref_parameter
 raising::exit
 raising::fatal
 raising::new_throwable

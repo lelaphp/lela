@@ -110,6 +110,10 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_mysqli::extension,
         #[cfg(feature = "sqlite3")]
         php_ext_sqlite3::extension,
+        #[cfg(feature = "fileinfo")]
+        php_ext_fileinfo::extension,
+        #[cfg(feature = "dba")]
+        php_ext_dba::extension,
     ]
 }
 
@@ -118,7 +122,7 @@ pub fn enabled() -> &'static [fn() -> Extension] {
 /// them: each extension php leaves out by default and the bundle carries,
 /// in its `config.m4` spelling (`--enable-mbstring`, `--with-openssl`);
 /// each php builds by default and the bundle leaves out, as its
-/// `--disable` or `--without`, the five no crate holds yet among them;
+/// `--disable` or `--without`, the four no crate holds yet among them;
 /// and nothing for the extensions php always builds. By extension name.
 pub const CONFIGURE: &[&str] = &[
     #[cfg(feature = "bcmath")]
@@ -131,8 +135,11 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-ctype",
     #[cfg(feature = "curl")]
     "--with-curl",
+    #[cfg(feature = "dba")]
+    "--enable-dba",
     #[cfg(not(feature = "dom"))]
     "--disable-dom",
+    #[cfg(not(feature = "fileinfo"))]
     "--disable-fileinfo",
     #[cfg(not(feature = "filter"))]
     "--disable-filter",

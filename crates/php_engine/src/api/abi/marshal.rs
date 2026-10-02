@@ -1013,6 +1013,24 @@ plain_return!(True, Type::True, bits::TRUE, |_| Value::bool(true));
 pub struct False;
 plain_return!(False, Type::False, bits::FALSE, |_| Value::bool(false));
 
+/// `false` as a member of a parameter's union, `dba_key_split`'s
+/// `string|false|null $key`: held only by `false` itself.
+impl FromArgument for False {
+    const MASK: u32 = bits::FALSE;
+    fn declared() -> Option<Type> {
+        Some(Type::False)
+    }
+    fn accepts(value: &Value) -> bool {
+        matches!(value.as_ref(), ValueRef::Bool(false))
+    }
+    fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
+        match value.as_ref() {
+            ValueRef::Bool(false) => Ok(False),
+            _ => mismatch(req, "false"),
+        }
+    }
+}
+
 /// `null`.
 #[derive(Debug, Clone, Copy)]
 pub struct Null;
