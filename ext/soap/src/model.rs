@@ -591,6 +591,9 @@ pub(crate) enum RpcEncoding {
 /// `sdlEncodingUse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Use {
+    /// The zero `memset` leaves: an operation's `<input>` or `<output>`
+    /// whose binding had no `<soap:body>`, neither `encoded` nor `literal`.
+    Unset = 0,
     Encoded = 1,
     Literal = 2,
 }
@@ -643,6 +646,11 @@ impl Sdl {
         let id = EncId(u32::try_from(self.encoder_arena.len()).unwrap_or(u32::MAX));
         self.encoder_arena.push(e);
         id
+    }
+
+    /// The binding a function runs over, `function->binding`.
+    pub(crate) fn binding_of(&self, function: &Function) -> Option<&Binding> {
+        self.bindings.as_ref()?.nth(function.binding?)
     }
 
     /// The function a request element names, `sdl->requests`.
@@ -701,7 +709,7 @@ impl Default for Body {
     fn default() -> Body {
         Body {
             ns: None,
-            use_: Use::Encoded,
+            use_: Use::Unset,
             encoding_style: RpcEncoding::Default,
             headers: None,
         }
@@ -859,8 +867,11 @@ pub(crate) struct Function {
     pub(crate) response_name: Option<Vec<u8>>,
     pub(crate) request_parameters: Option<Table<Param>>,
     pub(crate) response_parameters: Option<Table<Param>>,
-    /// The binding, by its key in [`Sdl::bindings`].
-    pub(crate) binding: Option<Vec<u8>>,
+    /// The binding, by its row in [`Sdl::bindings`], in order: two
+    /// ports over one `<binding>` make two rows of one name, the second
+    /// pushed (`zend_hash_next_index_insert`), which a name would not
+    /// tell apart.
+    pub(crate) binding: Option<usize>,
     pub(crate) binding_attributes: Option<SoapBindingFunction>,
     pub(crate) faults: Option<Table<Fault>>,
 }

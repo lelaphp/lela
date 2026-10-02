@@ -1,6 +1,5 @@
 //! `SOAP_GLOBAL` and what a layer raises.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
@@ -42,8 +41,10 @@ pub(crate) struct State {
     /// `cur_uniq_ref`: the last `refN` id made.
     pub(crate) cur_uniq_ref: i64,
     /// `mem_cache`: the descriptions read in this request by their URI,
-    /// each with the time it was read, for `WSDL_CACHE_MEMORY`.
-    pub(crate) mem_cache: HashMap<Vec<u8>, (Arc<Sdl>, i64)>,
+    /// each with the time it was read, for `WSDL_CACHE_MEMORY`; in
+    /// insertion order, which decides the one `soap.wsdl_cache_limit`
+    /// evicts among those read in the same second.
+    pub(crate) mem_cache: Table<(Arc<Sdl>, i64)>,
 }
 
 impl Default for State {
@@ -60,7 +61,7 @@ impl Default for State {
             typemap: None,
             cur_uniq_ns: 0,
             cur_uniq_ref: 0,
-            mem_cache: HashMap::new(),
+            mem_cache: Table::new(),
         }
     }
 }

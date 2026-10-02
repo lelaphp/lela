@@ -27,19 +27,16 @@ mod classes;
     reason = "the globals the encoding, SDL, server and client layers set and read (#1562)"
 )]
 mod globals;
-#[expect(
-    dead_code,
-    reason = "the headers the SDL and client layers send (#1562)"
-)]
 mod http;
 #[expect(
     dead_code,
     reason = "the description the encoding, SDL, server and client layers fill and read (#1562)"
 )]
 mod model;
+mod schema;
 #[expect(
     dead_code,
-    reason = "the lookups the encoding and SDL layers resolve names with (#1562)"
+    reason = "the lookups the encoding and SDL layers resolve names with, and `get_sdl`, which the server and client layers call (#1562)"
 )]
 mod sdl;
 #[expect(
