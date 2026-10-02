@@ -1173,7 +1173,28 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `zend_ffi_cdata_get_closure`: a pointer to a C function called as
-    /// one, through the same trampoline `FFI`'s methods are.
+    /// one, through the same trampoline `FFI`'s methods are, which
+    /// `zend_is_callable` asks too; the trampoline has no scope, so
+    /// `Closure::fromCallable` refuses it.
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("int abs(int j);"); $f = $ffi->abs;
+    /// var_dump(is_callable($f, false, $name), $name, call_user_func($f, -3), call_user_func_array($f, [-4]), array_map($f, [-1]));
+    /// try { Closure::fromCallable($f); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { call_user_func($ffi->new("int")); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(19) "FFI\CData::__invoke"
+    /// int(3)
+    /// int(4)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// Failed to create closure from callable
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, no array or string given
+    /// ```
     fn get_closure(&self, req: &mut Request, object: PhpObject) -> Option<ClosureInfo> {
         let v = view(req, object);
         if v.freed() || v.ptr == 0 {

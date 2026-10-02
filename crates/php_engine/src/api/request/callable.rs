@@ -19,7 +19,7 @@ use php_unit::decl::Visibility;
 use super::{Request, visibility_string};
 use crate::api::abi::Callable;
 use crate::api::call::{Function, Target};
-use crate::api::values::{ClassId, Key, PhpObject, Value};
+use crate::api::values::{ClassId, ClosureInfo, Key, PhpObject, Value};
 
 /// php's `IS_CALLABLE_SUPPRESS_DEPRECATIONS`: whether a resolution
 /// raises the deprecations of `self`, `parent` and `static` as a class
@@ -376,6 +376,58 @@ impl Request {
         self.callable_made(resolved)
     }
 
+    /// `Z_OBJ_HANDLER_P(callable, get_closure)` of a class whose table
+    /// answers a function of its own making rather than its `__invoke`,
+    /// as `zend_ffi_cdata_get_closure` answers a C function pointer's
+    /// trampoline, which `zend_is_callable_ex` asks before anything else
+    /// of an object; `ext/ffi`'s `get_closure` carries the witness.
+    pub(crate) fn handler_closure(&mut self, object: PhpObject) -> Option<ClosureInfo> {
+        let class = object.class();
+        let made = self.own_handlers(class)?.get_closure(self, object)?;
+        (self.method_named(class, b"__invoke") != Some(made.function)).then_some(made)
+    }
+
+    /// `zend_is_callable_at_frame`'s `case IS_OBJECT`.
+    fn callable_object(&mut self, held: Value, object: PhpObject) -> Result<Resolved, Refusal> {
+        // The `get_closure` handler: a `Closure`'s payload, a function
+        // the class's table makes ([`Request::handler_closure`]), then
+        // `zend_std_get_closure`'s `__invoke`, which reads the class's
+        // table and no visibility.
+        if object.closure(self).is_some() {
+            let name = self.callable_name(&held);
+            return Ok(Resolved::Made(Callable::of(
+                held,
+                name.as_bytes(),
+                Target::Closure(object),
+            )));
+        }
+        let class = object.class();
+        if let Some(made) = self.handler_closure(object) {
+            let name = self.callable_name(&held);
+            let target = Target::Method {
+                function: made.function,
+                scope: made.called_scope.unwrap_or(class),
+                this: made.this,
+            };
+            return Ok(Resolved::Made(Callable::of(held, name.as_bytes(), target)));
+        }
+        let Some(function) = self.method_named(class, b"__invoke") else {
+            return Err("no array or string given".into());
+        };
+        let this =
+            Some(object).filter(|_| self.method_decl(function).is_none_or(|d| d.is_instance));
+        let name = self.callable_name(&held);
+        Ok(Resolved::Made(Callable::of(
+            held,
+            name.as_bytes(),
+            Target::Method {
+                function,
+                scope: class,
+                this,
+            },
+        )))
+    }
+
     /// `zend_is_callable_at_frame` (`Z/Zend/zend_API.c:4139`) over the
     /// frame `zend_is_callable_ex` walks to.
     fn callable_resolved(
@@ -388,33 +440,7 @@ impl Request {
         let held = value.deref();
         let mut fcc = Fcc::default();
         if let Some(object) = held.as_object().copied() {
-            // `case IS_OBJECT`: the `get_closure` handler, a `Closure`'s
-            // payload, then `zend_std_get_closure`'s `__invoke`, which
-            // reads the class's table and no visibility.
-            if object.closure(self).is_some() {
-                let name = self.callable_name(&held);
-                return Ok(Resolved::Made(Callable::of(
-                    held,
-                    name.as_bytes(),
-                    Target::Closure(object),
-                )));
-            }
-            let class = object.class();
-            let Some(function) = self.method_named(class, b"__invoke") else {
-                return Err("no array or string given".into());
-            };
-            let this =
-                Some(object).filter(|_| self.method_decl(function).is_none_or(|d| d.is_instance));
-            let name = self.callable_name(&held);
-            return Ok(Resolved::Made(Callable::of(
-                held,
-                name.as_bytes(),
-                Target::Method {
-                    function,
-                    scope: class,
-                    this,
-                },
-            )));
+            return self.callable_object(held, object);
         }
         let mut strict = false;
         let method = if let Some(array) = held.as_array().copied() {

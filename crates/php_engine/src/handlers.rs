@@ -1400,14 +1400,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         });
     }
     let class = object.class();
-    // `Z_OBJ_HANDLER_P(function, get_closure)` of a class that answers
-    // a function of its own making rather than its `__invoke`, as
-    // `zend_ffi_cdata_get_closure` answers a C function pointer's
-    // trampoline.
-    if let Some(table) = req.own_handlers(class)
-        && let Some(made) = table.get_closure(req, object)
-        && req.method_named(class, b"__invoke") != Some(made.function)
-    {
+    if let Some(made) = req.handler_closure(object) {
         if let Some(this) = made.this {
             req.addref(&this.as_value());
         }
