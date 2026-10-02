@@ -1087,7 +1087,7 @@ fn attribute_object_at(
     let mut named: Vec<(PhpString, Value)> = Vec::new();
     let mut evaluated = Ok(());
     for argument in &attribute.arguments {
-        let value = match eval_const_expr(req, &argument.value, scope) {
+        let value = match eval_declared(req, &argument.value, scope) {
             Ok(value) => value,
             Err(thrown) => {
                 evaluated = Err(thrown);
@@ -1738,8 +1738,11 @@ pub fn eval_const_expr(
 /// `zend_declare_class_constant_ex` keep it (`Z/Zend/zend_API.c:4510`,
 /// `:4852`): a string the declaration wrote is `zval_make_interned_string`'s,
 /// so a slot or a constant copied from it takes no owner; anything else
-/// is [`eval_const_expr`]'s. An attribute's argument and a user enum
-/// case's value php keeps unevaluated and never interns.
+/// is [`eval_const_expr`]'s. An attribute's argument and a backed enum
+/// case's value are read through it too: a unit's declarations hold
+/// their strings as its literals do, interned as opcache persists them
+/// (design §5.2, revision 64), where `php -n` copies them per request,
+/// the difference `trace:immutable-literal-arrays` covers.
 pub fn eval_declared(
     req: &mut Request,
     expr: &ConstExpr,

@@ -1049,6 +1049,16 @@ pub(crate) fn bind_lexical<T: Tier>(
 /// 3|3|3|
 /// 3
 /// ```
+///
+/// A string initializer is the unit's interned string, as opcache
+/// persists `op_array->static_variables` (design §5.2):
+///
+/// ```php
+/// function sv() { static $x = 'static var'; debug_zval_dump($x); } sv();
+/// ```
+/// ```expect regime=immutable-literals
+/// string(10) "static var" interned
+/// ```
 pub(crate) fn bind_static<T: Tier>(
     req: &mut Request,
     frame: FrameRef,

@@ -8627,7 +8627,7 @@ impl Request {
         let mut seen: Vec<(Value, Vec<u8>)> = Vec::new();
         let mut outcome = Ok(());
         for (name, expr) in cases {
-            let value = match crate::api::call::eval_const_expr(self, &expr, Some(class)) {
+            let value = match crate::api::call::eval_declared(self, &expr, Some(class)) {
                 Ok(value) => value,
                 Err(thrown) => {
                     outcome = Err(thrown);
@@ -8690,7 +8690,16 @@ impl Request {
     /// and handed back by identity from then on, its `name` the case's
     /// own and, for a backed enum, its `value` the backing value the
     /// declaration carries. One more owner is taken for the caller, the
-    /// slot keeping its own, as php's constant table keeps one.
+    /// slot keeping its own, as php's constant table keeps one. A string
+    /// value is the unit's interned string, as opcache persists the
+    /// case's constant (design §5.2):
+    ///
+    /// ```php
+    /// enum E: string { case X = 'ex'; } debug_zval_dump(E::X->value);
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// string(2) "ex" interned
+    /// ```
     pub(crate) fn enum_case(&mut self, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
         if let Some((_, case)) = self
             .enum_cases
@@ -8722,7 +8731,7 @@ impl Request {
         let slot = PhpString::new(self, b"name")?;
         case.set_prop(self, slot, Value::string(spelled))?;
         if backing != php_unit::decl::EnumBacking::Pure {
-            let value = crate::api::call::eval_const_expr(self, &constant.value, Some(class))?;
+            let value = crate::api::call::eval_declared(self, &constant.value, Some(class))?;
             let slot = PhpString::new(self, b"value")?;
             case.set_prop(self, slot, value)?;
         }

@@ -17,7 +17,7 @@ use php_unit::decl::Attribute as AttributeDecl;
 use php_unit::Level;
 
 use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
-use crate::api::call::{Function, eval_const_expr, instantiate_named};
+use crate::api::call::{Function, eval_declared, instantiate_named};
 use crate::api::raising::{Thrown, raise, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
@@ -80,7 +80,7 @@ fn internal_strings(
     let mut positional = Vec::new();
     let mut named = Vec::new();
     for argument in &attribute.arguments {
-        let value = eval_const_expr(req, &argument.value, scope)?;
+        let value = eval_declared(req, &argument.value, scope)?;
         match &argument.name {
             Some(name) => named.push((PhpString::new(req, &name.0)?, value)),
             None => positional.push(value),

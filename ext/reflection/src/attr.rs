@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 
 use php_ext::abi::This;
 use php_ext::attr::php_class;
-use php_ext::call::{attribute_object, eval_const_expr, lookup_class};
+use php_ext::call::{attribute_object, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw};
@@ -398,11 +398,25 @@ impl ReflectionAttribute {
     ///   int(3)
     /// }
     /// ```
+    ///
+    /// A string the attribute's declaration wrote is the unit's interned
+    /// string, as opcache persists `attr->args[i].value`:
+    ///
+    /// ```php
+    /// #[Attribute] class At { function __construct(public $v) {} }
+    /// #[At('attr')] class B {} debug_zval_dump((new ReflectionClass('B'))->getAttributes()[0]->getArguments());
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// array(1) packed refcount(1){
+    ///   [0]=>
+    ///   string(4) "attr" interned
+    /// }
+    /// ```
     fn getArguments(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let mut out = PhpArray::new(req)?;
         for argument in &kept.attribute.arguments {
-            let value = eval_const_expr(req, &argument.value, kept.scope)?;
+            let value = eval_declared(req, &argument.value, kept.scope)?;
             match &argument.name {
                 Some(name) => {
                     let key = PhpString::new(req, &name.0)?;
