@@ -22,9 +22,9 @@
 //!
 //! Every throwable `libsodium.c` raises leaves without the arguments in
 //! its trace (`sodium_remove_param_values_from_backtrace`), a
-//! `SodiumException` because its `create_object` strips them and a
-//! parameter's `TypeError` because the native strips it; [`parsed`]
-//! and [`fail`] are the two.
+//! `SodiumException` because its `create_object` strips them, one PHP
+//! code makes with `new` among them ([`SodiumHandlers`]), and a
+//! parameter's `TypeError` because the native strips it ([`parsed`]).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -43,7 +43,9 @@ mod ffi;
 mod hash;
 mod keys;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Raw, Ref};
+use php_ext::abi::{
+    CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref,
+};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
 use php_ext::raising::{Thrown, argument_error, arity, throw};
@@ -218,6 +220,12 @@ pub(crate) struct Exception;
 /// try { f(); } catch (SodiumException $e) { var_dump(get_parent_class($e), $e->getMessage()); }
 /// function g($s) { return sodium_bin2base64($s, 0); }
 /// try { g('x'); } catch (SodiumException $e) { var_dump($e->getMessage(), $e->getTrace()[0]['args'], $e->getTrace()[1]['args']); }
+/// function h($secret) { return new SodiumException('x'); }
+/// var_dump(h('hunter2')->getTrace()[0]['args']);
+/// class Mine extends SodiumException {}
+/// function k($s) { return new Mine('y'); }
+/// var_dump(k('pw')->getTrace()[0]['args']);
+/// try { clone h(1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(9) "Exception"
@@ -227,9 +235,31 @@ pub(crate) struct Exception;
 /// }
 /// array(0) {
 /// }
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// Trying to clone an uncloneable object of class SodiumException
 /// ```
-#[php_class(extends(Exception))]
+#[php_class(extends(Exception), handlers = SODIUM_EXCEPTION)]
 pub(crate) struct SodiumException;
+
+/// `SodiumException`'s handlers: the throwables' `clone_obj`, and
+/// `sodium_exception_create_object`, which strips the arguments from
+/// the trace `zend_default_exception_new` has written.
+pub(crate) struct SodiumHandlers;
+
+impl ObjectHandlers for SodiumHandlers {
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        scrub(req, object)
+    }
+}
+
+static SODIUM_EXCEPTION: SodiumHandlers = SodiumHandlers;
 
 #[php_class]
 impl SodiumException {}
@@ -465,14 +495,12 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 
 /// `zend_throw_exception(sodium_exception_ce, message, 0)`.
 pub(crate) fn fail(req: &mut Request, message: &str) -> Thrown {
-    let thrown = throw(req, "SodiumException", message);
-    scrubbed(req, thrown)
+    throw(req, "SodiumException", message)
 }
 
 /// `zend_argument_error(sodium_exception_ce, position, tail)`.
 pub(crate) fn bad_arg(req: &mut Request, position: u32, tail: &str) -> Thrown {
-    let thrown = argument_error(req, "SodiumException", position, tail);
-    scrubbed(req, thrown)
+    argument_error(req, "SodiumException", position, tail)
 }
 
 /// `"internal error"`, what a libsodium call that fails past php's own

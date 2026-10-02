@@ -719,7 +719,7 @@ pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Va
     };
     let name = PhpString::new(req, b"message")?;
     object.set_prop(req, name, Value::string(message))?;
-    if !crate::classes::records_throw_site(req.handlers_of(object.class())) {
+    if !req.records_throw_site(object.class()) {
         req.note_throw_site(object)?;
     }
     Ok(object.as_value())

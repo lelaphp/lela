@@ -7846,15 +7846,6 @@ impl Request {
         };
         self.init_properties(object, defaults);
         self.object_created(object)?;
-        // `zend_default_exception_new`, the throwables' `create_object`:
-        // `file`, `line` and `trace` are the site of `new`, written as
-        // the object is made and before any constructor runs.
-        if crate::classes::records_throw_site(self.handlers_of(class))
-            && let Err(thrown) = self.note_throw_site(object)
-        {
-            self.release(object.as_value());
-            return Err(thrown);
-        }
         Ok(object)
     }
 
@@ -13854,6 +13845,29 @@ impl Request {
         None
     }
 
+    /// Whether objects of `class` are made by `zend_default_exception_new`,
+    /// which every class under `Throwable` reaches: the throwables' table
+    /// its own or an ancestor's, under any table an extension gives a
+    /// subclass, whose `create_object` wraps it as php's
+    /// `ce->create_object` wraps `zend_ce_exception->create_object`.
+    pub(crate) fn records_throw_site(&self, class: ClassId) -> bool {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(class) = at else {
+                return false;
+            };
+            if let Some(Some(table)) = usize::try_from(class.0)
+                .ok()
+                .and_then(|i| self.shared.handlers.get(i))
+                && crate::classes::records_throw_site(*table)
+            {
+                return true;
+            }
+            at = self.class_parent(class);
+        }
+        false
+    }
+
     /// [`Request::handlers_of`] for the object's class, php's
     /// `zobj->handlers`.
     pub(crate) fn object_handlers(&self, o: Obj) -> &'static dyn ObjectHandlers {
@@ -18987,6 +19001,7 @@ impl Request {
     #[must_use]
     pub fn class_has_create_object(&self, class: ClassId) -> bool {
         self.native_new_of(class).is_some()
+            || self.records_throw_site(class)
             || crate::classes::core_create_object(self.handlers_of(class))
     }
 

@@ -162,13 +162,20 @@ impl Request {
 
     /// The rest of `create_object` over a new `object`, its properties
     /// laid down: what is allocated beside it ([`Request::lay_beside`]),
-    /// then what its class lays down with it
-    /// ([`crate::api::abi::ObjectHandlers::create_object`]); the object
-    /// released where either fails.
+    /// a throwable's `file`, `line` and `trace`, the site of `new`
+    /// written by `zend_default_exception_new` before any constructor
+    /// runs ([`Request::records_throw_site`]), then what its class lays
+    /// down with it ([`crate::api::abi::ObjectHandlers::create_object`]);
+    /// the object released where any fails.
     pub(crate) fn object_created(&mut self, object: PhpObject) -> Result<(), Thrown> {
         self.lay_beside(object)?;
         let handlers = self.handlers_of(object.class());
-        if let Err(thrown) = handlers.create_object(self, object) {
+        let thrown = if self.records_throw_site(object.class()) {
+            self.note_throw_site(object).err()
+        } else {
+            None
+        };
+        if let Some(thrown) = thrown.or_else(|| handlers.create_object(self, object).err()) {
             self.release(object.as_value());
             return Err(thrown);
         }
