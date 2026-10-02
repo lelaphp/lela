@@ -172,7 +172,46 @@ impl OutputSink for Response {
         }
     }
 
-    /// `sapi_cgi_send_headers`.
+    /// `sapi_cgi_send_headers`, the head [`php_sapi::cgi::head`] writes.
+    ///
+    /// `cgi.nph` read at the send, so an `ini_set` before the first byte
+    /// opens the head with `Status: 200 OK`:
+    ///
+    /// ```php
+    /// ini_set('cgi.nph', '1');
+    /// echo "x";
+    /// ```
+    /// ```request fpm
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// Status: 200 OK
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// x
+    /// ```
+    ///
+    /// and `cgi.rfc2616_headers` writes the status line `header()` was
+    /// given whole:
+    ///
+    /// ```php
+    /// ini_set('cgi.rfc2616_headers', '1');
+    /// header('HTTP/1.1 404 Not Found');
+    /// echo "x";
+    /// ```
+    /// ```request fpm
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// HTTP/1.1 404 Not Found
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// x
+    /// ```
     fn send_headers(&mut self, head: &ResponseHead) {
         let block = php_sapi::cgi::head(head);
         let mut wire = self.wire();
@@ -809,6 +848,10 @@ impl Worker {
                     code: page.code,
                     status_line: None,
                     lines,
+                    ini: php_sapi::cgi::HEAD_INI
+                        .iter()
+                        .filter_map(|name| Some((*name, self.engine.ini_get(name)?)))
+                        .collect(),
                 };
                 response.send_headers(&head);
                 let _ = response.write(&page.body);

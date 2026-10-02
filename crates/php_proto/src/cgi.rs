@@ -470,27 +470,89 @@ use crate::http::reason;
 /// `SAPI_CGI_MAX_HEADER_LENGTH`: the most a `Status:` line php builds holds.
 const MAX_HEADER_LENGTH: usize = 1024;
 
-/// `sapi_cgi_send_headers` (`Z/sapi/cgi/cgi_main.c:370`) with `cgi.nph`
-/// and `cgi.rfc2616_headers` off: a response code other than 200 writes
-/// a `Status:` line first, from an `HTTP/` status line's text past its
-/// first space where one was given, else from the code and php's reason
-/// for it, unless a `Status:` header stands in the lines; then each line,
-/// the first `Status:` line alone of its kind, a `Content-Type` dropped
-/// under a 304; then the blank line.
+/// When the head opens with a status line, `cgi.nph`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Opens {
+    /// Where the response code is not 200, `cgi.nph` off.
+    #[default]
+    Changed,
+    /// Always, `cgi.nph` on: a 200 too is `Status: 200 OK`.
+    Always,
+}
+
+/// How a status line `header()` was given is written, `cgi.rfc2616_headers`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Form {
+    /// `Status:` and an `HTTP/` line's text past its first space,
+    /// `cgi.rfc2616_headers` off.
+    #[default]
+    Status,
+    /// The line whole, `HTTP/1.1 404 Not Found`, `cgi.rfc2616_headers` on.
+    Line,
+}
+
+/// The shape `sapi_cgi_send_headers` gives the head, read off `cgi.nph`
+/// and `cgi.rfc2616_headers` at the send (`Z/sapi/cgi/cgi_main.c:381-400`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:320-340`), so an `ini_set` before it counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Shape {
+    pub opens: Opens,
+    pub form: Form,
+}
+
+impl Shape {
+    /// The shape the two entries' values give, each read as
+    /// `zend_ini_parse_bool` reads it: `true`, `yes` or `on` in any case,
+    /// else `atoi` of it not 0.
+    #[must_use]
+    pub fn of(nph: &[u8], rfc2616_headers: &[u8]) -> Shape {
+        let on = |value: &[u8]| {
+            [&b"true"[..], b"yes", b"on"]
+                .iter()
+                .any(|word| value.eq_ignore_ascii_case(word))
+                || atol(value) != 0
+        };
+        Shape {
+            opens: if on(nph) {
+                Opens::Always
+            } else {
+                Opens::Changed
+            },
+            form: if on(rfc2616_headers) {
+                Form::Line
+            } else {
+                Form::Status
+            },
+        }
+    }
+}
+
+/// `sapi_cgi_send_headers` (`Z/sapi/cgi/cgi_main.c:370`) in `shape`: a
+/// response code other than 200, or any under `cgi.nph`, writes a status
+/// line first; under `cgi.rfc2616_headers` the status line `header()` was
+/// given whole where it was, else `Status:` and an `HTTP/` status line's
+/// text past its first space where one was given, else the code and php's
+/// reason for it, unless a `Status:` header stands in the lines; then each
+/// line, the first `Status:` line alone of its kind, a `Content-Type`
+/// dropped under a 304; then the blank line.
 #[must_use]
-pub fn head(code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8>]) -> Vec<u8> {
+pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8>]) -> Vec<u8> {
     let is = |line: &[u8], name: &[u8]| {
         line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name)
     };
     let mut out = Vec::new();
     let mut ignore_status = false;
     let mut response_status = code;
-    if code != 200 {
-        let from_line = status_line.and_then(|line| {
+    if shape.opens == Opens::Always || code != 200 {
+        let status = if let (Form::Line, Some(line)) = (shape.form, status_line) {
+            if let Some(space) = line.iter().position(|b| *b == b' ') {
+                response_status = atol(&line[space + 1..]);
+            }
+            Some(line.to_vec())
+        } else if let Some(rest) = status_line.and_then(|line| {
             let space = line.iter().position(|b| *b == b' ')?;
             (space >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/")).then(|| &line[space..])
-        });
-        let status = if let Some(rest) = from_line {
+        }) {
             response_status = atol(&rest[1..]);
             let mut built = b"Status:".to_vec();
             built.extend_from_slice(rest);
@@ -602,24 +664,58 @@ mod tests {
     fn the_head_opens_with_the_status_where_the_code_is_not_200() {
         let lines = [b"X-Powered-By: PHP/8.5.9".to_vec(), b"Location: /".to_vec()];
         assert_eq!(
-            head(302, None, &lines),
+            head(Shape::default(), 302, None, &lines),
             b"Status: 302 Found\r\nX-Powered-By: PHP/8.5.9\r\nLocation: /\r\n\r\n"
         );
         assert_eq!(
-            head(404, Some(b"HTTP/1.1 404 Nope"), &[]),
+            head(Shape::default(), 404, Some(b"HTTP/1.1 404 Nope"), &[]),
             b"Status: 404 Nope\r\n\r\n"
         );
         assert_eq!(
-            head(200, None, &[b"Content-type: text/html".to_vec()]),
+            head(
+                Shape::default(),
+                200,
+                None,
+                &[b"Content-type: text/html".to_vec()]
+            ),
             b"Content-type: text/html\r\n\r\n"
         );
         assert_eq!(
             head(
+                Shape::default(),
                 299,
                 None,
                 &[b"Status: 299 Mine".to_vec(), b"Status: 1".to_vec()]
             ),
             b"Status: 299 Mine\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn nph_opens_every_head_and_rfc2616_writes_the_status_line_whole() {
+        let lines = [b"X-Powered-By: PHP/8.5.9".to_vec()];
+        let nph = Shape::of(b"1", b"0");
+        assert_eq!(nph.opens, Opens::Always);
+        assert_eq!(
+            head(nph, 200, None, &lines),
+            b"Status: 200 OK\r\nX-Powered-By: PHP/8.5.9\r\n\r\n"
+        );
+        let line = Shape::of(b"off", b"Yes");
+        assert_eq!(line.form, Form::Line);
+        assert_eq!(
+            head(line, 404, Some(b"HTTP/1.1 404 Not Found"), &[]),
+            b"HTTP/1.1 404 Not Found\r\n\r\n"
+        );
+        assert_eq!(
+            head(
+                line,
+                304,
+                Some(b"HTTP/1.1 304 Not Modified"),
+                &[b"Content-Type: x".to_vec()]
+            ),
+            b"HTTP/1.1 304 Not Modified\r\n\r\n"
+        );
+        assert_eq!(head(line, 200, Some(b"HTTP/1.1 200 OK"), &[]), b"\r\n");
+        assert_eq!(Shape::of(b"", b"0"), Shape::default());
     }
 }

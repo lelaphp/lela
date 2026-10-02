@@ -370,6 +370,46 @@ impl OutputSink for Process {
         let _ = std::io::stdout().lock().flush();
     }
 
+    /// `sapi_cgi_send_headers`, the head [`php_sapi::cgi::head`] writes.
+    ///
+    /// `cgi.nph` read at the send, so an `ini_set` before the first byte
+    /// opens the head with `Status: 200 OK`:
+    ///
+    /// ```php
+    /// ini_set('cgi.nph', '1');
+    /// echo "x";
+    /// ```
+    /// ```request
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// Status: 200 OK
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// x
+    /// ```
+    ///
+    /// and `cgi.rfc2616_headers` writes the status line `header()` was
+    /// given whole:
+    ///
+    /// ```php
+    /// ini_set('cgi.rfc2616_headers', '1');
+    /// header('HTTP/1.1 404 Not Found');
+    /// echo "x";
+    /// ```
+    /// ```request
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// HTTP/1.1 404 Not Found
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// x
+    /// ```
     fn send_headers(&mut self, head: &ResponseHead) {
         let _ = self.write(&php_sapi::cgi::head(head));
     }

@@ -100,6 +100,16 @@ impl Binary {
         }
     }
 
+    /// The binaries of the workspace at `root`, with `fpm` standing in for
+    /// its `php-fpm-witness`, so a test serves a `request fpm` fence by a
+    /// host whose failure it chooses.
+    #[cfg(test)]
+    pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
+        let binary = Binary::of(root);
+        let _ = binary.fpm.set(Ok(fpm));
+        binary
+    }
+
     /// Where the CLI's binary is, built from the tree now if this run has
     /// not built it yet; what `crosscheck` starts as the built-in server.
     pub(crate) fn cli(&self) -> Result<&Path> {

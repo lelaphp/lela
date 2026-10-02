@@ -12,7 +12,7 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use php_proto::cgi::{Environment, Files, RequestInfo, Settings};
+use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape};
 
 use crate::ini::enabled;
 use crate::{Method, ResponseHead, WebRequest};
@@ -77,6 +77,7 @@ pub fn web(env: &Environment, info: &RequestInfo) -> WebRequest {
         headers: php_proto::cgi::request_headers(env),
         no_headers: false,
         response_code: info.response_code,
+        head_ini: &HEAD_INI,
     }
 }
 
@@ -120,11 +121,25 @@ fn php_self(env: &Environment, info: &RequestInfo, settings: Settings) -> Vec<u8
     }
 }
 
-/// The response's head as `sapi_cgi_send_headers` writes it: the status
-/// line where the request set one, each header line, and the blank line.
+/// The entries `sapi_cgi_send_headers` reads at the send, `CGIG(nph)`
+/// and `CGIG(rfc2616_headers)`, which a request's [`web`] names for its
+/// head.
+pub const HEAD_INI: [&[u8]; 2] = [b"cgi.nph", b"cgi.rfc2616_headers"];
+
+/// The response's head as `sapi_cgi_send_headers` writes it, in the
+/// shape `cgi.nph` and `cgi.rfc2616_headers` give it at the send: the
+/// status line where the request set one or `cgi.nph` asks for it, each
+/// header line, and the blank line.
 #[must_use]
 pub fn head(head: &ResponseHead) -> Vec<u8> {
-    php_proto::cgi::head(head.code, head.status_line.as_deref(), &head.lines)
+    let entry = |name: &[u8]| {
+        head.ini
+            .iter()
+            .find(|(had, _)| *had == name)
+            .map_or(&[][..], |(_, value)| value.as_slice())
+    };
+    let shape = Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"));
+    php_proto::cgi::head(shape, head.code, head.status_line.as_deref(), &head.lines)
 }
 
 #[cfg(test)]
