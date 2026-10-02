@@ -33,6 +33,7 @@
 mod error;
 #[allow(dead_code)]
 mod ffi;
+mod formatter;
 #[allow(dead_code)]
 mod iterator;
 
@@ -303,6 +304,7 @@ pub fn extension() -> Extension {
         intl_is_failure::declared(),
         intl_error_name::declared(),
     ]);
+    let builder = formatter::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
     // MessageFormatter, IntlDateFormatter, IntlDatePatternGenerator,
@@ -311,6 +313,7 @@ pub fn extension() -> Extension {
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
     let builder = builder
+        .class::<formatter::NumberFormatter>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>();
     builder
@@ -442,7 +445,6 @@ fn intl_info(req: &mut Request) {
 
 /// `intl_locale_get_default`: `intl.default_locale` where it is set,
 /// ICU's default otherwise.
-#[allow(dead_code)]
 pub(crate) fn default_locale(req: &Request) -> Vec<u8> {
     match req.ini_get(DEFAULT_LOCALE) {
         Some(locale) if !locale.is_empty() => locale.to_vec(),
