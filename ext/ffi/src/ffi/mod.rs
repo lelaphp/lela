@@ -451,10 +451,42 @@ fn place(
     fixed.cast_mut()
 }
 
+/// The words of the cell a closure's code reaches the request through:
+/// the request, how many calls into C it has under way, and the thread
+/// it is served on.
+const REQUEST: usize = 0;
+const CALLS: usize = 8;
+const THREAD: usize = 16;
+/// The cell's size.
+pub(crate) const SLOT_SIZE: usize = 24;
+
+/// The calling thread, `pthread_self()`.
+fn thread() -> usize {
+    // SAFETY: `pthread_self` takes nothing and answers the calling
+    // thread, from any context.
+    unsafe { libc::pthread_self() as usize }
+}
+
+/// The request written into `slot`, where every callback of its own
+/// reaches it until [`disarm`]: from here to the request's end, as
+/// php's callbacks reach `EG()` whenever C calls them. The request
+/// stands at one address from its program's start to its shutdown,
+/// which disarms the cell before it frees a callback.
+pub(crate) fn arm(req: &mut Request, slot: usize) {
+    write(slot + REQUEST, std::ptr::from_mut(req) as usize);
+    write(slot + THREAD, thread());
+}
+
+/// No request in `slot` from here: a callback C calls returns without
+/// calling PHP code, as one php freed at `RSHUTDOWN` is never called.
+pub(crate) fn disarm(slot: usize) {
+    write(slot + REQUEST, 0usize);
+}
+
 /// `ffi_call(&cif, target, ret, args)`: the C function at `target`
 /// called with the argument values at `args`, the return written into
-/// `ret`. `slot` holds the request while C runs, for a callback C makes
-/// back into PHP code, and what it held before once C returns.
+/// `ret`. `slot` holds the request, and counts the call while C runs, so
+/// a callback C makes from another thread meanwhile reaches it too.
 pub(crate) fn call(
     req: &mut Request,
     slot: usize,
@@ -469,8 +501,9 @@ pub(crate) fn call(
     } else {
         values.as_mut_ptr()
     };
-    let before = read::<usize>(slot);
-    write(slot, std::ptr::from_mut(req) as usize);
+    arm(req, slot);
+    let calls = read::<usize>(slot + CALLS);
+    write(slot + CALLS, calls + 1);
     // SAFETY: the cif was prepared for exactly these argument values,
     // each standing across the call, and `ret` holds at least
     // `sizeof(ffi_arg)` and the return type's size; `target` is the
@@ -483,12 +516,12 @@ pub(crate) fn call(
             values,
         );
     }
-    write(slot, before);
+    write(slot + CALLS, calls);
     let _ = (&sig.args, &sig.nodes, &sig.lists);
 }
 
-/// What a closure's code hands back to PHP code: the request the call
-/// into C came from, read off `slot`, the callback's own number, where
+/// What a closure's code hands back to PHP code: the request read off
+/// its slot, the callback's own number, where
 /// to write the return, and each argument's address.
 pub(crate) type Callback = fn(&mut Request, usize, usize, &[usize]);
 
@@ -581,7 +614,7 @@ impl Drop for Closure {
 }
 
 /// `zend_ffi_callback_trampoline`'s entry from C: the thunk, the
-/// argument addresses, and the request the call into C was made from.
+/// argument addresses, and the request its slot holds.
 extern "C" fn enter(
     _cif: *mut sys::Cif,
     ret: *mut c_void,
@@ -601,13 +634,21 @@ extern "C" fn enter(
             .map(|addr| *addr as usize)
             .collect()
     };
-    let request = read::<usize>(thunk.slot);
+    let request = read::<usize>(thunk.slot + REQUEST);
     if request == 0 {
         return;
     }
-    // SAFETY: the slot holds the request whose call into C is on this
-    // thread's stack, set by `call` around `ffi_call`; the request is
-    // reached through nothing else until C returns.
+    // Another thread reaches the request only while the request's own
+    // waits in a call into C; otherwise both would run it at once.
+    if thread() != read::<usize>(thunk.slot + THREAD) && read::<usize>(thunk.slot + CALLS) == 0 {
+        return;
+    }
+    // SAFETY: the slot holds the request from the first callback made
+    // to its shutdown, which disarms it, and the request stands at that
+    // address meanwhile. C called this on the request's thread, which
+    // runs one thing at a time, or on another while the request's waits
+    // in `ffi_call`; either way the request runs this callback alone
+    // until it returns, as php's `EG()` serves it.
     let req = unsafe { &mut *(request as *mut Request) };
     (thunk.callback)(req, thunk.data, ret as usize, &addrs);
 }
