@@ -180,10 +180,11 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          \x20   }};\n\
          \x20   let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();\n\
          \x20   let builder = Engine::builder()\n\
+         \x20       .sapi_name(NAME)\n\
          \x20       .extensions(&extensions)\n\
          \x20       .configure(php_bundle::CONFIGURE)\n\
          \x20       .tier::<php_bundle::Tier>();\n\
-         \x20   let engine = php_sapi::start(builder, &[], None);\n\
+         \x20   let engine = php_sapi::start(builder, &[]);\n\
          \x20   let description = RequestDescription {{\n\
          \x20       argv: vec![file.as_encoded_bytes().to_vec()],\n\
          \x20       cwd: std::env::current_dir().unwrap_or_default(),\n\

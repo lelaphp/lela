@@ -8,7 +8,6 @@ EachLine
 Engine
 EngineBuilder
 FileHandles
-HostExtension
 HostValue
 IniEvent
 IniOrigin
@@ -18,7 +17,6 @@ Observables
 OutputSink
 PHP_VERSION
 Primary
-ProcessTitle
 RequestDescription
 ResponseHead
 Routed

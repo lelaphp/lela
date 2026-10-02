@@ -20,6 +20,10 @@ use php_sapi::{Engine, PHP_VERSION};
 use crate::options::Server;
 use log::{Log, Type};
 
+/// `sapi_module.name` for the built-in server: what `php_sapi_name()`
+/// answers under it.
+pub(crate) const NAME: &str = "cli-server";
+
 /// What every connection of one server reads: the engine, the document
 /// root and the router, the host and port the server listens on, and
 /// the log.

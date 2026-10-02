@@ -75,10 +75,10 @@ pub struct RequestDescription {
     /// `php_request_startup` and php's other hosts have none of; `None`
     /// registers nothing.
     pub file_handles: Option<FileHandles>,
-    /// The process's title, where the host saved the area `ps` shows
-    /// (`save_ps_args`): what `cli_set_process_title` writes and
-    /// `PHP_CLI_PROCESS_TITLE` says is there.
-    pub process_title: Option<ProcessTitle>,
+    /// Whether the host saved the area `ps` shows the command line from
+    /// (`save_ps_args`), which its `cli_set_process_title` writes: what
+    /// `PHP_CLI_PROCESS_TITLE` says.
+    pub process_title: bool,
     /// The entries the host sets before the request starts, each as its
     /// [`IniOrigin`] says, in the order given: php-fpm's `PHP_VALUE` and
     /// `PHP_ADMIN_VALUE` and the lines of the request's `.user.ini` files.
@@ -150,55 +150,6 @@ pub enum HostValue {
     Map(Vec<(Vec<u8>, HostValue)>),
     /// An array keyed 0, 1, and on.
     List(Vec<HostValue>),
-}
-
-/// The memory `ps` shows a process's command line from, which php's CLI
-/// takes over in `save_ps_args` (`Z/sapi/cli/ps_title.c:147`) before it
-/// reads its arguments: the host's `argv` strings and the environment
-/// strings after them, each byte written atomically, so every request
-/// of a process may hold it at once without waiting on another; and the length
-/// of the title last set, `ps_buffer_cur_len`, which every copy shares.
-#[derive(Debug, Clone)]
-pub struct ProcessTitle {
-    area: &'static [std::sync::atomic::AtomicU8],
-    shown: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl ProcessTitle {
-    /// The title over `area`, `ps_buffer` to `ps_buffer_size`, with no
-    /// title set yet.
-    #[must_use]
-    pub fn new(area: &'static [std::sync::atomic::AtomicU8]) -> ProcessTitle {
-        ProcessTitle {
-            area,
-            shown: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }
-    }
-
-    /// `set_ps_title` (`Z/sapi/cli/ps_title.c:345`): a title as long as
-    /// the area or longer is `Too long`; else it is written with its NUL
-    /// and the rest of the area padded with NULs, as Linux and macOS pad
-    /// it.
-    pub(crate) fn set(&self, title: &[u8]) -> Result<(), &'static str> {
-        if title.len() >= self.area.len() {
-            return Err("Too long");
-        }
-        let padding = std::iter::repeat_n(0, self.area.len() - title.len());
-        for (cell, byte) in self.area.iter().zip(title.iter().copied().chain(padding)) {
-            cell.store(byte, Ordering::Relaxed);
-        }
-        self.shown.store(title.len(), Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// `get_ps_title`: the area up to the title last set.
-    pub(crate) fn get(&self) -> Vec<u8> {
-        let shown = self.shown.load(Ordering::Relaxed).min(self.area.len());
-        self.area[..shown]
-            .iter()
-            .map(|cell| cell.load(Ordering::Relaxed))
-            .collect()
-    }
 }
 
 /// One request of the web as its host received it, php's
@@ -2109,8 +2060,9 @@ pub struct EngineBuilder {
     reenter: Loop,
     resume: Loop,
     tier_extension: Option<Extension>,
-    host_extension: Option<crate::host_extension::HostExtension>,
+    sapi_name: &'static str,
     additional_extension: Option<Extension>,
+    additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
     configure: &'static [&'static str],
@@ -2179,24 +2131,38 @@ impl EngineBuilder {
         self
     }
 
-    /// The extension the host registers after the bundle, as php-cgi hands
-    /// `cgi_module_entry` to `php_module_startup`: its natives and ini
-    /// entries, and its name last in `get_loaded_extensions()`.
+    /// `sapi_module.name` as `php_module_startup` finds it: the name the
+    /// request laid for startup carries, which an entry's `on_modify`
+    /// reads as opcache's does; empty until a host names it.
     #[must_use]
-    pub fn host_extension(mut self, host: crate::host_extension::HostExtension) -> EngineBuilder {
-        self.host_extension = Some(host);
+    pub fn sapi_name(mut self, name: &'static str) -> EngineBuilder {
+        self.sapi_name = name;
         self
     }
 
     /// The extension a host built itself and hands `php_module_startup`
-    /// as its `additional_module`, as phpdbg hands
+    /// as its `additional_module`, as php-cgi hands `cgi_module_entry`
+    /// (`Z/sapi/cgi/cgi_main.c:1564-1712`) and phpdbg
     /// `sapi_phpdbg_module_entry` (`Z/sapi/phpdbg/phpdbg.c:682-697`): its
     /// natives, constants and ini entries, started after the bundle's as
-    /// `zend_sort_modules` leaves them, for a host that declares natives of
-    /// its own (ADR-0008, #1348).
+    /// `zend_sort_modules` leaves them, its name last in
+    /// `get_loaded_extensions()`, for a host that declares natives of its
+    /// own (ADR-0008, #1348).
     #[must_use]
     pub fn additional_extension(mut self, extension: Extension) -> EngineBuilder {
         self.additional_extension = Some(extension);
+        self
+    }
+
+    /// The natives a host declared itself and names in
+    /// `sapi_module.additional_functions`, as php's CLI names `dl()` and
+    /// the process title's two (`Z/sapi/cli/php_cli.c:449-453`):
+    /// registered under `standard` once every extension has started, in
+    /// the order given (`Z/main/main.c:2359-2366`), and under no
+    /// extension where the bundle has no `standard`.
+    #[must_use]
+    pub fn additional_functions(mut self, natives: Vec<(FunctionDecl, Entry)>) -> EngineBuilder {
+        self.additional_functions.extend(natives);
         self
     }
 
@@ -2255,11 +2221,7 @@ impl EngineBuilder {
             .collect();
         let mut extensions = self.extensions;
         extensions.extend(self.tier_extension);
-        let hosted = self.host_extension.map(crate::host_extension::hosted);
-        let additional = hosted.map_or_else(Vec::new, |hosted| {
-            extensions.extend(hosted.extension);
-            hosted.additional
-        });
+        let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // What a `MINIT` registers into another extension's tables, as
@@ -2389,7 +2351,7 @@ impl EngineBuilder {
                 started: OnceLock::new(),
             }),
         };
-        engine.register_ini(held, self.host_extension);
+        engine.register_ini(held, self.sapi_name);
         engine
     }
 }
@@ -2671,8 +2633,9 @@ impl Engine {
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
-            host_extension: None,
+            sapi_name: "",
             additional_extension: None,
+            additional_functions: Vec::new(),
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
             configure: &[],
@@ -2722,11 +2685,7 @@ impl Engine {
     /// pin's `session-startup` regime holds it, with the test below for
     /// a refused value, and `ext/date`'s `date.timezone` is the one the
     /// phpt corpus reads.
-    fn register_ini(
-        &mut self,
-        mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
-        host: Option<crate::host_extension::HostExtension>,
-    ) {
+    fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>, bool)>, sapi_name: &str) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
@@ -2747,9 +2706,7 @@ impl Engine {
         // php-fpm's child applies its pool's once php has started.
         held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
         let description = RequestDescription {
-            sapi_name: host
-                .map_or("", crate::host_extension::HostExtension::sapi_name)
-                .to_owned(),
+            sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&self.shared), description);
@@ -3116,7 +3073,7 @@ impl Engine {
         }
         if work == Work::Serve {
             self.execute_script(&mut req, source.as_deref());
-            crate::host_extension::after_script(&mut req);
+            req.program_ended();
             return self.shutdown(&mut req, sink);
         }
         // `php_lint_script` compiles and drops the op array, and what

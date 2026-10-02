@@ -2944,7 +2944,7 @@ impl Request {
     /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
     /// `php_request_startup` as whether `cli_set_process_title` can set
     /// the title, which is whether the host saved the area `ps` shows
-    /// (`crate::engine::ProcessTitle`), then
+    /// (`RequestDescription::process_title`), then
     /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
     /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`,
     /// and the three constants on them, each holding its stream's one
@@ -2985,7 +2985,7 @@ impl Request {
         if !self.registers_file_handles() {
             return Ok(());
         }
-        let titled = self.process_title().is_some();
+        let titled = self.holds_process_title();
         self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(titled));
         let mut opened = Vec::with_capacity(3);
         for (path, mode) in [

@@ -38,6 +38,7 @@ mod events;
 mod ffi;
 mod glob;
 mod master;
+mod natives;
 mod pctl;
 mod pools;
 mod scoreboard;
@@ -55,7 +56,7 @@ use std::process::ExitCode;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
 use php_sapi::ini::define;
-use php_sapi::{Engine, HostExtension, RequestDescription};
+use php_sapi::{Engine, RequestDescription};
 
 use crate::master::{Args, Became, EXIT_CONFIG, EXIT_OK, EXIT_USAGE, Fpm, Init};
 
@@ -188,12 +189,19 @@ fn parse(argv: &[Vec<u8>]) -> (Vec<(String, String)>, Ask) {
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
 /// and `cgi-fcgi` after them, over `-d`'s entries.
 fn engine(ini: &[(String, String)]) -> Engine {
+    php_sapi::start(builder(), ini)
+}
+
+/// php-fpm's engine before its entries: its name, the bundle's enabled
+/// set, its tier, and its own `cgi-fcgi` after them ([`natives`]).
+fn builder() -> php_sapi::EngineBuilder {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let builder = Engine::builder()
+    Engine::builder()
+        .sapi_name(worker::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
-        .tier::<php_bundle::Tier>();
-    php_sapi::start(builder, ini, Some(HostExtension::FpmFcgi))
+        .tier::<php_bundle::Tier>()
+        .additional_extension(natives::extension())
 }
 
 /// `text` on stdout.

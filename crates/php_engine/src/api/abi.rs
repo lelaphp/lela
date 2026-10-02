@@ -573,6 +573,8 @@ pub struct Extension {
     pub(crate) cached: Option<CachedHook>,
     /// What [`ExtensionBuilder::fatal_logged`] was handed.
     pub(crate) fatal_logged: Option<FatalLoggedHook>,
+    /// What [`ExtensionBuilder::program_ended`] was handed.
+    pub(crate) program_ended: Option<fn(&mut Request)>,
     /// What [`ExtensionBuilder::input_filter`] was handed.
     pub(crate) input_filter: Option<InputFilterHook>,
     /// What [`ExtensionBuilder::treat_data`] was handed.
@@ -633,6 +635,7 @@ pub struct ExtensionBuilder {
     post_startup: Option<PostStartupHook>,
     cached: Option<CachedHook>,
     fatal_logged: Option<FatalLoggedHook>,
+    program_ended: Option<fn(&mut Request)>,
     input_filter: Option<InputFilterHook>,
     treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
@@ -919,6 +922,20 @@ impl ExtensionBuilder {
         self
     }
 
+    /// Served once the primary program has ended and before the request
+    /// shuts down, the moment between `php_execute_script` and
+    /// `php_request_shutdown` where php-fpm's loop puts the line
+    /// `fastcgi.error_header` names into the head
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1931-1940`): every extension's hook in
+    /// bundle order, for a program served whole and not for a lint, a
+    /// highlight or a strip. An extension a host declares for itself is
+    /// the one that hands it (ADR-0008, #1348).
+    #[must_use]
+    pub fn program_ended(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.program_ended = Some(hook);
+        self
+    }
+
     /// The input filter, php's `sapi_module.input_filter` as `ext/filter`'s
     /// `MINIT` registers `php_sapi_filter` (`sapi_register_input_filter`):
     /// each variable php registers from what a host described, a query
@@ -1129,6 +1146,7 @@ impl ExtensionBuilder {
             post_startup: self.post_startup,
             cached: self.cached,
             fatal_logged: self.fatal_logged,
+            program_ended: self.program_ended,
             input_filter: self.input_filter,
             treat_data: self.treat_data,
             upload: self.upload,

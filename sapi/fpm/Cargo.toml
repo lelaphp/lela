@@ -2,8 +2,10 @@
 # under `sapi/` (ADR-0008), the binary `php-fpm`: a master that reads
 # php-fpm.conf and forks its pools' children, each serving FastCGI
 # requests on an engine of the bundle's enabled set with `cgi-fcgi` after
-# it. Three edges, php_bundle, php_sapi and php_proto for the FastCGI and
-# CGI codecs; the engine is named through the facade alone.
+# it. Four edges, php_bundle, php_sapi, php_proto for the FastCGI and
+# CGI codecs, and php_ext for the natives its own extension declares
+# (ADR-0008 as amended by #1348); the engine is named through the facade
+# alone.
 [package]
 name = "php_sapi_fpm"
 version = "0.0.0"
@@ -40,6 +42,9 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
+# The face its `cgi_module_entry`'s natives are declared with, as an
+# extension declares its own (ADR-0008, #1348).
+php_ext = { path = "../../crates/php_ext" }
 # The process manager's system calls, safe where `nix` wraps them, and
 # `libc` in `src/ffi/` alone for the fork, the signal handlers, the
 # shared memory and the rest `nix` leaves unsafe (ADR-0008).

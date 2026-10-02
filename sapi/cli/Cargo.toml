@@ -1,7 +1,9 @@
 # sapi/cli: php's CLI, `php-src/sapi/cli`, one crate under `sapi/` (ADR-0008),
 # the binary `php`: the bundle's enabled set on one engine, the tier the
-# bundle names, the command line read as php's CLI reads it. Two edges,
-# php_bundle and php_sapi; the engine is named through the facade alone.
+# bundle names, the command line read as php's CLI reads it. Four edges,
+# php_bundle, php_sapi, php_proto, and php_ext for the natives it declares
+# itself (ADR-0008 as amended by #1348); the engine is named through the
+# facade alone.
 [package]
 name = "php_sapi_cli"
 version = "0.0.0"
@@ -52,6 +54,9 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `mysqli`, php's `--with-mysqli`, over the same `mysqlnd` (#1367).
 php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
 php_sapi = { path = "../../crates/php_sapi" }
+# The face its `additional_functions` and the built-in server's module are
+# declared with, as an extension declares its own (ADR-0008, #1348).
+php_ext = { path = "../../crates/php_ext" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does
 # not answer: the local time the server's log writes (ADR-0008).

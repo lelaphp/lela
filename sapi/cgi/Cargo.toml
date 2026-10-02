@@ -1,8 +1,9 @@
 # sapi/cgi: php's CGI, `php-src/sapi/cgi`, one crate under `sapi/` (ADR-0008),
 # the binary `php-cgi`: the bundle's enabled set on one engine with
 # `cgi-fcgi` after it, the request the server describes in the environment.
-# Three edges, php_bundle, php_sapi and php_proto for the CGI environment's
-# codec; the engine is named through the facade alone.
+# Four edges, php_bundle, php_sapi, php_proto for the CGI environment's
+# codec, and php_ext for the natives its own extension declares (ADR-0008
+# as amended by #1348); the engine is named through the facade alone.
 [package]
 name = "php_sapi_cgi"
 version = "0.0.0"
@@ -40,3 +41,6 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring"] }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
+# The face `cgi_module_entry`'s natives are declared with, as an extension
+# declares its own (ADR-0008, #1348).
+php_ext = { path = "../../crates/php_ext" }

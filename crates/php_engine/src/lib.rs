@@ -31,7 +31,6 @@ mod exec;
 mod fiber;
 mod generator;
 mod handlers;
-mod host_extension;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
@@ -62,8 +61,7 @@ pub use api::request::{BuildDefs, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
-    Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
-    Uncaught, WebRequest,
+    Observables, OutputSink, Primary, RequestDescription, ResponseHead, Routed, Uncaught,
+    WebRequest,
 };
-pub use host_extension::HostExtension;
 pub use ini_syntax::{IniEvent, IniValue};
