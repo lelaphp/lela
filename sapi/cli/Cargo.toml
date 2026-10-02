@@ -33,7 +33,7 @@ required-features = ["witness-trace"]
 witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 
 [dependencies]
-# The bundle's default set and fifteen it turns on: `pcntl` and `posix`,
+# The bundle's default set and sixteen it turns on: `pcntl` and `posix`,
 # which php builds for the CLI and which no server host carries (design
 # §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
 # `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
@@ -49,8 +49,9 @@ witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
 # `--enable-sysvsem`, `--enable-sysvmsg` and `--enable-sysvshm`, which
 # the oracle is built with (#1323), `pdo_mysql`, php's
 # `--with-pdo-mysql`, over the `mysqlnd` it turns on (#1345, #1366), and
-# `mysqli`, php's `--with-mysqli`, over the same `mysqlnd` (#1367).
-php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli"] }
+# `mysqli`, php's `--with-mysqli`, over the same `mysqlnd` (#1367), and
+# `dba`, php's `--enable-dba`, which the oracle is built with (#1451).
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix", "sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba"] }
 php_sapi = { path = "../../crates/php_sapi" }
 php_proto = { path = "../../crates/php_proto" }
 # The C library in `src/ffi/` alone, for what the standard library does

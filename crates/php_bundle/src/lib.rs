@@ -108,6 +108,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xmlwriter::extension,
         #[cfg(feature = "mysqli")]
         php_ext_mysqli::extension,
+        #[cfg(feature = "dba")]
+        php_ext_dba::extension,
     ]
 }
 
@@ -129,6 +131,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-ctype",
     #[cfg(feature = "curl")]
     "--with-curl",
+    #[cfg(feature = "dba")]
+    "--enable-dba",
     #[cfg(not(feature = "dom"))]
     "--disable-dom",
     "--disable-fileinfo",

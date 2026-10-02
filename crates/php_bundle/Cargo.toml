@@ -65,6 +65,7 @@ linked = [
     "xmlwriter",
     "mysqlnd",
     "mysqli",
+    "dba",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -110,6 +111,7 @@ xmlreader = ["dep:php_ext_xmlreader"]
 xmlwriter = ["dep:php_ext_xmlwriter"]
 mysqlnd = ["dep:php_ext_mysqlnd"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366)
 mysqli = ["dep:php_ext_mysqli", "spl", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-mysqli; mysqli.c ZEND_MOD_REQUIRED("spl") and ZEND_MOD_REQUIRED("mysqlnd") (#1367)
+dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -158,6 +160,7 @@ php_ext_xmlreader = { path = "../../ext/xmlreader", optional = true }
 php_ext_xmlwriter = { path = "../../ext/xmlwriter", optional = true }
 php_ext_mysqlnd = { path = "../../ext/mysqlnd", optional = true }
 php_ext_mysqli = { path = "../../ext/mysqli", optional = true }
+php_ext_dba = { path = "../../ext/dba", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

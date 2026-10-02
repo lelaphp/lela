@@ -211,7 +211,6 @@ Options:
 ├── dba
 ├── dom
 ├── exif
-├── fileinfo
 ├── filter
 ├── ftp
 ├── hash
@@ -249,7 +248,7 @@ Options:
 ├── xmlwriter
 └── zlib
 ```
-<!-- /computed in=e9529fce20eaded1ead0b22b4b315172b2c1f7484dbaf6b633adb267cb15922d out=60d66039f11e0c8c90cd7f67553b2a5e5b73f827814fce0ffb65cf34a0e8283b -->
+<!-- /computed in=d732296477bf04bf8349aabcd836f005a056f91d1a6125b1050af1f2867a7564 out=52d9efd3a2bedf7dcc3db3dfd6da3c8684dbbc7f19290c87f3bb2478742aa0f7 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
