@@ -140,7 +140,7 @@ pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                     s.stopped = Some(Stop::Quit);
                     return Outcome::Stopped;
                 }
-                Line::Read(line) => match cmd::parse(&line) {
+                Line::Read(mut line) => match cmd::parse(&mut line) {
                     Ok(commands) => commands,
                     Err(cmd::Malformed(message)) => {
                         out::error(format!("Parse Error: {message}").as_bytes());

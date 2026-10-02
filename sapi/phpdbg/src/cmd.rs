@@ -123,8 +123,9 @@ fn is_end(b: Option<&u8>) -> bool {
     matches!(b, None | Some(b'\n' | 0))
 }
 
-/// The line cut into tokens.
-fn tokens(line: &[u8]) -> Vec<Token> {
+/// The line cut into tokens, each quoted word unquoted in the line
+/// where it stands, as `unescape_string` leaves php's input buffer.
+fn tokens(line: &mut [u8]) -> Vec<Token> {
     let mut out = Vec::new();
     let mut state = State::Initial;
     let mut at = 0;
@@ -171,6 +172,9 @@ fn tokens(line: &[u8]) -> Vec<Token> {
                 let (token, len, raw) = normal(rest);
                 if len == 0 {
                     break;
+                }
+                if len > 1 && matches!(c, b'"' | b'\'') {
+                    unescape_string(&mut line[at..at + len]);
                 }
                 out.push(token);
                 at += len;
@@ -245,6 +249,29 @@ fn plain_id_len(rest: &[u8]) -> usize {
                 at += 1;
             }
             _ => return at,
+        }
+    }
+}
+
+/// `unescape_string`: a quoted word's bytes moved down over its opening
+/// quote in place, escapes taken, up to its closing quote; the bytes
+/// past what moved are left as they were, so `"cmd"` reads `cmdd"`.
+fn unescape_string(word: &mut [u8]) {
+    let Some(&start) = word.first() else {
+        return;
+    };
+    let (mut at, mut off) = (0, 1);
+    loop {
+        if word.get(at + off) == Some(&b'\\') {
+            off += 1;
+        }
+        let Some(&b) = word.get(at + off) else {
+            return;
+        };
+        word[at] = b;
+        at += 1;
+        if word.get(at + off).is_none_or(|b| *b == start) {
+            return;
         }
     }
 }
@@ -402,8 +429,9 @@ fn input_len(rest: &[u8]) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Malformed(pub String);
 
-/// The line as its commands, in order.
-pub fn parse(line: &[u8]) -> Result<Vec<Command>, Malformed> {
+/// The line as its commands, in order; the line is left as php's lexer
+/// leaves its input, each quoted word unquoted where it stands.
+pub fn parse(line: &mut [u8]) -> Result<Vec<Command>, Malformed> {
     let tokens = tokens(line);
     let mut commands = Vec::new();
     for part in tokens.split(|token| *token == Token::Separator) {
@@ -574,7 +602,7 @@ mod tests {
     use super::*;
 
     fn params(line: &str) -> Vec<Param> {
-        match parse(line.as_bytes()).as_deref() {
+        match parse(&mut line.as_bytes().to_vec()).as_deref() {
             Ok([Command::Params(params), ..]) => params.clone(),
             _ => Vec::new(),
         }
@@ -583,7 +611,7 @@ mod tests {
     #[test]
     fn a_line_is_cut_at_each_pound_and_ev_takes_its_rest_raw() {
         assert_eq!(
-            parse(b"ev 1 + 3 # ev 2 ** 3#q\n"),
+            parse(&mut b"ev 1 + 3 # ev 2 ** 3#q\n".to_vec()),
             Ok(vec![
                 Command::Eval(b"1 + 3 ".to_vec()),
                 Command::Eval(b"2 ** 3".to_vec()),
@@ -591,11 +619,11 @@ mod tests {
             ])
         );
         assert_eq!(
-            parse(b"r\n"),
+            parse(&mut b"r\n".to_vec()),
             Ok(vec![Command::Params(vec![Param::Str(b"r".to_vec())])])
         );
         assert_eq!(
-            parse(b"r echo # quit\n"),
+            parse(&mut b"r echo # quit\n".to_vec()),
             Ok(vec![
                 Command::Run(Some(b"echo ".to_vec())),
                 Command::Params(vec![Param::Str(b"quit".to_vec())]),
