@@ -5,14 +5,35 @@
 //! `--EXPECTREGEX--` is one already, and both are matched anchored under
 //! the `s` flag (run-tests.php:2584-2600).
 //!
-//! The engine behind the two patterns has RE2 semantics, as the design
-//! says (design §8): the one corpus body that needs PCRE-only syntax is a
-//! row in the divergence registry, not a reason to carry a backtracker.
+//! The engine behind an `--EXPECTF--` has RE2 semantics (design §8), since
+//! `expectf_to_regex` writes nothing past them but `%f`'s lookahead, which
+//! is written here as the same language. An `--EXPECTREGEX--` is the
+//! test's own PCRE, look-around and all (`ok((?!memory leaks
+//! detected).)*` in `ext/zip/tests/bug76524.phpt`), so a lane that has the
+//! oracle matches it as run-tests.php does, by the pinned php's
+//! `preg_match` ([`Expectation::met_under`], design §8, revision 73,
+//! #1543); the RE2 engine reads it only where no oracle runs.
 
 use std::fmt::Write as _;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use regex_lite::Regex;
+
+use super::{Invocation, Oracle, Program};
+use crate::scratch::Tree;
+
+/// What the pinned php runs to match a pattern as run-tests.php does
+/// (run-tests.php:2592-2598), the pattern and what ran each read from
+/// the file its argument names: exit 0 met, 1 not met, and 2 with what
+/// PCRE said where the pattern is none it compiles.
+const PREG_MATCH: &str = r#"$wanted_re = preg_replace('/\r\n/', "\n", file_get_contents($argv[1]));
+$met = @preg_match('/^' . $wanted_re . '$/s', file_get_contents($argv[2]));
+if ($met === false) {
+    echo error_get_last()['message'] ?? preg_last_error_msg();
+    exit(2);
+}
+exit($met === 1 ? 0 : 1);
+"#;
 
 /// The one expectation a test carries. `--EXPECT--` is bytes, as the
 /// program's stdout is; the two pattern forms are words, and a byte of
@@ -62,6 +83,39 @@ impl Expectation {
             )
         })?;
         Ok(regex.is_match(&String::from_utf8_lossy(actual)))
+    }
+}
+
+impl Expectation {
+    /// Whether `actual`, already normalised, meets the expectation, an
+    /// `--EXPECTREGEX--` matched by `oracle`'s pinned php as run-tests.php
+    /// matches it, with `preg_match` (#1543); the other two as
+    /// [`Expectation::met`] matches them.
+    pub(crate) fn met_under(&self, oracle: &Oracle<'_>, actual: &[u8]) -> Result<bool> {
+        let Expectation::Pattern(body) = self else {
+            return self.met(actual);
+        };
+        oracle.asserted()?;
+        let files = Tree::new("expectregex")?;
+        let (pattern, output) = (files.join("pattern"), files.join("output"));
+        std::fs::write(&pattern, body).context("writing the pattern")?;
+        std::fs::write(&output, actual).context("writing the output")?;
+        let args = [
+            pattern.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+        ];
+        let seen = oracle.run_under(&Invocation {
+            args: &args,
+            ..Invocation::new(&oracle.pin().oracle.path, Program::Snippet(PREG_MATCH))
+        })?;
+        match seen.exit {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!(
+                "the EXPECTREGEX section is not a pattern PCRE takes: {}: {body}",
+                String::from_utf8_lossy(&seen.stdout).trim()
+            ),
+        }
     }
 }
 

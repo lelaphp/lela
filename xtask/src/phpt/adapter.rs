@@ -204,7 +204,7 @@ impl<'a> Adapter<'a> {
             let why = "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--";
             return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(Miss::bork(why)));
         };
-        let (met, trouble) = match expectation.met(&actual) {
+        let (met, trouble) = match expectation.met_under(self.oracle, &actual) {
             Ok(met) => (met, String::new()),
             Err(e) => (false, format!("{e:#}\n")),
         };

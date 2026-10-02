@@ -1644,3 +1644,50 @@ fn a_mysql_subset_runs_in_a_database_of_its_own() {
     let after = said(&oracle);
     assert!(!after.contains(&name), "{name} was not dropped: {after}");
 }
+
+/// An `--EXPECTREGEX--` is matched as run-tests.php matches it, by the
+/// pinned php's `preg_match` (#1543): `ext/zip/tests/bug76524.phpt`'s
+/// negative lookahead meets what has no leak line after `ok` and misses
+/// what has one, a back-reference is PCRE's, a pattern PCRE does not
+/// compile is an error naming the section, and a test carrying the
+/// lookahead passes. The control: the RE2 engine takes no look-around.
+#[test]
+fn an_expectregex_is_matched_as_pcre_matches_it() {
+    use crate::oracle::expect::Expectation;
+    if oracle().is_none() {
+        return;
+    }
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    let leak = Expectation::Pattern("ok((?!memory leaks detected).)*".to_owned());
+    assert!(leak.met(b"ok").is_err(), "the RE2 engine took a lookahead");
+    assert!(leak.met_under(&oracle, b"ok").unwrap());
+    assert!(
+        leak.met_under(&oracle, b"ok\nwarning: libzip says so")
+            .unwrap()
+    );
+    assert!(
+        !leak
+            .met_under(
+                &oracle,
+                b"ok\n[Fri] Script:  '-'\n=== Total 1 memory leaks detected ==="
+            )
+            .unwrap()
+    );
+    let anchored = Expectation::Pattern("o.".to_owned());
+    assert!(!anchored.met_under(&oracle, b"xok").unwrap(), "unanchored");
+    assert!(anchored.met_under(&oracle, b"o\n").unwrap(), "no s flag");
+    let backref = Expectation::Pattern(r"(a)\1".to_owned());
+    assert!(backref.met_under(&oracle, b"aa").unwrap());
+    let broken = Expectation::Pattern("(".to_owned());
+    let error = broken.met_under(&oracle, b"(").unwrap_err().to_string();
+    assert!(error.contains("EXPECTREGEX"), "{error}");
+    let exact = Expectation::Exact(b"ok".to_vec());
+    assert!(exact.met_under(&oracle, b"ok").unwrap());
+    let (_root, subset) = rooted(
+        "lookahead",
+        "--TEST--\nlookahead\n--FILE--\n<?php echo 'ok';\n--EXPECTREGEX--\nok((?!memory leaks detected).)*\n",
+    );
+    let tally = run_on(&subset, 1, 10);
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
