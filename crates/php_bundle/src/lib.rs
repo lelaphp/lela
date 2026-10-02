@@ -126,6 +126,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xsl::extension,
         #[cfg(feature = "tidy")]
         php_ext_tidy::extension,
+        #[cfg(feature = "intl")]
+        php_ext_intl::extension,
     ]
 }
 

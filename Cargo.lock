@@ -707,6 +707,7 @@ dependencies = [
  "php_ext_gmp",
  "php_ext_hash",
  "php_ext_iconv",
+ "php_ext_intl",
  "php_ext_json",
  "php_ext_lexbor",
  "php_ext_libxml",
@@ -902,6 +903,14 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_standard",
+]
+
+[[package]]
+name = "php_ext_intl"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "php_ext",
 ]
 
 [[package]]

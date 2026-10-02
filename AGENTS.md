@@ -217,6 +217,7 @@ Options:
 ├── gmp
 ├── hash
 ├── iconv
+├── intl
 ├── json
 ├── lexbor
 ├── libxml
@@ -254,7 +255,7 @@ Options:
 ├── zip
 └── zlib
 ```
-<!-- /computed in=6490da831faeffaf82cabbc8a98082114553c6f524edfd653fbb969c9ee6b2c0 out=b26f8dc483eca4ae04f9612c9c2fc10455cec5b544479c7662ee656e0646df0e -->
+<!-- /computed in=8ddaf481176935f61ee5b37d33e94054f66cffe3b73b61825648bbcb4d09f908 out=c1e2ce7b591e4080381343b70a1a7716b91e5eb4bad247182601543fb3d3d559 -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .
