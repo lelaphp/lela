@@ -739,6 +739,7 @@ dependencies = [
  "php_ext_xml",
  "php_ext_xmlreader",
  "php_ext_xmlwriter",
+ "php_ext_xsl",
  "php_ext_zip",
  "php_ext_zlib",
 ]
@@ -921,6 +922,7 @@ dependencies = [
 name = "php_ext_libxml"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "php_ext",
  "php_ext_standard",
  "pkg-config",
@@ -1177,6 +1179,17 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_libxml",
+]
+
+[[package]]
+name = "php_ext_xsl"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "php_ext",
+ "php_ext_dom",
+ "php_ext_libxml",
+ "pkg-config",
 ]
 
 [[package]]

@@ -614,6 +614,10 @@ unsafe extern "C" {
     pub(crate) fn __xmlStructuredError() -> *mut Option<xmlStructuredErrorFunc>;
     pub(crate) fn __xmlStructuredErrorContext() -> *mut *mut c_void;
     pub(crate) fn xmlGetLastError() -> *mut xmlError;
+    // globals.h, parser.h: the parse defaults `PHP_LIBXML_SANITIZE_GLOBALS`
+    // saves and sets around a foreign library's parse.
+    pub(crate) fn xmlSubstituteEntitiesDefault(val: c_int) -> c_int;
+    pub(crate) fn __xmlLoadExtDtdDefaultValue() -> *mut c_int;
     pub(crate) fn xmlResetLastError();
 
     // tree.h

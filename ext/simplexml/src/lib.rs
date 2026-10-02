@@ -87,7 +87,9 @@ pub fn extension() -> Extension {
         ])
         .class::<SimpleXMLElement>()
         .class::<SimpleXMLIterator>()
-        .register(register_export(b"SimpleXMLElement", export_node))
+        .register(
+            register_export(b"SimpleXMLElement", export_node).with_node_object(sxe::libxml_half),
+        )
         .info(simplexml_info)
         .build("SimpleXML")
 }

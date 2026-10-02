@@ -153,6 +153,26 @@ impl Node {
         self.0.as_ptr()
     }
 
+    /// The `xmlNodePtr` itself, as `php_libxml.h` hands its nodes to the
+    /// extensions that include it and link a library over libxml2 of their
+    /// own: ext/xsl's libxslt reads a document through it.
+    #[must_use]
+    pub fn as_ptr(self) -> *mut c_void {
+        self.0.as_ptr().cast()
+    }
+
+    /// A `Node` for the `xmlNodePtr` a library over libxml2 answered, as
+    /// libxslt answers the document a transformation made; `None` for its
+    /// null.
+    ///
+    /// # Safety
+    /// `p` is null or a live node of libxml2's, which stays live while the
+    /// `Node` names it.
+    #[must_use]
+    pub unsafe fn from_ptr(p: *mut c_void) -> Option<Node> {
+        Node::from_raw(p.cast())
+    }
+
     fn read<T>(self, f: impl FnOnce(&sys::xmlNode) -> T) -> T {
         // SAFETY: a handle names a live node (the module's invariant); the
         // borrow ends with `f`, before anything else touches the node.

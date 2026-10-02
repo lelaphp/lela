@@ -18,6 +18,10 @@ mod refusals;
 /// last; a person moves it when the crate declares an edge, and
 /// `api-check` names both crates until it is moved.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a list of two lines per extension, as long as php's internal_functions.c"
+)]
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
         #[cfg(feature = "date")]
@@ -118,6 +122,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_zip::extension,
         #[cfg(feature = "gmp")]
         php_ext_gmp::extension,
+        #[cfg(feature = "xsl")]
+        php_ext_xsl::extension,
     ]
 }
 

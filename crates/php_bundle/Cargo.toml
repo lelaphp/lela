@@ -32,7 +32,7 @@ description = "The enabled set of extensions and the tier's name"
 workspace = true
 
 [features]
-default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache", "simplexml", "xml", "xmlreader", "xmlwriter", "sqlite3", "fileinfo"]
+default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache", "simplexml", "xml", "xmlreader", "xmlwriter", "sqlite3", "fileinfo", "xsl"]
 # The compiled tier (design §4.1, §11): a name that enables nothing until
 # php_jit exists, when it enables the crate on the four targets.
 jit = []
@@ -70,6 +70,7 @@ linked = [
     "dba",
     "zip",
     "gmp",
+    "xsl",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
@@ -120,6 +121,7 @@ fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166
 dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
 zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"), and php_glob and the stream context through standard (design §7.2, revision 70; #1515)
 gmp = ["dep:php_ext_gmp", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links; gmp.c includes ext/standard/php_var.h for the `C:` unserializer (design §7.2, revision 72; #1540, #1563)
+xsl = ["dep:php_ext_xsl", "libxml", "dom"] # php_xsl.c: ZEND_MOD_REQUIRED("libxml") and ("dom"), over the platform's libxslt and libexslt (design §7.2, revision 72; #1564)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -173,6 +175,7 @@ php_ext_fileinfo = { path = "../../ext/fileinfo", optional = true }
 php_ext_dba = { path = "../../ext/dba", optional = true }
 php_ext_zip = { path = "../../ext/zip", optional = true }
 php_ext_gmp = { path = "../../ext/gmp", optional = true }
+php_ext_xsl = { path = "../../ext/xsl", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

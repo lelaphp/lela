@@ -7,7 +7,9 @@ use php_ext::abi::{Callable, Instance, Passed, Path, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_chained, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
@@ -41,12 +43,16 @@ enum Mode {
 pub(crate) struct XPathState {
     ctx: ffi::XPath,
     register_node_ns: bool,
-    callbacks: Callbacks,
+    callbacks: XPathCallbacks,
 }
 
-/// `php_dom_xpath_callbacks`.
+/// `php_dom_xpath_callbacks`, as `xpath_callbacks.h` exports it
+/// (`PHP_DOM_EXPORT`) to the extensions that include it, ext/xsl's
+/// `XSLTProcessor` keeping one beside its stylesheet (design §4.10): the
+/// php functions an expression may call, by namespace, and the values the
+/// calls handed out, kept alive as long as their owner.
 #[derive(Default)]
-struct Callbacks {
+pub struct XPathCallbacks {
     /// `php_ns`, the functions of `php:function`.
     php_ns: Mode,
     /// `namespaces`: the functions `registerPhpFunctionNS` registered, by
@@ -57,8 +63,10 @@ struct Callbacks {
     node_list: Vec<Value>,
 }
 
-impl Callbacks {
-    fn release(self, req: &mut Request) {
+impl XPathCallbacks {
+    /// `php_dom_xpath_callbacks_dtor`: every registered function and kept
+    /// value let go of.
+    pub fn release(self, req: &mut Request) {
         for mode in std::iter::once(self.php_ns).chain(self.namespaces.into_iter().map(|(_, m)| m))
         {
             if let Mode::Set(functions) = mode {
@@ -72,7 +80,8 @@ impl Callbacks {
         }
     }
 
-    fn visit(&self, visit: &mut dyn FnMut(Value)) {
+    /// `php_dom_xpath_callbacks_get_gc`: every value the table holds.
+    pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
         for mode in std::iter::once(&self.php_ns).chain(self.namespaces.iter().map(|(_, m)| m)) {
             if let Mode::Set(functions) = mode {
                 for (_, _, value) in functions {
@@ -84,7 +93,97 @@ impl Callbacks {
             visit(*value);
         }
     }
+
+    /// `php_dom_xpath_callbacks_clean_node_list`: the values the calls of
+    /// one evaluation handed out let go of.
+    pub fn clean_node_list(&mut self, req: &mut Request) {
+        for value in std::mem::take(&mut self.node_list) {
+            req.release(value);
+        }
+    }
+
+    /// `php_dom_xpath_callbacks_update_method_handler` with no namespace
+    /// and `PHP_DOM_XPATH_CALLBACK_NAME_VALIDATE_NULLS`:
+    /// `registerPhpFunctions($restrict)`, every function where `restrict`
+    /// is null, and the ones it names otherwise.
+    pub fn register_php(
+        &mut self,
+        req: &mut Request,
+        restrict: Option<Value>,
+    ) -> Result<(), Thrown> {
+        register_into(req, &mut self.php_ns, restrict)
+    }
+
+    /// `php_dom_xpath_callbacks_update_single_method_handler` under
+    /// `PHP_DOM_XPATH_CALLBACK_NAME_VALIDATE_NCNAME`: `callable`, the third
+    /// argument, registered as `name` in `ns`, one owner of it taken.
+    pub fn register_ns(
+        &mut self,
+        req: &mut Request,
+        ns: &[u8],
+        name: &[u8],
+        callable: &Value,
+    ) -> Result<(), Thrown> {
+        if name.is_empty() || !Name::valid_ncname(name) {
+            return Err(arg_value_error(req, 2, "be a valid callback name"));
+        }
+        let (callable, value) = callable_of(req, callable, 3, false)?;
+        let at = if let Some(at) = self.namespaces.iter().position(|(n, _)| n == ns) {
+            at
+        } else {
+            self.namespaces.push((ns.to_vec(), Mode::None));
+            self.namespaces.len() - 1
+        };
+        let mut functions = match std::mem::take(&mut self.namespaces[at].1) {
+            Mode::Set(f) => f,
+            _ => Vec::new(),
+        };
+        if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
+            let old = std::mem::replace(&mut slot.2, value);
+            slot.1 = callable;
+            req.release(old);
+        } else {
+            functions.push((name.to_vec(), callable, value));
+        }
+        self.namespaces[at].1 = Mode::Set(functions);
+        Ok(())
+    }
+
+    /// `php_dom_xpath_callbacks_delayed_lib_registration`'s walk: each
+    /// namespace and name `registerPhpFunctionNS` registered, which the
+    /// owner registers on an evaluator of its own.
+    #[must_use]
+    pub fn registered(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        for (ns, mode) in &self.namespaces {
+            if let Mode::Set(functions) = mode {
+                out.extend(functions.iter().map(|(n, _, _)| (ns.clone(), n.clone())));
+            }
+        }
+        out
+    }
+
+    /// `php_dom_xpath_callbacks_call_php_ns` and
+    /// `php_dom_xpath_callbacks_call_custom_ns`: the function `called`
+    /// names served with `operands`, each node handed to it made an
+    /// object by `proxy`, php's `proxy_factory`; `modern` is whether the
+    /// document follows the spec, which decides the node class an answer
+    /// is held to.
+    pub fn call(
+        &mut self,
+        req: &mut Request,
+        called: Called,
+        operands: Vec<Operand>,
+        modern: bool,
+        proxy: &mut Proxy<'_>,
+    ) -> Result<Returned, Thrown> {
+        dispatch(req, self, called, operands, modern, proxy)
+    }
 }
+
+/// `php_dom_xpath_callbacks_proxy_factory`: the object a node handed to a
+/// php function stands as.
+pub type Proxy<'a> = dyn FnMut(&mut Request, Node) -> Result<Value, Thrown> + 'a;
 
 /// The evaluator of `this`, taken out of the payload for one call.
 fn take(req: &mut Request, this: PhpObject) -> Option<Box<XPathState>> {
@@ -160,9 +259,9 @@ pub(crate) const PROPS: &[Prop] = &[
 
 /// The object an item of a node set answers as: a node's, or a namespace
 /// node standing for the declaration, its element kept alive by it.
-fn item_object(req: &mut Request, this: PhpObject, item: Item) -> Result<Value, Thrown> {
+fn item_object(req: &mut Request, proxy: &mut Proxy<'_>, item: Item) -> Result<Value, Thrown> {
     match item {
-        Item::Node(node) => object_for(req, node, Some(this)),
+        Item::Node(node) => proxy(req, node),
         Item::Namespace {
             href,
             prefix,
@@ -171,7 +270,7 @@ fn item_object(req: &mut Request, this: PhpObject, item: Item) -> Result<Value, 
             let Some(parent) = parent else {
                 return Ok(Value::null());
             };
-            let parent_value = object_for(req, parent, Some(this))?;
+            let parent_value = proxy(req, parent)?;
             let Some(parent_obj) = parent_value.as_object().copied() else {
                 return Ok(Value::null());
             };
@@ -192,7 +291,11 @@ fn item_object(req: &mut Request, this: PhpObject, item: Item) -> Result<Value, 
 }
 
 /// `php_dom_xpath_callback_fetch_args`' conversion of one operand.
-fn operand_value(req: &mut Request, this: PhpObject, operand: Operand) -> Result<Value, Thrown> {
+fn operand_value(
+    req: &mut Request,
+    proxy: &mut Proxy<'_>,
+    operand: Operand,
+) -> Result<Value, Thrown> {
     match operand {
         Operand::Str(s) => string(req, &s),
         Operand::Bool(b) => Ok(Value::bool(b)),
@@ -203,7 +306,7 @@ fn operand_value(req: &mut Request, this: PhpObject, operand: Operand) -> Result
         Operand::Nodes(items) => {
             let mut array = PhpArray::new(req)?;
             for item in items {
-                let v = item_object(req, this, item)?;
+                let v = item_object(req, proxy, item)?;
                 array.append(req, v)?;
             }
             Ok(Value::array(array))
@@ -218,10 +321,11 @@ const NOT_A_NAME: &str = "Handler name must be a string";
 /// `php_dom_xpath_callback_dispatch`.
 fn dispatch(
     req: &mut Request,
-    this: PhpObject,
-    state: &mut Callbacks,
+    state: &mut XPathCallbacks,
     called: Called,
     operands: Vec<Operand>,
+    modern: bool,
+    proxy: &mut Proxy<'_>,
 ) -> Result<Returned, Thrown> {
     let (mode_ns, name, operands) = match called {
         Called::Php { .. } => {
@@ -242,7 +346,7 @@ fn dispatch(
     };
     let mut args = Vec::with_capacity(operands.len());
     for operand in operands {
-        args.push(operand_value(req, this, operand)?);
+        args.push(operand_value(req, proxy, operand)?);
     }
     let mode = match &mode_ns {
         None => Some(&state.php_ns),
@@ -260,7 +364,13 @@ fn dispatch(
             req.release(name_value);
             found.map_err(|why| {
                 let shown = String::from_utf8_lossy(&name).into_owned();
-                throw_error(req, "Error", &format!("Invalid callback {shown}, {why}"))
+                let message = format!("Invalid callback {shown}, {why}");
+                // An autoloader's throw is the refusal's previous, as
+                // `zend_throw_error` chains onto `EG(exception)`.
+                match pending(req) {
+                    Err(previous) => throw_chained(req, previous, "Error", &message),
+                    Ok(()) => throw_error(req, "Error", &message),
+                }
             })
         }
         Some(Mode::Set(functions)) => {
@@ -294,11 +404,7 @@ fn dispatch(
         }
     }
     let answer = answered?;
-    let node_class = if crate::modern::follows_spec(req, this) {
-        "Dom\\Node"
-    } else {
-        "DOMNode"
-    };
+    let node_class = if modern { "Dom\\Node" } else { "DOMNode" };
     let returned = match answer.as_ref() {
         ValueRef::Object(o) if crate::instance_of(req, *o, node_class) => {
             match crate::node_of(req, *o) {
@@ -380,8 +486,9 @@ fn eval(
     };
     let (answer, raised, thrown) = {
         let XPathState { ctx, callbacks, .. } = &mut *state;
+        let mut proxy = |req: &mut Request, node: Node| object_for(req, node, Some(this));
         let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
-            dispatch(req, this, callbacks, called, operands)
+            dispatch(req, callbacks, called, operands, modern, &mut proxy)
         };
         ctx.eval_scoped(req, expr, node, scope, &mut handler)
     };
@@ -443,7 +550,11 @@ fn node_list(
                  Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
             ));
         }
-        let v = item_object(req, this, item)?;
+        let v = item_object(
+            req,
+            &mut |req, node| object_for(req, node, Some(this)),
+            item,
+        )?;
         array.append(req, v)?;
     }
     let class = if modern {
@@ -593,7 +704,7 @@ impl DOMXPath {
         let state = XPathState {
             ctx,
             register_node_ns: registerNodeNS,
-            callbacks: Callbacks::default(),
+            callbacks: XPathCallbacks::default(),
         };
         put(req, this, Box::new(state));
         Ok(())
@@ -797,40 +908,17 @@ impl DOMXPath {
                 "not be \"http://php.net/xpath\" because it is reserved by PHP",
             ));
         }
-        if name.is_empty() || !Name::valid_ncname(&name) {
-            return Err(arg_value_error(req, 2, "be a valid callback name"));
-        }
-        let (callable, value) = callable_of(req, &callable.value(), 3, false)?;
         let Some(mut state) = take(req, this) else {
-            req.release(value);
             return Err(throw_error(req, "Error", "Invalid XPath Context"));
         };
-        state.ctx.register_custom(&ns, &name);
-        let at = if let Some(at) = state
+        let registered = state
             .callbacks
-            .namespaces
-            .iter()
-            .position(|(n, _)| *n == ns)
-        {
-            at
-        } else {
-            state.callbacks.namespaces.push((ns, Mode::None));
-            state.callbacks.namespaces.len() - 1
-        };
-        let mut functions = match std::mem::take(&mut state.callbacks.namespaces[at].1) {
-            Mode::Set(f) => f,
-            _ => Vec::new(),
-        };
-        if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
-            let old = std::mem::replace(&mut slot.2, value);
-            slot.1 = callable;
-            req.release(old);
-        } else {
-            functions.push((name, callable, value));
+            .register_ns(req, &ns, &name, &callable.value());
+        if registered.is_ok() {
+            state.ctx.register_custom(&ns, &name);
         }
-        state.callbacks.namespaces[at].1 = Mode::Set(functions);
         put(req, this, state);
-        Ok(())
+        registered
     }
 
     /// `DOMXPath::quote(string $str): string`.

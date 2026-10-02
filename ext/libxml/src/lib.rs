@@ -574,14 +574,63 @@ pub type ExportNode = fn(&mut Request, PhpObject) -> Option<ffi::Exported>;
 /// once the engine is built (ADR-0005).
 pub struct Export {
     class: &'static [u8],
-    export: ExportNode,
+    answer: ExportNode,
+    half: Option<NodeObjectOf>,
+}
+
+/// `Z_LIBXML_NODE_P`, `php_libxml_node_fetch_object`: the libxml half of
+/// an object of an XML extension's classes, which php reaches through the
+/// object's handler offset, whether or not it stands for a node yet.
+pub type NodeObjectOf = fn(&mut Request, PhpObject) -> Option<ffi::Borrowed>;
+
+impl Export {
+    /// The row with the way to the libxml half of the extension's
+    /// objects, which [`node_object`] reads.
+    #[must_use]
+    pub fn with_node_object(self, half: NodeObjectOf) -> Export {
+        Export {
+            half: Some(half),
+            ..self
+        }
+    }
 }
 
 /// `php_libxml_register_export(ce, export_function)`: the row for `class`,
 /// the root of the classes whose objects `export` answers for.
 #[must_use]
 pub fn register_export(class: &'static [u8], export: ExportNode) -> Export {
-    Export { class, export }
+    Export {
+        class,
+        answer: export,
+        half: None,
+    }
+}
+
+/// The row of the export table that answers for the root of `object`'s
+/// class.
+fn export_row(req: &mut Request, object: PhpObject) -> Option<(ExportNode, Option<NodeObjectOf>)> {
+    let mut class = object.class();
+    let mut depth = 0;
+    while let Some(parent) = req.class_decl(class).and_then(|d| d.parent.clone()) {
+        class = lookup_class(req, &parent.0).ok().flatten()?;
+        depth += 1;
+        if depth > 64 {
+            return None;
+        }
+    }
+    let root = req.class_decl(class)?.name.0.clone();
+    req.registered::<Export>()
+        .find(|row| row.class == &root[..])
+        .map(|row| (row.answer, row.half))
+}
+
+/// `Z_LIBXML_NODE_P(object)`: the libxml half of an object of any XML
+/// extension, through the row registered for the root of its class, as
+/// ext/xsl's `transformToDoc` lays a document into an object of the
+/// class it was asked for; `None` for an object no row answers.
+pub fn node_object(req: &mut Request, object: PhpObject) -> Option<ffi::Borrowed> {
+    let (_, half) = export_row(req, object)?;
+    half?(req, object)
 }
 
 /// `php_libxml_import_node`: the node an object of any XML extension
@@ -600,20 +649,7 @@ pub fn register_export(class: &'static [u8], export: ExportNode) -> Export {
 /// string(1) "a"
 /// ```
 pub fn import_node(req: &mut Request, object: PhpObject) -> Option<ffi::Exported> {
-    let mut class = object.class();
-    let mut depth = 0;
-    while let Some(parent) = req.class_decl(class).and_then(|d| d.parent.clone()) {
-        class = lookup_class(req, &parent.0).ok().flatten()?;
-        depth += 1;
-        if depth > 64 {
-            return None;
-        }
-    }
-    let root = req.class_decl(class)?.name.0.clone();
-    let export = req
-        .registered::<Export>()
-        .find(|row| row.class == &root[..])
-        .map(|row| row.export)?;
+    let (export, _) = export_row(req, object)?;
     export(req, object)
 }
 
