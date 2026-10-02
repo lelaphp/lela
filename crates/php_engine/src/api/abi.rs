@@ -327,6 +327,24 @@ pub enum AfterLog {
     BailedOut,
 }
 
+/// The CLI's interactive shell, php's `cli_shell_callbacks_t`
+/// (`Z/sapi/cli/cli.h:31`), as `readline_cli.c`'s `MINIT` fills the
+/// table the CLI's `php_cli_get_shell_callbacks` hands it: what an
+/// extension provides with [`ExtensionBuilder::shell`] and a host that
+/// carries the table serves, php's `-a`.
+#[derive(Debug, Clone, Copy)]
+pub struct Shell {
+    /// `cli_shell_run`: the shell served in the request the host began,
+    /// after `auto_prepend_file`; what it answers is the request's exit
+    /// status, as `do_cli` sets `EG(exit_status)` to it.
+    pub serve: fn(&mut Request) -> i32,
+    /// `cli_shell_ub_write` and `cli_shell_write`, which
+    /// `sapi_cli_ub_write` calls, in that order, before each body write
+    /// reaches the host and whatever the host serves: the bytes seen,
+    /// never kept from it, as readline's two answer `-1` and nothing.
+    pub write: fn(&mut Request, &[u8]),
+}
+
 /// An extension's answer as the engine finishes starting up, before it
 /// serves its first request (design §6.3): php's `zend_post_startup_cb`,
 /// which opcache's `accel_post_startup` is. The engine is built before
@@ -575,6 +593,8 @@ pub struct Extension {
     pub(crate) fatal_logged: Option<FatalLoggedHook>,
     /// What [`ExtensionBuilder::program_ended`] was handed.
     pub(crate) program_ended: Option<fn(&mut Request)>,
+    /// What [`ExtensionBuilder::shell`] was handed.
+    pub(crate) shell: Option<Shell>,
     /// What [`ExtensionBuilder::input_filter`] was handed.
     pub(crate) input_filter: Option<InputFilterHook>,
     /// What [`ExtensionBuilder::treat_data`] was handed.
@@ -636,6 +656,7 @@ pub struct ExtensionBuilder {
     cached: Option<CachedHook>,
     fatal_logged: Option<FatalLoggedHook>,
     program_ended: Option<fn(&mut Request)>,
+    shell: Option<Shell>,
     input_filter: Option<InputFilterHook>,
     treat_data: Option<TreatDataHook>,
     upload: Option<UploadHook>,
@@ -936,6 +957,16 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The CLI's interactive shell ([`Shell`]): what `readline_cli.c`'s
+    /// `MINIT` writes into the table of a host that carries one. The
+    /// last extension in bundle order with a shell is the one served,
+    /// as the last `MINIT` to write the table wins.
+    #[must_use]
+    pub fn shell(mut self, shell: Shell) -> ExtensionBuilder {
+        self.shell = Some(shell);
+        self
+    }
+
     /// The input filter, php's `sapi_module.input_filter` as `ext/filter`'s
     /// `MINIT` registers `php_sapi_filter` (`sapi_register_input_filter`):
     /// each variable php registers from what a host described, a query
@@ -1147,6 +1178,7 @@ impl ExtensionBuilder {
             cached: self.cached,
             fatal_logged: self.fatal_logged,
             program_ended: self.program_ended,
+            shell: self.shell,
             input_filter: self.input_filter,
             treat_data: self.treat_data,
             upload: self.upload,

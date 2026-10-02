@@ -611,6 +611,9 @@ pub(crate) struct Shared {
     /// `CG(skip_shebang)` for every file a request compiles, which the
     /// host asked for ([`EngineBuilder::skip_shebang`]).
     pub(crate) shebang: php_compile::Shebang,
+    /// The interactive shell the bundle provides, where the host carries
+    /// php's table of shell callbacks ([`EngineBuilder::cli_shell`]).
+    pub(crate) shell: Option<crate::api::abi::Shell>,
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
     /// wrote there over the host's values, as opcache's handlers log a
@@ -2095,6 +2098,7 @@ pub struct EngineBuilder {
     additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
+    cli_shell: bool,
     configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
@@ -2214,6 +2218,18 @@ impl EngineBuilder {
     #[must_use]
     pub fn skip_shebang(mut self) -> EngineBuilder {
         self.shebang = php_compile::Shebang::Skipped;
+        self
+    }
+
+    /// The host carries php's table of shell callbacks, the CLI's
+    /// `php_cli_get_shell_callbacks` (`Z/sapi/cli/php_cli.c:110`), which
+    /// an extension's [`Shell`](crate::api::abi::Shell) fills: every body
+    /// write is shown to the shell's `write` before it reaches the sink,
+    /// and [`Engine::has_shell`] answers whether `-a` has a shell to
+    /// serve ([`CommandLine::Shell`](crate::CommandLine::Shell)).
+    #[must_use]
+    pub fn cli_shell(mut self) -> EngineBuilder {
+        self.cli_shell = true;
         self
     }
 
@@ -2337,6 +2353,10 @@ impl EngineBuilder {
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(MAX_ACCELERATED_FILES, &functions, &classes);
+        let shell = self
+            .cli_shell
+            .then(|| extensions.iter().filter_map(|e| e.shell).next_back())
+            .flatten();
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -2362,6 +2382,7 @@ impl EngineBuilder {
                 sapi_names,
                 build_defs: BuildDefs::of(self.configure),
                 shebang: self.shebang,
+                shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 configuration: configuration.table,
@@ -2689,6 +2710,7 @@ impl Engine {
             additional_functions: Vec::new(),
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
+            cli_shell: false,
             configure: &[],
             #[cfg(feature = "witness-trace")]
             trace_to: None,
@@ -2821,6 +2843,14 @@ impl Engine {
     #[must_use]
     pub fn startup_errors(&self) -> &str {
         &self.shared.startup_errors
+    }
+
+    /// Whether `cli_shell_callbacks.cli_shell_run` is set: the host
+    /// carries the table ([`EngineBuilder::cli_shell`]) and an extension
+    /// of the bundle filled it, which `do_cli` asks of `-a`.
+    #[must_use]
+    pub fn has_shell(&self) -> bool {
+        self.shared.shell.is_some()
     }
 
     /// `ini_get()` outside any request: the value each request starts
@@ -3745,7 +3775,7 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
 /// (`Z/main/main.c:2621-2645`): required as `require` resolves it and
 /// served where the program is, and whether it ran to its end; an entry
 /// left empty is nothing to serve.
-fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
+pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
     let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
