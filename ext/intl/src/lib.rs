@@ -31,6 +31,7 @@
 // areas land one at a time over them (#1574).
 mod breakiterator;
 mod collator;
+mod common_date;
 #[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
@@ -43,6 +44,7 @@ mod iterator;
 mod listformatter;
 mod locale;
 mod normalizer;
+mod timezone;
 mod transliterator;
 mod uchar;
 mod utf8;
@@ -320,6 +322,7 @@ pub fn extension() -> Extension {
     let builder = idn::functions(builder);
     let builder = locale::functions(builder);
     let builder = normalizer::functions(builder);
+    let builder = timezone::functions(builder);
     let builder = transliterator::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
     // NumberFormatter, IntlListFormatter, Normalizer, Locale,
@@ -335,6 +338,7 @@ pub fn extension() -> Extension {
         .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
         .class::<transliterator::Transliterator>()
+        .class::<timezone::IntlTimeZone>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
         .class::<breakiterator::IntlBreakIterator>()

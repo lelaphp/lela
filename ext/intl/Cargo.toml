@@ -16,6 +16,10 @@ workspace = true
 # The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `php_date.h`, which `common_date.cpp`, `timezone_class.cpp` and
+# `calendar_methods.cpp` include for a `DateTime`'s and a `DateTimeZone`'s
+# time and zone (design §4.10).
+php_ext_date = { path = "../date" }
 
 # ICU is the keg the oracle links (icu4c@78), found by `build.rs` through
 # pkg-config and bound in `src/ffi/` alone, and php's intl C++ is built by

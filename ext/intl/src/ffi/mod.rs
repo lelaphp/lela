@@ -36,6 +36,7 @@ pub(crate) use icu;
 
 pub(crate) mod breakiterator;
 pub(crate) mod collator;
+pub(crate) mod cpp;
 pub(crate) mod enumeration;
 pub(crate) mod formatter;
 pub(crate) mod grapheme;
@@ -43,6 +44,7 @@ pub(crate) mod idn;
 pub(crate) mod listformatter;
 pub(crate) mod locale;
 pub(crate) mod normalizer;
+pub(crate) mod timezone;
 pub(crate) mod transliterator;
 pub(crate) mod uchar;
 

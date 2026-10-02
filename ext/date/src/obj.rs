@@ -40,9 +40,11 @@ pub(crate) struct DateState {
 /// payload is one, inside the `sizeof` php allocates (design §5.13).
 pub(crate) type DateObj = Box<DateState>;
 
-/// What a `DateTimeZone` holds, `php_timezone_obj`'s `type` and `tzi`.
+/// What a `DateTimeZone` holds, `php_timezone_obj`'s `type` and `tzi`:
+/// a zone of the database, an offset from UTC in seconds, or an
+/// abbreviation with its offset and whether it is daylight time.
 #[derive(Clone)]
-pub(crate) enum TzKind {
+pub enum TzKind {
     Id(Arc<Zone>),
     Offset(i64),
     Abbr {

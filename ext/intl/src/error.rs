@@ -10,6 +10,7 @@
 use std::any::Any;
 use std::fmt::Write as _;
 
+use php_ext::abi::OrFalse;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
@@ -279,4 +280,66 @@ pub(crate) fn parse_error(pe: &crate::ffi::ParseError) -> String {
         crate::ffi::to_utf8(&c[..end]).unwrap_or_default()
     };
     parse_error_text(pe.line, pe.offset, &context(&pe.pre), &context(&pe.post))
+}
+
+/// The `intl_error *outside_error` php hands a function that may fail on
+/// its caller's behalf (`common_date.cpp`, `timezone_class.cpp`): none,
+/// so the request's error alone is set; a local one; or an object's.
+pub(crate) enum Outside<'a> {
+    Request,
+    Local(&'a mut IntlError),
+    Object(
+        PhpObject,
+        fn(&mut Request, PhpObject) -> Option<&mut IntlError>,
+    ),
+}
+
+impl Outside<'_> {
+    /// The error an object of payload `P` carries.
+    pub(crate) fn of<P: Carrier>(object: PhpObject) -> Outside<'static> {
+        Outside::Object(object, carried::<P>)
+    }
+
+    /// `intl_errors_set(err, code, msg)`: the outside error's code and
+    /// message, then the request's, which raises.
+    pub(crate) fn set(
+        &mut self,
+        req: &mut Request,
+        code: Code,
+        message: &str,
+    ) -> Result<(), Thrown> {
+        let text = prefixed(req, message);
+        let error = match self {
+            Outside::Request => None,
+            Outside::Local(error) => Some(&mut **error),
+            Outside::Object(object, carried) => carried(req, *object),
+        };
+        if let Some(error) = error {
+            error.code = code;
+            error.message = Some(Box::new(text));
+        }
+        set(req, code, message)
+    }
+
+    /// `intl_error_get_code(err)`: the outside error's, zero for none.
+    pub(crate) fn code(&mut self, req: &mut Request) -> Code {
+        match self {
+            Outside::Request => Code::ZERO,
+            Outside::Local(error) => error.code,
+            Outside::Object(object, carried) => {
+                carried(req, *object).map_or(Code::ZERO, |e| e.code)
+            }
+        }
+    }
+}
+
+/// What a native answers for a check that failed: `false` for
+/// `Err(None)`, where php's `INTL_CHECK_STATUS` and its kin
+/// `RETURN_FALSE`, and the throwable for `Err(Some(..))`.
+pub(crate) fn or_false<T>(answer: Result<T, Option<Thrown>>) -> Result<OrFalse<T>, Thrown> {
+    match answer {
+        Ok(value) => Ok(OrFalse::Value(value)),
+        Err(None) => Ok(OrFalse::False),
+        Err(Some(thrown)) => Err(thrown),
+    }
 }

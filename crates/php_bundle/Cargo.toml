@@ -129,7 +129,7 @@ xsl = ["dep:php_ext_xsl", "libxml", "dom"] # php_xsl.c: ZEND_MOD_REQUIRED("libxm
 tidy = ["dep:php_ext_tidy"] # the `php` binary and the phpt lane, as php builds it with --with-tidy over the keg's libtidy (design §7.2, revision 72; #1540)
 soap = ["dep:php_ext_soap", "libxml", "date"] # the `php` binary and the phpt lane, as php builds it with --enable-soap; soap.c ZEND_MOD_REQUIRED("date") and ("libxml"), php's own C ported over ext/libxml (design §7.2, revision 72; #1540, #1562)
 gd = ["dep:php_ext_gd"] # the `php` binary and the phpt lane, as php builds it with --enable-gd --with-external-gd over the keg's libgd (design §7.2, revision 75; #1573, #1575)
-intl = ["dep:php_ext_intl"] # the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
+intl = ["dep:php_ext_intl", "date"] # common_date.cpp, timezone_class.cpp and calendar_methods.cpp include ext/date/php_date.h; the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
