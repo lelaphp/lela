@@ -444,7 +444,7 @@ static INFO: &[Def] = &[
 /// `phpdbg_set_commands`, whose parent is php's row 17, `clear`
 /// (`Z/sapi/phpdbg/phpdbg_set.c:28-46`).
 static SET: &[Def] = &[
-    sub(&ROOT[17], "prompt", Some(b'p'), "|s", unsupported),
+    sub(&ROOT[17], "prompt", Some(b'p'), "|s", set_prompt),
     sub(&ROOT[17], "pagination", Some(b'P'), "|b", unsupported),
     sub(&ROOT[17], "color", Some(b'c'), "ss", set_color),
     sub(&ROOT[17], "colors", Some(b'C'), "|b", set_colors),
@@ -1770,6 +1770,38 @@ fn help(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
 /// `PHPDBG_COMMAND(set)`: a word no row of `set` names.
 fn set(_: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
     out::error(b"No set command selected!");
+    Ret::Success
+}
+
+/// `PHPDBG_SET(prompt)`: the prompt as the prompt shows it, or its text
+/// from here, a byte past ASCII shown as `?` as `phpdbg_prompt()` sets it.
+///
+/// ```php
+/// echo "x\n";
+/// ```
+/// ```request phpdbg
+/// set prompt
+/// set prompt dbg>
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Current prompt: prompt>%s
+/// prompt> dbg> x
+/// [Script ended normally]
+/// dbg>
+/// ```
+fn set_prompt(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        Some(Param::Str(text)) => {
+            s.prompt = text
+                .iter()
+                .map(|b| if *b & 0x80 == 0 { *b } else { b'?' })
+                .collect();
+        }
+        _ => out::writeln(&[&b"Current prompt: "[..], &s.prompt, b" "].concat()),
+    }
     Ret::Success
 }
 
