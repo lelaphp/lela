@@ -18,7 +18,7 @@ use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, PhpObject, PhpString, TypeTag, Value};
 use crate::engine::MethodAt;
 
 /// A hooked property as an object's class holds it, what
@@ -991,7 +991,7 @@ fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
 /// One row of [`Request::hooked_object_rows`]: the name as declared,
 /// the value, one owner the caller's, and for a declared row the class
 /// that declared it and its visibility, none for a dynamic one.
-pub(crate) type HookedRow = (PhpString, Value, Option<(ClassId, Visibility)>);
+pub(crate) type HookedRow = (Key, Value, Option<(ClassId, Visibility)>);
 
 /// Whose a key of `zho_build_properties_ex`'s table is: php keys the
 /// table by the mangled name, so a public property, the protected one
@@ -1250,7 +1250,7 @@ impl Request {
         let placed = self.placed_properties(class).to_vec();
         let mut rows = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
-            let interned = self.interned(&name)?;
+            let interned = Key::Str(self.interned(&name)?);
             if let Some(hooked) = self.row_hooked(declaring, &name) {
                 if hooked.is_virtual && hooked.get.is_none() {
                     continue;
@@ -1282,17 +1282,16 @@ impl Request {
             rows.push((interned, value, Some((declaring, visibility))));
         }
         if let Some(table) = object.heap().properties() {
-            let dynamic: Vec<(PhpString, Value)> = table
+            let dynamic: Vec<(Key, Value)> = table
                 .iter()
-                .filter_map(|(key, z)| match key {
-                    php_heap::Key::Str(s) => Some((PhpString::of(s), Value::of_zval(z))),
-                    php_heap::Key::Long(_) => None,
-                })
+                .map(|(key, z)| (Key::of(key), Value::of_zval(z)))
                 .collect();
-            for (name, value) in dynamic {
+            for (key, value) in dynamic {
                 self.addref(&value);
-                self.addref(&Value::string(name));
-                rows.push((name, value, None));
+                if let Key::Str(name) = key {
+                    self.addref(&Value::string(name));
+                }
+                rows.push((key, value, None));
             }
         }
         Ok(Some(rows))
@@ -1331,7 +1330,7 @@ impl Request {
     pub(crate) fn hooked_properties_for(
         &mut self,
         object: PhpObject,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
         if !self.class_has_hooks(object.class()) {
             return Ok(None);
         }
@@ -1347,7 +1346,12 @@ impl Request {
         };
         let mut out = Vec::with_capacity(rows.len());
         let mut held = Vec::with_capacity(rows.len() * 2);
-        for (name, value, declared) in rows {
+        for (key, value, declared) in rows {
+            let Key::Str(name) = key else {
+                held.push(value);
+                out.push((key, value));
+                continue;
+            };
             let prefix = match declared {
                 Some((_, Visibility::Protected)) => Some(b"\0*\0".to_vec()),
                 Some((declaring, Visibility::Private)) => self
@@ -1362,7 +1366,7 @@ impl Request {
                 name
             };
             held.push(value);
-            out.push((key, value));
+            out.push((Key::Str(key), value));
         }
         let Some(call) = self.vm.serving_call_mut() else {
             for value in held {

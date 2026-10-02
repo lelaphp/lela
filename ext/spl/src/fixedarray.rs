@@ -233,9 +233,12 @@ impl SplFixedArray {
         if with(req, this, |a| a.elements.is_empty())? {
             let props = Std.get_properties(req, this)?;
             let mut elements = Vec::with_capacity(props.len());
-            for (name, value) in props {
+            for (key, value) in props {
                 elements.push(crate::copied(req, value));
-                Std.unset_property(req, this, name.as_bytes())?;
+                match key {
+                    Key::Str(name) => Std.unset_property(req, this, name.as_bytes())?,
+                    Key::Int(_) => this.unset_row(req, &key)?,
+                }
             }
             let allocation = laid(req, elements.len())?;
             lay(req, this, elements, allocation)?;

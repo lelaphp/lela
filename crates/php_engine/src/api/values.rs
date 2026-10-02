@@ -1220,7 +1220,7 @@ impl PhpObject {
     /// `get_object_vars` from inside the class: views, no owner taken.
     /// A declared name is the interned string php's is, so the `Err` is
     /// the memory limit refusing the intern.
-    pub fn props(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    pub fn props(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         req.object_entries(self.0)
     }
 
@@ -1434,8 +1434,9 @@ impl PhpObject {
         req.replace_table(*self, table)
     }
 
-    /// One row of the property table by key, `zend_symtable_find_ind`:
-    /// no handler, hook or visibility in the way, a declared property
+    /// One row of the property table by key, `zend_hash_find_ind`
+    /// (`zend_hash_index_find` for an integer key): no handler, hook or
+    /// visibility in the way, a declared property
     /// under its mangled name, a view; `None` for a key the table has
     /// not and for a declared slot nothing holds. What `ArrayObject`
     /// reads its backing object through.
@@ -1457,8 +1458,9 @@ impl PhpObject {
     }
 
     /// One row of the property table written by key,
-    /// `zend_symtable_update_ind`: a declared slot under its mangled name
-    /// written raw, its declared type, `readonly` and hooks left
+    /// `zend_hash_update_ind`, and `zend_hash_index_update` for an
+    /// integer key, which is a row of its own and never the string that
+    /// spells it: a declared slot under its mangled name written raw, its declared type, `readonly` and hooks left
     /// unconsulted, and any other key a dynamic property laid down with
     /// no `__set` served and no deprecation raised. `value` is the
     /// table's from here, and what the row held is released after the
@@ -1486,9 +1488,10 @@ impl PhpObject {
     }
 
     /// One row of the property table removed by key,
-    /// `zend_symtable_del_ind`: a declared slot left uninitialised with
-    /// no `__unset` served, a dynamic property removed, what either
-    /// held released; a key the table has not is nothing.
+    /// `zend_hash_del_ind` (`zend_hash_index_del` for an integer key): a
+    /// declared slot left uninitialised with no `__unset` served, a
+    /// dynamic property removed, what either held released; a key the
+    /// table has not is nothing.
     ///
     /// ```php
     /// #[AllowDynamicProperties] class U { public $a = 1; public $b = 2; public function __unset($k) { echo "__unset $k\n"; } }
@@ -1508,7 +1511,7 @@ impl PhpObject {
     }
 
     /// One row of the property table made a reference in place,
-    /// `ZVAL_MAKE_REF` over what `zend_symtable_find_ind` finds, `null`
+    /// `ZVAL_MAKE_REF` over what `zend_hash_find_ind` finds, `null`
     /// laid down where the table has none: the place a write through an
     /// `ArrayObject` over an object reaches. The cell is handed back
     /// with one more owner, the caller's.
@@ -1540,7 +1543,7 @@ impl PhpObject {
     }
 
     /// Where the row `key` stands in the object's property table, the
-    /// declared slot or the dynamic entry, `zend_symtable_find_ind`'s
+    /// declared slot or the dynamic entry, `zend_hash_find_ind`'s
     /// `zval *` behind the `IS_INDIRECT`; a row the table has none of,
     /// or a slot nothing wrote, laid down as `null` first, as
     /// `spl_array_get_dimension_ptr` does under a write fetch.

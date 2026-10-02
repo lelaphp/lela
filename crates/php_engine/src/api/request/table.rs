@@ -1,6 +1,6 @@
 //! An object's property table read and written as a table, php's
-//! `zobj->properties` under `zend_symtable_find_ind`,
-//! `zend_symtable_update_ind` and `zend_symtable_del_ind`: no handler, no
+//! `zobj->properties` under `zend_hash_find_ind`, `zend_hash_update_ind`
+//! and `zend_hash_del_ind` and their `zend_hash_index_*` twins: no handler, no
 //! `__get` or `__set`, no hook, no visibility and no declared type in the
 //! way, which is how `spl_array.c` reads and writes an `ArrayObject`'s
 //! backing object. php's table holds an `IS_INDIRECT` row per declared
@@ -13,10 +13,12 @@
 //! copies of the declared rows ([`php_heap::DeclaredRows::Copied`]) is
 //! read and written as it stands, every key its own row.
 //!
-//! The dynamic table keys a numeric name by its decimal string where
-//! php's `zend_symtable_update` makes it an integer key, since every
-//! reader of an object's dynamic table here reads string keys, as php's
-//! `zend_symtable_to_proptable` leaves the table a cast makes.
+//! A key is the table's as it is handed over, `zend_hash_update` for a
+//! string and `zend_hash_index_update` for an integer, so an integer key
+//! is a row of its own beside the string that spells it, as
+//! `object_properties_load` and `zend_hash_copy` leave php's table. A
+//! caller that reads a key as a property name spells an integer in
+//! decimal first, as `spl_array`'s `get_hash_key` does for an object.
 //!
 //! Every access first initialises a lazy object and goes on with what
 //! that answers, the ghost or the proxy's instance, since php reaches the
@@ -49,22 +51,19 @@ impl Request {
     /// The row `key` names on `object`: the declared slot
     /// whose mangled name is the key, `\0*\0p` for a protected property
     /// and `\0C\0p` for a private one declared by `C`, or the dynamic
-    /// table's key, a number spelt in decimal.
-    fn table_row_of(&mut self, object: PhpObject, key: &Key) -> Result<Row, Thrown> {
+    /// table's key, an integer one an index row.
+    fn table_row_of(&self, object: PhpObject, key: &Key) -> Row {
         let class = object.class();
         let object_rows = object.heap().declared_rows();
         let name = match key {
             Key::Str(name) => *name,
-            Key::Int(n) => {
-                let spelt = PhpString::new(self, n.to_string().as_bytes())?;
-                return Ok(Row::Dynamic(php_heap::Key::Str(spelt.heap())));
-            }
+            Key::Int(n) => return Row::Dynamic(php_heap::Key::Long(*n)),
         };
         let bytes = name.as_bytes();
         // A table that holds copies of the declared rows answers every
         // key itself, as php's plain values do.
         if object_rows == php_heap::DeclaredRows::Copied {
-            return Ok(Row::Dynamic(php_heap::Key::Str(name.heap())));
+            return Row::Dynamic(php_heap::Key::Str(name.heap()));
         }
         for (at, (declaring, property)) in self.placed_properties(class).iter().enumerate() {
             let prefix: Vec<u8> = match property.visibility {
@@ -79,10 +78,10 @@ impl Request {
                 && bytes.starts_with(&prefix)
                 && bytes[prefix.len()..] == *property.name.0
             {
-                return Ok(Row::Slot(u32::try_from(at).unwrap_or(u32::MAX)));
+                return Row::Slot(u32::try_from(at).unwrap_or(u32::MAX));
             }
         }
-        Ok(Row::Dynamic(php_heap::Key::Str(name.heap())))
+        Row::Dynamic(php_heap::Key::Str(name.heap()))
     }
 
     /// [`PhpObject::row`]: `zend_symtable_find_ind`, a view.
@@ -93,7 +92,7 @@ impl Request {
     ) -> Result<Option<Value>, Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        Ok(match self.table_row_of(object, key)? {
+        Ok(match self.table_row_of(object, key) {
             Row::Slot(i) => {
                 let z = o.slot(i);
                 (!z.is_undef()).then(|| Value::of_zval(z))
@@ -118,7 +117,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let placed = self
             .table_owner(object)
-            .and_then(|object| Ok((object, self.table_row_of(object, key)?)));
+            .map(|object| (object, self.table_row_of(object, key)));
         let (object, row) = match placed {
             Ok(placed) => placed,
             Err(thrown) => {
@@ -144,7 +143,7 @@ impl Request {
     pub(crate) fn table_unset_row(&mut self, object: PhpObject, key: &Key) -> Result<(), Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        match self.table_row_of(object, key)? {
+        match self.table_row_of(object, key) {
             Row::Slot(i) => {
                 if !o.slot(i).is_undef() {
                     Heap::object_set_slot(&mut Hooks(self), o, i, php_heap::Zval::UNDEF);
@@ -193,7 +192,7 @@ impl Request {
     ) -> Result<php_heap::ZvalRef, Thrown> {
         let object = self.table_owner(object)?;
         let o = object.heap();
-        let place = match self.table_row_of(object, key)? {
+        let place = match self.table_row_of(object, key) {
             Row::Slot(i) => o.slot_ref(i),
             Row::Dynamic(k) => {
                 let table = self.separated_properties(o)?;
@@ -222,7 +221,7 @@ impl Request {
         key: &Key,
     ) -> Result<PhpRef, Thrown> {
         let object = self.table_owner(object)?;
-        if let Row::Slot(i) = self.table_row_of(object, key)?
+        if let Row::Slot(i) = self.table_row_of(object, key)
             && let Some((typed, name)) = self.slot_typed_property(object.class(), i)
             && let Some(at) = object.heap().slot_ref(i)
         {

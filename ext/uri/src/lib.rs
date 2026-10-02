@@ -641,9 +641,9 @@ fn serialized_uri(data: PhpArray) -> Option<Vec<u8>> {
 /// was never set.
 fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (name, value) in this.props(req)? {
+    for (key, value) in this.props(req)? {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     if !is_set::<P>(req, this) {
         return Ok(out);

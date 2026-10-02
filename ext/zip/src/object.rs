@@ -247,7 +247,7 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
         refresh(req, object)?;
         Std.get_properties(req, object)
     }

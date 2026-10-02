@@ -384,9 +384,9 @@ fn class_name(req: &Request, object: PhpObject) -> String {
 /// array with one more owner of each value.
 fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (name, value) in object.props(req)? {
+    for (key, value) in object.props(req)? {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        out.set(req, key, value)?;
     }
     Ok(out)
 }

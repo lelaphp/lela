@@ -22,7 +22,7 @@ use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::{Thrown, throw_error};
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
 pub(crate) const SKIP_INITIALIZATION_ON_SERIALIZE: i64 = 1 << 3;
@@ -175,7 +175,7 @@ impl Request {
     pub(crate) fn properties_no_lazy_init(
         &mut self,
         object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
         if object.heap().laziness() == Laziness::Eager {
             let table = self.object_handlers(object.heap());
             return table.get_properties(self, object);

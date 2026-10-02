@@ -1321,11 +1321,18 @@ impl Table {
         }
     }
 
-    /// `zend_symtable_find_ind`, a view.
+    /// `zend_symtable_find_ind`, a view; over an object an integer
+    /// offset is the name spelt in decimal, as `get_hash_key` spells it
+    /// for one, and so for [`Table::set`] and [`Table::unset`].
     fn get(self, req: &mut Request, key: &Key) -> Result<Option<Value>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.get(key)),
-            Table::Props(object) => object.row(req, key),
+            Table::Props(object) => {
+                let name = key.to_prop_name(req)?;
+                let row = object.row(req, &Key::Str(name));
+                req.release(Value::string(name));
+                row
+            }
         }
     }
 
@@ -1338,7 +1345,18 @@ impl Table {
                 array.set(req, key, value)?;
                 store(req, owner, array)
             }
-            Table::Props(object) => object.set_row(req, key, value),
+            Table::Props(object) => {
+                let name = match key.to_prop_name(req) {
+                    Ok(name) => name,
+                    Err(thrown) => {
+                        req.release(value);
+                        return Err(thrown);
+                    }
+                };
+                let written = object.set_row(req, &Key::Str(name), value);
+                req.release(Value::string(name));
+                written
+            }
         }
     }
 
@@ -1356,7 +1374,12 @@ impl Table {
                 array.unset(req, key)?;
                 store(req, owner, array)
             }
-            Table::Props(object) => object.unset_row(req, key),
+            Table::Props(object) => {
+                let name = key.to_prop_name(req)?;
+                let unset = object.unset_row(req, &Key::Str(name));
+                req.release(Value::string(name));
+                unset
+            }
         }
     }
 

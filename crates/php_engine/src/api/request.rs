@@ -2286,7 +2286,7 @@ pub struct Request {
 /// One row of an object's property table as [`Request::property_rows`]
 /// reads it: the name, the value, and for a declared slot the class
 /// that declared it and its visibility.
-pub(crate) type PropertyRow = (PhpString, Value, Option<(ClassId, Visibility)>);
+pub(crate) type PropertyRow = (Key, Value, Option<(ClassId, Visibility)>);
 
 /// What called the native being served ([`Request::native_caller`]):
 /// a user function's frame and its arguments, a code frame, or another
@@ -11879,7 +11879,7 @@ impl Request {
             let slot = placed
                 .iter()
                 .skip(cursor)
-                .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                .position(|(_, p)| key_names(&name, &p.name.0))
                 .map(|found| found + cursor);
             if let Some(slot) = slot {
                 cursor = slot + 1;
@@ -11891,10 +11891,14 @@ impl Request {
             let declaring = slot
                 .and_then(|slot| placed.get(slot))
                 .map(|(declaring, _)| *declaring);
-            if !self.property_row_visible(class, name.as_bytes(), declaring) {
+            // An integer key is no name `zend_check_property_access`
+            // is asked about.
+            if let Key::Str(name) = name
+                && !self.property_row_visible(class, name.as_bytes(), declaring)
+            {
                 continue;
             }
-            let key = php_heap::Key::Str(name.heap());
+            let key = name.heap();
             let walked = match slot.and_then(|slot| u32::try_from(slot).ok()) {
                 Some(slot) if !o.slot(slot).is_undef() => Walked::Slot(slot),
                 _ if o.properties().is_some_and(|table| table.contains(key)) => {
@@ -12116,12 +12120,6 @@ impl Request {
                 || self.wrong_name(object.class(), name))
     }
 
-    /// The properties in order, the declared slots that hold a value
-    /// then the dynamic table, which is the order
-    /// `rebuild_object_properties` lays the table out in. Views, and a
-    /// declared name is the interned string php's `prop_info->name` is,
-    /// never refcounted, so a caller that takes an owner of it takes
-    /// none; the `Err` is the memory limit refusing the intern.
     /// The rows `get_properties` answers for `object`, each beside the
     /// declared slot it is, the class that declared what stands there
     /// and its visibility, or none for a dynamic row: the rows of the
@@ -12145,7 +12143,7 @@ impl Request {
                 let slot = placed
                     .iter()
                     .skip(at)
-                    .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                    .position(|(_, p)| key_names(&name, &p.name.0))
                     .map(|i| i + at);
                 let declared = slot.and_then(|i| {
                     at = i + 1;
@@ -12156,7 +12154,46 @@ impl Request {
             .collect())
     }
 
-    pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    /// The properties in order, the declared slots that hold a value
+    /// then the dynamic table, which is the order
+    /// `rebuild_object_properties` lays the table out in. Views, and a
+    /// declared name is the interned string php's `prop_info->name` is,
+    /// never refcounted, so a caller that takes an owner of it takes
+    /// none; the `Err` is the memory limit refusing the intern. A
+    /// dynamic row is keyed as the table holds it, so an integer key,
+    /// which `object_properties_load` and `zend_hash_copy` write with
+    /// `zend_hash_index_update`, stays an integer beside the string that
+    /// spells it, and a property access, which names a string, misses it.
+    ///
+    /// ```php
+    /// $g = unserialize('C:3:"GMP":23:{s:1:"2";a:1:{i:46;i:7;}}');
+    /// @$g->{46} = 8;
+    /// var_dump($g);
+    /// foreach ($g as $k => $v) var_dump($k);
+    /// var_dump(get_object_vars(clone $g), (array)$g, $g->{46});
+    /// ```
+    /// ```expect
+    /// object(GMP)#1 (3) {
+    ///   [46]=>
+    ///   int(7)
+    ///   ["46"]=>
+    ///   int(8)
+    ///   ["num"]=>
+    ///   string(1) "2"
+    /// }
+    /// int(46)
+    /// string(2) "46"
+    /// array(1) {
+    ///   [46]=>
+    ///   int(8)
+    /// }
+    /// array(1) {
+    ///   [46]=>
+    ///   int(8)
+    /// }
+    /// int(8)
+    /// ```
+    pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(Key, Value)>, Thrown> {
         let mut entries = Vec::new();
         // A table that holds copies of the declared rows is read alone,
         // as php reads the plain values its `zend_array_dup` left.
@@ -12175,13 +12212,11 @@ impl Request {
             }
             let interned = self.heap.intern(name);
             let name = self.fatal_of(interned).map(PhpString::of)?;
-            entries.push((name, Value::of_zval(z)));
+            entries.push((Key::Str(name), Value::of_zval(z)));
         }
         if let Some(table) = o.properties() {
             for (k, z) in &table {
-                if let php_heap::Key::Str(s) = k {
-                    entries.push((PhpString::of(s), Value::of_zval(z)));
-                }
+                entries.push((Key::of(k), Value::of_zval(z)));
             }
         }
         Ok(entries)
@@ -23343,6 +23378,12 @@ fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpA
         }
     }
     Ok(array)
+}
+
+/// Whether a row's key is the declared name `name`: a string key of its
+/// bytes, never an integer one.
+fn key_names(key: &Key, name: &[u8]) -> bool {
+    matches!(key, Key::Str(s) if s.as_bytes() == name)
 }
 
 #[cfg(test)]

@@ -1562,16 +1562,8 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        let built = properties(req, object)?;
-        built
-            .snapshot()
-            .into_iter()
-            .map(|(key, value)| match key {
-                Key::Str(name) => Ok((name, value)),
-                Key::Int(n) => Ok((PhpString::new(req, n.to_string().as_bytes())?, value)),
-            })
-            .collect()
+    ) -> Result<Vec<(Key, Value)>, Thrown> {
+        Ok(properties(req, object)?.snapshot())
     }
 
     fn get_properties_for(

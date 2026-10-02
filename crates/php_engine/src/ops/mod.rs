@@ -769,7 +769,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             // object is cast as it stands.
             let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
                 PropertiesFor::Rows(rows) => rows,
-                PropertiesFor::Standard => named_rows(req.properties_no_lazy_init(o)?),
+                PropertiesFor::Standard => req.properties_no_lazy_init(o)?,
                 // `zend_get_properties_for` answering `NULL`:
                 // `ZVAL_EMPTY_ARRAY` (`Z/Zend/zend_execute.h:280`).
                 PropertiesFor::Null => return Ok(PhpArray::empty()),
@@ -1607,7 +1607,7 @@ pub(crate) fn properties_answered(
             if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) =>
         {
             if let Some(rows) = req.hooked_properties_for(object)? {
-                return Ok(Answered::Own(named_rows(rows)));
+                return Ok(Answered::Own(rows));
             }
             table.get_properties(req, object)?
         }
@@ -1633,7 +1633,11 @@ pub(crate) fn properties_answered(
     let mangled = mangled_names(req, object);
     let mut at = 0;
     let mut out = Vec::with_capacity(rows.len());
-    for (name, entry) in rows {
+    for (key, entry) in rows {
+        let Key::Str(name) = key else {
+            out.push((key, entry));
+            continue;
+        };
         let name = match mangled_prefix(&mangled, &mut at, name) {
             Some(prefix) => {
                 let bytes = [prefix.as_slice(), name.as_bytes()].concat();
@@ -1710,14 +1714,6 @@ pub(crate) fn debug_rows(
         held
     };
     Ok((out, count))
-}
-
-/// Rows keyed by property names, each a string key as a property
-/// table holds it.
-pub(crate) fn named_rows(rows: Vec<(PhpString, Value)>) -> Vec<(Key, Value)> {
-    rows.into_iter()
-        .map(|(name, value)| (Key::Str(name), value))
-        .collect()
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the
