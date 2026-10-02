@@ -168,25 +168,45 @@ fn object_of(req: &mut Request, name: &[u8]) -> Result<PhpObject, Thrown> {
     new_object(req, class)
 }
 
-/// `php_gd_error_method` for each message libgd raised during a call: its
-/// debug, info and notice levels as `E_NOTICE`, its warning as
-/// `E_WARNING`, and the rest as `E_ERROR`.
-pub(crate) fn raise(req: &mut Request, reported: Reported) {
-    for (level, text) in reported {
-        let level = match level {
-            5..=7 => Level::Notice,
-            4 => Level::Warning,
-            _ => Level::Error,
-        };
-        docref(req, level, &String::from_utf8_lossy(&text));
+/// `php_gd_error_method`'s level for one of libgd's: `GD_DEBUG`,
+/// `GD_INFO` and `GD_NOTICE` as `E_NOTICE`, `GD_WARNING` as `E_WARNING`,
+/// and the rest, `GD_ERROR` and the three past it, as `E_ERROR`.
+const fn level(gd: i32) -> Level {
+    match gd {
+        5..=7 => Level::Notice,
+        4 => Level::Warning,
+        _ => Level::Error,
     }
 }
 
-/// `f` over libgd with its reports raised once it returns.
-pub(crate) fn gd<R>(req: &mut Request, f: impl FnOnce() -> R) -> R {
+/// `php_gd_error_method` for each message libgd raised during a call,
+/// through `php_verror` as the native's docref. An `E_ERROR` ends the
+/// request where php's bails out of libgd: what came before it stands,
+/// nothing after it is raised, and the native answers through the
+/// `Thrown`. No snippet reaches one through the keg's libgd 2.3.3, whose
+/// `GD_ERROR`s are its XPM reader, which php declares no native over
+/// without XPM support, and the PNG and JPEG handlers' unrecoverable
+/// jumps, so the level's mapping is pinned by the crate's test alone.
+pub(crate) fn raise(req: &mut Request, reported: Reported) -> Result<(), Thrown> {
+    for (gd, text) in reported {
+        let text = String::from_utf8_lossy(&text);
+        match level(gd) {
+            Level::Error => {
+                let function = req.active_function_name();
+                return Err(fatal(req, &format!("{function}(): {text}")));
+            }
+            level => docref(req, level, &text),
+        }
+    }
+    Ok(())
+}
+
+/// `f` over libgd with its reports raised once it returns; the `Err` is
+/// the `E_ERROR` that ended the request.
+pub(crate) fn gd<R>(req: &mut Request, f: impl FnOnce() -> R) -> Result<R, Thrown> {
     let (answer, reported) = ffi::capture(f);
-    raise(req, reported);
-    answer
+    raise(req, reported)?;
+    Ok(answer)
 }
 
 /// `overflow2` (`gd_compat.c`): whether `a * b` cannot be an `int`
@@ -258,7 +278,7 @@ fn imagecreatetruecolor(
     height: i64,
 ) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
     let (w, h) = sizes(req, width, height)?;
-    let image = gd(req, || Image::create_true_color(w, h));
+    let image = gd(req, || Image::create_true_color(w, h))?;
     wrap(req, image)
 }
 
@@ -316,7 +336,7 @@ fn imagecreate(
     height: i64,
 ) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
     let (w, h) = sizes(req, width, height)?;
-    let image = gd(req, || Image::create(w, h));
+    let image = gd(req, || Image::create(w, h))?;
     wrap(req, image)
 }
 
@@ -445,4 +465,29 @@ fn read_full(req: &mut Request, stream: Stream, buf: &mut [u8]) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Level, level};
+
+    /// `php_gd_error_method`'s switch over `gd_errors.h`'s levels,
+    /// `GD_EMERG` 0 to `GD_DEBUG` 7.
+    #[test]
+    fn libgd_levels_are_php_levels() {
+        let levels: Vec<Level> = (0..=7).map(level).collect();
+        assert_eq!(
+            levels,
+            [
+                Level::Error,
+                Level::Error,
+                Level::Error,
+                Level::Error,
+                Level::Warning,
+                Level::Notice,
+                Level::Notice,
+                Level::Notice,
+            ]
+        );
+    }
 }

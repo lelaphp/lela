@@ -72,7 +72,7 @@ fn imagetruecolortopalette(
         let text = format!("be greater than 0 and less than {}", i32::MAX);
         return Err(arg_value_error(req, 3, &text));
     }
-    if gd(req, || im.true_color_to_palette(dither, int(num_colors))) {
+    if gd(req, || im.true_color_to_palette(dither, int(num_colors)))? {
         return Ok(true);
     }
     docref(req, Level::Warning, "Couldn't convert to palette");
@@ -94,7 +94,7 @@ fn imagetruecolortopalette(
 #[php_function]
 fn imagepalettetotruecolor(req: &mut Request, image: Instance<GdImage>) -> Result<bool, Thrown> {
     let im = im(req, image)?;
-    Ok(gd(req, || im.palette_to_true_color()))
+    gd(req, || im.palette_to_true_color())
 }
 
 /// `imagecolormatch(GdImage $image1, GdImage $image2): true`: libgd's
@@ -122,7 +122,7 @@ fn imagecolormatch(
     image2: Instance<GdImage>,
 ) -> Result<True, Thrown> {
     let (a, b) = (im(req, image1)?, im(req, image2)?);
-    let (position, text) = match gd(req, || a.color_match(b)) {
+    let (position, text) = match gd(req, || a.color_match(b))? {
         -1 => (1, "be TrueColor"),
         -2 => (2, "be Palette"),
         -3 => (2, "be the same size as argument #1 ($im1)"),
@@ -185,7 +185,7 @@ fn imagefilledellipse(
     }
     let im = im(req, image)?;
     let at = [center_x, center_y, width, height].map(int);
-    gd(req, || im.draw(Draw::FilledEllipse, at, int(color)));
+    gd(req, || im.draw(Draw::FilledEllipse, at, int(color)))?;
     Ok(True)
 }
 
@@ -233,7 +233,7 @@ fn imagefilledarc(
         angle(start_angle),
         angle(end_angle),
     ];
-    gd(req, || im.arc(arc, int(color), Some(int(style))));
+    gd(req, || im.arc(arc, int(color), Some(int(style))))?;
     Ok(True)
 }
 
@@ -326,7 +326,7 @@ fn color(
 ) -> Result<i64, Thrown> {
     let im = im(req, image)?;
     let channels = rgba(req, channels, 2)?;
-    Ok(i64::from(gd(req, || im.color(op, channels))))
+    Ok(i64::from(gd(req, || im.color(op, channels))?))
 }
 
 /// `imagecolorallocatealpha(GdImage $image, int $red, int $green, int
@@ -452,7 +452,7 @@ fn copy(
     size: [i64; 4],
 ) -> Result<True, Thrown> {
     let (d, s) = (im(req, dst)?, im(req, src)?);
-    gd(req, || d.copy(s, op, at.map(int), size.map(int)));
+    gd(req, || d.copy(s, op, at.map(int), size.map(int)))?;
     Ok(True)
 }
 
@@ -587,7 +587,7 @@ fn imagepalettecopy(
     src: Instance<GdImage>,
 ) -> Result<(), Thrown> {
     let (d, s) = (im(req, dst)?, im(req, src)?);
-    gd(req, || d.palette_copy(s));
+    gd(req, || d.palette_copy(s))?;
     Ok(())
 }
 
@@ -913,7 +913,7 @@ fn imagesetpixel(
     color: i64,
 ) -> Result<True, Thrown> {
     let im = im(req, image)?;
-    gd(req, || im.set_pixel(int(x), int(y), int(color)));
+    gd(req, || im.set_pixel(int(x), int(y), int(color)))?;
     Ok(True)
 }
 
@@ -933,7 +933,7 @@ fn draw(
         im.set_anti_aliased(c);
         c = -7;
     }
-    gd(req, || im.draw(op, at.map(int), c));
+    gd(req, || im.draw(op, at.map(int), c))?;
     Ok(True)
 }
 
@@ -1077,7 +1077,7 @@ fn imagearc(
         angle(start_angle),
         angle(end_angle),
     ];
-    gd(req, || im.arc(arc, int(color), None));
+    gd(req, || im.arc(arc, int(color), None))?;
     Ok(True)
 }
 
@@ -1285,7 +1285,7 @@ fn polygon(
         im.set_anti_aliased(c);
         c = -7;
     }
-    gd(req, || im.polygon(&mut list, c, filled));
+    gd(req, || im.polygon(&mut list, c, filled))?;
     Ok(true)
 }
 
@@ -1461,7 +1461,7 @@ fn text(
                     y = y.wrapping_sub(f.size().0);
                 }
             }
-        });
+        })?;
         Ok(True)
     })
 }
@@ -1725,7 +1725,7 @@ fn imagecopyresized(
         }
     }
     let at = [dst_x, dst_y, src_x, src_y].map(int);
-    gd(req, || d.copy(s, Copy::Resized, at, size.map(int)));
+    gd(req, || d.copy(s, Copy::Resized, at, size.map(int)))?;
     Ok(True)
 }
 

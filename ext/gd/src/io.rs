@@ -131,7 +131,7 @@ fn imagecreatefromstring(
         docref(req, Level::Warning, "Data is not in a recognized format");
         return Ok(OrFalse::False);
     };
-    let image = gd(req, || Image::decode(format, data.as_bytes()));
+    let image = gd(req, || Image::decode(format, data.as_bytes()))?;
     if image.is_none() {
         let text = format!("Passed data is not in \"{name}\" format");
         docref(req, Level::Warning, &text);
@@ -181,7 +181,7 @@ fn create_from(
         }
         other => other,
     };
-    let image = gd(req, || Image::decode(format, data.as_bytes()));
+    let image = gd(req, || Image::decode(format, data.as_bytes()))?;
     stream.free(req);
     if image.is_none() {
         let text = format!(
@@ -562,7 +562,7 @@ fn write(
     how: Encode,
 ) -> Result<bool, Thrown> {
     let im = im(req, image)?;
-    let bytes = gd(req, || im.encode(how)).unwrap_or_default();
+    let bytes = gd(req, || im.encode(how))?.unwrap_or_default();
     sink.emit(req, &bytes);
     Ok(true)
 }
@@ -628,7 +628,7 @@ fn imagexbm(
     let name = filename
         .map(|p| p.0.as_bytes().to_vec())
         .unwrap_or_default();
-    let bytes = gd(req, || im.xbm(&name, int(fg)));
+    let bytes = gd(req, || im.xbm(&name, int(fg)))?;
     sink.emit(req, &bytes);
     Ok(true)
 }
@@ -841,7 +841,7 @@ fn output_gd(
         }
         None => Sink::Output,
     };
-    let bytes = gd(req, || im.encode(how)).unwrap_or_default();
+    let bytes = gd(req, || im.encode(how))?.unwrap_or_default();
     sink.emit(req, &bytes);
     Ok(true)
 }
