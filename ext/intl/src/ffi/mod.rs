@@ -35,6 +35,7 @@ macro_rules! icu {
 pub(crate) use icu;
 
 pub(crate) mod breakiterator;
+pub(crate) mod calendar;
 pub(crate) mod collator;
 pub(crate) mod cpp;
 pub(crate) mod enumeration;

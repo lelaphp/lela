@@ -30,6 +30,7 @@
 // The error state and the binding's base are what every area calls; the
 // areas land one at a time over them (#1574).
 mod breakiterator;
+mod calendar;
 mod collator;
 mod common_date;
 #[allow(dead_code)]
@@ -310,6 +311,7 @@ pub fn extension() -> Extension {
     // intlgregcal_*, collator_*, intl_*, datefmt_*, numfmt_*,
     // grapheme_*, idn_*, locale_*, msgfmt_*, normalizer_*,
     // resourcebundle_*, intltz_*, transliterator_*.
+    let builder = calendar::functions(builder);
     let builder = collator::functions(builder);
     let builder = builder.functions(vec![
         intl_get_error_code::declared(),
@@ -339,6 +341,8 @@ pub fn extension() -> Extension {
         .class::<locale::Locale>()
         .class::<transliterator::Transliterator>()
         .class::<timezone::IntlTimeZone>()
+        .class::<calendar::IntlCalendar>()
+        .class::<calendar::IntlGregorianCalendar>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
         .class::<breakiterator::IntlBreakIterator>()
