@@ -4,18 +4,156 @@
 //! error reads to start on a line of its own; an op array's listing goes
 //! to stderr, where `zend_dump_op_array` writes it. The program's output comes
 //! through [`Sink`] as `php_sapi_phpdbg_ub_write` sends it, `P_STDOUT`.
+//!
+//! A notice and an error are coloured, as php colours them whether or not
+//! stdout is a terminal, while the session's [`Colours`] are on: `-b`
+//! starts them off, `set colors` turns them, and each element's colour is
+//! a row of php's table ([`COLOURS`]) that `set color` and
+//! `phpdbg_color()` choose. The prompt is never coloured: the oracle's
+//! phpdbg is built with libedit, under which `phpdbg_get_prompt` writes
+//! it plain (`Z/sapi/phpdbg/phpdbg_utils.c:321-331`).
 
 use std::cell::Cell;
 use std::io::Write;
 
 use php_sapi::{Aborted, OutputSink, ResponseHead};
 
+/// A row of php's colour table (`colors[]`,
+/// `Z/sapi/phpdbg/phpdbg_utils.c:41-67`): its name and the SGR code it
+/// writes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Colour {
+    pub name: &'static str,
+    pub code: &'static str,
+}
+
+const fn colour(name: &'static str, code: &'static str) -> Colour {
+    Colour { name, code }
+}
+
+/// `colors[]`, in php's order; the first, `none`, is what an element is
+/// given for a name the table does not hold (`phpdbg_set_color_ex`).
+pub static COLOURS: [Colour; 25] = [
+    colour("none", "0;0"),
+    colour("white", "0;64"),
+    colour("white-bold", "1;64"),
+    colour("white-underline", "4;64"),
+    colour("red", "0;31"),
+    colour("red-bold", "1;31"),
+    colour("red-underline", "4;31"),
+    colour("green", "0;32"),
+    colour("green-bold", "1;32"),
+    colour("green-underline", "4;32"),
+    colour("yellow", "0;33"),
+    colour("yellow-bold", "1;33"),
+    colour("yellow-underline", "4;33"),
+    colour("blue", "0;34"),
+    colour("blue-bold", "1;34"),
+    colour("blue-underline", "4;34"),
+    colour("purple", "0;35"),
+    colour("purple-bold", "1;35"),
+    colour("purple-underline", "4;35"),
+    colour("cyan", "0;36"),
+    colour("cyan-bold", "1;36"),
+    colour("cyan-underline", "4;36"),
+    colour("black", "0;30"),
+    colour("black-bold", "1;30"),
+    colour("black-underline", "4;30"),
+];
+
+/// `phpdbg_get_color`: the row named exactly `name`.
+pub fn find_colour(name: &[u8]) -> Option<&'static Colour> {
+    COLOURS.iter().find(|row| row.name.as_bytes() == name)
+}
+
+/// An element php colours (`PHPDBG_COLOR_PROMPT`, `_ERROR`, `_NOTICE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Element {
+    Prompt,
+    Error,
+    Notice,
+}
+
+impl Element {
+    /// `phpdbg_get_element`: the element by its name, in any case.
+    pub fn named(name: &[u8]) -> Option<Element> {
+        [
+            (&b"prompt"[..], Element::Prompt),
+            (b"error", Element::Error),
+            (b"notice", Element::Notice),
+        ]
+        .into_iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(name))
+        .map(|(_, element)| element)
+    }
+}
+
+/// `PHPDBG_IS_COLOURED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colours {
+    On,
+    Off,
+}
+
+/// `PHPDBG_IS_COLOURED` and `PHPDBG_G(colors)`, the colour of the error
+/// and the notice; php keeps both across the cycles of its main loop
+/// (`PHPDBG_PRESERVE_FLAGS_MASK`, `Z/sapi/phpdbg/phpdbg.c:1679-1690`).
+/// The prompt's colour is not kept: nothing the oracle's build writes
+/// shows it.
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    colours: Colours,
+    error: &'static Colour,
+    notice: &'static Colour,
+}
+
+impl Palette {
+    /// `PHPDBG_DEFAULT_FLAGS` and the defaults `main` sets
+    /// (`Z/sapi/phpdbg/phpdbg.c:1330-1333`): red-bold and green.
+    const DEFAULT: Palette = Palette {
+        colours: Colours::On,
+        error: &COLOURS[5],
+        notice: &COLOURS[7],
+    };
+}
+
 thread_local! {
+    static PALETTE: Cell<Palette> = const { Cell::new(Palette::DEFAULT) };
     /// `PHPDBG_G(last_was_newline)`.
     static LAST_WAS_NEWLINE: Cell<bool> = const { Cell::new(true) };
     /// A write of the debugger's own through the program's output is
     /// under way, [`interruptible`].
     static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether notices and errors are coloured.
+pub fn colours() -> Colours {
+    PALETTE.get().colours
+}
+
+/// Notices and errors coloured from here, or not.
+pub fn set_colours(colours: Colours) {
+    PALETTE.set(Palette {
+        colours,
+        ..PALETTE.get()
+    });
+}
+
+/// `phpdbg_set_color`: the element's colour from here.
+pub fn set_colour(element: Element, colour: &'static Colour) {
+    let mut palette = PALETTE.get();
+    match element {
+        Element::Prompt => {}
+        Element::Error => palette.error = colour,
+        Element::Notice => palette.notice = colour,
+    }
+    PALETTE.set(palette);
+}
+
+/// `phpdbg_set_color_ex`: the element's colour by its name, `none` for a
+/// name the table does not hold.
+pub fn set_colour_named(element: Element, name: &[u8]) {
+    set_colour(element, find_colour(name).unwrap_or(&COLOURS[0]));
 }
 
 /// `f`, a write of the debugger's own that goes through the program's
@@ -72,26 +210,41 @@ pub fn writeln(bytes: &[u8]) {
     LAST_WAS_NEWLINE.set(true);
 }
 
-/// `phpdbg_notice` and `phpdbg_error`, which read alike without colours:
-/// a newline first where the last byte was none, then `[message]`.
-pub fn notice(message: &[u8]) {
+/// `phpdbg_process_print`'s `P_NOTICE` and `P_ERROR`: a newline first
+/// where the last byte was none, then `[message]`, inside the element's
+/// colour while colours are on.
+fn bracketed(message: &[u8], pick: fn(&Palette) -> &'static Colour) {
     if message.is_empty() {
         return;
     }
-    let mut line = Vec::with_capacity(message.len() + 4);
+    let mut line = Vec::with_capacity(message.len() + 16);
     if !LAST_WAS_NEWLINE.get() {
         line.push(b'\n');
     }
+    let palette = PALETTE.get();
+    let colour = pick(&palette);
+    if palette.colours == Colours::On {
+        line.extend_from_slice(format!("\x1b[{}m", colour.code).as_bytes());
+    }
     line.push(b'[');
     line.extend_from_slice(message);
-    line.extend_from_slice(b"]\n");
+    line.push(b']');
+    if palette.colours == Colours::On {
+        line.extend_from_slice(b"\x1b[0m");
+    }
+    line.push(b'\n');
     raw(&line);
     LAST_WAS_NEWLINE.set(true);
 }
 
-/// `phpdbg_error`, the same bytes as a notice.
+/// `phpdbg_notice`.
+pub fn notice(message: &[u8]) {
+    bracketed(message, |palette| palette.notice);
+}
+
+/// `phpdbg_error`: a notice's bytes in the error's colour.
 pub fn error(message: &[u8]) {
-    notice(message);
+    bracketed(message, |palette| palette.error);
 }
 
 /// The line the prompt reads was taken, `phpdbg_consume_stdin_line`: the

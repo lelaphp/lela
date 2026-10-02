@@ -145,10 +145,12 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     }
     // php's cycle ends with the request a run, a restart, `clean` or an
     // `exec` during a run stood in (`phpdbg_clean(1, ...)`): the module
-    // starts again, `PHPDBG_G(registered)` built empty with it.
+    // starts again, `PHPDBG_G(registered)` built empty with it, and the
+    // next cycle runs the init files first.
     let cycle_ended = s.execution != Execution::Not || s.stopped == Some(Stop::Clean);
     if cycle_ended {
         s.registered.clear();
+        s.init_due = true;
     }
     let execution = std::mem::replace(&mut s.execution, Execution::Not);
     if execution != Execution::Not {
@@ -194,6 +196,12 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
             | Stop::Restart(_)
             | Stop::RunWith(_),
         ) => {}
+    }
+    // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
+    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off as
+    // the line says, in the colours the last cycle left.
+    if cycle_ended {
+        out::set_colours(s.line_colours);
     }
 }
 
