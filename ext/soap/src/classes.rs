@@ -574,10 +574,13 @@ impl SoapVar {
 
 // ---- Soap\Url and Soap\Sdl
 
-/// `soap_url_object`: a parsed URL a client keeps between calls; empty
-/// until the client layer makes one.
+/// `soap_url_object`: the parsed URL a client keeps between calls, the
+/// one its kept connection goes to; none until a request made one.
 #[derive(Default)]
-pub(crate) struct UrlPayload;
+pub(crate) struct UrlPayload {
+    /// `uri`, php's `php_uri`, its `port` defaulted for the scheme.
+    pub(crate) uri: Option<php_ext_uri::UriStruct>,
+}
 
 /// `soap_sdl_object`: the description a client was made with.
 #[derive(Default)]
