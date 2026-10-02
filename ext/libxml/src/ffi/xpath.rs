@@ -4,10 +4,10 @@
 //! `registerPhpFunctionNS` name), as `dom_xpath_ext_function_php` reaches
 //! the object through `ctxt->context->userData`.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
 
-use super::{Alloc, Raised, cstr, sys};
+use super::{Alloc, Call, Io, Raised, cstr, loader, sys};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 
@@ -107,7 +107,17 @@ struct Session<'s> {
     req: *mut Request,
     handler: &'s mut Handler<'s>,
     thrown: Option<Thrown>,
+    /// The loads' record where the evaluation lends them the request
+    /// too ([`XPath::lend`]), so a throw from a function is the call's
+    /// first throw and silences what libxml raises after it; null
+    /// otherwise.
+    io: *mut Io,
 }
+
+/// An `xmlXPathFunction` over an untyped `xmlXPathParserContextPtr`, as a library over
+/// libxml2 registers one in an evaluator of its own: libxslt's
+/// `xsltRegisterExtModuleFunction` and `xsltRegisterExtFunction` take it.
+pub type Function = unsafe extern "C" fn(ctxt: *mut c_void, nargs: c_int);
 
 /// `xmlXPathContextPtr`, owned.
 pub struct XPath(NonNull<sys::xmlXPathContext>);
@@ -158,6 +168,57 @@ impl XPath {
     pub fn bare(doc: Node) -> Option<XPath> {
         // SAFETY: a live document.
         NonNull::new(unsafe { sys::xmlXPathNewContext(doc.raw().cast()) }).map(XPath)
+    }
+
+    /// `php:functionString`, `php:function` and a name
+    /// `registerPhpFunctionNS` registered, as a library over libxml2
+    /// registers them on its own evaluator, ext/xsl's libxslt under
+    /// `http://php.net/xsl` (`xsl_ext_function_string_php`,
+    /// `xsl_ext_function_object_php` and `xsl_ext_function_trampoline`),
+    /// each served through the handler [`XPath::lend`] lent.
+    pub const PHP_STRING: Function = foreign_string;
+    pub const PHP_OBJECT: Function = foreign_object;
+    pub const CUSTOM: Function = foreign_custom;
+
+    /// `f`, a call into a library over libxml2 that evaluates `XPath` in
+    /// `ctx`, an evaluator of its own, with the request lent to the functions
+    /// its expressions call, served through `handler`, and to libxml's
+    /// loads and saves, as [`Raised::capture_io`] lends it: the answer,
+    /// what libxml raised, and the first throwable a program's code raised
+    /// from inside the call, after which libxml's errors reach the list
+    /// alone.
+    ///
+    /// # Safety
+    /// `ctx` is a live `xmlXPathContextPtr` that nothing but `f` uses
+    /// meanwhile and whose `userData` its owner leaves alone.
+    pub unsafe fn lend<R>(
+        ctx: *mut c_void,
+        req: &mut Request,
+        handler: &mut Handler<'_>,
+        f: impl FnOnce() -> R,
+    ) -> (R, Vec<Raised>, Option<Thrown>) {
+        let ctx = ctx.cast::<sys::xmlXPathContext>();
+        let mut io = Io {
+            req: ptr::from_mut(req),
+            thrown: None,
+        };
+        let mut session = Session {
+            req: ptr::from_mut(req),
+            handler,
+            thrown: None,
+            io: &raw mut io,
+        };
+        // SAFETY: the caller's contract; the session outlives `f`, and the
+        // field is cleared before it goes.
+        unsafe { (*ctx).userData = ptr::from_mut(&mut session).cast() };
+        let (answer, raised) = {
+            let _creators = loader::Creators::set();
+            Call::run(None, &raw mut io, f)
+        };
+        // SAFETY: as above.
+        unsafe { (*ctx).userData = ptr::null_mut() };
+        let thrown = session.thrown.take();
+        (answer, raised, io.thrown.or(thrown))
     }
 
     /// `ctx->doc`.
@@ -252,6 +313,7 @@ impl XPath {
             req: ptr::from_mut(req),
             handler,
             thrown: None,
+            io: ptr::null_mut(),
         };
         // SAFETY: the live context this owns; the fields php sets for one
         // evaluation.
@@ -484,8 +546,14 @@ fn serve(ctxt: *mut sys::xmlXPathParserContext, nargs: c_int, called: Called, st
     match (session.handler)(req, called, args) {
         Ok(returned) => push(ctxt, returned),
         Err(thrown) => {
-            if session.thrown.is_none() {
-                session.thrown = Some(thrown);
+            // SAFETY: null, or the record `XPath::lend` keeps live for the
+            // call that reached here.
+            let slot = match unsafe { session.io.as_mut() } {
+                Some(io) => &mut io.thrown,
+                None => &mut session.thrown,
+            };
+            if slot.is_none() {
+                *slot = Some(thrown);
             }
             push(ctxt, Returned::Sentinel);
         }
@@ -517,4 +585,17 @@ unsafe extern "C" fn custom(ctxt: *mut sys::xmlXPathParserContext, nargs: c_int)
     // SAFETY: as above.
     let ns = unsafe { Alloc::bytes(c.functionURI) }.to_vec();
     serve(ctxt, nargs, Called::Custom { ns, name }, false);
+}
+
+unsafe extern "C" fn foreign_string(ctxt: *mut c_void, nargs: c_int) {
+    serve(ctxt.cast(), nargs, Called::Php { strings: true }, true);
+}
+
+unsafe extern "C" fn foreign_object(ctxt: *mut c_void, nargs: c_int) {
+    serve(ctxt.cast(), nargs, Called::Php { strings: false }, false);
+}
+
+unsafe extern "C" fn foreign_custom(ctxt: *mut c_void, nargs: c_int) {
+    // SAFETY: libxml's call of a function registered as `custom` is.
+    unsafe { custom(ctxt.cast(), nargs) };
 }

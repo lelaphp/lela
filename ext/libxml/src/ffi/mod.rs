@@ -54,7 +54,7 @@ pub use sys::{
 };
 pub use tree::{DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
 pub use writer::Emitter;
-pub use xpath::{Answer, Called, Handler, Item, Object, Operand, Returned, Scope, XPath};
+pub use xpath::{Answer, Called, Function, Handler, Item, Object, Operand, Returned, Scope, XPath};
 
 /// A copy of `bytes` up to its first NUL with the NUL after, which is
 /// what a C function handed a `zend_string`'s `char *` reads.
@@ -148,6 +148,29 @@ impl Library {
     #[must_use]
     pub fn escaped_has_scheme(source: &[u8]) -> bool {
         Uri::escaped_has_scheme(source)
+    }
+
+    /// `f` under the parse defaults ext/xsl's `importStylesheet` sets
+    /// around `xsltParseStylesheetDoc`: `PHP_LIBXML_SANITIZE_GLOBALS`,
+    /// then `xmlSubstituteEntitiesDefault(1)` and
+    /// `xmlLoadExtDtdDefaultValue = XML_DETECT_IDS | XML_COMPLETE_ATTRS`,
+    /// and `PHP_LIBXML_RESTORE_GLOBALS` after. libxml2 keeps both per
+    /// thread.
+    pub fn stylesheet_defaults<R>(f: impl FnOnce() -> R) -> R {
+        // SAFETY: no pointer argument; the thread's own default.
+        let substitute = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+        // SAFETY: the address of the thread's own default.
+        let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
+        // SAFETY: the thread's own global, read by copy.
+        let saved = unsafe { *load };
+        // SAFETY: as above; `XML_DETECT_IDS | XML_COMPLETE_ATTRS`.
+        unsafe { *load = 2 | 4 };
+        let answer = f();
+        // SAFETY: as above.
+        unsafe { *load = saved };
+        // SAFETY: as above.
+        unsafe { sys::xmlSubstituteEntitiesDefault(substitute) };
+        answer
     }
 
     /// `xmlParserVersion`, the library's own version string: `"20913"`.
@@ -538,6 +561,36 @@ impl Raised {
             Call::run(routing, &raw mut io, f)
         };
         (answer, raised, io.thrown)
+    }
+
+    /// [`Raised::capture_io`] for a library over libxml2 whose own parses
+    /// read through php's streams, ext/xsl's libxslt compiling a
+    /// stylesheet that imports another.
+    pub fn capture_request<R>(
+        req: &mut Request,
+        f: impl FnOnce() -> R,
+    ) -> (R, Vec<Raised>, Option<Thrown>) {
+        Raised::capture_io(req, None, f)
+    }
+
+    /// `php_libxml_ctx_error(NULL, "%s", message)` from the error handler
+    /// of a library over libxml2, which libxml's own capture does not
+    /// see: libxslt's `xsltGenericError`, which `xsl_libxslt_error_handler`
+    /// hands php's routing. It joins the errors of the capture running on
+    /// this thread, routed as the generic handler's, and is dropped where
+    /// none runs.
+    pub fn generic(message: &[u8]) {
+        let Some(call) = Call::current() else {
+            return;
+        };
+        // SAFETY: the record of the capture running on this thread, live
+        // while it runs, and nothing else borrows it during this callback.
+        let call = unsafe { &mut *call };
+        let mut error = Raised::internal(message);
+        if call.thrown() {
+            error.route = Route::Silent;
+        }
+        call.raised.push(error);
     }
 
     /// [`Raised::capture`] with the routes its errors take decided by
