@@ -287,6 +287,23 @@ impl Breakpoints {
         }
     }
 
+    /// `phpdbg_enable_breakpoint` and `phpdbg_disable_breakpoint`: the
+    /// breakpoint numbered `id`, where there is one, made to stop or not.
+    pub fn enable(&mut self, id: i64, on: bool) {
+        if let Some(brake) = self.list.iter_mut().find(|b| i64::from(b.id) == id) {
+            brake.disabled = !on;
+        }
+    }
+
+    /// Whether the breakpoint numbered `id` stops, none where there is no
+    /// such breakpoint (`phpdbg_find_breakbase`).
+    pub fn enabled(&self, id: i64) -> Option<bool> {
+        self.list
+            .iter()
+            .find(|b| i64::from(b.id) == id)
+            .map(|b| !b.disabled)
+    }
+
     /// `phpdbg_reset_breakpoints`: every hit count back to zero.
     pub fn reset_hits(&mut self) {
         for brake in &mut self.list {

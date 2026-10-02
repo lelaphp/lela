@@ -80,6 +80,66 @@ impl Request {
         }
     }
 
+    /// phpdbg's init file's code block (`Z/sapi/phpdbg/phpdbg_prompt.c:206-214`)
+    /// over `zend_eval_stringl(code, len, NULL, name)`: `code` compiled as
+    /// an `eval`'s statements under `name`, with no `return` around it, and
+    /// served by the loop bound to the engine at the top of the request
+    /// ([`Request::nothing_executing`]). What it leaves uncaught stays
+    /// pending, as php's `EG(exception)` stands after `zend_execute`, and so
+    /// does what the compiler threw, `zend_eval_stringl`'s `FAILURE`; with
+    /// something pending already, nothing is served. A fatal, the
+    /// compiler's or one served, or an exit, at which phpdbg's loop bails
+    /// out, leaves the code as `zend_bailout` leaves for the `zend_try`
+    /// around phpdbg's init, which catches it here: the status stays what
+    /// the fatal or the exit wrote, and the exit stays pending.
+    pub(crate) fn evaluate_code_in(&mut self, name: &[u8], code: &[u8]) -> Evaluated {
+        if self.is_pending() {
+            return Evaluated::Rendered;
+        }
+        let ending = self.ending.take();
+        let served = self.nothing_executing(|req| req.code_over(name, code));
+        self.ending = ending;
+        match served {
+            Ok(Evaluated::NotCompiled) => {
+                self.catch_bailout();
+                Evaluated::NotCompiled
+            }
+            Ok(evaluated) if !self.bailing_out() && !self.unwind_exit() => evaluated,
+            _ => {
+                self.catch_bailout();
+                Evaluated::BailedOut
+            }
+        }
+    }
+
+    /// The code block itself, on a frame of its own over the global table.
+    fn code_over(&mut self, name: &[u8], code: &[u8]) -> Result<Evaluated, Fatal> {
+        let shared = Arc::clone(&self.shared);
+        let unit = match shared.compile_for(self, code, name, SourceKind::Eval) {
+            Ok(unit) => unit,
+            Err(refused) => {
+                let thrown = self.refused_include(&refused, name, SourceKind::Eval);
+                self.leave_pending(&thrown);
+                return Ok(Evaluated::NotCompiled);
+            }
+        };
+        if !crate::engine::note_compiled(self, &unit, SourceKind::Eval) || self.bailing_out() {
+            return Ok(Evaluated::NotCompiled);
+        }
+        let standing = self.vm.frames().len();
+        let callee = self.push_frame(unit)?;
+        let reenter = self.shared.reenter;
+        let served = reenter(self, callee);
+        while self.vm.frames().len() > standing {
+            let top = self.stack.current();
+            self.leave_frame(top);
+        }
+        served?;
+        let returned = std::mem::replace(&mut self.returned, Value::null());
+        self.release(returned);
+        Ok(Evaluated::Rendered)
+    }
+
     /// The evaluation itself, in `scope`'s frame as a nested code frame
     /// is, or, with none, on a frame of its own over the global table as
     /// `zend_execute` serves an op array with no frame standing.

@@ -95,6 +95,11 @@ fn permitted(s: &mut Session, question: &[u8]) -> bool {
     }
 }
 
+/// `run`'s question where php takes something to be executing.
+pub fn restart_permitted(s: &mut Session) -> bool {
+    permitted(s, b"Do you really want to restart execution?")
+}
+
 /// How the prompt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -205,6 +210,8 @@ pub enum InitLine {
     Done,
     /// A command ended the request: the session's `stopped` says why.
     Stopped,
+    /// `run` runs the program inline, and the reading goes on after it.
+    Ran,
     /// A command named nothing php's table resolves, or what it named was
     /// held to the wrong parameters, and no registered function took the
     /// line: the error, which `phpdbg_line_init` writes with the line.
@@ -242,6 +249,9 @@ pub fn init_line(s: &mut Session, here: &mut Here<'_>, commands: Vec<Command>) -
         };
         if s.stopped.is_some() {
             return InitLine::Stopped;
+        }
+        if s.inline_run {
+            return InitLine::Ran;
         }
         match asked {
             Ret::Success => {}
@@ -448,9 +458,9 @@ static SET: &[Def] = &[
     sub(&ROOT[17], "pagination", Some(b'P'), "|b", unsupported),
     sub(&ROOT[17], "color", Some(b'c'), "ss", set_color),
     sub(&ROOT[17], "colors", Some(b'C'), "|b", set_colors),
-    sub(&ROOT[17], "break", Some(b'b'), "l|b", unsupported),
-    sub(&ROOT[17], "breaks", Some(b'B'), "|b", unsupported),
-    sub(&ROOT[17], "quiet", Some(b'q'), "|b", unsupported),
+    sub(&ROOT[17], "break", Some(b'b'), "l|b", set_break),
+    sub(&ROOT[17], "breaks", Some(b'B'), "|b", set_breaks),
+    sub(&ROOT[17], "quiet", Some(b'q'), "|b", set_quiet),
     sub(&ROOT[17], "stepping", Some(b's'), "|s", unsupported),
     sub(&ROOT[17], "refcount", Some(b'r'), "|b", unsupported),
     sub(&ROOT[17], "lines", Some(b'l'), "|l", unsupported),
@@ -795,7 +805,7 @@ fn call_registered(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> bo
 /// [Script ended normally]
 /// prompt>
 /// ```
-fn bailed_out(s: &mut Session) {
+pub fn bailed_out(s: &mut Session) {
     if s.execution == Execution::Not {
         s.execution = Execution::BailedOut;
     }
@@ -861,6 +871,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     );
     s.exec = Some(resolved);
     s.stdin_code = None;
+    s.refused.clear();
     s.context = if in_execution(s, here) {
         Context::Announced
     } else {
@@ -903,6 +914,7 @@ fn stdin(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(b"Standard input code".to_vec());
     s.stdin_code = Some(code);
     s.context = Context::Unannounced;
+    s.refused.clear();
     s.stopped = Some(Stop::Exec);
     Ret::Success
 }
@@ -938,9 +950,18 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
     if in_execution(s, here) {
-        if permitted(s, b"Do you really want to restart execution?") {
+        if restart_permitted(s) {
             s.stopped = Some(Stop::Restart(args));
         }
+        return Ret::Success;
+    }
+    // In the init files, php's `run` compiles the context and runs it
+    // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
+    // stopping but for a throwable nothing catches, and the reading goes
+    // on after it.
+    if s.initializing && s.program_held && args.is_none() {
+        compiled_in_init(s);
+        s.inline_run = true;
         return Ret::Success;
     }
     match here {
@@ -1149,6 +1170,11 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
 /// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
+    // `phpdbg_execute_ex` bails out at its entry while the cycle is being
+    // cleaned, and `ev`'s `zend_catch` writes nothing.
+    if s.init_cleaning {
+        return Ret::Success;
+    }
     let Some((req, under)) = here.serving() else {
         crate::host::idle(s, Command::Eval(code.to_vec()));
         return Ret::Success;
@@ -1303,15 +1329,32 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// `PHPDBG_PRINT(exec)`.
+/// `PHPDBG_PRINT(exec)`. In the init files, before php's cycle has
+/// compiled the context, `phpdbg_compile` compiles it here first and
+/// writes its notice, once a cycle.
 fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let Some(exec) = s.exec.clone() else {
         out::error(b"No execution context set");
         return Ret::Success;
     };
+    // The compiler refuses the context again, its log written again.
+    if s.context == Context::Refused {
+        refused_again(s, Some(here));
+        return Ret::Success;
+    }
     let Some(req) = here.request() else {
+        // After a `run` in the init files, no request stands, and
+        // `phpdbg_compile` compiles the context again.
+        if s.init_cleaning
+            && let Some(code) = s.ran_code.clone()
+        {
+            compiled_in_init(s);
+            out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
+            out::dump(&code.dump);
+        }
         return Ret::Success;
     };
+    compiled_in_init(s);
     let entry = tier::entry(req);
     let main = main_frame(req, entry);
     if let Some(code) = tier::frame_code(req, main) {
@@ -1319,6 +1362,69 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::dump(&code.dump);
     }
     Ret::Success
+}
+
+/// What `phpdbg_compile` writes where the compiler refuses the context:
+/// the diagnostic, displayed or logged, and where it was logged, the
+/// listing where nothing executes and, once the session is fully started,
+/// a prompt inside the log, under which nothing more is logged; and the
+/// status 255. Inside the log already, nothing is written.
+///
+/// ```php
+/// $a = 1;
+/// $b =
+/// ```
+/// ```request phpdbg
+/// print exec
+/// c
+/// print exec
+/// ev 1
+/// c
+/// q
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt>%s
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt> [Not running]
+/// prompt>%s
+/// Parse error: syntax error, unexpected end of file in %SCRATCH%/witness.php on line 3
+/// prompt> 1
+/// prompt> [Not running]
+/// prompt>
+/// ```
+pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
+    s.status = Some(255);
+    if out::logging() {
+        return;
+    }
+    // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
+    // listing and prompt, where the compiler's fatal was logged.
+    if out::replay(&s.refused) {
+        crate::list::code(s, NO_ACTIVE_FILE, 0);
+        if s.started
+            && let Some(here) = here
+        {
+            let _ = out::in_log(|| interactive(s, here));
+        }
+    }
+}
+
+/// `phpdbg_compile`'s notice where the init files compile the context,
+/// `PHPDBG_G(ops)` being empty until they have: once a cycle, whatever
+/// the cycle's own compile writes after them.
+pub fn compiled_in_init(s: &mut Session) {
+    if !s.initializing || std::mem::replace(&mut s.init_compiled, true) {
+        return;
+    }
+    if let Some(exec) = &s.exec {
+        let message = if s.stdin_code.is_some() {
+            b"Successful compilation of stdin input".to_vec()
+        } else {
+            [&b"Successful compilation of "[..], exec].concat()
+        };
+        out::notice(&message);
+    }
 }
 
 /// The bottom frame of the chain from `frame`, past any native between
@@ -1366,21 +1472,56 @@ fn main_frame(req: &Request, frame: FrameRef) -> FrameRef {
     at
 }
 
-/// `PHPDBG_PRINT(opline)`.
+/// `PHPDBG_PRINT(opline)`: the opline the run stands at, as
+/// `zend_dump_op_line` writes it, to stderr.
+///
+/// ```php
+/// function f($x) {
+///   $y = $x + 1;
+///   return $y;
+/// }
+/// echo f(1), "\n";
+/// echo "a\n";
+/// ```
+/// ```request phpdbg
+/// p o
+/// b f
+/// r
+/// p o
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Not Executing!]
+/// prompt> [Breakpoint #0 added at f]
+/// prompt> [Breakpoint #0 in f() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   $y = $x + 1;
+///  00004:   return $y;
+///  00005: }
+/// prompt> prompt>
+/// ```
+/// ```stderr
+/// L0003 0001 T2 = ADD CV0($x) int(1)
+/// ```
 fn print_opline(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let executing = here.executing();
     match here.standing() {
-        Some((req, frame)) if executing => {
-            if let (Some(code), Some(position)) =
-                (tier::frame_code(req, frame), tier::position(req, frame))
-                && let Some(line) = opline_line(&code.dump, position.opline)
-            {
-                out::writeln(line);
-            }
-        }
+        Some((req, frame)) if executing => print_opline_ex(req, frame),
         _ => out::error(b"Not Executing!"),
     }
     Ret::Success
+}
+
+/// `phpdbg_print_opline`'s `zend_dump_op_line`: the opline `frame`
+/// stands at, numbered and with its line, written to stderr, where
+/// `print opline` asks for it and where the loop reaches it stepping
+/// with quietness off.
+pub fn print_opline_ex(req: &Request, frame: FrameRef) {
+    if let (Some(code), Some(position)) = (tier::frame_code(req, frame), tier::position(req, frame))
+        && let Some(line) = opline_line(&code.dump, position.opline)
+    {
+        out::dump(&[line, b"\n"].concat());
+    }
 }
 
 /// The dump's line for the opline numbered `at`, `L0015 0001 ...`.
@@ -1964,6 +2105,173 @@ fn set_colors(_: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
             out::Colours::Off
         }),
         Some(_) => out::error(b"set colors used incorrectly: set colors <on|off>"),
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_SET(break)`: one breakpoint by its number enabled or
+/// disabled, or whether it is. A disabled one is listed so and stops
+/// nothing; the `break` lines a cycle's end exports it as say nothing
+/// of that, so the next cycle has it enabled again.
+///
+/// ```php
+/// function foo() { echo "foo\n"; }
+/// foo();
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// b foo
+/// set break 0
+/// set break 0 off
+/// set break 0
+/// set break 5
+/// set break 5 off
+/// set break x
+/// info break
+/// r
+/// info break
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at foo]
+/// prompt> Breakpoint #0 on
+/// prompt> prompt> Breakpoint #0 off
+/// prompt> [Failed to find breakpoint #5]
+/// prompt> prompt> [set break used incorrectly: set break [id] <on|off>]
+/// prompt> ------------------------------------------------
+/// Function Breakpoints:
+/// #0%sfoo [disabled]
+/// prompt> foo
+/// end
+/// [Script ended normally]
+/// prompt> ------------------------------------------------
+/// Function Breakpoints:
+/// #0%sfoo
+/// prompt> [Breakpoint #0 in foo() at %SCRATCH%/witness.php:2, hits: 1]
+/// >00002: function foo() { echo "foo\n"; }
+///  00003: foo();
+///  00004: echo "end\n";
+/// prompt>
+/// ```
+fn set_break(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params {
+        [Param::Num(id), Param::Num(on), ..] => s.breaks.enable(*id, *on != 0),
+        [Param::Num(id), ..] => match s.breaks.enabled(*id) {
+            Some(on) => out::writeln(
+                format!("Breakpoint #{id} {}", if on { "on" } else { "off" }).as_bytes(),
+            ),
+            None => out::error(format!("Failed to find breakpoint #{id}").as_bytes()),
+        },
+        _ => out::error(b"set break used incorrectly: set break [id] <on|off>"),
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_SET(breaks)`: every breakpoint enabled or disabled at once,
+/// or whether they are, `PHPDBG_IS_BP_ENABLED`: a flag of
+/// `PHPDBG_G(flags)`, which each cycle sets from the line again.
+///
+/// ```php
+/// function foo() { echo "foo\n"; }
+/// foo();
+/// echo "end\n";
+/// ```
+/// ```request phpdbg
+/// set breaks
+/// b foo
+/// set breaks off
+/// set breaks
+/// r
+/// set breaks
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Breakpoints on
+/// prompt> [Breakpoint #0 added at foo]
+/// prompt> prompt> Breakpoints off
+/// prompt> foo
+/// end
+/// [Script ended normally]
+/// prompt> Breakpoints on
+/// prompt> [Breakpoint #0 in foo() at %SCRATCH%/witness.php:2, hits: 1]
+/// >00002: function foo() { echo "foo\n"; }
+///  00003: foo();
+///  00004: echo "end\n";
+/// prompt>
+/// ```
+fn set_breaks(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        None => out::writeln(
+            format!(
+                "Breakpoints {}",
+                if s.breaks.disabled { "off" } else { "on" }
+            )
+            .as_bytes(),
+        ),
+        Some(Param::Num(on)) => s.breaks.disabled = *on == 0,
+        Some(_) => out::error(b"set breaks used incorrectly: set breaks <on|off>"),
+    }
+    Ret::Success
+}
+
+/// `PHPDBG_SET(quiet)`: `PHPDBG_IS_QUIET`, which `-v` clears and each
+/// cycle sets from the line again. Cleared, a step writes each opline
+/// the loop reaches until it stops ([`print_opline_ex`]).
+///
+/// ```php
+/// function f($x) {
+///   $y = $x + 1;
+///   return $y;
+/// }
+/// echo f(1), "\n";
+/// echo "a\n";
+/// echo "b\n";
+/// ```
+/// ```request phpdbg
+/// set quiet
+/// b f
+/// r
+/// set quiet off
+/// set quiet
+/// s
+/// set quiet on
+/// s
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> Quietness on
+/// prompt> [Breakpoint #0 added at f]
+/// prompt> [Breakpoint #0 in f() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   $y = $x + 1;
+///  00004:   return $y;
+///  00005: }
+/// prompt> prompt> Quietness off
+/// prompt> >00004:   return $y;
+///  00005: }
+///  00006: echo f(1), "\n";
+/// prompt> prompt> >00006: echo f(1), "\n";
+///  00007: echo "a\n";
+///  00008: echo "b\n";
+/// prompt>
+/// ```
+/// ```stderr
+/// L0003 0002 ASSIGN CV1($y) T2
+/// L0004 0003 RETURN CV1($y)
+/// ```
+fn set_quiet(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
+    match params.first() {
+        None => {
+            out::writeln(format!("Quietness {}", if s.quiet { "on" } else { "off" }).as_bytes());
+        }
+        Some(Param::Num(on)) => s.quiet = *on != 0,
+        Some(param) => out::error(
+            format!("Unsupported parameter type ({}) for command", param.kind()).as_bytes(),
+        ),
     }
     Ret::Success
 }

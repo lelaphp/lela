@@ -57,14 +57,34 @@ pub fn serve(engine: &Engine) -> i32 {
                 if let Some(args) = args {
                     set_arguments(&mut s, &args);
                 }
-                Plan::Run
+                if s.init_due
+                    && let Some(refused) = refused(engine, &s)
+                {
+                    s.refused = refused;
+                    s.context = Context::Refused;
+                    s.init_runs = true;
+                    Plan::Init
+                } else {
+                    Plan::Run
+                }
             }
             Some(Stop::Idle) => Plan::Idle,
             Some(Stop::Clean | Stop::Exec) | None => {
-                if s.exec.is_some() && s.context != Context::Refused {
-                    Plan::Hold
-                } else {
+                if s.exec.is_none() {
                     Plan::Idle
+                } else if s.context == Context::Refused {
+                    if s.refused.is_empty() {
+                        s.refused = refused(engine, &s).unwrap_or_default();
+                    }
+                    Plan::Idle
+                } else if s.init_due
+                    && let Some(refused) = refused(engine, &s)
+                {
+                    s.refused = refused;
+                    s.context = Context::Refused;
+                    Plan::Init
+                } else {
+                    Plan::Hold
                 }
             }
         };
@@ -80,7 +100,7 @@ pub fn serve(engine: &Engine) -> i32 {
         let Some(mut s) = session::take() else {
             return status;
         };
-        s.exit_status = observed.exit_code;
+        s.exit_status = s.status.take().unwrap_or(observed.exit_code);
         status = s.exit_status;
         ended(&mut s, plan, &observed);
         session::put(s);
@@ -168,6 +188,30 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
         }
         crate::watch::removed_at_end(s);
     }
+    if std::mem::take(&mut s.inline_run) {
+        inline_ran(s, plan);
+    } else {
+        stopped(s, execution, cycle_ended);
+    }
+    // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
+    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off and
+    // quietness is as the line says, in the colours the last cycle left;
+    // `set breaks off` goes with the tables. The breakpoints
+    // go out as `break` lines (`bp_tmp`), and the next cycle's module
+    // starts with its tables empty and `bp_count` at zero
+    // (`PHP_MINIT_FUNCTION(phpdbg)`, `php_phpdbg_globals_ctor`), its init
+    // files numbering from there before the lines are run again.
+    if cycle_ended {
+        out::set_colours(s.line_colours);
+        s.quiet = s.line_quiet;
+        s.carried = s.breaks.export();
+        s.breaks = crate::bp::Breakpoints::default();
+        s.vmret = 0;
+    }
+}
+
+/// What follows the request where it ended early or its run is over.
+fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
     match s.stopped {
         None if execution == Execution::Run => {
             prompt::run_queued(s);
@@ -197,19 +241,44 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
             | Stop::RunWith(_),
         ) => {}
     }
-    // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
-    // (`Z/sapi/phpdbg/phpdbg.c:1348-1349`), so colours are on or off as
-    // the line says, in the colours the last cycle left. The breakpoints
-    // go out as `break` lines (`bp_tmp`), and the next cycle's module
-    // starts with its tables empty and `bp_count` at zero
-    // (`PHP_MINIT_FUNCTION(phpdbg)`, `php_phpdbg_globals_ctor`), its init
-    // files numbering from there before the lines are run again.
-    if cycle_ended {
-        out::set_colours(s.line_colours);
-        s.carried = s.breaks.export();
-        s.breaks = crate::bp::Breakpoints::default();
-        s.vmret = 0;
+}
+
+/// What follows a `run` in the init files once the program it ran is
+/// over: its `phpdbg_clean` has the cycle cleaned, so the init files'
+/// lines after it are read under that ([`crate::init::resume`]); then a
+/// cycle that began with a run finds `in_execution` set and asks before
+/// it restarts, `-rr` quitting whatever the answer, and else the cycle's
+/// compile after the init files writes its notice, the first cycle's
+/// alone, and the prompt bails out at once, which ends the cycle. php
+/// loops so for as long as the init files run the program.
+fn inline_ran(s: &mut Session, plan: Plan) {
+    // The run left `in_execution` set, which a `run` after it asks about.
+    s.execution = Execution::Run;
+    crate::init::resume(s);
+    s.execution = Execution::Not;
+    if s.stopped.is_some() {
+        return;
     }
+    if plan == Plan::Run {
+        // `-rr` quits whatever the answer. Else a yes restarts with the
+        // run again and a no without it; the input's end bails out
+        // quitting, which the cycle being cleaned turns into its end, so
+        // the session goes on. A no alone reaches the module's shutdown
+        // with nothing quitting, and its notice.
+        let answer = input::ask(b"Do you really want to restart execution?");
+        if s.after_run == AfterRun::Quit {
+            s.stopped = Some(Stop::Quit);
+            return;
+        }
+        match answer {
+            input::Answer::Yes => s.stopped = Some(Stop::Restart(None)),
+            input::Answer::No => cycle_notice(),
+            input::Answer::End => {}
+        }
+        return;
+    }
+    crate::debugger::announce(s);
+    cycle_notice();
 }
 
 /// What `PHP_MSHUTDOWN_FUNCTION(phpdbg)` writes where the cycle ends and
@@ -244,6 +313,22 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
 fn cycle_notice() {
     out::notice(b"Script ended normally");
     input::forget();
+}
+
+/// What the compiler says where the execution context does not compile,
+/// learned from a lint of it while the session is out of its cell, so
+/// the log stops at no prompt: php runs the init files before its
+/// compile, so a context that will be refused has them run first and
+/// the log written after them, in a request of their own that the
+/// prompt then stands in ([`crate::debugger`]'s `Plan::Init`). None
+/// where it compiles.
+fn refused(engine: &Engine, s: &Session) -> Option<Vec<out::Written>> {
+    let mut description = describe(s, Plan::Hold);
+    description.file_handles = None;
+    description.exit_status = 0;
+    let mut kept = out::Kept::default();
+    let linted = engine.lint(description, &mut kept);
+    (linted.exit_code != 0).then_some(kept.written)
 }
 
 /// `run`'s arguments, split as php's `run` splits them
@@ -317,7 +402,7 @@ fn describe(s: &Session, plan: Plan) -> RequestDescription {
     let mut argv = vec![exec.clone()];
     argv.extend(s.args.iter().cloned());
     let (script_name, source) = match (plan, &s.stdin_code) {
-        (Plan::Idle, _) => (None, Some(b"<?php ".to_vec())),
+        (Plan::Idle | Plan::Init, _) => (None, Some(b"<?php ".to_vec())),
         (_, Some(code)) => (Some(exec.clone()), Some(code.clone())),
         (_, None) => (Some(exec.clone()), None),
     };
@@ -338,7 +423,14 @@ fn describe(s: &Session, plan: Plan) -> RequestDescription {
     RequestDescription {
         argv,
         env: std::env::vars_os()
-            .map(|(n, v)| (n.as_encoded_bytes().to_vec(), v.as_encoded_bytes().to_vec()))
+            .map(|(n, v)| {
+                let name = n.as_encoded_bytes().to_vec();
+                // `phpdbg_init`'s walk cut it at its first `:`.
+                match s.init_files.scan_dir_seen() {
+                    Some(dir) if name == b"PHP_INI_SCAN_DIR" => (name, dir),
+                    _ => (name, v.as_encoded_bytes().to_vec()),
+                }
+            })
             .collect(),
         cwd: std::env::current_dir().unwrap_or_default(),
         server: vec![

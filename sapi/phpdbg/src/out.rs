@@ -126,6 +126,24 @@ thread_local! {
     static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
     /// `PHPDBG_DISCARD_OUTPUT`, [`discarded`].
     static DISCARDING: Cell<bool> = const { Cell::new(false) };
+    /// `PG(in_error_log)`: a prompt inside `php_sapi_phpdbg_log_message`
+    /// stands, [`in_log`].
+    static IN_LOG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f` inside the host's log: `php_log_err` guards against itself, so
+/// whatever is logged while `f` runs, the compiler's refusal of the
+/// context among it, is logged nowhere.
+pub fn in_log<R>(f: impl FnOnce() -> R) -> R {
+    let outer = IN_LOG.replace(true);
+    let result = f();
+    IN_LOG.set(outer);
+    result
+}
+
+/// Whether a prompt inside the host's log stands.
+pub fn logging() -> bool {
+    IN_LOG.get()
 }
 
 /// `f` with `PHPDBG_DISCARD_OUTPUT` set: what phpdbg writes in it goes
@@ -296,7 +314,9 @@ impl OutputSink for Sink {
     /// (`Z/sapi/phpdbg/phpdbg.c:731-770`); what follows a fatal's is
     /// [`crate::debugger::fatal_logged`].
     fn log(&mut self, entry: &[u8]) {
-        error(entry);
+        if !logging() {
+            error(entry);
+        }
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
@@ -306,4 +326,59 @@ impl OutputSink for Sink {
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
         Some(Box::new(Sink))
     }
+}
+
+/// What a request wrote, one write at a time, on each of its streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    Out(Vec<u8>),
+    Log(Vec<u8>),
+    Err(Vec<u8>),
+}
+
+/// A sink that keeps what it is given and writes nothing: what the host
+/// serves to learn what the compiler would say, said later, through
+/// [`Sink`], where php says it.
+#[derive(Debug, Default)]
+pub struct Kept {
+    pub written: Vec<Written>,
+}
+
+impl OutputSink for Kept {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+        self.written.push(Written::Out(bytes.to_vec()));
+        Ok(())
+    }
+
+    fn flush(&mut self) {}
+
+    fn send_headers(&mut self, _: &ResponseHead) {}
+
+    fn log(&mut self, entry: &[u8]) {
+        self.written.push(Written::Log(entry.to_vec()));
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        self.written.push(Written::Err(bytes.to_vec()));
+    }
+}
+
+/// What a [`Kept`] sink kept, written as the request would have written
+/// it; whether any of it was logged.
+pub fn replay(written: &[Written]) -> bool {
+    let mut sink = Sink;
+    let mut logged = false;
+    for each in written {
+        match each {
+            Written::Out(bytes) => {
+                let _ = sink.write(bytes);
+            }
+            Written::Log(entry) => {
+                logged = true;
+                sink.log(entry);
+            }
+            Written::Err(bytes) => sink.write_stderr(bytes),
+        }
+    }
+    logged
 }
