@@ -1,17 +1,18 @@
 //! The readers and the encoders (`gd.c`'s `_php_image_create_from`,
 //! `_php_image_output` and the stream handling `gd_ctx.c` carried): a
 //! file or a string read through php's streams into libgd's readers, and
-//! libgd's bytes written to php's stdout, a path or a stream resource.
+//! libgd's bytes written to php's stdout, a path or a stream resource
+//! through a `gdIOCtx` as libgd writes them (`create_output_context`).
 
 use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::{Opening, Request, Stream};
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, PhpString, Value, ValueRef};
 
-use crate::ffi::{Encode, Format, Image, Rect};
-use crate::image::{GdImage, gd, im, int, wrap};
+use crate::ffi::{self, Encode, Format, GdFormat, Image, Rect, Reported};
+use crate::image::{GdImage, gd, im, int, raise, wrap};
 
 /// `imagetypes(): int`: the `IMG_*` bits of what the build reads and
 /// writes, no XPM.
@@ -488,37 +489,94 @@ fn imagecreatefromtga(
     create_from(req, filename, Format::Tga, "TGA")
 }
 
-/// Where an encoder's bytes go, what `create_output_context` makes.
-enum Sink {
+/// Where an encoder's bytes go, what `create_output_context` makes:
+/// the target, and the `gdIOCtx` php `ecalloc`s for it, which stands
+/// until `gd_free` and counts in the peak as php's does.
+struct Sink {
+    to: To,
+    ctx: Emalloc,
+}
+
+/// [`Sink`]'s target.
+enum To {
     /// The request's stdout, `php_write`.
     Output,
-    /// A stream, closed after the write where the native opened it.
+    /// A stream, closed by `gd_free` where the native opened it.
     Stream(Stream, bool),
 }
 
 impl Sink {
-    /// The bytes written, and the stream closed where it was opened here.
-    fn emit(self, req: &mut Request, bytes: &[u8]) {
-        match self {
-            Sink::Output => req.write(bytes),
-            Sink::Stream(stream, close) => {
-                if !bytes.is_empty() {
-                    let _ = stream.write(req, bytes);
-                }
-                if close {
+    /// The `gdIOCtx` made over `to`; the memory limit refusing it closes
+    /// the stream opened for it.
+    fn new(req: &mut Request, to: To) -> Result<Sink, Thrown> {
+        match Emalloc::new(req, ffi::CTX_SIZE) {
+            Ok(ctx) => Ok(Sink { to, ctx }),
+            Err(thrown) => {
+                if let To::Stream(stream, true) = to {
                     stream.free(req);
                 }
+                Err(thrown)
             }
         }
     }
 
-    /// A native refused after its sink was made: the stream it
-    /// opened closed.
-    fn drop_with(self, req: &mut Request, thrown: Thrown) -> Thrown {
-        if let Sink::Stream(stream, true) = self {
+    /// `putBuf`, and `putC` with its answer unread: how many bytes the
+    /// target took, `php_write` all of them, `php_stream_write` its own
+    /// count or `-1`.
+    fn put(&self, req: &mut Request, bytes: &[u8]) -> i32 {
+        let took = match self.to {
+            To::Output => {
+                req.write(bytes);
+                Some(bytes.len())
+            }
+            To::Stream(stream, _) => stream.write(req, bytes),
+        };
+        took.map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    }
+
+    /// `gd_free`: the stream closed where it was opened here, then the
+    /// `gdIOCtx` freed.
+    fn free(self, req: &mut Request) {
+        if let To::Stream(stream, true) = self.to {
             stream.free(req);
         }
+        self.ctx.free(req);
+    }
+
+    /// A native refused after its sink was made: `gd_free`, then the
+    /// refusal.
+    fn drop_with(self, req: &mut Request, thrown: Thrown) -> Thrown {
+        self.free(req);
         thrown
+    }
+
+    /// libgd writing through the `gdIOCtx`: each write after what libgd
+    /// reported before it, as `php_gd_error_method` raises it while
+    /// libgd runs, then what it reported after its last; an `E_ERROR`
+    /// ends the request there and nothing more reaches the target.
+    /// `gd_free` follows.
+    fn encode(
+        self,
+        req: &mut Request,
+        write: impl FnOnce(&mut ffi::Put<'_>) -> Reported,
+    ) -> Result<bool, Thrown> {
+        let mut ended = None;
+        let left = write(&mut |reported, bytes| {
+            if ended.is_some() {
+                return 0;
+            }
+            if let Err(thrown) = raise(req, reported) {
+                ended = Some(thrown);
+                return 0;
+            }
+            self.put(req, bytes)
+        });
+        let raised = match ended {
+            Some(thrown) => Err(thrown),
+            None => raise(req, left),
+        };
+        self.free(req);
+        raised.map(|()| true)
     }
 }
 
@@ -527,9 +585,9 @@ impl Sink {
 fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thrown> {
     let position = 2;
     match file.as_ref() {
-        ValueRef::Null => Ok(Some(Sink::Output)),
+        ValueRef::Null => Sink::new(req, To::Output).map(Some),
         ValueRef::Resource(_) => match Stream::from_value(req, file) {
-            Some(stream) => Ok(Some(Sink::Stream(stream, false))),
+            Some(stream) => Sink::new(req, To::Stream(stream, false)).map(Some),
             None => Err(php_ext::raising::throw_error(
                 req,
                 "TypeError",
@@ -541,9 +599,10 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
                 return Err(arg_type_error(req, position, "not contain null bytes"));
             }
             let path = path.as_bytes().to_vec();
-            Ok(req
-                .open_stream(&path, b"wb", false)?
-                .map(|s| Sink::Stream(s, true)))
+            match req.open_stream(&path, b"wb", false)? {
+                Some(stream) => Sink::new(req, To::Stream(stream, true)).map(Some),
+                None => Ok(None),
+            }
         }
         _ => {
             let name = value_name(req, file);
@@ -553,18 +612,19 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
     }
 }
 
-/// An encoding native's body after its checks: the image encoded and the bytes
-/// written.
+/// An encoding native's body after its checks: the image written
+/// through the sink's `gdIOCtx` as libgd encodes it.
 fn write(
     req: &mut Request,
     image: Instance<GdImage>,
     sink: Sink,
     how: Encode,
 ) -> Result<bool, Thrown> {
-    let im = im(req, image)?;
-    let bytes = gd(req, || im.encode(how))?.unwrap_or_default();
-    sink.emit(req, &bytes);
-    Ok(true)
+    let im = match im(req, image) {
+        Ok(im) => im,
+        Err(thrown) => return Err(sink.drop_with(req, thrown)),
+    };
+    sink.encode(req, |put| im.write(how, put))
 }
 
 /// The encoders that take `$file` and nothing it checks: the sink,
@@ -614,23 +674,25 @@ fn imagexbm(
     #[php(default = null)] foreground_color: Option<i64>,
 ) -> Result<bool, Thrown> {
     let im = im(req, image)?;
-    let sink = match &filename {
+    let to = match &filename {
         Some(path) => match req.open_stream(path.0.as_bytes(), b"wb", false)? {
-            Some(stream) => Sink::Stream(stream, true),
+            Some(stream) => To::Stream(stream, true),
             None => return Ok(false),
         },
-        None => Sink::Output,
+        None => To::Output,
     };
+    let sink = Sink::new(req, to)?;
     let fg = match foreground_color {
         Some(fg) => fg,
-        None => first_black(req, image)?,
+        None => match first_black(req, image) {
+            Ok(fg) => fg,
+            Err(thrown) => return Err(sink.drop_with(req, thrown)),
+        },
     };
     let name = filename
         .map(|p| p.0.as_bytes().to_vec())
         .unwrap_or_default();
-    let bytes = gd(req, || im.xbm(&name, int(fg)))?;
-    sink.emit(req, &bytes);
-    Ok(true)
+    sink.encode(req, |put| im.write_xbm(&name, int(fg), put))
 }
 
 /// `imageavif(GdImage $image, $file = null, int $quality = -1, int
@@ -708,6 +770,23 @@ fn imagegif(
 /// string(32) "e060947b2207d3318db986d00a9d2a26"
 /// string(32) "655bf8058aa70c8dfd289808418b92c4"
 /// imagepng(): Argument #3 ($quality) must be between -1 and 9
+/// ```
+///
+/// The bytes reach the sink as libgd writes them, so the peak is the
+/// `gdIOCtx` php allocates and what the sink holds, never the image whole:
+///
+/// ```php
+/// $i = imagecreatetruecolor(64, 64); $f = __DIR__ . '/w'; $h = fopen($f, 'w');
+/// imagepng($i, $h);
+/// $s = memory_get_usage(); memory_reset_peak_usage(); imagepng($i, $h); echo memory_get_peak_usage() - $s, "\n";
+/// ob_start(); imagepng($i); ob_end_clean();
+/// ob_start(); $s = memory_get_usage(); memory_reset_peak_usage(); imagepng($i); $p = memory_get_peak_usage() - $s; ob_end_clean(); echo $p, "\n";
+/// fclose($h); var_dump(filesize($f)); unlink($f);
+/// ```
+/// ```expect
+/// 64
+/// 64
+/// int(224)
 /// ```
 #[php_function]
 fn imagepng(
@@ -793,6 +872,20 @@ fn imagejpeg(
 /// ```expect
 /// string(10) "0000020180"
 /// ```
+///
+/// libgd writes a WBMP a byte at a time, `putC`, and each byte is one
+/// write to the stream:
+///
+/// ```php
+/// class C { public $context; static $n = []; function stream_open($p, $m, $o, &$op) { return true; } function stream_write($d) { self::$n[] = strlen($d); return strlen($d); } }
+/// stream_wrapper_register('cc', 'C');
+/// $i = imagecreate(9, 2); imagecolorallocate($i, 0, 0, 0);
+/// var_dump(imagewbmp($i, 'cc://x')); echo implode(',', C::$n), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// 1,1,1,1,1,1,1,1
+/// ```
 #[php_function]
 fn imagewbmp(
     req: &mut Request,
@@ -805,24 +898,28 @@ fn imagewbmp(
     };
     let fg = match foreground_color {
         Some(fg) => fg,
-        None => first_black(req, image)?,
+        None => match first_black(req, image) {
+            Ok(fg) => fg,
+            Err(thrown) => return Err(sink.drop_with(req, thrown)),
+        },
     };
     write(req, image, sink, Encode::Wbmp(int(fg)))
 }
 
 /// `_php_image_output`: `imagegd` and `imagegd2` write a path through
-/// `VCWD_FOPEN`, or stdout where none is given.
+/// `VCWD_FOPEN`, or stdout where none is given, from the temporary file
+/// libgd wrote whole; no `gdIOCtx`, as php makes none for them.
 fn output_gd(
     req: &mut Request,
     image: Instance<GdImage>,
     file: Option<&Path>,
-    how: Encode,
+    how: GdFormat,
 ) -> Result<bool, Thrown> {
     let im = im(req, image)?;
     let file = file
         .map(|p| p.0.as_bytes().to_vec())
         .filter(|p| !p.is_empty());
-    let sink = match &file {
+    let stream = match &file {
         Some(path) => {
             if req.check_open_basedir(path, true).is_err() {
                 docref(req, Level::Warning, "Invalid filename");
@@ -837,12 +934,28 @@ fn output_gd(
                 docref(req, Level::Warning, &text);
                 return Ok(false);
             };
-            Sink::Stream(stream, true)
+            Some(stream)
         }
-        None => Sink::Output,
+        None => None,
     };
-    let bytes = gd(req, || im.encode(how))?.unwrap_or_default();
-    sink.emit(req, &bytes);
+    let bytes = match gd(req, || im.encode(how)) {
+        Ok(bytes) => bytes.unwrap_or_default(),
+        Err(thrown) => {
+            if let Some(stream) = stream {
+                stream.free(req);
+            }
+            return Err(thrown);
+        }
+    };
+    match stream {
+        Some(stream) => {
+            if !bytes.is_empty() {
+                let _ = stream.write(req, &bytes);
+            }
+            stream.free(req);
+        }
+        None => req.write(&bytes),
+    }
     Ok(true)
 }
 
@@ -862,7 +975,7 @@ fn imagegd(
     image: Instance<GdImage>,
     #[php(default = null)] file: Option<Path>,
 ) -> Result<bool, Thrown> {
-    output_gd(req, image, file.as_ref(), Encode::Gd)
+    output_gd(req, image, file.as_ref(), GdFormat::Gd)
 }
 
 /// `imagegd2(GdImage $image, ?string $file = null,`
@@ -900,7 +1013,7 @@ fn imagegd2(
         req,
         image,
         file.as_ref(),
-        Encode::Gd2(int(chunk), int(mode)),
+        GdFormat::Gd2(int(chunk), int(mode)),
     )
 }
 
@@ -912,6 +1025,43 @@ fn imagegd2(
 /// ```
 /// ```expect
 /// string(12) "424d39000000"
+/// ```
+///
+/// A compressed palette image goes through libgd's temporary file, the
+/// `gdIOCtx` seeking none, and is copied out a kilobyte at a time; a sink
+/// that takes part of a write leaves what it took, and libgd's warning
+/// comes between the writes it follows and the next:
+///
+/// ```php
+/// class W {
+///     public $context;
+///     static $left = 1100;
+///     function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_write($d) { $n = min(strlen($d), self::$left); self::$left -= $n; echo strlen($d), " took $n\n"; return $n; }
+/// }
+/// stream_wrapper_register('ww', 'W');
+/// $i = imagecreate(1500, 2); imagecolorallocate($i, 1, 2, 3); imagecolorallocate($i, 9, 9, 9);
+/// for ($x = 0; $x < 1500; $x += 2) imagesetpixel($i, $x, 0, 1);
+/// var_dump(imagebmp($i, 'ww://x'));
+/// W::$left = 0;
+/// imagebmp($i, 'ww://x');
+/// ```
+/// ```expect
+/// 1024 took 1024
+/// 592 took 76
+/// 516 took 0
+///
+/// Warning: imagebmp(): gd-bmp write error
+///  in %s on line 11
+/// bool(true)
+/// 1024 took 0
+///
+/// Warning: imagebmp(): gd-bmp write error
+///  in %s on line 13
+/// 592 took 0
+///
+/// Warning: imagebmp(): gd-bmp write error
+///  in %s on line 13
 /// ```
 #[php_function]
 fn imagebmp(

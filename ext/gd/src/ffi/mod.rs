@@ -19,7 +19,7 @@
 // libgd's own names for its numbers: `r`, `g`, `b`, `a`, `cx`, `w`.
 #![allow(clippy::many_single_char_names)]
 
-use std::ffi::{CStr, CString, c_char, c_double, c_float, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_double, c_float, c_int, c_long, c_uint, c_void};
 use std::ptr::{self, NonNull};
 
 /// `gdMaxColors`.
@@ -82,18 +82,23 @@ struct GdFont {
     data: *mut c_char,
 }
 
-/// `gdIOCtx`, libgd's, reached only through its `gd_free`.
+/// `gdIOCtx` (`gd_io.h`): what libgd reads through and writes through.
+/// The encoders' is [`writing`]'s, built here as `create_output_context`
+/// builds php's.
 #[repr(C)]
 struct IoCtx {
-    get_c: *const c_void,
-    get_buf: *const c_void,
-    put_c: *const c_void,
-    put_buf: *const c_void,
-    seek: *const c_void,
-    tell: *const c_void,
+    get_c: Option<unsafe extern "C" fn(*mut IoCtx) -> c_int>,
+    get_buf: Option<unsafe extern "C" fn(*mut IoCtx, *mut c_void, c_int) -> c_int>,
+    put_c: Option<unsafe extern "C" fn(*mut IoCtx, c_int)>,
+    put_buf: Option<unsafe extern "C" fn(*mut IoCtx, *const c_void, c_int) -> c_int>,
+    seek: Option<unsafe extern "C" fn(*mut IoCtx, c_int) -> c_int>,
+    tell: Option<unsafe extern "C" fn(*mut IoCtx) -> c_long>,
     gd_free: Option<unsafe extern "C" fn(*mut IoCtx)>,
     data: *mut c_void,
 }
+
+/// `sizeof(gdIOCtx)`, what php's `ecalloc` of one counts.
+pub(crate) const CTX_SIZE: usize = std::mem::size_of::<IoCtx>();
 
 /// `gdPoint`.
 #[repr(C)]
@@ -138,8 +143,6 @@ unsafe extern "C" {
     fn gdFontGetMediumBold() -> *mut GdFont;
     fn gdFontGetLarge() -> *mut GdFont;
     fn gdFontGetGiant() -> *mut GdFont;
-    fn gdNewDynamicCtx(size: c_int, data: *mut c_void) -> *mut IoCtx;
-    fn gdDPExtractData(ctx: *mut IoCtx, size: Size) -> *mut c_void;
     fn gdImageCreate(sx: c_int, sy: c_int) -> Ptr;
     fn gdImageCreateTrueColor(sx: c_int, sy: c_int) -> Ptr;
     fn gdImageDestroy(im: Ptr);
@@ -162,13 +165,13 @@ unsafe extern "C" {
         h: c_int,
     ) -> Ptr;
     fn gdImageCreateFromXbm(file: *mut libc_file::File) -> Ptr;
-    fn gdImageGifPtr(im: Ptr, size: Size) -> *mut c_void;
-    fn gdImagePngPtrEx(im: Ptr, size: Size, level: c_int) -> *mut c_void;
-    fn gdImageJpegPtr(im: Ptr, size: Size, quality: c_int) -> *mut c_void;
-    fn gdImageWebpPtrEx(im: Ptr, size: Size, quality: c_int) -> *mut c_void;
-    fn gdImageAvifPtrEx(im: Ptr, size: Size, quality: c_int, speed: c_int) -> *mut c_void;
-    fn gdImageWBMPPtr(im: Ptr, size: Size, fg: c_int) -> *mut c_void;
-    fn gdImageBmpPtr(im: Ptr, size: Size, compression: c_int) -> *mut c_void;
+    fn gdImageGifCtx(im: Ptr, out: *mut IoCtx);
+    fn gdImagePngCtxEx(im: Ptr, out: *mut IoCtx, level: c_int);
+    fn gdImageJpegCtx(im: Ptr, out: *mut IoCtx, quality: c_int);
+    fn gdImageWebpCtx(im: Ptr, out: *mut IoCtx, quality: c_int);
+    fn gdImageAvifCtx(im: Ptr, out: *mut IoCtx, quality: c_int, speed: c_int);
+    fn gdImageWBMPCtx(im: Ptr, fg: c_int, out: *mut IoCtx);
+    fn gdImageBmpCtx(im: Ptr, out: *mut IoCtx, compression: c_int);
     fn gdImageGdPtr(im: Ptr, size: Size) -> *mut c_void;
     fn gdImageGd2Ptr(im: Ptr, cs: c_int, fmt: c_int, size: Size) -> *mut c_void;
     fn gdImageXbmCtx(im: Ptr, name: *mut c_char, fg: c_int, out: *mut IoCtx);
@@ -390,15 +393,96 @@ extern "C" fn php_gd_error_text(sink: *mut c_void, level: c_int, text: *const c_
 
 /// `f`, with what libgd reports during it collected rather than lost.
 pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Reported) {
+    capturing(|_| f())
+}
+
+/// [`capture`], `f` handed the vector the reports land in, which it
+/// reads through that pointer alone while libgd is not reporting.
+fn capturing<R>(f: impl FnOnce(*mut Reported) -> R) -> (R, Reported) {
     let mut reported: Reported = Vec::new();
-    let sink = (&raw mut reported).cast::<c_void>();
+    let sink = &raw mut reported;
     // SAFETY: the sink is this frame's vector, live until the call below
     // puts the saved one back.
-    let saved = unsafe { php_gd_capture(sink) };
-    let answer = f();
+    let saved = unsafe { php_gd_capture(sink.cast::<c_void>()) };
+    let answer = f(sink);
     // SAFETY: the sink this thread had, set again.
     unsafe { php_gd_capture(saved) };
     (answer, reported)
+}
+
+// ------------------------------------------------------------ output
+
+/// Where an encoder's bytes go as libgd writes them: handed what libgd
+/// reported since the last write and the bytes, it answers how many the
+/// sink took, `-1` for a write that failed, as `php_stream_write` does.
+pub(crate) type Put<'a> = dyn FnMut(Reported, &[u8]) -> c_int + 'a;
+
+/// What [`writing`]'s `gdIOCtx` points its `data` at.
+struct Out<'p, 'a> {
+    reported: *mut Reported,
+    put: &'p mut Put<'a>,
+}
+
+/// `create_output_context`'s `gdIOCtx` over `put`, a stack value: `putC`
+/// and `putBuf` alone, as php's `ecalloc` leaves the rest `NULL`, so
+/// libgd seeks none (a compressed BMP goes through its temporary file,
+/// as it does for php) and `gd_free` is the caller's. `f` is handed it
+/// with the reports captured; what libgd reported after its last write
+/// is answered.
+fn writing(put: &mut Put<'_>, f: impl FnOnce(*mut IoCtx)) -> Reported {
+    let ((), left) = capturing(|reported| {
+        let mut out = Out { reported, put };
+        let mut ctx = IoCtx {
+            get_c: None,
+            get_buf: None,
+            put_c: Some(put_c),
+            put_buf: Some(put_buf),
+            seek: None,
+            tell: None,
+            gd_free: None,
+            data: (&raw mut out).cast::<c_void>(),
+        };
+        f(&raw mut ctx);
+    });
+    left
+}
+
+/// `_php_image_output_putc` and `_php_image_stream_putc`: one byte, the
+/// `int` libgd passes cut to its low eight bits as php's cast cuts it.
+unsafe extern "C" fn put_c(ctx: *mut IoCtx, c: c_int) {
+    let byte = c.to_le_bytes()[0];
+    // SAFETY: libgd hands back the `gdIOCtx` `writing` made.
+    unsafe { put(ctx, &[byte]) };
+}
+
+/// `_php_image_output_putbuf` and `_php_image_stream_putbuf`.
+unsafe extern "C" fn put_buf(ctx: *mut IoCtx, buf: *const c_void, len: c_int) -> c_int {
+    let len = usize::try_from(len).unwrap_or(0);
+    if buf.is_null() || len == 0 {
+        // SAFETY: as `put_c`.
+        return unsafe { put(ctx, &[]) };
+    }
+    // SAFETY: libgd hands `len` bytes it holds for the call.
+    let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
+    // SAFETY: as `put_c`.
+    unsafe { put(ctx, bytes) }
+}
+
+/// The bytes to the sink, after what libgd reported before them.
+///
+/// # Safety
+///
+/// `ctx` is the `gdIOCtx` [`writing`] made, live for the encode.
+unsafe fn put(ctx: *mut IoCtx, bytes: &[u8]) -> c_int {
+    // SAFETY: the caller's `gdIOCtx`, its `data` the `Out` of `writing`.
+    let data = unsafe { (*ctx).data };
+    // SAFETY: the `Out` of `writing`'s frame, which nothing else reaches
+    // while libgd writes.
+    let out = unsafe { &mut *data.cast::<Out<'_, '_>>() };
+    // SAFETY: the capture's vector, which libgd is not reporting into
+    // while it writes.
+    let pending = std::mem::take(unsafe { &mut *out.reported });
+    (out.put)(pending, bytes)
 }
 
 // ------------------------------------------------------------ library
@@ -568,6 +652,12 @@ pub(crate) enum Encode {
     Avif(i32, i32),
     Wbmp(i32),
     Bmp(i32),
+}
+
+/// libgd's own formats, which php writes through a `FILE *` and not a
+/// `gdIOCtx`, and which the keg's libgd refuses with a warning.
+#[derive(Clone, Copy)]
+pub(crate) enum GdFormat {
     Gd,
     Gd2(i32, i32),
 }
@@ -1016,56 +1106,52 @@ impl Im {
         unsafe { gdImageSetResolution(self.at(), x, y) };
     }
 
-    /// The image encoded, the bytes libgd's `Ptr` encoder answered; `None`
-    /// where it answered none.
-    pub(crate) fn encode(self, how: Encode) -> Option<Vec<u8>> {
+    /// The image encoded through a `gdIOCtx` over `put`, as libgd writes
+    /// it: what libgd reported after its last write.
+    pub(crate) fn write(self, how: Encode, put: &mut Put<'_>) -> Reported {
+        let at = self.at();
+        writing(put, |ctx| match how {
+            // SAFETY: a live image and the `gdIOCtx` of `writing`.
+            Encode::Gif => unsafe { gdImageGifCtx(at, ctx) },
+            // SAFETY: as above.
+            Encode::Png(level) => unsafe { gdImagePngCtxEx(at, ctx, level) },
+            // SAFETY: as above.
+            Encode::Jpeg(q) => unsafe { gdImageJpegCtx(at, ctx, q) },
+            // SAFETY: as above.
+            Encode::Webp(q) => unsafe { gdImageWebpCtx(at, ctx, q) },
+            // SAFETY: as above.
+            Encode::Avif(q, speed) => unsafe { gdImageAvifCtx(at, ctx, q, speed) },
+            // SAFETY: as above.
+            Encode::Wbmp(fg) => unsafe { gdImageWBMPCtx(at, fg, ctx) },
+            // SAFETY: as above.
+            Encode::Bmp(c) => unsafe { gdImageBmpCtx(at, ctx, c) },
+        })
+    }
+
+    /// `gdImageXbmCtx` through a `gdIOCtx` over `put`, the bitmap named
+    /// after `name`: what libgd reported after its last write.
+    pub(crate) fn write_xbm(self, name: &[u8], fg: i32, put: &mut Put<'_>) -> Reported {
+        let mut name = c_string(name).into_bytes_with_nul();
+        let at = self.at();
+        writing(put, |ctx| {
+            // SAFETY: a live image, a NUL-terminated name and the `gdIOCtx`.
+            unsafe { gdImageXbmCtx(at, name.as_mut_ptr().cast(), fg, ctx) };
+        })
+    }
+
+    /// The image in one of libgd's own formats, the bytes its `Ptr`
+    /// encoder answered; `None` where it answered none.
+    pub(crate) fn encode(self, how: GdFormat) -> Option<Vec<u8>> {
         let mut size: c_int = 0;
         let s = &raw mut size;
         let at = self.at();
         let data = match how {
             // SAFETY: a live image and a slot of this frame.
-            Encode::Gif => unsafe { gdImageGifPtr(at, s) },
+            GdFormat::Gd => unsafe { gdImageGdPtr(at, s) },
             // SAFETY: as above.
-            Encode::Png(level) => unsafe { gdImagePngPtrEx(at, s, level) },
-            // SAFETY: as above.
-            Encode::Jpeg(q) => unsafe { gdImageJpegPtr(at, s, q) },
-            // SAFETY: as above.
-            Encode::Webp(q) => unsafe { gdImageWebpPtrEx(at, s, q) },
-            // SAFETY: as above.
-            Encode::Avif(q, speed) => unsafe { gdImageAvifPtrEx(at, s, q, speed) },
-            // SAFETY: as above.
-            Encode::Wbmp(fg) => unsafe { gdImageWBMPPtr(at, s, fg) },
-            // SAFETY: as above.
-            Encode::Bmp(c) => unsafe { gdImageBmpPtr(at, s, c) },
-            // SAFETY: as above.
-            Encode::Gd => unsafe { gdImageGdPtr(at, s) },
-            // SAFETY: as above.
-            Encode::Gd2(cs, fmt) => unsafe { gdImageGd2Ptr(at, cs, fmt, s) },
+            GdFormat::Gd2(cs, fmt) => unsafe { gdImageGd2Ptr(at, cs, fmt, s) },
         };
         taken(data, size)
-    }
-
-    /// `gdImageXbmCtx` into a dynamic `gdIOCtx`: the bytes written.
-    pub(crate) fn xbm(self, name: &[u8], fg: i32) -> Vec<u8> {
-        let name = c_string(name);
-        let mut name = name.into_bytes_with_nul();
-        // SAFETY: an empty context libgd grows as it writes.
-        let ctx = unsafe { gdNewDynamicCtx(2048, ptr::null_mut()) };
-        if ctx.is_null() {
-            return Vec::new();
-        }
-        // SAFETY: a live image, a NUL-terminated name and the context.
-        unsafe { gdImageXbmCtx(self.at(), name.as_mut_ptr().cast(), fg, ctx) };
-        let mut size: c_int = 0;
-        // SAFETY: the context made above; the data is handed over.
-        let data = unsafe { gdDPExtractData(ctx, &raw mut size) };
-        // SAFETY: the context, read once for its `gd_free`.
-        let free = unsafe { (*ctx).gd_free };
-        if let Some(free) = free {
-            // SAFETY: the context, freed once.
-            unsafe { free(ctx) };
-        }
-        taken(data, size).unwrap_or_default()
     }
 
     /// `gdImageStringFT`, or `gdImageStringFTEx` where `linespacing` is
