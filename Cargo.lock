@@ -1067,9 +1067,11 @@ dependencies = [
 name = "php_ext_soap"
 version = "0.0.0"
 dependencies = [
+ "getrandom",
  "php_ext",
  "php_ext_libxml",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
