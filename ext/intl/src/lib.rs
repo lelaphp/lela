@@ -33,6 +33,8 @@
 mod error;
 #[allow(dead_code)]
 mod ffi;
+#[allow(dead_code)]
+mod iterator;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -305,7 +307,9 @@ pub fn extension() -> Extension {
     // IntlGregorianCalendar, Spoofchecker, IntlException, IntlIterator,
     // IntlBreakIterator, IntlRuleBasedBreakIterator,
     // IntlCodePointBreakIterator, IntlPartsIterator, UConverter, IntlChar.
-    let builder = builder.class::<IntlException>();
+    let builder = builder
+        .class::<IntlException>()
+        .class::<iterator::IntlIterator>();
     builder
         .request_state::<State>()
         .info(intl_info)

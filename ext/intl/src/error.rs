@@ -17,11 +17,14 @@ use php_ext::values::PhpObject;
 use crate::State;
 use crate::ffi::Code;
 
-/// `intl_error`: the last code and the message a native wrote for it.
+/// `intl_error`: the last code and the message a native wrote for it,
+/// sixteen bytes as php's, the message behind one thin pointer as its
+/// `zend_string *` is, so an object's payload fits php's struct.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct IntlError {
     pub(crate) code: Code,
-    message: Option<Vec<u8>>,
+    #[allow(clippy::box_collection, reason = "a thin pointer, php's zend_string *")]
+    message: Option<Box<Vec<u8>>>,
 }
 
 impl IntlError {
@@ -116,7 +119,7 @@ pub(crate) fn set_custom_msg(req: &mut Request, message: &str) -> Result<(), Thr
         let text = String::from_utf8_lossy(&text).into_owned();
         throw(req, "IntlException", &text)
     });
-    global(req).message = Some(text);
+    global(req).message = Some(Box::new(text));
     thrown.map_or(Ok(()), Err)
 }
 
@@ -166,7 +169,7 @@ pub(crate) fn errors_set_custom_msg<P: Carrier>(
 ) -> Result<(), Thrown> {
     let text = prefixed(req, message);
     if let Some(error) = carried::<P>(req, object) {
-        error.message = Some(text);
+        error.message = Some(Box::new(text));
     }
     set_custom_msg(req, message)
 }
