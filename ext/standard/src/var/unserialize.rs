@@ -130,21 +130,30 @@ pub(crate) struct VarHash {
     ref_props: Vec<usize>,
 }
 
-/// `allowed_classes`: every class, php's null table, or those of the
-/// lowered names alone.
-#[derive(Clone, Default)]
+/// `allowed_classes`: every class, php's null `class_hash`, or the
+/// classes whose lowered names key `class_hash`, the table
+/// `php_unserialize_with_options` lays down on the request's heap for
+/// the call and frees before the var hash is destroyed.
+#[derive(Clone, Copy, Default)]
 enum Allowed {
     #[default]
     Every,
-    Only(Vec<Vec<u8>>),
+    Only(PhpArray),
 }
 
 impl Allowed {
     /// `unserialize_allowed_class` over a lowered name.
-    fn admits(&self, lowered: &[u8]) -> bool {
+    fn admits(self, lowered: &[u8]) -> bool {
         match self {
             Allowed::Every => true,
-            Allowed::Only(names) => names.iter().any(|name| name.as_slice() == lowered),
+            Allowed::Only(names) => names.find(lowered).is_some(),
+        }
+    }
+
+    /// `zend_hash_destroy(class_hash)` and `FREE_HASHTABLE`.
+    fn free(self, req: &mut Request) {
+        if let Allowed::Only(names) = self {
+            req.release(names.to_value());
         }
     }
 }
@@ -692,11 +701,7 @@ pub fn php_unserialize_with_options(
             return Err(thrown);
         }
     };
-    let previous = (
-        state.hash.allowed.clone(),
-        state.hash.max_depth,
-        state.hash.depth,
-    );
+    let previous = (state.hash.allowed, state.hash.max_depth, state.hash.depth);
     if let Some(allowed) = given.allowed {
         state.hash.allowed = allowed;
     }
@@ -747,6 +752,11 @@ pub fn php_unserialize_with_options(
             None
         }
     };
+    // `cleanup`: this call's `class_hash` freed, the previous options
+    // restored, and the var hash destroyed after them.
+    if let Some(allowed) = given.allowed {
+        allowed.free(req);
+    }
     let (allowed, max_depth, depth) = previous;
     state.hash.allowed = allowed;
     state.hash.max_depth = max_depth;
@@ -952,7 +962,25 @@ struct Options {
 }
 
 /// The `allowed_classes` and `max_depth` options, held to their types
-/// as php holds them.
+/// as php holds them. `allowed_classes` given as a list or as `false` is
+/// `class_hash` on the request's heap, which stands while the value is
+/// read and goes before the var hash, so the peak over what is kept is
+/// php's:
+///
+/// ```php
+/// class W { function __wakeup() {} }
+/// $s = serialize(new W);
+/// foreach ([['W', 'Foo'], ['w'], false] as $allowed) {
+///     unserialize($s, ['allowed_classes' => $allowed]);
+///     memory_reset_peak_usage(); $x = unserialize($s, ['allowed_classes' => $allowed]); $after = memory_get_usage();
+///     echo memory_get_peak_usage() - $after, "\n"; unset($x);
+/// }
+/// ```
+/// ```expect
+/// 17200
+/// 17136
+/// 12720
+/// ```
 fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result<Options, Thrown> {
     let Some(options) = given else {
         return Ok(Options {
@@ -965,38 +993,18 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
         let classes = classes.deref();
         match classes.as_ref() {
             ValueRef::Bool(true) => {}
-            ValueRef::Bool(false) => allowed = Allowed::Only(Vec::new()),
+            // `ALLOC_HASHTABLE` and `zend_hash_init` at the list's count,
+            // or none for `false`, which no name is ever added to.
+            ValueRef::Bool(false) => allowed = Allowed::Only(PhpArray::new(req)?),
             ValueRef::Array(list) => {
-                let mut names = Vec::new();
-                for (_, entry) in list.snapshot() {
-                    let entry = entry.deref();
-                    if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
-                        let name = value_name(req, &entry);
-                        return Err(throw(
-                            req,
-                            "TypeError",
-                            &format!(
-                                "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
-                            ),
-                        ));
-                    }
-                    let name = php_ext::coerce::to_string(req, &entry)?.as_bytes().to_vec();
-                    if !valid_class_name(&name) {
-                        // php prints the name as a C string, up to its
-                        // first NUL byte.
-                        let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-                        let shown = String::from_utf8_lossy(&name[..end]).into_owned();
-                        return Err(throw(
-                            req,
-                            "ValueError",
-                            &format!(
-                                "{function}(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
-                            ),
-                        ));
-                    }
-                    names.push(name.to_ascii_lowercase());
-                }
+                let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
+                let names = PhpArray::init_size(req, count)?;
                 allowed = Allowed::Only(names);
+                if let Err(thrown) = allowed_names(req, names, *list, function) {
+                    // `goto cleanup`, which frees what was added so far.
+                    allowed.free(req);
+                    return Err(thrown);
+                }
             }
             _ => {
                 let name = value_name(req, &classes);
@@ -1034,6 +1042,64 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
         allowed: Some(allowed),
         max_depth: depth,
     })
+}
+
+/// `allowed_classes`' list into `class_hash`: each entry a string or
+/// an object, its string (`zval_try_get_tmp_string`) held to
+/// `zend_is_valid_class_name`, and its lowered form added
+/// (`zend_hash_add_empty_element`), a copy only where the name holds an
+/// upper-case letter (`zend_string_tolower`).
+fn allowed_names(
+    req: &mut Request,
+    mut names: PhpArray,
+    list: PhpArray,
+    function: &str,
+) -> Result<(), Thrown> {
+    for (_, entry) in list.snapshot() {
+        let entry = entry.deref();
+        if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
+            let name = value_name(req, &entry);
+            return Err(throw(
+                req,
+                "TypeError",
+                &format!(
+                    "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
+                ),
+            ));
+        }
+        let name = php_ext::coerce::to_string(req, &entry)?;
+        if !valid_class_name(name.as_bytes()) {
+            // php prints the name as a C string, up to its first NUL
+            // byte.
+            let bytes = name.as_bytes();
+            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+            let shown = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let thrown = throw(
+                req,
+                "ValueError",
+                &format!(
+                    "{function}(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
+                ),
+            );
+            req.release(Value::string(name));
+            return Err(thrown);
+        }
+        let lowered = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+            // `zend_string_alloc`, whatever the length.
+            let bytes = name.as_bytes().to_ascii_lowercase();
+            let lowered = PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(&bytes));
+            req.release(Value::string(name));
+            lowered?
+        } else {
+            name
+        };
+        if names.find(lowered.as_bytes()).is_some() {
+            req.release(Value::string(lowered));
+        } else {
+            names.set(req, Key::Str(lowered), Value::null())?;
+        }
+    }
+    Ok(())
 }
 
 /// `zend_is_valid_class_name`: letters, digits, `_`, `\` and the bytes
@@ -1573,7 +1639,19 @@ impl State<'_> {
         Ok(true)
     }
 
-    /// `"a:" uiv ":" "{"`.
+    /// `"a:" uiv ":" "{"`: a table of the elements' count laid down as a
+    /// hash, or, for none, the process's empty array, which costs
+    /// nothing.
+    ///
+    /// ```php
+    /// debug_zval_dump(unserialize('a:0:{}'));
+    /// $m = memory_get_usage(); $x = unserialize('a:1:{i:0;a:0:{}}'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// array(0) interned {
+    /// }
+    /// 376
+    /// ```
     fn array(
         &mut self,
         req: &mut Request,
@@ -1595,10 +1673,11 @@ impl State<'_> {
             return Ok(false);
         }
         // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
-        // convert from packed to hash during unserialization".
+        // convert from packed to hash during unserialization"; and
+        // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
         let array = match u32::try_from(elements) {
             Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
-            _ => PhpArray::new(req)?,
+            _ => PhpArray::empty(),
         };
         self.write(req, slot, entry, Value::array(array))?;
         if elements == 0 {

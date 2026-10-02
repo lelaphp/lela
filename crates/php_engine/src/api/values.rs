@@ -336,6 +336,16 @@ impl PhpArray {
         req.array()
     }
 
+    /// `zend_new_array(size)` and `zend_hash_init(ht, size, ...)`, an
+    /// empty array whose first write lays its table down for `size`
+    /// elements, the size held to `zend_hash_check_size`: the header
+    /// alone until then, as [`PhpArray::new`] is, where
+    /// [`PhpArray::sized`] lays the table down at once. The `Err` is the
+    /// memory limit.
+    pub fn init_size(req: &mut Request, size: u32) -> Result<PhpArray, Thrown> {
+        req.array_sized(size, true)
+    }
+
     /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
     /// immutable empty array, php's `zend_empty_array`, which costs the
     /// request nothing and is what a native answers where php's body

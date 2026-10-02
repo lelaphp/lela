@@ -852,6 +852,7 @@ values::PhpArray::cursor_reset
 values::PhpArray::empty
 values::PhpArray::find
 values::PhpArray::get
+values::PhpArray::init_size
 values::PhpArray::is_empty
 values::PhpArray::is_list
 values::PhpArray::is_packed

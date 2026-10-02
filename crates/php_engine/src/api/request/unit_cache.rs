@@ -14,8 +14,23 @@ use php_compile::SourceKind;
 use super::{Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
+use crate::api::values::{Emalloc, PhpString, Value};
 use crate::exec::IncludeKind;
 use crate::unit_cache::{Asked, Cached, Disk, Filed, Held, Levels, UnitKey, full_path};
+
+/// What the `zend_file_handle` a file is compiled through holds when
+/// `persistent_compile_file` finds it held, which decides what a due
+/// stat costs the request ([`Request::cached_file`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandlePath {
+    /// The path alone, as `compile_filename` hands an `include` or a
+    /// `require` over: `do_validate_timestamps` resolves it again.
+    Filename,
+    /// The opened path too, as `zend_stream_open` leaves it for an
+    /// `_once` include, a preload or the primary file: the stat
+    /// compares it and resolves nothing.
+    Opened,
+}
 
 /// The unit cache for one request: [`Request::unit_cache`].
 pub struct UnitCache<'r> {
@@ -206,7 +221,12 @@ impl Request {
     /// misses, any other through the cache, validated as the answer
     /// says and filed under `written` too where the answer looks by the
     /// path as written.
-    pub(crate) fn cached_file(&mut self, path: &[u8], written: Option<&[u8]>) -> Cached {
+    pub(crate) fn cached_file(
+        &mut self,
+        path: &[u8],
+        written: Option<&[u8]>,
+        handle: HandlePath,
+    ) -> Cached {
         if self.preloading.is_some() {
             return self.preload_file(path);
         }
@@ -236,6 +256,14 @@ impl Request {
                 false,
             ),
         };
+        let now = self.request_time();
+        if memory
+            && handle == HandlePath::Filename
+            && let Some(held) = shared.units.find(&UnitKey::full(&full))
+            && !held.trusted(validation, now)
+        {
+            self.revalidated_path(written.unwrap_or(path), &full);
+        }
         let written = match lookup {
             Lookup::AsWritten => written.and_then(|written| self.written_key(written)),
             Lookup::Resolved => None,
@@ -253,7 +281,7 @@ impl Request {
             written,
             validation,
             protection,
-            now: self.request_time(),
+            now,
             levels,
         };
         let stack = self.stack_limit();
@@ -272,6 +300,58 @@ impl Request {
             self.tell_cached(&full);
         }
         cached
+    }
+
+    /// `do_validate_timestamps` over a held copy whose stat is due
+    /// (`Z/ext/opcache/ZendAccelerator.c:1117`): the `zend_file_handle`
+    /// has no opened path, so the path as written is resolved again
+    /// (`accelerator_orig_zend_resolve_path`), and the request pays for
+    /// `tsrm_realpath`'s buffer, laid down as `emalloc(1)` for an
+    /// absolute path or a copy of the working directory for a relative
+    /// one and grown to the resolved path by `virtual_file_ex`, beside
+    /// the `zend_string` `tsrm_realpath_str` copies it into, the buffer
+    /// freed first and the string after the stat. A heap that refuses
+    /// one has recorded the memory limit's fatal, which ends the request
+    /// at the next step; nothing else reads it.
+    ///
+    /// The included file's op array and its runtime cache are the
+    /// request's while it runs ([`crate::exec::HeapOpArray`]), which is the
+    /// whole of a short path's peak; past about a hundred bytes of path
+    /// the two strings are more:
+    ///
+    /// ```php
+    /// function peak($f) {
+    ///     file_put_contents($f, '<?php $x = 1; return $x;'); touch($f, time() - 10); clearstatcache();
+    ///     include $f; include $f;
+    ///     $s = memory_get_usage(); memory_reset_peak_usage(); include $f;
+    ///     echo memory_get_peak_usage() - $s, "\n"; unlink($f);
+    /// }
+    /// peak('/tmp/' . uniqid() . '.php');
+    /// peak(__DIR__ . '/' . str_repeat('v', 150 - strlen(__DIR__)) . '.php');
+    /// peak(__DIR__ . '/' . str_repeat('w', 230 - strlen(__DIR__)) . '.php');
+    /// ```
+    /// ```expect regime=jit-off
+    /// 272
+    /// 352
+    /// 576
+    /// ```
+    fn revalidated_path(&mut self, written: &[u8], full: &[u8]) {
+        let start = if written.first() == Some(&b'/') {
+            1
+        } else {
+            self.cwd.as_os_str().len().saturating_add(1)
+        };
+        let Ok(buffer) = Emalloc::new(self, start) else {
+            return;
+        };
+        let Ok(buffer) = buffer.resize(self, full.len().saturating_add(1)) else {
+            return;
+        };
+        let resolved = PhpString::filled(self, full.len(), |out| out.copy_from_slice(full));
+        buffer.free(self);
+        if let Ok(resolved) = resolved {
+            self.release(Value::string(resolved));
+        }
     }
 
     /// `filename_is_in_file_cache`: whether `file_cache` keeps a unit of
@@ -434,7 +514,7 @@ impl UnitCache<'_> {
             other => other,
         };
         let compiled = resolved.map(|path| {
-            let unit = held.or_else(|| req.cached_file(&path, Some(written)));
+            let unit = held.or_else(|| req.cached_file(&path, Some(written), HandlePath::Filename));
             (unit, path)
         });
         let unit = match compiled {

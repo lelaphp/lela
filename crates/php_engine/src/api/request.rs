@@ -77,6 +77,7 @@ mod recording;
 mod site_override;
 mod table;
 mod unit_cache;
+pub(crate) use unit_cache::HandlePath;
 mod variables;
 mod zone;
 pub use post::Upload;
@@ -2097,8 +2098,11 @@ pub struct Request {
     /// here keeps the key's identity while the entry stands.
     function_callables: Vec<(php_unit::UnitCell, u32, Function)>,
     autoloaders: Vec<Callable>,
-    /// `EG(in_autoload)`: the lowered names an autoloader is loading.
-    in_autoload: Vec<Vec<u8>>,
+    /// `EG(in_autoload)`: the lowered names an autoloader is loading,
+    /// each a key of php's table, which the first lookup that may
+    /// autoload lays down on the request's heap and which stands, its
+    /// data with it, until the request ends.
+    in_autoload: Option<PhpArray>,
     assert_callback: Option<Value>,
     umask: u32,
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
@@ -2404,6 +2408,12 @@ enum Traced {
     /// code, which php names `unknown` (`ZEND_STR_UNKNOWN`): what a
     /// host's evaluation in a frame is ([`crate::tier::evaluate`]).
     Unknown,
+    /// A code frame no `INCLUDE_OR_EVAL` pushed and that stands over no
+    /// user code, the main op array's above all: php lays its row down,
+    /// `zend_new_array(8)` and `zend_hash_real_init_mixed`, before its
+    /// default arm finds nothing to name it by and destroys it, so the
+    /// trace has no row for it and the walk's peak has the row's bytes.
+    Dropped,
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -2736,7 +2746,7 @@ impl Request {
             ticks_count: 0,
             function_callables: Vec::new(),
             autoloaders: Vec::new(),
-            in_autoload: Vec::new(),
+            in_autoload: None,
             assert_callback: None,
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
@@ -2997,6 +3007,58 @@ impl Request {
         Ok(frame)
     }
 
+    /// The op array `frame` serves held on the request's heap as php's
+    /// `INCLUDE_OR_EVAL` holds it ([`exec::HeapOpArray`]): `copy`, made
+    /// before the frame was pushed, and the runtime cache
+    /// `i_init_code_execute_data` lays down after the symbol table is
+    /// attached, `cache_size` bytes. Both go when the frame is popped,
+    /// whether the file returned or threw, and an `eval`'s as an
+    /// include's:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/' . uniqid() . '.php';
+    /// file_put_contents($f, '<?php if ($t) throw new Exception("x"); $y = 2; return $y;'); touch($f, time() - 10); clearstatcache();
+    /// $t = false; include $f; $t = true; try { include $f; } catch (Exception $e) {} unset($e);
+    /// $m = memory_get_usage(); try { include $f; } catch (Exception $e) {} unset($e); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $t = false; $r = include $f; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $r = eval('$q = 1; return $q;'); echo memory_get_usage() - $m, "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 0
+    /// 0
+    /// ```
+    ///
+    /// The `Err` is the memory limit, the copy held already.
+    pub(crate) fn hold_op_array(
+        &mut self,
+        frame: FrameRef,
+        copy: crate::api::values::Emalloc,
+    ) -> Result<(), Thrown> {
+        let size = self
+            .vm
+            .serving(frame)
+            .and_then(|serving| serving.code().map(|code| code.cache_size))
+            .unwrap_or(0);
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.op_array = Some(exec::HeapOpArray {
+                copy,
+                run_time_cache: None,
+            });
+        }
+        let cache =
+            crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX))?;
+        if let Some(held) = self
+            .vm
+            .at_mut(frame)
+            .and_then(|state| state.op_array.as_mut())
+        {
+            held.run_time_cache = Some(cache);
+        }
+        Ok(())
+    }
+
     /// `zend_leave_helper`'s arm for a nested code frame
     /// (`Z/Zend/zend_vm_def.h:3030`): the frame's CVs detached into the
     /// table it shares with its includer, the frame popped, and the
@@ -3178,7 +3240,14 @@ impl Request {
                 self.release(closure.as_value());
             }
         }
-        self.vm.pop();
+        // `destroy_op_array`, which frees the heap runtime cache, then
+        // `efree_size(EX(func))`.
+        if let Some(held) = self.vm.pop().and_then(|state| state.op_array) {
+            if let Some(cache) = held.run_time_cache {
+                cache.free(self);
+            }
+            held.copy.free(self);
+        }
         self.stack.pop_frame(&mut self.heap);
     }
 
@@ -5411,6 +5480,24 @@ impl Request {
     /// method's receiver between `class` and `type`, where php adds it,
     /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`; and `limit`
     /// rows at most, none meaning every row.
+    ///
+    /// The walk lays a row down for every link before it knows whether
+    /// to keep it, so the main frame's, which it destroys, is in the
+    /// peak, and a walk cut short by `limit` lays down no row past it:
+    ///
+    /// ```php
+    /// function d($a) { return debug_backtrace(); }
+    /// function e() { return d(1); }
+    /// e(); $s = memory_get_usage(); memory_reset_peak_usage(); $t = e();
+    /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+    /// function d2() { return debug_backtrace(0, 1); }
+    /// d2(); unset($t); $s = memory_get_usage(); memory_reset_peak_usage(); $t = d2();
+    /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+    /// ```
+    /// ```expect
+    /// 1560 1216
+    /// 592 592
+    /// ```
     pub(crate) fn fetch_debug_backtrace(
         &mut self,
         skip_last: bool,
@@ -5422,10 +5509,18 @@ impl Request {
         // of it is one a later row reads back.
         let skipped = usize::from(skip_last).min(chain.len());
         let mut links = self.trace_rows(&chain[skipped..]);
+        // `frameno < limit`: the walk stops once `limit` rows are in,
+        // before it lays down the next, and a dropped row is no row.
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
+            && let Some(cut) = links
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| !matches!(row.0, Traced::Dropped))
+                .nth(limit - 1)
+                .map(|(at, _)| at + 1)
         {
-            links.truncate(limit);
+            links.truncate(cut);
         }
         self.render_trace(links, options)
     }
@@ -5535,7 +5630,9 @@ impl Request {
         let mut trace = PhpArray::new(self)?;
         self.constant_expression_row(&mut trace)?;
         for (traced, this, scope, arguments, named, site) in links {
-            let mut row = PhpArray::new(self)?;
+            // `zend_new_array(8)` and `zend_hash_real_init_mixed`: every
+            // row is a hash laid down before its first key.
+            let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?;
             if let Some((file, line)) = site {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of the interned string.
@@ -5583,6 +5680,11 @@ impl Request {
                 Traced::Unknown => {
                     let name = Value::string(PhpString::new(self, b"unknown")?);
                     self.set_string_key(&mut row, b"function", name)?;
+                }
+                Traced::Dropped => {
+                    // `zend_array_destroy(stack_frame)`.
+                    self.release(Value::array(row));
+                    continue;
                 }
             }
             trace.append(self, Value::array(row))?;
@@ -5876,16 +5978,12 @@ impl Request {
                             // a dummy frame is skipped where it holds no
                             // file and line, and named `unknown` where
                             // it stands over user code.
-                            if site.is_some() {
-                                rows.push((
-                                    Traced::Unknown,
-                                    None,
-                                    None,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    site,
-                                ));
-                            }
+                            let traced = if site.is_some() {
+                                Traced::Unknown
+                            } else {
+                                Traced::Dropped
+                            };
+                            rows.push((traced, None, None, Vec::new(), Vec::new(), site));
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
@@ -8600,7 +8698,7 @@ impl Request {
         let mut seen: Vec<(Value, Vec<u8>)> = Vec::new();
         let mut outcome = Ok(());
         for (name, expr) in cases {
-            let value = match crate::api::call::eval_const_expr(self, &expr, Some(class)) {
+            let value = match crate::api::call::eval_declared(self, &expr, Some(class)) {
                 Ok(value) => value,
                 Err(thrown) => {
                     outcome = Err(thrown);
@@ -8663,7 +8761,16 @@ impl Request {
     /// and handed back by identity from then on, its `name` the case's
     /// own and, for a backed enum, its `value` the backing value the
     /// declaration carries. One more owner is taken for the caller, the
-    /// slot keeping its own, as php's constant table keeps one.
+    /// slot keeping its own, as php's constant table keeps one. A string
+    /// value is the unit's interned string, as opcache persists the
+    /// case's constant (design §5.2):
+    ///
+    /// ```php
+    /// enum E: string { case X = 'ex'; } debug_zval_dump(E::X->value);
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// string(2) "ex" interned
+    /// ```
     pub(crate) fn enum_case(&mut self, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
         if let Some((_, case)) = self
             .enum_cases
@@ -8695,7 +8802,7 @@ impl Request {
         let slot = PhpString::new(self, b"name")?;
         case.set_prop(self, slot, Value::string(spelled))?;
         if backing != php_unit::decl::EnumBacking::Pure {
-            let value = crate::api::call::eval_const_expr(self, &constant.value, Some(class))?;
+            let value = crate::api::call::eval_declared(self, &constant.value, Some(class))?;
             let slot = PhpString::new(self, b"value")?;
             case.set_prop(self, slot, value)?;
         }
@@ -14731,6 +14838,14 @@ impl Request {
     /// Warning: g(): Unable to create filter (f) in %s on line 4
     /// Undefined constant "NOPE"
     /// ```
+    /// Whether the native being served is a method, whose name
+    /// `get_active_function_or_method_name` makes as a member string
+    /// (`zend_create_member_string`) where a function's is its own.
+    pub(crate) fn active_native_is_method(&self) -> bool {
+        self.active_native_function()
+            .is_some_and(|function| self.method_class(function).is_some())
+    }
+
     pub(crate) fn active_native(&self) -> String {
         if let Some((kind, _)) = self.including
             && self.serving_include()
@@ -17035,9 +17150,14 @@ impl Request {
             }
             return Ok(Opened::Unit(unit));
         }
+        let handle = if kind.once() {
+            HandlePath::Opened
+        } else {
+            HandlePath::Filename
+        };
         let cached = match held {
             Some(held) => Some(held.unit.clone()),
-            None => self.cached_file(&path, Some(written)),
+            None => self.cached_file(&path, Some(written), handle),
         };
         match cached {
             Some(Ok(unit)) => {
@@ -18967,19 +19087,52 @@ impl Request {
         self.autoloaders.get(at).cloned()
     }
 
-    /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`: `false`
-    /// for a name an autoloader is loading already.
-    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> bool {
-        if self.in_autoload.iter().any(|name| name == lowered) {
-            return false;
+    /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`, the
+    /// table laid down first where this is the request's first lookup
+    /// that may autoload (`ALLOC_HASHTABLE`, `zend_hash_init(8)`): the
+    /// lowered name as the request string php's `lc_name` is, which the
+    /// caller hands back to [`Request::autoload_leave`], or `None` for a
+    /// name an autoloader is loading already. The `Err` is the memory
+    /// limit.
+    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> Result<Option<PhpString>, Thrown> {
+        let name = PhpString::new(self, lowered)?;
+        let made = match self.in_autoload {
+            Some(table) => Ok(table),
+            None => PhpArray::new(self).inspect(|table| self.in_autoload = Some(*table)),
+        };
+        let mut table = match made {
+            Ok(table) => table,
+            Err(thrown) => {
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        if table.find(lowered).is_some() {
+            self.release(Value::string(name));
+            return Ok(None);
         }
-        self.in_autoload.push(lowered.to_vec());
-        true
+        self.addref(&Value::string(name));
+        if let Err(thrown) = table.add_new(self, Key::Str(name), Value::null()) {
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        Ok(Some(name))
     }
 
-    /// `zend_hash_del(EG(in_autoload), lc_name)`.
-    pub(crate) fn autoload_leave(&mut self, lowered: &[u8]) {
-        self.in_autoload.retain(|name| name != lowered);
+    /// `zend_hash_del(EG(in_autoload), lc_name)`, and `lc_name` released.
+    pub(crate) fn autoload_leave(&mut self, name: PhpString) {
+        if let Some(table) = self.in_autoload {
+            self.array_del(table.heap(), php_heap::Key::Str(name.heap()));
+        }
+        self.release(Value::string(name));
+    }
+
+    /// `zend_hash_destroy(EG(in_autoload))` and `FREE_HASHTABLE` in
+    /// `shutdown_executor`, after the object storage.
+    pub(crate) fn free_in_autoload(&mut self) {
+        if let Some(table) = self.in_autoload.take() {
+            self.release(Value::array(table));
+        }
     }
 
     /// `spl_autoload_functions()`: each loader as its

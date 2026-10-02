@@ -1087,7 +1087,7 @@ fn attribute_object_at(
     let mut named: Vec<(PhpString, Value)> = Vec::new();
     let mut evaluated = Ok(());
     for argument in &attribute.arguments {
-        let value = match eval_const_expr(req, &argument.value, scope) {
+        let value = match eval_declared(req, &argument.value, scope) {
             Ok(value) => value,
             Err(thrown) => {
                 evaluated = Err(thrown);
@@ -1398,6 +1398,19 @@ pub fn bound_variables(
 /// #0 {main}
 ///   thrown in %s on line 12
 /// ```
+///
+/// The first lookup that may autoload lays `EG(in_autoload)` down, its
+/// header and the data of the lowered name it adds and deletes, and
+/// the table stands until the request ends, so a second costs nothing.
+///
+/// ```php
+/// $m = memory_get_usage(); class_exists('F'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); class_exists('G'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 376
+/// 0
+/// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     let bare = name.strip_prefix(b"\\").unwrap_or(name);
     // The table first, which holds an anonymous class under its name
@@ -1416,10 +1429,9 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     if req.link_under_way(bare) {
         return Ok(None);
     }
-    let lowered = bare.to_ascii_lowercase();
-    if !req.autoload_enter(&lowered) {
+    let Some(lowered) = req.autoload_enter(&bare.to_ascii_lowercase())? else {
         return Ok(None);
-    }
+    };
     let served = req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
@@ -1434,7 +1446,7 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
         }
         Ok(None)
     });
-    req.autoload_leave(&lowered);
+    req.autoload_leave(lowered);
     served
 }
 
@@ -1726,8 +1738,11 @@ pub fn eval_const_expr(
 /// `zend_declare_class_constant_ex` keep it (`Z/Zend/zend_API.c:4510`,
 /// `:4852`): a string the declaration wrote is `zval_make_interned_string`'s,
 /// so a slot or a constant copied from it takes no owner; anything else
-/// is [`eval_const_expr`]'s. An attribute's argument and a user enum
-/// case's value php keeps unevaluated and never interns.
+/// is [`eval_const_expr`]'s. An attribute's argument and a backed enum
+/// case's value are read through it too: a unit's declarations hold
+/// their strings as its literals do, interned as opcache persists them
+/// (design §5.2, revision 64), where `php -n` copies them per request,
+/// the difference `trace:immutable-literal-arrays` covers.
 pub fn eval_declared(
     req: &mut Request,
     expr: &ConstExpr,

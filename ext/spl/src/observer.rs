@@ -947,6 +947,19 @@ impl SplObjectStorage {
     /// Non-object key
     /// int(1)
     /// ```
+    ///
+    /// What `unserialize()` hands it for an empty storage is two empty
+    /// arrays, the process's own (`ZVAL_EMPTY_ARRAY`), so the peak is
+    /// php's:
+    ///
+    /// ```php
+    /// $s = serialize(new SplObjectStorage);
+    /// unserialize($s); $u = memory_get_usage(); memory_reset_peak_usage(); $x = unserialize($s);
+    /// echo memory_get_peak_usage() - $u, " ", memory_get_usage() - $u, "\n";
+    /// ```
+    /// ```expect
+    /// 16920 192
+    /// ```
     #[php(tentative)]
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
