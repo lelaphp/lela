@@ -101,12 +101,12 @@ impl Binary {
     }
 
     /// Where the CLI's binary is, built from the tree now if this run has
-    /// not built it yet.
-    fn path(&self) -> Result<&Path> {
+    /// not built it yet; what `crosscheck` starts as the built-in server.
+    pub(crate) fn cli(&self) -> Result<&Path> {
         built(&self.cli, &self.root, CLI)
     }
 
-    /// Where the CGI's binary is, as [`Binary::path`].
+    /// Where the CGI's binary is, as [`Binary::cli`].
     fn cgi_path(&self) -> Result<&Path> {
         built(&self.cgi, &self.root, CGI)
     }
@@ -121,7 +121,7 @@ impl Binary {
         snippet: &str,
         regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.path()?;
+        let binary = self.cli()?;
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
@@ -141,7 +141,7 @@ impl Binary {
     /// `snippet` served as the request `request` describes by the CGI's
     /// binary run under the name php-cgi, as [`Binary::serve`] serves a
     /// `process` fence; with the natives it entered.
-    pub(super) fn serve_cgi(
+    pub(crate) fn serve_cgi(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,
@@ -161,7 +161,7 @@ impl Binary {
     /// `snippet` served as the request `request` describes by `sapi/fpm`'s
     /// binary, as [`Binary::serve_cgi`] serves one by php-cgi; with the
     /// natives its child entered.
-    pub(super) fn serve_fpm(
+    pub(crate) fn serve_fpm(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,

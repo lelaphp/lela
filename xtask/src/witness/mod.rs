@@ -118,7 +118,8 @@ use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
 use fence::Extracted;
-pub(crate) use process::Binary;
+pub(crate) use fpm::served_as_fpm;
+pub(crate) use process::{Binary, served_as_cgi};
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
