@@ -153,11 +153,18 @@ fn restriction(req: &Request) -> Restriction {
 
 /// `ZEND_FFI_VALIDATE_API_RESTRICTION`: `ffi.enable=1` anywhere, and
 /// under `preload` the CLI, whose scripts php lets use FFI after
-/// startup, and the request `opcache.preload`'s file is served in.
+/// startup, a function `opcache.preload`'s file declared, in any host
+/// and any request, and the request that file is served in. The test
+/// `ffi_preloaded_caller` of `sapi/cgi` holds a preloaded function's
+/// call under php-cgi to the oracle.
 pub(crate) fn validate_api_restriction(req: &mut Request) -> Result<(), Thrown> {
     match restriction(req) {
         Restriction::Enabled => Ok(()),
-        Restriction::Preload if req.sapi_name() == "cli" || req.preloading() => Ok(()),
+        Restriction::Preload
+            if req.sapi_name() == "cli" || req.caller_preloaded() || req.preloading() =>
+        {
+            Ok(())
+        }
         _ => Err(ffi_error(
             req,
             "FFI API is restricted by \"ffi.enable\" configuration directive",
