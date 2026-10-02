@@ -7147,7 +7147,7 @@ impl Request {
             Message::String(string) => (string, false),
             // The memory limit refusing the message has rendered its
             // fatal, and the request is ending.
-            Message::Text(text) => match PhpString::new(self, text.as_bytes()) {
+            Message::Text(text) => match crate::api::raising::strpprintf(self, text) {
                 Ok(string) => (string, true),
                 Err(_) => return false,
             },
@@ -7225,7 +7225,13 @@ impl Request {
         let trace = self.stack_trace_after_the_site();
         if self.log_errors() {
             let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
-            if self.log_err(text.as_bytes()) && fatal_errors(level) {
+            // `spprintf(&log_buffer, …)`, freed once it is logged.
+            let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
+                return;
+            };
+            let logged = self.log_err(text.as_bytes());
+            self.heap.free_block(buffer);
+            if logged && fatal_errors(level) {
                 // What follows a fatal in the host's log is still inside
                 // `sapi_module.log_message`, so inside `php_log_err`'s
                 // guard: a diagnostic it raises is not logged.
@@ -7251,7 +7257,7 @@ impl Request {
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
-            self.display(text.as_bytes());
+            self.printed(text.as_bytes());
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -7259,16 +7265,23 @@ impl Request {
             // the newline.
             let prepend = self.ini_text(b"error_prepend_string");
             let append = self.ini_text(b"error_append_string");
-            let text = match level {
-                Level::Error | Level::Parse => format!(
+            if let Level::Error | Level::Parse = level {
+                // `escape_html`'s string stands while it is printed.
+                let Ok(escaped) = self.heap.block(escaped_html_size(message)) else {
+                    return;
+                };
+                let text = format!(
                     "{prepend}<br />\n<b>{name}</b>:  {} in <b>{named}</b> on line <b>{line}</b><br />\n{append}",
                     escape_html(message)
-                ),
-                _ => format!(
+                );
+                self.printed(text.as_bytes());
+                self.heap.free_block(escaped);
+            } else {
+                let text = format!(
                     "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
-                ),
-            };
-            self.display(text.as_bytes());
+                );
+                self.printed(text.as_bytes());
+            }
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
@@ -7282,7 +7295,51 @@ impl Request {
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
-            self.display(text.as_bytes());
+            self.printed(text.as_bytes());
+        }
+    }
+
+    /// `php_printf` (`Z/main/main.c:1003`) of a diagnostic's display:
+    /// `vspprintf`'s buffer laid down for `text`, written, and freed, so
+    /// the peak around a displayed diagnostic holds it as php's does: a
+    /// `smart_string`'s 256 bytes for a short one, the page for one past
+    /// 255 bytes, and nothing for one `@` silenced. Under `html_errors`
+    /// an `E_ERROR`'s message is escaped into a string of its own that
+    /// stands beside the buffer.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo "\n", memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// class K { function m() {} }
+    /// pk(function () { trigger_error('x', E_USER_DEPRECATED); });
+    /// pk(function () { @trigger_error('x', E_USER_DEPRECATED); });
+    /// pk(function () { trigger_error(str_repeat('y', 300), E_USER_DEPRECATED); });
+    /// pk(function () { new ReflectionMethod('K::m'); });
+    /// ```
+    /// ```expect
+    /// Deprecated: x in %s on line 4
+    ///
+    /// Deprecated: x in %s on line 4
+    ///
+    /// 256 0
+    ///
+    /// 0 0
+    ///
+    /// Deprecated: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy in %s on line 6
+    ///
+    /// Deprecated: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy in %s on line 6
+    ///
+    /// 4096 0
+    ///
+    /// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 7
+    ///
+    /// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 7
+    ///
+    /// 528 0
+    /// ```
+    fn printed(&mut self, text: &[u8]) {
+        if let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) {
+            self.display(text);
+            self.heap.free_block(buffer);
         }
     }
 
@@ -23135,6 +23192,32 @@ pub(crate) fn escape_html(message: &str) -> String {
         }
     }
     escaped
+}
+
+/// The bytes `php_escape_html_entities_ex` asks for the string
+/// [`escape_html`] writes: `zend_string_alloc(maxlen)` with `maxlen` 128
+/// for a message under 64 bytes and twice its length otherwise, grown
+/// by 128 before each character that finds fewer than 40 bytes left.
+fn escaped_html_size(message: &str) -> usize {
+    let mut maxlen = if message.len() < 64 {
+        128
+    } else {
+        message.len() * 2
+    };
+    let mut len = 0;
+    for letter in message.chars() {
+        if len > maxlen - 40 {
+            maxlen += 128;
+        }
+        len += match letter {
+            '&' => 5,
+            '<' | '>' => 4,
+            '"' => 6,
+            _ => letter.len_utf8(),
+        };
+    }
+    // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
+    24 + maxlen + 1
 }
 
 /// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte
