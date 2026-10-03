@@ -1010,12 +1010,13 @@ impl ZipArchive {
     }
 
     /// `ZipArchive::setPassword()`: the password encrypted entries are
-    /// read with; an empty one refused.
+    /// read with; an empty one refused. The archive is one the oracle wrote,
+    /// `s` under PKWARE with `pw`, since a header written at each close lets `no`
+    /// through its check byte about once in a hundred.
     ///
     /// ```php
-    /// $z = new ZipArchive; $z->open('password-witness.zip', ZipArchive::CREATE);
-    /// $z->addFromString('s', 'secret'); $z->setEncryptionName('s', ZipArchive::EM_TRAD_PKWARE, 'pw'); $z->close();
-    /// $z->open('password-witness.zip');
+    /// file_put_contents('password-witness.zip', base64_decode('UEsDBBQACQAAAPgTQ13l6KJcEgAAAAYAAAABAAAAc8euH2s2oYKwPfvmL6NjIhq7OlBLBwjl6KJcEgAAAAYAAABQSwECPwMUAAkAAAD4E0Nd5eiiXBIAAAAGAAAAAQAAAAAAAAAAAAAAtoEAAAAAc1BLBQYAAAAAAQABAC8AAABBAAAAAAA='));
+    /// $z = new ZipArchive; $z->open('password-witness.zip');
     /// var_dump($z->getFromName('s'), $z->getStatusString(), $z->setPassword(''), $z->setPassword('no'), $z->getFromName('s'), $z->getStatusString());
     /// var_dump($z->setPassword('pw'), $z->getFromName('s'), $z->statName('s')['encryption_method']);
     /// $z->close(); unlink('password-witness.zip');

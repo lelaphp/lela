@@ -313,7 +313,7 @@ impl Raw {
     /// }
     /// $z->close(); $z->open('enc-witness.zip');
     /// var_dump($z->getStream('a'), $z->getStatusString());
-    /// $z->setPassword('no'); var_dump($z->getStream('p'), $z->getStatusString(), $z->getFromName('a'), $z->getStatusString());
+    /// $z->setPassword('no'); var_dump($z->getFromName('a'), $z->getStatusString());
     /// $z->setPassword('pw'); var_dump(strlen(stream_get_contents($z->getStream('a'))), strlen($z->getFromName('p', 5)));
     /// $z->close();
     /// $b = file_get_contents('enc-witness.zip'); $p = strpos($b, "PK\x01\x02") - 1; $b[$p] = chr(ord($b[$p]) ^ 1);
@@ -324,8 +324,6 @@ impl Raw {
     /// ```expect
     /// bool(false)
     /// string(20) "No password provided"
-    /// bool(false)
-    /// string(23) "Wrong password provided"
     /// bool(false)
     /// string(23) "Wrong password provided"
     /// int(8192)
