@@ -208,6 +208,9 @@ fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
 pub(crate) fn rshutdown(req: &mut Request) {
     for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
         persistent_shutdown(req, &mut dbh);
+        if let Conn::Open(conn) = &mut dbh.conn {
+            conn.give_back(req);
+        }
         if let Some(Pooled(pool)) = req.engine::<Pooled>() {
             drop(pool.give(key, dbh));
         }
