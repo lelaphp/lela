@@ -359,7 +359,22 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
 /// with every section but the credits, in a request started before
 /// `do_repeat` set `php_self` or an `argv`, and 0.
 pub fn info(engine: &Engine) -> i32 {
-    let description = RequestDescription {
+    let code = b"phpinfo(INFO_ALL & ~INFO_CREDITS);".to_vec();
+    let _ = in_request(engine, unnamed(), code);
+    0
+}
+
+/// `-v` (`php_cli.c:638-641`), which php serves with no request once
+/// `php_module_startup` has run: what the startup raised is displayed at
+/// a request's first moment here, so an empty one is served first, and
+/// its status 1 where the startup failed is the answer.
+pub(crate) fn started(engine: &Engine) -> i32 {
+    in_request(engine, unnamed(), Vec::new())
+}
+
+/// A request before `do_repeat` set `php_self` or an `argv`.
+fn unnamed() -> RequestDescription {
+    RequestDescription {
         env: std::env::vars_os()
             .map(|(n, v)| (n.as_encoded_bytes().to_vec(), v.as_encoded_bytes().to_vec()))
             .collect(),
@@ -367,13 +382,7 @@ pub fn info(engine: &Engine) -> i32 {
         server: server_variables(b"", b""),
         sapi_name: String::from(NAME),
         ..RequestDescription::default()
-    };
-    let _ = in_request(
-        engine,
-        description,
-        b"phpinfo(INFO_ALL & ~INFO_CREDITS);".to_vec(),
-    );
-    0
+    }
 }
 
 /// A reflector made by `made` over `name`, printed as `zend_print_zval`

@@ -152,7 +152,7 @@ impl Engine {
 }
 
 /// What a request that served no program wrote, handed to the host.
-fn hand_over(req: &mut Request, sink: &mut dyn OutputSink) {
+pub(crate) fn hand_over(req: &mut Request, sink: &mut dyn OutputSink) {
     match req.release_sink() {
         Sink::Held(mut held) => held.flush(),
         Sink::Kept(kept) => kept.hand_to(sink),
