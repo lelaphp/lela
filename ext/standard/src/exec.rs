@@ -473,7 +473,7 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
 /// ```php
 /// foreach (['C', 'ja_JP.SJIS', 'C.UTF-8'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(escapeshellcmd("\x95\;"))); }
 /// ```
-/// ```expect
+/// ```expect locale=ja_JP.SJIS
 /// string(10) "955c5c5c3b"
 /// string(8) "955c5c3b"
 /// string(8) "5c5c5c3b"
@@ -504,7 +504,7 @@ fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown>
 /// ```php
 /// foreach (['C', 'ja_JP.SJIS', 'C.UTF-8'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(escapeshellarg("\x95'\xe9"))); }
 /// ```
-/// ```expect
+/// ```expect locale=ja_JP.SJIS
 /// string(16) "2795275c2727e927"
 /// string(8) "27952727"
 /// string(12) "27275c272727"

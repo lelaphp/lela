@@ -2557,7 +2557,7 @@ impl MetaData {
 /// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', array_flip(get_meta_tags($f)))); }
 /// unlink($f);
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// array(1) {
 ///   ["x"]=>
 ///   string(6) "636166"
@@ -3089,7 +3089,7 @@ pub fn php_fputcsv(
 /// $f = fopen('php://memory', 'w+'); fwrite($f, "\x95\\,x\n\x95\\,x\n"); rewind($f);
 /// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', fgetcsv($f, null, "\\", '"', ""))); }
 /// ```
-/// ```expect
+/// ```expect locale=ja_JP.SJIS
 /// array(2) {
 ///   [0]=>
 ///   string(2) "95"
