@@ -1198,7 +1198,7 @@ impl Archive {
         check_crc: bool,
     ) -> Result<Reader, Status> {
         let de = self.dirent(idx, flags).map_err(|e| Status::of(e, 0))?;
-        let dostime = de.last_mod.time;
+        let (dostime, bitflags) = (de.last_mod.time, de.bitflags);
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let layers = Layers {
             method: st.comp_method,
@@ -1208,6 +1208,7 @@ impl Archive {
             comp_size: st.comp_size,
             crc: (check_crc && crc_valid).then_some(st.crc),
             dostime,
+            bitflags,
             check: self.open_flags & CHECKCONS != 0,
         };
         let window = self.window(idx)?;

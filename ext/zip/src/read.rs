@@ -9,7 +9,7 @@
 //! not the entry; an error is met at the read that reaches it.
 
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
 use crate::codec::{PkwareKeys, WinzipAes};
@@ -242,6 +242,20 @@ impl Read for Raw {
     }
 }
 
+/// `zip_source_read` on the stored bytes: up to `buf.len()` of them.
+fn read_raw(lower: &mut Raw, buf: &mut [u8]) -> Result<usize, Status> {
+    loop {
+        return match lower.read(buf) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => Err(e
+                .get_ref()
+                .and_then(|i| i.downcast_ref::<Carried>())
+                .map_or(Status::of(Er::Read, 0), |c| c.0)),
+        };
+    }
+}
+
 /// One step of a `zip_compression_algorithm_t`'s `process`.
 enum Step {
     Ok,
@@ -352,16 +366,7 @@ impl Decompressor {
 
     /// `zip_source_read` on the layer below.
     fn read_lower(&mut self, len: usize) -> Result<usize, Status> {
-        loop {
-            return match self.lower.read(&mut self.buffer[..len]) {
-                Ok(n) => Ok(n),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => Err(e
-                    .get_ref()
-                    .and_then(|i| i.downcast_ref::<Carried>())
-                    .map_or(Status::of(Er::Read, 0), |c| c.0)),
-            };
-        }
+        read_raw(&mut self.lower, &mut self.buffer[..len])
     }
 
     /// `compress_read`.
@@ -468,53 +473,579 @@ impl Decompressor {
     }
 }
 
-/// LZMA (method 14), whose header `zip_algorithm_xz.c` reads before the
-/// first byte comes out: version, the properties' size, the properties.
-struct Lzma {
-    pending: Option<(BufReader<Raw>, u64)>,
-    reader: Option<Box<lzma_rust2::LzmaReader<BufReader<Raw>>>>,
+/// The stored bytes a codec its crate reads whole reads from, as
+/// `compress_read` hands them to liblzma and libzstd: `BUFSIZE` at a
+/// time, each read of the layer below numbered, so a byte the codec
+/// makes is known by the reads it was made from.
+struct Feed {
+    lower: Raw,
+    buffer: Vec<u8>,
+    at: usize,
+    /// The reads of the layer below so far.
+    reads: usize,
+    /// The read that met the data's end, and the error it failed with.
+    end: Option<(usize, Option<Status>)>,
+    /// Whether the codec asked past the end.
+    starved: bool,
+    /// The bytes of the zstd frame being read, which its blocks are read
+    /// again from.
+    kept: Option<Vec<u8>>,
 }
 
-impl Read for Lzma {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some((mut src, size)) = self.pending.take() {
-            let mut header = [0u8; 9];
-            src.read_exact(&mut header)?;
-            if header[2..4] != [5, 0] {
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
-            }
-            let dict_size = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
-            let reader =
-                lzma_rust2::LzmaReader::new_with_props(src, size, header[4], dict_size, None)
-                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-            self.reader = Some(Box::new(reader));
+impl Feed {
+    fn new(lower: Raw) -> Feed {
+        Feed {
+            lower,
+            buffer: Vec::new(),
+            at: 0,
+            reads: 0,
+            end: None,
+            starved: false,
+            kept: None,
         }
-        match &mut self.reader {
-            Some(r) => r.read(buf),
-            None => Ok(0),
+    }
+
+    fn left(&self) -> usize {
+        self.buffer.len() - self.at
+    }
+
+    /// One more read of the layer below behind what is left; `false` at
+    /// the data's end or an error.
+    fn fetch(&mut self) -> bool {
+        if self.end.is_some() {
+            return false;
+        }
+        self.reads += 1;
+        self.buffer.drain(..self.at);
+        self.at = 0;
+        let have = self.buffer.len();
+        self.buffer.resize(have + BUFSIZE, 0);
+        let got = read_raw(&mut self.lower, &mut self.buffer[have..]);
+        self.buffer.truncate(have + got.unwrap_or(0));
+        match got {
+            Ok(0) => self.end = Some((self.reads, None)),
+            Err(e) => self.end = Some((self.reads, Some(e))),
+            Ok(_) => return true,
+        }
+        false
+    }
+}
+
+impl Read for Feed {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.left() == 0 && !self.fetch() {
+            self.starved = true;
+            return Ok(0);
+        }
+        let n = self.left().min(out.len());
+        out[..n].copy_from_slice(&self.buffer[self.at..self.at + n]);
+        if let Some(kept) = &mut self.kept {
+            kept.extend_from_slice(&out[..n]);
+        }
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// How a codec read whole stopped.
+#[derive(Clone, Copy)]
+enum Stop {
+    /// `ZIP_COMPRESSION_END`.
+    End,
+    /// The library's error, as libzip's `map_error` reads its code.
+    Failed(Status),
+    /// It wanted input past the data's end: the stream ends there, and
+    /// the CRC says what is missing.
+    Starved,
+}
+
+/// The largest frame window libzstd decodes by default
+/// (`ZSTD_WINDOWLOG_LIMIT_DEFAULT`).
+const ZSTD_WINDOW_MAX: u64 = 1 << 27;
+
+/// What libzstd made of a frame's first blocks: the frame read again
+/// with an empty last block after them.
+fn zstd_prefix(frame: &[u8]) -> Vec<u8> {
+    let mut src = frame.to_vec();
+    src.extend_from_slice(&[1, 0, 0]);
+    if frame.get(4).is_some_and(|d| d & 4 != 0) {
+        src.extend_from_slice(&[0; 4]);
+    }
+    let mut d = ruzstd::decoding::FrameDecoder::new();
+    d.set_max_window_size(ZSTD_WINDOW_MAX);
+    let mut s = &src[..];
+    if d.init(&mut s).is_err()
+        || d.decode_blocks(&mut s, ruzstd::decoding::BlockDecodingStrategy::All)
+            .is_err()
+    {
+        return Vec::new();
+    }
+    d.collect().unwrap_or_default()
+}
+
+/// libzstd's frames, read one block at a time by ruzstd
+/// (`ZSTD_decompressStream`).
+struct Zstd {
+    feed: Feed,
+    frame: Option<ruzstd::decoding::FrameDecoder>,
+    /// Where each block read of the frame ends in its kept bytes, and the
+    /// read of the layer below that completed it.
+    blocks: Vec<(usize, usize)>,
+    /// The frame's bytes ruzstd has let go of.
+    made: usize,
+}
+
+/// What one turn of a codec read whole made.
+enum Made {
+    Bytes(Vec<u8>, usize),
+    /// A zstd frame's last bytes, behind which a new step begins.
+    FrameEnd(Vec<u8>, usize),
+    /// A zstd frame's bytes libzstd delivers before it stops: those
+    /// made before the read the stop is met at, and those made at it.
+    Before(Vec<u8>, Vec<u8>, Stop, usize),
+    Stopped(Stop, usize),
+}
+
+impl Zstd {
+    /// The frame's blocks read so far, as libzstd delivers them before
+    /// it meets `stop` at read `at`: those read before `at`, then those
+    /// read at it.
+    fn before(&mut self, made: Option<Vec<u8>>, stop: Stop, at: usize) -> Made {
+        let kept = self.feed.kept.take().unwrap_or_default();
+        let k = self.blocks.len();
+        let all = match made {
+            Some(tail) => tail,
+            None if k == 0 => Vec::new(),
+            None => zstd_prefix(&kept[..self.blocks[k - 1].0])
+                .get(self.made..)
+                .unwrap_or_default()
+                .to_vec(),
+        };
+        let first = self.blocks.iter().position(|b| b.1 >= at).unwrap_or(k);
+        let early = match first {
+            0 => 0,
+            f if f == k => self.made + all.len(),
+            f => zstd_prefix(&kept[..self.blocks[f - 1].0]).len(),
+        };
+        let split = early.saturating_sub(self.made).min(all.len());
+        self.frame = None;
+        if all.is_empty() {
+            return Made::Stopped(stop, at);
+        }
+        let (a, b) = all.split_at(split);
+        Made::Before(a.to_vec(), b.to_vec(), stop, at)
+    }
+
+    /// One frame header, block or skipped frame read.
+    fn turn(&mut self) -> Made {
+        use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+        let fault = Status::of(Er::Internal, 0);
+        let Some(d) = &mut self.frame else {
+            self.feed.kept = Some(Vec::new());
+            self.blocks.clear();
+            self.made = 0;
+            let mut d = ruzstd::decoding::FrameDecoder::new();
+            d.set_max_window_size(ZSTD_WINDOW_MAX);
+            return match d.init(&mut self.feed) {
+                Ok(()) => {
+                    self.frame = Some(d);
+                    Made::Bytes(Vec::new(), self.feed.reads)
+                }
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                    length,
+                    ..
+                })) => {
+                    let mut skip = vec![0; length as usize];
+                    let _ = self.feed.read_exact(&mut skip);
+                    if self.feed.starved {
+                        Made::Stopped(Stop::Starved, self.feed.reads)
+                    } else {
+                        Made::Bytes(Vec::new(), self.feed.reads)
+                    }
+                }
+                Err(_) if self.feed.starved => Made::Stopped(Stop::Starved, self.feed.reads),
+                Err(_) => Made::Stopped(Stop::Failed(fault), self.feed.reads),
+            };
+        };
+        let got = d.decode_blocks(
+            &mut self.feed,
+            ruzstd::decoding::BlockDecodingStrategy::UptoBlocks(1),
+        );
+        let at = self.feed.reads;
+        match got {
+            Err(_) if self.feed.starved => self.before(None, Stop::Starved, at),
+            Err(_) => self.before(None, Stop::Failed(fault), at),
+            Ok(finished) => {
+                let end = self.feed.kept.as_ref().map_or(0, Vec::len);
+                self.blocks.push((end, at));
+                let bytes = d.collect().unwrap_or_default();
+                if !finished {
+                    self.made += bytes.len();
+                    return Made::Bytes(bytes, at);
+                }
+                let sums = (d.get_checksum_from_data(), d.get_calculated_checksum());
+                if let (Some(stored), Some(made)) = sums
+                    && stored != made
+                {
+                    return self.before(Some(bytes), Stop::Failed(fault), at);
+                }
+                self.frame = None;
+                Made::FrameEnd(bytes, at)
+            }
         }
     }
 }
 
-/// ZSTD (method 93), whose frame header ruzstd reads at its start.
-struct Zstd {
-    pending: Option<BufReader<Raw>>,
-    reader: Option<
-        Box<ruzstd::decoding::StreamingDecoder<BufReader<Raw>, ruzstd::decoding::FrameDecoder>>,
-    >,
+/// A codec its crate reads whole.
+enum Codec {
+    /// LZMA before libzip's header of it (`zip_algorithm_xz.c`'s
+    /// `input`): its feed, and the size it ends at where the entry has no
+    /// end marker.
+    LzmaHeader(Option<Feed>, u64),
+    Lzma(Box<lzma_rust2::LzmaReader<Feed>>),
+    /// XZ, and whether its first bytes are XZ's magic, liblzma's
+    /// `LZMA_FORMAT_ERROR` otherwise.
+    Xz(Box<lzma_rust2::XzReader<Feed>>, Option<bool>),
+    Zstd(Box<Zstd>),
 }
 
-impl Read for Zstd {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(src) = self.pending.take() {
-            let reader = ruzstd::decoding::StreamingDecoder::new(src)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-            self.reader = Some(Box::new(reader));
+impl Codec {
+    fn feed(&mut self) -> Option<&mut Feed> {
+        match self {
+            Codec::LzmaHeader(feed, _) => feed.as_mut(),
+            Codec::Lzma(r) => Some(r.inner_mut()),
+            Codec::Xz(r, _) => Some(r.inner_mut()),
+            Codec::Zstd(z) => Some(&mut z.feed),
         }
-        match &mut self.reader {
-            Some(r) => r.read(buf),
-            None => Ok(0),
+    }
+
+    /// libzip's header of an LZMA entry, then the reader over the rest.
+    fn lzma(feed: Option<Feed>, size: u64) -> (Codec, Made) {
+        let Some(mut feed) = feed else {
+            return (
+                Codec::LzmaHeader(None, size),
+                Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), 0),
+            );
+        };
+        while feed.left() < 14 && feed.fetch() {}
+        let at = feed.reads;
+        let head = &feed.buffer[feed.at..];
+        let corrupt = Made::Stopped(Stop::Failed(Status::of(Er::CompressedData, 0)), at);
+        if head.len() >= 9 && head[2..4] != [5, 0] {
+            return (Codec::LzmaHeader(Some(feed), size), corrupt);
         }
+        if head.len() < 14 {
+            return (
+                Codec::LzmaHeader(Some(feed), size),
+                Made::Stopped(Stop::Starved, at),
+            );
+        }
+        let (props, dict) = (
+            head[4],
+            u32::from_le_bytes([head[5], head[6], head[7], head[8]]),
+        );
+        if props > 224 || props % 9 + props / 9 % 5 > 4 {
+            // `lzma_lzma_lclppb_decode`'s `LZMA_FORMAT_ERROR` leaves the
+            // stream in error, and the next `lzma_code` is liblzma's
+            // `LZMA_PROG_ERROR`, which `map_error` reads as internal.
+            return (
+                Codec::LzmaHeader(Some(feed), size),
+                Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), at),
+            );
+        }
+        feed.at += 9;
+        match lzma_rust2::LzmaReader::new_with_props(feed, size, props, dict, None) {
+            Ok(r) => (Codec::Lzma(Box::new(r)), Made::Bytes(Vec::new(), at)),
+            Err(_) => (Codec::LzmaHeader(None, size), corrupt),
+        }
+    }
+
+    /// One read of the codec: at most `room` bytes, and for LZMA fewer
+    /// than the input left could make, so none is made from a read the
+    /// input past it had not come in by (a symbol takes at most 48 bytes).
+    fn turn(&mut self, room: usize, scratch: &mut [u8]) -> Made {
+        let (got, magic) = match self {
+            Codec::LzmaHeader(feed, size) => {
+                let (codec, made) = Codec::lzma(feed.take(), *size);
+                *self = codec;
+                return made;
+            }
+            Codec::Zstd(z) => return z.turn(),
+            Codec::Lzma(r) => {
+                let n = (r.inner().left().saturating_sub(64) / 48).clamp(1, room);
+                (r.read(&mut scratch[..n]), true)
+            }
+            Codec::Xz(r, magic) => {
+                let magic = *magic.get_or_insert_with(|| {
+                    let feed = r.inner_mut();
+                    while feed.left() < 6 && feed.fetch() {}
+                    feed.buffer[feed.at..].starts_with(b"\xfd7zXZ\0")
+                });
+                // An LZMA2 chunk is read whole, so the reads its bytes
+                // were made from are known no closer than the chunk.
+                (r.read(&mut scratch[..room]), magic)
+            }
+        };
+        let Some(feed) = self.feed() else {
+            return Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), 0);
+        };
+        let at = feed.reads;
+        match got {
+            Ok(0) => Made::Stopped(Stop::End, at),
+            _ if feed.starved => Made::Stopped(Stop::Starved, at),
+            Ok(m) => Made::Bytes(scratch[..m].to_vec(), at),
+            Err(_) => Made::Stopped(
+                Stop::Failed(Status::of(
+                    if magic {
+                        Er::CompressedData
+                    } else {
+                        Er::Internal
+                    },
+                    0,
+                )),
+                at,
+            ),
+        }
+    }
+}
+
+/// LZMA, XZ and ZSTD as `compress_read` drives liblzma and libzstd
+/// through `zip_algorithm_xz.c` and `zip_algorithm_zstd.c`, over codecs
+/// their crates read whole: each byte is made ahead, marked with the
+/// reads of the layer below it was made from, and handed on as libzip's
+/// `process` steps would hand it, a step ending where the buffer it fills
+/// is full or the input runs out; a step that meets the library's error
+/// drops what it made.
+struct Pulled {
+    codec: Codec,
+    ahead: std::collections::VecDeque<u8>,
+    /// Runs of `ahead`: the reads they were made from, and their length.
+    runs: std::collections::VecDeque<(usize, usize)>,
+    /// The bytes at the head of `ahead` a zstd frame's end keeps out of
+    /// the step after it.
+    keep: usize,
+    stop: Option<(Stop, usize)>,
+    /// `compress_read`'s reads of the layer below.
+    reads: usize,
+    end_of_input: bool,
+    end_of_stream: bool,
+    error: Option<Status>,
+    /// `ZIP_CHECKCONS`: input left past the stream's end is an error.
+    check: bool,
+    scratch: Vec<u8>,
+}
+
+impl Pulled {
+    fn new(codec: Codec, check: bool) -> Pulled {
+        Pulled {
+            codec,
+            ahead: std::collections::VecDeque::new(),
+            runs: std::collections::VecDeque::new(),
+            keep: 0,
+            stop: None,
+            reads: 0,
+            end_of_input: false,
+            end_of_stream: false,
+            error: None,
+            check,
+            scratch: vec![0; BUFSIZE],
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], at: usize) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.ahead.extend(bytes);
+        match self.runs.back_mut() {
+            Some(run) if run.0 == at => run.1 += bytes.len(),
+            _ => self.runs.push_back((at, bytes.len())),
+        }
+    }
+
+    /// The bytes ahead made from the first `reads` reads.
+    fn ready(&self) -> usize {
+        self.runs
+            .iter()
+            .take_while(|r| r.0 <= self.reads)
+            .map(|r| r.1)
+            .sum()
+    }
+
+    fn take(&mut self, out: &mut [u8]) -> usize {
+        let n = out.len();
+        for (o, b) in out.iter_mut().zip(self.ahead.drain(..n)) {
+            *o = b;
+        }
+        let mut left = n;
+        while left > 0 {
+            let Some(run) = self.runs.front_mut() else {
+                break;
+            };
+            let k = run.1.min(left);
+            run.1 -= k;
+            left -= k;
+            if run.1 == 0 {
+                self.runs.pop_front();
+            }
+        }
+        self.keep = self.keep.saturating_sub(n);
+        n
+    }
+
+    /// The codec read on until `space` bytes are ready, it reads past
+    /// what `compress_read` has read, or it stops.
+    fn make(&mut self, space: usize) {
+        while self.stop.is_none()
+            && self.ready() <= space
+            && self.codec.feed().is_some_and(|f| f.reads <= self.reads)
+        {
+            let room = space
+                .saturating_sub(self.ahead.len() + 1)
+                .clamp(1, self.scratch.len());
+            match self.codec.turn(room, &mut self.scratch) {
+                Made::Bytes(b, at) => self.push(&b, at),
+                Made::FrameEnd(b, at) => {
+                    self.push(&b, at);
+                    self.keep = self.ahead.len();
+                }
+                Made::Before(early, late, stop, at) => {
+                    self.push(&early, at);
+                    self.keep = self.ahead.len();
+                    self.push(&late, at);
+                    self.stop = Some((stop, at));
+                }
+                Made::Stopped(stop, at) => self.stop = Some((stop, at)),
+            }
+        }
+    }
+
+    /// `compress_read`'s read of one byte past the stream's end: whether
+    /// any input is left.
+    fn trailing(&mut self) -> Result<bool, Status> {
+        let reads = self.reads;
+        let Some(feed) = self.codec.feed() else {
+            return Ok(false);
+        };
+        let more = if feed.reads > reads {
+            match feed.end {
+                Some((at, Some(e))) if at == reads + 1 => return Err(e),
+                Some((at, None)) if at == reads + 1 => false,
+                _ => true,
+            }
+        } else {
+            read_raw(&mut feed.lower, &mut [0u8; 1])? > 0
+        };
+        Ok(more || feed.left() > 0)
+    }
+
+    /// `compress_read`.
+    ///
+    /// LZMA, XZ and ZSTD entries the oracle wrote, damaged: a step that
+    /// meets liblzma's error drops what it made; LZMA whose input ends before
+    /// its end marker ends there, and the CRC finds it short; liblzma's
+    /// `LZMA_FORMAT_ERROR` and every ZSTD error are libzip's `Internal error`
+    /// (its `map_error` is handed `ZSTD_decompressStream`'s return, which no
+    /// case matches); and libzstd reads on through damage to a frame without
+    /// a checksum, which the CRC then finds.
+    ///
+    /// ```php
+    /// $z = base64_decode('UEsDBD8AAgAOAJIQQ10RaoskYwAAAPBVAAABAAAAbAkUBQBdAAAEAAAwiAmG1B9FuCOP9NI7P2QgG4TEbe+6YngwQwLuv8NzyJHDoCyOV1cqVIHHUAW6YehSADuHGILHHs/JY6H+MavdjihXb3j28THGD/KTQG+yO57q7P//xtxAAFBLAwQUAAAAXwCSEENdEWqLJJQAAADwVQAAAQAAAHj9N3pYWgAABObWtEYCACEBDAAAAI+YQZzgVe8AU10AMIgJhtQfRbgjj/TSOz9kIBuExG3vumJ4MEMC7r/Dc8iRw6AsjldXKlSBx1AFumHoUgA7hxiCxx7PyWOh/jGr3Y4oV2949vExxg/yk0Bvsjn6GAAAANpQsC7u8a+SAAFv8KsBAAA8zWvpscRn+wIAAAAABFlaUEsDBBQAAABdAJIQQ10RaoskJwAAAPBVAAABAAAAeii1L/0AWPUAALBhIGxpbmUgb2YgdGhlIHdpdG5lc3MKAQCuq9xnE1BLAQI/Az8AAgAOAJIQQ10RaoskYwAAAPBVAAABAAAAAAAAAAAAAAC2gQAAAABsUEsBAj8DFAAAAF8AkhBDXRFqiySUAAAA8FUAAAEAAAAAAAAAAAAAALaBggAAAHhQSwECPwMUAAAAXQCSEENdEWqLJCcAAADwVQAAAQAAAAAAAAAAAAAAtoE1AQAAelBLBQYAAAAAAwADAI0AAAB7AQAAAAA=');
+    /// foreach ([['l', 31, 4], ['l', 31, 58], ['l', 31, 68], ['x', 161, 5], ['x', 161, 97], ['z', 340, 3], ['z', 340, 15]] as [$n, $s, $o]) {
+    ///   $b = $z; $b[$s + $o] = chr(ord($b[$s + $o]) ^ 0x5a); file_put_contents('codec-witness.zip', $b);
+    ///   $a = new ZipArchive; $a->open('codec-witness.zip'); $f = $a->getStream($n); $k = 0;
+    ///   while (($r = fread($f, 4096)) !== false && $r !== '') { $k += strlen($r); }
+    ///   echo "$n+$o: $k ", strlen($a->getFromName($n)), ' ', strlen($a->getFromName($n, 100)), "\n"; $a->close();
+    /// }
+    /// unlink('codec-witness.zip');
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    /// l+4: 0 0 0
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    /// l+58: 5504 5504 100
+    ///
+    /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    /// l+68: 8192 0 100
+    ///
+    /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    /// x+5: 0 0 0
+    ///
+    /// Warning: fread(): Zip stream error: Compressed data invalid in %s on line %d
+    /// x+97: 8192 0 100
+    ///
+    /// Warning: fread(): Zip stream error: Internal error in %s on line %d
+    /// z+3: 0 0 0
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    ///
+    /// Warning: fread(): Zip stream error: CRC error in %s on line %d
+    /// z+15: 22000 22000 100
+    /// ```
+    fn read_some(&mut self, out: &mut [u8]) -> Result<usize, Status> {
+        if let Some(e) = self.error {
+            return Err(e);
+        }
+        if out.is_empty() || self.end_of_stream {
+            return Ok(0);
+        }
+        let mut done = 0;
+        loop {
+            let space = out.len() - done;
+            self.make(space);
+            let ready = self.ready();
+            match self.stop {
+                Some((Stop::Failed(e), at)) if at <= self.reads => {
+                    let keep = self.keep.min(ready).min(space);
+                    done += self.take(&mut out[done..done + keep]);
+                    let (rest, space) = (ready - keep, out.len() - done);
+                    if space > 0 && rest <= space {
+                        self.ahead.clear();
+                        self.runs.clear();
+                        self.error = Some(e);
+                    } else {
+                        done += self.take(&mut out[done..done + rest.min(space)]);
+                    }
+                    break;
+                }
+                Some((Stop::End, at)) if at <= self.reads && ready <= space => {
+                    done += self.take(&mut out[done..done + ready]);
+                    self.end_of_stream = true;
+                    match self.trailing() {
+                        Err(e) => self.error = Some(e),
+                        Ok(true) if self.check => self.error = Some(Status::of(Er::Incons, 0)),
+                        Ok(_) => {}
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            done += self.take(&mut out[done..done + ready.min(space)]);
+            if done == out.len() || self.end_of_input {
+                break;
+            }
+            let next = self.reads + 1;
+            match self.codec.feed().and_then(|f| f.end) {
+                Some((at, Some(e))) if at == next => {
+                    self.error = Some(e);
+                    break;
+                }
+                Some((at, None)) if at == next => self.end_of_input = true,
+                _ => {}
+            }
+            self.reads = next;
+        }
+        if done > 0 {
+            return Ok(done);
+        }
+        self.error.map_or(Ok(0), Err)
     }
 }
 
@@ -525,14 +1056,12 @@ enum Body {
     /// A window read as it is: stored data, or the raw bytes
     /// `ZIP_FL_COMPRESSED` asks for.
     Window(Window),
+    /// Stored data, decrypted.
+    Decrypted(Raw),
     /// Deflated or bzip2 data, decompressed as libzip decompresses it.
     Compressed(Box<Decompressor>),
-    /// Decrypted, or decompressed by a codec read whole, and the error
-    /// the codec's own failure reads as.
-    Decoded {
-        reader: Box<dyn Read + Send>,
-        fault: Status,
-    },
+    /// LZMA, XZ or ZSTD data, decompressed by a codec read whole.
+    Pulled(Box<Pulled>),
 }
 
 impl Body {
@@ -546,21 +1075,9 @@ impl Body {
                 Ok(n)
             }
             Body::Window(w) => w.read_some(buf),
+            Body::Decrypted(raw) => read_raw(raw, buf),
             Body::Compressed(d) => d.read_some(buf),
-            Body::Decoded { reader, fault } => loop {
-                return match reader.read(buf) {
-                    Ok(n) => Ok(n),
-                    Err(e) => match e.get_ref().and_then(|i| i.downcast_ref::<Carried>()) {
-                        Some(c) => Err(c.0),
-                        None if e.kind() == io::ErrorKind::Interrupted => continue,
-                        // `ZIP_COMPRESSION_NEED_DATA` past the input's
-                        // end: the stream ends there, and the CRC says
-                        // what is missing.
-                        None if e.kind() == io::ErrorKind::UnexpectedEof => Ok(0),
-                        None => Err(*fault),
-                    },
-                };
-            },
+            Body::Pulled(p) => p.read_some(buf),
         }
     }
 
@@ -569,7 +1086,7 @@ impl Body {
         match self {
             Body::Bytes { data, offset } => Some((*offset as u64, data.len() as u64)),
             Body::Window(w) => Some((w.offset, w.len)),
-            Body::Compressed(_) | Body::Decoded { .. } => None,
+            Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => None,
         }
     }
 
@@ -577,7 +1094,7 @@ impl Body {
         match self {
             Body::Bytes { offset, .. } => *offset = usize::try_from(to).unwrap_or(usize::MAX),
             Body::Window(w) => w.offset = to,
-            Body::Compressed(_) | Body::Decoded { .. } => {}
+            Body::Decrypted(_) | Body::Compressed(_) | Body::Pulled(_) => {}
         }
     }
 }
@@ -618,6 +1135,9 @@ pub(crate) struct Layers<'a> {
     pub(crate) crc: Option<u32>,
     /// The DOS time PKWARE's header is checked by.
     pub(crate) dostime: u16,
+    /// The general purpose bit flags, whose bits 1 and 2 say whether an
+    /// LZMA entry ends with an end marker.
+    pub(crate) bitflags: u16,
     /// `ZIP_CHECKCONS`, which the archive was opened with.
     pub(crate) check: bool,
 }
@@ -704,14 +1224,7 @@ impl Reader {
         if l.method == 0 {
             return Ok(match raw {
                 Raw::Plain(w) => Reader::new(Body::Window(w), crc, true),
-                raw => Reader::new(
-                    Body::Decoded {
-                        reader: Box::new(raw),
-                        fault: Status::of(Er::Internal, 0),
-                    },
-                    crc,
-                    false,
-                ),
+                raw => Reader::new(Body::Decrypted(raw), crc, false),
             });
         }
         let algorithm = match l.method {
@@ -723,26 +1236,29 @@ impl Reader {
             let d = Decompressor::new(raw, algorithm, l.check);
             return Ok(Reader::new(Body::Compressed(Box::new(d)), crc, false));
         }
-        let src = BufReader::with_capacity(BUFSIZE, raw);
-        let corrupt = Status::of(Er::CompressedData, 0);
-        let (reader, fault): (Box<dyn Read + Send>, Status) = match l.method {
-            14 => (
-                Box::new(Lzma {
-                    pending: Some((src, l.size)),
-                    reader: None,
-                }),
-                corrupt,
+        let feed = Feed::new(raw);
+        let codec = match l.method {
+            // `zip_algorithm_xz.c`'s `start`: the size is the entry's
+            // where neither of general purpose bits 1 and 2 says an end
+            // marker ends the data.
+            14 => Codec::LzmaHeader(
+                Some(feed),
+                if l.bitflags & 6 == 0 {
+                    l.size
+                } else {
+                    u64::MAX
+                },
             ),
-            93 => (
-                Box::new(Zstd {
-                    pending: Some(src),
-                    reader: None,
-                }),
-                corrupt,
-            ),
-            _ => (Box::new(lzma_rust2::XzReader::new(src, false)), corrupt),
+            93 => Codec::Zstd(Box::new(Zstd {
+                feed,
+                frame: None,
+                blocks: Vec::new(),
+                made: 0,
+            })),
+            _ => Codec::Xz(Box::new(lzma_rust2::XzReader::new(feed, true)), None),
         };
-        Ok(Reader::new(Body::Decoded { reader, fault }, crc, false))
+        let pulled = Pulled::new(codec, l.check);
+        Ok(Reader::new(Body::Pulled(Box::new(pulled)), crc, false))
     }
 
     /// `zip_file_is_seekable`.
