@@ -791,8 +791,8 @@ impl Drained {
     }
 
     /// What came through the pipe: all of it once its last writer closed
-    /// it, or what had come by `until` where a process the group kill did
-    /// not reach still holds it open.
+    /// it, or what had come by `until` where a process the program started
+    /// still holds it open.
     fn taken(self, until: Instant) -> Vec<u8> {
         let _ = self
             .done
@@ -807,11 +807,11 @@ impl Drained {
 /// The process group a program leads, which it was spawned into
 /// (`process_group(0)`) so that whatever it starts is in the group too: a
 /// server a test forks, a `php -S`, a worker it leaves running (#1211). The
-/// group is killed whole when this value drops, past the limit, after the
-/// program exits and on every error between, so nothing a program started
-/// outlives its run, as `proc_terminate` ends upstream's on its timeout
-/// (run-tests.php `system_with_timeout`). A kill that finds the group
-/// empty is no error.
+/// group is killed whole when this value drops, past the limit, once the
+/// program has exited and its pipes have reached their end, and on every
+/// error between, so nothing a program started outlives its run, as
+/// `proc_terminate` ends upstream's on its timeout (run-tests.php
+/// `system_with_timeout`). A kill that finds the group empty is no error.
 struct Group(nix::unistd::Pid);
 
 impl Group {
@@ -1053,14 +1053,19 @@ impl<'a> Oracle<'a> {
             thread::sleep(Duration::from_millis(5));
         };
         let wall = started.elapsed();
-        // What the program started goes with it, which closes whatever of
-        // its pipes those held, so the reads below reach their end.
+        // A pipe is read to its end before what the program started goes
+        // with it, as upstream's `system_with_timeout` reads until `feof`
+        // within its timeout: a child sharing the program's stdout writes
+        // there after the program exits, as gh20582.phpt's `proc_open`ed
+        // `php -r` does (#1491), and killing it first drops what it had
+        // still to write. A process that holds the pipe open past the
+        // limit leaves what came by then, and the kill then reaches it.
+        let (stdout, stderr) = taken.read(started + limit)?;
         drop(group);
         if let Some(feeding) = feeding {
             let _ = feeding.join();
         }
 
-        let (stdout, stderr) = taken.read(started + limit)?;
         let (stdout, stderr) = if call.raw {
             (stdout, stderr)
         } else {
