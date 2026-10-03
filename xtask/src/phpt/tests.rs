@@ -1696,6 +1696,63 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
 
+/// A lane whose second subset is refused for a `MySQL` server that does
+/// not answer still writes the first subset's reading, and the refusal is
+/// the second's own failing reading with its cause, so the lane's exit
+/// says it without erasing the rest (#1612). Before, the refusal was the
+/// lane's error and no reading of the lane was written.
+#[test]
+fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading() {
+    if oracle().is_none() {
+        return;
+    }
+    let tree = fixture_tree();
+    // `ext/hollow` is first and holds no `.phpt`, so its reading is a skip
+    // and nothing runs; `ext/pdo_mysql` is second and needs the server.
+    fs::create_dir_all(tree.join("ext/hollow/src")).unwrap();
+    copy(&fixture("mysql"), &tree.join("ext/pdo_mysql/tests"));
+    let mut manifest = manifest_of(
+        [Crate::named("ext/hollow"), Crate::named("ext/pdo_mysql")],
+        &tree,
+    );
+    manifest.pin.recipe.env.insert(
+        "PDO_MYSQL_TEST_DSN".to_owned(),
+        "mysql:host=127.0.0.1;port=1;dbname=test".to_owned(),
+    );
+    // An engine built after the tree, so the run copies the tree and asks
+    // the server; it never runs a test, the refusal comes first.
+    let ask = Ask {
+        engine: Some(std::env::current_exe().unwrap()),
+        jobs: NonZeroUsize::new(1),
+        ..Ask::default()
+    };
+    let readings = super::run(&workspace(), &manifest, &registry(""), &ask).unwrap();
+    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(scopes, ["ext/hollow", "ext/pdo_mysql"], "{readings:#?}");
+    assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
+    let refused = &readings[1];
+    assert_eq!(refused.status, Status::Fail, "{refused:#?}");
+    assert!(
+        refused.message.contains("refused, not skipped"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(refused.numbers["refused"], 1i64.into());
+    let kept = Tree::new("phpt-lane-store").unwrap();
+    let store = crate::reading::Store::at(kept.path());
+    let outcome = store.record(&readings).unwrap();
+    assert!(
+        outcome.exit().is_err(),
+        "the lane's exit says nothing was refused"
+    );
+    for scope in scopes {
+        assert!(
+            store.read(INSTRUMENT, scope).unwrap().is_some(),
+            "{scope} is not written"
+        );
+    }
+}
+
 /// A run's database is named in the DSN as in the two variables php's
 /// suites read (#1546), and a database of the runs' is dropped only once
 /// the process its name carries is gone; one of another name never.
