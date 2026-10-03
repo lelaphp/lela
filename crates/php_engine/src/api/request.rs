@@ -15961,6 +15961,23 @@ impl Request {
     /// P C Q
     /// ```
     ///
+    /// Under opcache they are tried once the unit's other classes are
+    /// declared, as `zend_accel_load_script` copies the cached file's class
+    /// table before the delayed early binding, so a parent written below
+    /// its child is there by then; what the link refuses names the
+    /// child's line, the one `zend_try_early_bind` compiles at
+    /// (GH-16508). Without it each is tried in its place, as php's own
+    /// compiler early binds:
+    ///
+    /// ```php
+    /// echo "never\n";
+    /// class Test2 extends Test {}
+    /// abstract class Test { abstract function foo(); }
+    /// ```
+    /// ```expect exit=255 regime=jit-off
+    /// Fatal error: Class Test2 contains 1 abstract method and must therefore be declared abstract or implement the remaining method (Test::foo) in %s on line 3
+    /// ```
+    ///
     /// A file compiled while the request already holds a class of its
     /// name binds none early, as php's compiler, which sees the
     /// request's table, leaves it to its opline (GH-8846): what stands
@@ -15993,6 +16010,8 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
+        let accelerated = self.accelerated();
+        let mut tried = Vec::new();
         for (at, decl) in unit.classes.iter().enumerate() {
             // A saved script of the preload, whose classes the preload
             // holds, declares none of them again (`preload_remove_declares`).
@@ -16012,10 +16031,12 @@ impl Request {
                     }
                     continue;
                 }
-                if delayed.iter().any(|delayed| **delayed == *key.0)
-                    && !self.bind_at_load(unit, at, decl)
-                {
-                    return false;
+                if delayed.iter().any(|delayed| **delayed == *key.0) {
+                    if accelerated {
+                        tried.push(at);
+                    } else if !self.bind_at_load(unit, at, decl) {
+                        return false;
+                    }
                 }
                 continue;
             }
@@ -16030,7 +16051,19 @@ impl Request {
             };
             self.bind_declared(unit, at, None);
         }
-        true
+        tried
+            .into_iter()
+            .filter_map(|at| Some((at, unit.classes.get(at)?)))
+            .all(|(at, decl)| self.bind_at_load(unit, at, decl))
+    }
+
+    /// Whether opcache compiles this request's files, whose
+    /// `ZEND_COMPILE_DELAYED_BINDING` leaves a class to the load:
+    /// `accel_startup` on, `opcache.enable_cli` too on the command line.
+    fn accelerated(&self) -> bool {
+        self.ini_flag(b"opcache.enable")
+            && (!matches!(self.sapi_name(), "cli" | "phpdbg")
+                || self.ini_flag(b"opcache.enable_cli"))
     }
 
     /// One entry of `zend_accel_do_delayed_early_binding`: the class at
