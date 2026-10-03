@@ -4,7 +4,8 @@
 //! the error state where php does, in php's order.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, Static, Std, This, Variadic,
+    CloneObj, CloneObjWith, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Static, Std,
+    This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
@@ -116,9 +117,13 @@ pub(crate) struct DbhState {
     stmt_args: Option<PhpArray>,
     /// `dbh->in_txn`.
     in_txn: bool,
-    /// `dbh->is_persistent`: the option was given; the connection is not
-    /// pooled.
+    /// `dbh->is_persistent`: the connection is the engine's pool's, lent
+    /// to the request ([`Persistent`]).
     persistent: bool,
+    /// The place of the persistent `pdo_dbh_t` the request holds, which
+    /// every `PDO` asking its key shares in place of its own, as
+    /// `pdo_obj->inner = pdbh` shares it.
+    shares: Option<usize>,
     /// `dbh->query_stmt`: the statement a failed `query()` left, one
     /// owner, whose error state `errorCode()` and `errorInfo()` read.
     query_stmt: Option<PhpObject>,
@@ -145,6 +150,70 @@ impl DbhState {
 /// `pdo_dbh_t` php allocates beside the object (design §5.13).
 pub(crate) type Dbh = Box<DbhState>;
 
+/// The `pdo_dbh_t` an object reaches through its payload: its own, or
+/// the persistent one the request holds where the payload
+/// [`shares`](DbhState::shares) it.
+pub(crate) fn state(req: &mut Request, object: PhpObject) -> Option<&mut DbhState> {
+    match object.native::<Dbh>(req)?.shares {
+        Some(at) => req.state::<Persistent>().lent.get_mut(at).map(|d| &mut **d),
+        None => object.native_mut::<Dbh>(req).map(|d| &mut **d),
+    }
+}
+
+/// An object's payload switched over to the persistent `pdo_dbh_t` the
+/// request holds at `at`, `pdo_obj->inner = pdbh`: what it held before
+/// handed back.
+fn share(req: &mut Request, object: PhpObject, at: usize) -> Option<Dbh> {
+    let payload = object.native_mut::<Dbh>(req)?;
+    let shared = DbhState {
+        shares: Some(at),
+        ..DbhState::default()
+    };
+    Some(std::mem::replace(payload, Box::new(shared)))
+}
+
+/// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
+/// engine's pool of persistent connections, keyed `PDO:DBH:DSN=…`.
+pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Box<DbhState>>);
+
+/// The idle persistent connections the pool keeps; php bounds pdo's by
+/// nothing but the process, and this is the engine's own streams' bound.
+pub(crate) const POOLED: usize = 1024;
+
+/// The persistent connections the request took out of the pool or
+/// opened, each held under its key until `rshutdown` gives it back.
+#[derive(Default)]
+pub(crate) struct Persistent {
+    lent: Lent<Vec<u8>, Box<DbhState>>,
+}
+
+/// What a persistent connection holds of the request given back, the
+/// connector's `persistent_shutdown` and the statement a failed
+/// `query()` left.
+fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
+    if let Some(stmt) = dbh.query_stmt.take() {
+        req.release(stmt.as_value());
+    }
+    if let Some(args) = dbh.stmt_args.take() {
+        req.release(Value::array(args));
+    }
+    if let Conn::Open(conn) = &mut dbh.conn {
+        conn.persistent_shutdown(req);
+    }
+}
+
+/// pdo's `RSHUTDOWN` in this engine: every persistent connection the
+/// request holds given back to the engine's pool, nothing of the
+/// request's left on it; one past the pool's bound is closed.
+pub(crate) fn rshutdown(req: &mut Request) {
+    for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
+        persistent_shutdown(req, &mut dbh);
+        if let Some(Pooled(pool)) = req.engine::<Pooled>() {
+            drop(pool.give(key, dbh));
+        }
+    }
+}
+
 /// `pdo_dbh_object_handlers`.
 pub(crate) struct Handlers;
 
@@ -161,7 +230,33 @@ impl ObjectHandlers for Handlers {
     /// then `dbh_free`: the failed statement given up, the connection
     /// closed and the constructor arguments released.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(dbh) = object.native_mut::<Dbh>(req) else {
+        if object
+            .native::<Dbh>(req)
+            .is_some_and(|d| d.shares.is_some())
+        {
+            // Over a persistent `pdo_dbh_t`: the transaction rolled back,
+            // `persistent_shutdown`, and `dbh_free`'s `--dbh->refcount`,
+            // which leaves the connection held.
+            let Some(tracked) = dbh_ref(req, object, |d| d.in_txn) else {
+                return;
+            };
+            let _ = with_connection(req, object, |req, conn| {
+                if conn.in_transaction(req).unwrap_or(tracked) {
+                    let _ = conn.rollback(req);
+                }
+                conn.persistent_shutdown(req);
+                Ok(())
+            });
+            let held = dbh_mut(req, object, |d| {
+                d.in_txn = false;
+                d.query_stmt.take()
+            });
+            if let Some(stmt) = held.flatten() {
+                req.release(stmt.as_value());
+            }
+            return;
+        }
+        let Some(dbh) = state(req, object) else {
             return;
         };
         let conn = std::mem::take(&mut dbh.conn);
@@ -190,7 +285,7 @@ impl ObjectHandlers for Handlers {
     /// `dbh_get_gc`: the constructor arguments and what the connector
     /// holds.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(dbh) = object.native::<Dbh>(req) {
+        if let Some(dbh) = state(req, object) {
             if let Some(args) = dbh.stmt_args {
                 visit(Value::array(args));
             }
@@ -231,7 +326,7 @@ impl ObjectHandlers for Handlers {
         if let Some(found) = Std.get_method(req, object, lowered)? {
             return Ok(Some(found));
         }
-        let Some(driver) = object.native::<Dbh>(req).and_then(|dbh| dbh.driver) else {
+        let Some(driver) = state(req, object).and_then(|dbh| dbh.driver) else {
             return Ok(None);
         };
         if !driver.methods().contains(&lowered) {
@@ -244,16 +339,20 @@ impl ObjectHandlers for Handlers {
 
 // ---- the handle's state, lent and read
 
-fn dbh_ref<R>(req: &Request, object: PhpObject, read: impl FnOnce(&Dbh) -> R) -> Option<R> {
-    object.native::<Dbh>(req).map(read)
+fn dbh_ref<R>(
+    req: &mut Request,
+    object: PhpObject,
+    read: impl FnOnce(&DbhState) -> R,
+) -> Option<R> {
+    state(req, object).map(|d| read(d))
 }
 
 fn dbh_mut<R>(
     req: &mut Request,
     object: PhpObject,
-    change: impl FnOnce(&mut Dbh) -> R,
+    change: impl FnOnce(&mut DbhState) -> R,
 ) -> Option<R> {
-    object.native_mut::<Dbh>(req).map(change)
+    state(req, object).map(change)
 }
 
 /// `PDO_CONSTRUCT_CHECK`: php's `Error` naming the object's class where
@@ -380,7 +479,7 @@ fn construct_driver(
         req,
         object,
         driver,
-        &source[colon + 1..],
+        (&source, colon),
         username.as_deref(),
         password.as_deref(),
         options,
@@ -464,23 +563,45 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
 }
 
 /// The payload laid down and the factory served, under
-/// `zend_replace_error_handling(EH_THROW, pdo_exception_ce)`.
+/// `zend_replace_error_handling(EH_THROW, pdo_exception_ce)`; for a
+/// persistent connection, the one the request holds under its key or the
+/// pool's, alive, in place of the factory (`pdo_dbh.c:413-457`).
 fn open(
     req: &mut Request,
     object: PhpObject,
     driver: &'static dyn Connector,
-    dsn: &[u8],
+    (source, colon): (&[u8], usize),
     username: Option<&[u8]>,
     password: Option<&[u8]>,
     options: Option<PhpArray>,
 ) -> Result<(), Thrown> {
-    let persistent = match options.and_then(|o| o.get(&Key::Int(PDO::ATTR_PERSISTENT))) {
+    let dsn = &source[colon + 1..];
+    let (persistent, named) = match options.and_then(|o| o.get(&Key::Int(PDO::ATTR_PERSISTENT))) {
         Some(v) => persistent_asked(req, &v.deref())?,
-        None => false,
+        None => (false, None),
     };
     let auto_commit = crate::connector::option_long(req, options, PDO::ATTR_AUTOCOMMIT, 1)?;
     let mode = crate::connector::option_long(req, options, PDO::ATTR_ERRMODE, 2)?;
     let _ = auto_commit;
+    let error_mode = match mode {
+        0 => OnError::Silent,
+        1 => OnError::Warn,
+        _ => OnError::Throw,
+    };
+    let mut dead = None;
+    let key = persistent.then(|| persistent_key(source, username, password, named.as_deref()));
+    if let Some(key) = &key {
+        match lend(req, key) {
+            Ok(at) => {
+                share(req, object, at);
+                dbh_mut(req, object, |d| d.error_mode = error_mode);
+                return throwing_warnings(req, "PDOException", |req| {
+                    apply_options(req, object, options)
+                });
+            }
+            Err(at) => dead = at,
+        }
+    }
     // `pestrdup(colon + 1)`, and the credentials where given.
     let mut copies = Vec::new();
     if !persistent {
@@ -489,13 +610,9 @@ fn open(
         }
     }
     dbh_mut(req, object, |d| {
-        **d = DbhState {
+        *d = DbhState {
+            error_mode,
             persistent,
-            error_mode: match mode {
-                0 => OnError::Silent,
-                1 => OnError::Warn,
-                _ => OnError::Throw,
-            },
             copies,
             ..DbhState::fresh()
         };
@@ -518,28 +635,116 @@ fn open(
             d.driver = Some(driver);
             d.describes_at_execute = describes;
         });
-        if let Some(options) = options {
-            for (key, value) in options.snapshot() {
-                if let Key::Int(attr) = key {
-                    attribute_set(req, object, attr, &value.deref(), 3)?;
-                }
-            }
+        if let Some(key) = key {
+            hold(req, object, key, dead);
         }
-        Ok(())
+        apply_options(req, object, options)
     })
 }
 
-/// Whether `PDO::ATTR_PERSISTENT` asks for a persistent connection: a
-/// non-numeric string is a key and asks, anything else by its truth as
-/// `zval_get_long` reads it.
-fn persistent_asked(req: &mut Request, value: &Value) -> Result<bool, Thrown> {
+/// `pdo_dbh_attribute_set` over each attribute the options array names.
+fn apply_options(
+    req: &mut Request,
+    object: PhpObject,
+    options: Option<PhpArray>,
+) -> Result<(), Thrown> {
+    if let Some(options) = options {
+        for (key, value) in options.snapshot() {
+            if let Key::Int(attr) = key {
+                attribute_set(req, object, attr, &value.deref(), 3)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The persistent list's key, `PDO:DBH:DSN=<dsn>:<user>:<password>`, and
+/// the attribute's string after one more colon where it is one, each as
+/// `%s` reads it, to its first NUL.
+fn persistent_key(
+    source: &[u8],
+    username: Option<&[u8]>,
+    password: Option<&[u8]>,
+    named: Option<&[u8]>,
+) -> Vec<u8> {
+    let c = |s: &[u8]| s[..s.iter().position(|b| *b == 0).unwrap_or(s.len())].to_vec();
+    let mut key = [b"PDO:DBH:DSN=".as_slice(), &c(source), b":"].concat();
+    key.extend(c(username.unwrap_or_default()));
+    key.push(b':');
+    key.extend(c(password.unwrap_or_default()));
+    if let Some(named) = named {
+        key.push(b':');
+        key.extend(c(named));
+    }
+    key
+}
+
+/// The persistent connection under `key` lent to the request: the one it
+/// holds, or the pool's, each where the connector's `check_liveness`
+/// finds it alive. `Err` has the factory open one, in place of the dead
+/// one the request held where it is `Some`, as `zend_list_close` drops it.
+fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
+    let lent = &mut req.state::<Persistent>().lent;
+    if let Some(at) = lent.find(&key.to_vec()) {
+        let conn = lent.get_mut(at).map(|d| std::mem::take(&mut d.conn));
+        let (alive, conn) = alive(req, conn.unwrap_or_default());
+        if let Some(dbh) = req.state::<Persistent>().lent.get_mut(at) {
+            dbh.conn = conn;
+        }
+        return if alive { Ok(at) } else { Err(Some(at)) };
+    }
+    let Some(mut dbh) = req
+        .engine::<Pooled>()
+        .and_then(|Pooled(pool)| pool.take(&key.to_vec()))
+    else {
+        return Err(None);
+    };
+    let (alive, conn) = alive(req, std::mem::take(&mut dbh.conn));
+    dbh.conn = conn;
+    if !alive {
+        return Err(None);
+    }
+    Ok(req.state::<Persistent>().lent.hold(key.to_vec(), dbh))
+}
+
+/// `pdbh->methods->check_liveness`, php's null slot answering alive.
+fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
+    match conn {
+        Conn::Open(mut open) => (open.check_liveness(req), Conn::Open(open)),
+        other => (false, other),
+    }
+}
+
+/// `zend_register_persistent_resource`: the connection the factory just
+/// opened for `object` held by the request under `key`, in place of the
+/// dead one at `dead`, and the object switched over to it.
+fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
+    let Some(dbh) = share(req, object, usize::MAX) else {
+        return;
+    };
+    let lent = &mut req.state::<Persistent>().lent;
+    let at = match dead.and_then(|at| lent.get_mut(at).map(|held| (at, held))) {
+        Some((at, held)) => {
+            let mut old = std::mem::replace(held, dbh);
+            persistent_shutdown(req, &mut old);
+            at
+        }
+        None => lent.hold(key, dbh),
+    };
+    share(req, object, at);
+}
+
+/// Whether `PDO::ATTR_PERSISTENT` asks for a persistent connection, and
+/// the name it gives it: a non-numeric string is a name and asks,
+/// anything else asks by its truth as `zval_get_long` reads it.
+fn persistent_asked(req: &mut Request, value: &Value) -> Result<(bool, Option<Vec<u8>>), Thrown> {
     if let Some(bytes) = value.as_str_bytes()
         && !bytes.is_empty()
         && php_ext::coerce::numeric_string(bytes).is_none()
     {
-        return Ok(true);
+        return Ok((true, Some(bytes.to_vec())));
     }
-    Ok(php_ext::coerce::to_long(req, value)? != 0)
+    Ok((php_ext::coerce::to_long(req, value)? != 0, None))
 }
 
 /// `dsn_from_uri`: the first line of what the URI opens, at most 511
@@ -1154,6 +1359,30 @@ impl PDO {
     /// int(376)
     /// int(-376)
     /// int(408)
+    /// ```
+    ///
+    /// Two persistent handles with one key share one connection, and a
+    /// `PDO` freed leaves it held for the next to ask the key:
+    ///
+    /// ```php
+    /// $a = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $a->exec('CREATE TABLE t (a)'); $a->exec('INSERT INTO t VALUES (1)');
+    /// $b = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// var_dump($b->query('SELECT COUNT(*) FROM t')->fetchColumn(), $b->getAttribute(PDO::ATTR_PERSISTENT));
+    /// $a->setAttribute(PDO::ATTR_CASE, PDO::CASE_UPPER); unset($a);
+    /// var_dump($b->getAttribute(PDO::ATTR_CASE) === PDO::CASE_UPPER);
+    /// $c = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => 'other']);
+    /// try { $c->query('SELECT COUNT(*) FROM t'); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+    /// unset($b);
+    /// $d = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => 1]);
+    /// var_dump($d->query('SELECT COUNT(*) FROM t')->fetchColumn());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(true)
+    /// bool(true)
+    /// SQLSTATE[HY000]: General error: 1 no such table: t
+    /// int(1)
     /// ```
     fn __construct(
         req: &mut Request,

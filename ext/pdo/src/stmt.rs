@@ -19,7 +19,7 @@ use crate::connector::{
     BindEvent, BindKind, BindType, Binding, Cause, Failure, Placeholders, Prepared, SqlState,
     Statement,
 };
-use crate::dbh::{self, Dbh, PDO};
+use crate::dbh::{self, PDO};
 use crate::error::{self, On};
 use crate::fetch::{self, Target};
 
@@ -514,7 +514,7 @@ pub(super) fn set_column_count(req: &mut Request, object: PhpObject, count: usiz
 pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     let count = read(req, object, |s| s.column_count).unwrap_or(0);
     let case = dbh_of(req, object)
-        .and_then(|dbh| dbh.native::<Dbh>(req).map(|d| d.case))
+        .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| d.case))
         .unwrap_or_default();
     write(req, object, |s| s.columns = Some(Vec::with_capacity(count)));
     for column in 0..count {
@@ -646,7 +646,7 @@ pub(super) fn run(req: &mut Request, object: PhpObject) -> Result<(), Option<Thr
     }
     if !executed {
         let own = dbh_of(req, object)
-            .and_then(|dbh| dbh.native::<Dbh>(req).map(|d| d.describes_at_execute))
+            .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| d.describes_at_execute))
             .unwrap_or(false);
         let described = read(req, object, |s| s.columns.is_some()).unwrap_or(false);
         if own && !described && !describe_columns(req, object).map_err(Some)? {
