@@ -811,7 +811,7 @@ fn php_strftime(
 /// date_default_timezone_set('UTC');
 /// foreach (['fr_FR.UTF-8', 'de_DE.UTF-8', 'C'] as $l) { setlocale(LC_TIME, $l); var_dump(@strftime('%A %a %B %b|%c|%x|%p', 1700000000)); }
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.UTF-8 locale=de_DE.UTF-8
 /// string(59) "Mardi Mar novembre nov|Mar 14 nov 22:13:20 2023|14.11.2023|"
 /// string(62) "Dienstag Di November Nov|Di 14 Nov 22:13:20 2023|14.11.2023|pm"
 /// string(61) "Tuesday Tue November Nov|Tue Nov 14 22:13:20 2023|11/14/23|PM"
@@ -844,7 +844,7 @@ fn strftime(
 /// ```php
 /// foreach (['fr_FR.UTF-8', 'de_DE.UTF-8', 'C'] as $l) { setlocale(LC_TIME, $l); var_dump(@gmstrftime('%A %B %x %X', 1700000000)); }
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.UTF-8 locale=de_DE.UTF-8
 /// string(34) "Mardi novembre 14.11.2023 22:13:20"
 /// string(37) "Dienstag November 14.11.2023 22:13:20"
 /// string(34) "Tuesday November 11/14/23 22:13:20"

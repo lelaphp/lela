@@ -231,7 +231,7 @@ fn ctype_alnum(req: &mut Request, text: Value) -> bool {
 /// setlocale(LC_CTYPE, "fr_FR.ISO8859-1"); var_dump(ctype_alpha("\xE9"), ctype_lower("\xE9"), ctype_upper("\xC9"), ctype_digit("\xB2"));
 /// setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"));
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// bool(true)
 /// bool(true)
 /// bool(true)
