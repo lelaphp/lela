@@ -122,15 +122,9 @@ pub fn main() -> ExitCode {
     };
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => {
-            let engine = engine(&options.ini);
-            match request::started(&engine) {
-                0 => print(&version(&engine)),
-                failed => failed,
-            }
-        }
+        Ask::Version => started(&options.ini, version),
         Ask::Info => request::info(&engine(&options.ini)),
-        Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
+        Ask::Extensions => started(&options.ini, php_sapi::modules),
         Ask::Server(server) => server::run(
             server_engine(&options.ini),
             server,
@@ -193,6 +187,37 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
             status
         }
         Ask::Usage | Ask::Version | Ask::Info | Ask::Extensions | Ask::Server(_) => 0,
+    }
+}
+
+/// `-v` and `-m` (`php_cli.c:638-655`), which print once
+/// `php_module_startup` has run: what the startup raised is displayed
+/// first ([`request::started`]), and where it failed nothing is printed
+/// and the status is 1.
+///
+/// ```php
+/// foreach ([['-d', 'magic_quotes_gpc=1'], ['-d', 'extension_dir=/nope', '-d', 'extension=x']] as $d) {
+///     $p = proc_open([PHP_BINARY, '-n', ...$d, '-m'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+///     echo preg_replace('/ \(tried: .*\)\)/', '', strstr($out, "\n[PHP Modules]\n", true) ?: $out), "\n";
+/// }
+/// ```
+/// ```expect process
+/// 1
+///
+/// Fatal error: Directive 'magic_quotes_gpc' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+///
+/// 0
+///
+/// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
+/// ```
+fn started(ini: &[(String, String)], text: fn(&Engine) -> String) -> i32 {
+    let engine = engine(ini);
+    match request::started(&engine) {
+        0 => print(&text(&engine)),
+        failed => failed,
     }
 }
 

@@ -364,10 +364,10 @@ pub fn info(engine: &Engine) -> i32 {
     0
 }
 
-/// `-v` (`php_cli.c:638-641`), which php serves with no request once
-/// `php_module_startup` has run: what the startup raised is displayed at
-/// a request's first moment here, so an empty one is served first, and
-/// its status 1 where the startup failed is the answer.
+/// `-v` and `-m` (`php_cli.c:638-655`), which php serves with no
+/// request once `php_module_startup` has run: what the startup raised is
+/// displayed at a request's first moment here, so an empty one is served
+/// first, and its status 1 where the startup failed is the answer.
 pub(crate) fn started(engine: &Engine) -> i32 {
     in_request(engine, unnamed(), Vec::new())
 }
