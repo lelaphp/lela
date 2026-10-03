@@ -32,10 +32,17 @@ pub(crate) fn key(pin: &Pin) -> String {
     format!("pin-{}-{}", pin.source.tag, pin.oracle.md5)
 }
 
+/// Where a workspace keeps every target under the pin, relative to its
+/// root: beside the kept runs, so `worktree retire` carries them with
+/// those, and CI's cache keeps the directory between runs (#1733).
+pub(crate) fn kept_under(pin: &Pin) -> PathBuf {
+    Path::new(RUNS).join(key(pin))
+}
+
 /// Where the workspace at `root` keeps the target of `scope` under the
-/// pin: beside the kept runs, so `worktree retire` carries it with them.
+/// pin.
 fn path(root: &Path, pin: &Pin, scope: &str) -> PathBuf {
-    root.join(RUNS).join(key(pin)).join(format!("{scope}.json"))
+    root.join(kept_under(pin)).join(format!("{scope}.json"))
 }
 
 /// Where one test stands against the target.

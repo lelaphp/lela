@@ -226,6 +226,80 @@ impl Dir {
     }
 }
 
+/// Where the corpus's subsets stand in the pinned tree: the one table the
+/// nightly lane's corpus is walked by and CI checks the tree out by,
+/// through `status --section corpus` (#1713), so the checkout is never
+/// narrower than a subset the lane or a `[[crate]]` row holds. An
+/// extension's place is the rule a row with no `phpt` key derives,
+/// `ext/<name>` whole (#1590), and a host's is its `tests` directory.
+pub(crate) const ROOTS: [Root; 4] = [
+    Root::Dir("Zend/tests"),
+    Root::Dir("tests"),
+    Root::Each(crate::manifest::derived_subset),
+    Root::Each(host_tests),
+];
+
+/// One row of [`ROOTS`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Root {
+    /// One directory of the tree, one subset: `Zend/tests`.
+    Dir(&'static str),
+    /// One subset per directory a name stands for: the place the function
+    /// gives the directory named, `ext/<name>` for `ext/*`.
+    Each(fn(&str) -> PathBuf),
+}
+
+impl Root {
+    /// The name that stands for every directory of an [`Root::Each`], one
+    /// path segment as git's sparse patterns and the shell's globs read it.
+    const ANY: &'static str = "*";
+
+    /// The place of the subsets in the tree, with [`Root::ANY`] for the
+    /// name of an [`Root::Each`]: `Zend/tests`, `ext/*`.
+    fn place(self) -> PathBuf {
+        match self {
+            Root::Dir(dir) => PathBuf::from(dir),
+            Root::Each(subset) => subset(Root::ANY),
+        }
+    }
+
+    /// The root as one of git's non-cone sparse-checkout patterns: the
+    /// directory anchored at the tree's top, everything under it taken.
+    pub(crate) fn pattern(self) -> String {
+        format!("/{}/", self.place().display())
+    }
+
+    /// The root's subsets in the tree at `source`, relative to it: the
+    /// directory itself, or one per directory under the name's parent,
+    /// sorted by name.
+    fn subsets(self, source: &Path) -> Vec<PathBuf> {
+        let subset = match self {
+            Root::Dir(dir) => return vec![PathBuf::from(dir)],
+            Root::Each(subset) => subset,
+        };
+        let parent: PathBuf = self
+            .place()
+            .iter()
+            .take_while(|segment| *segment != Root::ANY)
+            .collect();
+        let Ok(entries) = fs::read_dir(source.join(parent)) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        names.iter().map(|name| subset(name)).collect()
+    }
+}
+
+/// The subset of the host `name`: its `tests` directory, as the
+/// `[[crate]]` rows of `sapi/*` name it.
+fn host_tests(name: &str) -> PathBuf {
+    Path::new("sapi").join(name).join("tests")
+}
+
 /// One subset of the corpus: the directories its tests are in and what a
 /// reading of it is scoped to. A crate's subset is every directory its
 /// `[[crate]]` row owns, so the crate is measured by one reading whatever
@@ -343,43 +417,20 @@ impl Subset {
             .collect()
     }
 
-    /// Every subset of the corpus at `source`: the nightly lane's, which
-    /// is `Zend/tests`, `tests`, every `tests` directory under `sapi` and
-    /// every extension's subset as a row with no `phpt` key derives it,
-    /// `ext/<name>` whole (#1590), each where it holds a `.phpt`.
+    /// Every subset of the corpus at `source`: the nightly lane's, one per
+    /// directory [`ROOTS`] places in the tree, in the table's order, each
+    /// where it holds a `.phpt`.
     pub(crate) fn corpus(source: &Path) -> Vec<Subset> {
-        let mut subsets = Vec::new();
-        let mut push = |under: PathBuf| {
-            let subset = Subset {
+        ROOTS
+            .iter()
+            .flat_map(|root| root.subsets(source))
+            .map(|under| Subset {
                 scope: under.to_string_lossy().into_owned(),
                 dirs: vec![Dir::at(source, under)],
                 root: source.to_path_buf(),
-            };
-            if subset.tests().is_ok_and(|tests| !tests.is_empty()) {
-                subsets.push(subset);
-            }
-        };
-        for name in ["Zend/tests", "tests"] {
-            push(PathBuf::from(name));
-        }
-        for parent in ["ext", "sapi"] {
-            let Ok(entries) = fs::read_dir(source.join(parent)) else {
-                continue;
-            };
-            let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-            names.sort();
-            for path in names {
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                push(if parent == "ext" {
-                    crate::manifest::derived_subset(name)
-                } else {
-                    Path::new(parent).join(name).join("tests")
-                });
-            }
-        }
-        subsets
+            })
+            .filter(|subset| subset.tests().is_ok_and(|tests| !tests.is_empty()))
+            .collect()
     }
 
     /// Every `.phpt` under the subset's directories, sorted within each.

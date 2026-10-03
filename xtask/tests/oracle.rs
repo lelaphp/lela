@@ -410,6 +410,125 @@ fn a_tree_the_variable_names_is_at_the_pin() {
     assert!(tree.is_dir(), "{}", tree.display());
 }
 
+/// The `.phpt` files under `dir`, `.git` left out: what `find . -name
+/// '*.phpt' | wc -l` counts in a checkout.
+fn phpt_files_under(dir: &Path) -> u64 {
+    let mut found = 0;
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            if path.file_name().is_some_and(|name| name != ".git") {
+                found += phpt_files_under(&path);
+            }
+        } else if path.extension().is_some_and(|e| e == "phpt") {
+            found += 1;
+        }
+    }
+    found
+}
+
+/// The tree the variable names holds every `.phpt` the pin counts,
+/// `[source].phpt_files`, as `find . -name '*.phpt'` counts them at the
+/// tag (#1713). A checkout narrower than the corpus fails here naming
+/// both numbers, before a lane measures less in silence: the hand-written
+/// list CI checked out by had left 241 tests of `sapi/cgi`, `sapi/fpm`,
+/// `sapi/phpdbg` and `ext/intl/uchar` out, and their subsets read zero
+/// tests. Skipped where nothing claims a tree, as the test above is.
+#[test]
+fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
+    if std::env::var_os(TREE_VARIABLE).is_none_or(|value| value.is_empty()) {
+        assert!(
+            !Promised::load().unwrap().holds(Promise::Tree),
+            "{PROMISE_VARIABLE} promised the tree and {TREE_VARIABLE} is unset"
+        );
+        eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
+        return;
+    }
+    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let tree = source.tree().unwrap();
+    assert_eq!(
+        phpt_files_under(&tree),
+        source.phpt_files,
+        "{} holds the left-hand number of .phpt files and the pin counts the right-hand one: the checkout is not the corpus `xtask status --section corpus` names",
+        tree.display()
+    );
+}
+
+/// No workflow holds a directory of the corpus (#1713): a checkout of
+/// php-src takes its sparse patterns off `status --section corpus`, on
+/// stdin, so no step lists one and none can fall behind a subset the
+/// manifest adds. A token anchored as a pattern under a root's first
+/// directory is one, `/sapi/cli/tests/` as much as `/ext/*/`; a lane's
+/// `--subset Zend/tests` is the lane's composition (harness §7) and no
+/// pattern. Comments are stripped, so prose that cites a pattern does not
+/// count.
+#[test]
+fn no_workflow_holds_a_directory_of_the_corpus() {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(workspace())
+        .args(["status", "--section", "corpus", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let corpus: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let firsts: Vec<String> = corpus["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let anchored = p.as_str().unwrap().trim_start_matches('/');
+            format!("/{}/", anchored.split('/').next().unwrap_or_default())
+        })
+        .collect();
+    let mut checked_out = 0;
+    for entry in std::fs::read_dir(workspace().join(".github/workflows"))
+        .unwrap()
+        .flatten()
+    {
+        let path = entry.path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut reads_section = false;
+        let mut checks_out = false;
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim_start();
+            if line.starts_with('#') {
+                continue;
+            }
+            reads_section |= line.contains("status --section corpus");
+            for token in line.split(|c: char| c.is_whitespace() || "\"'=:,[]".contains(c)) {
+                assert!(
+                    !firsts.iter().any(|first| token.starts_with(first.as_str())),
+                    "{name}:{}: {token} is a directory of the corpus written by hand; the patterns are `status --section corpus`'s",
+                    n + 1
+                );
+            }
+            if line.contains("sparse-checkout set") {
+                checks_out = true;
+                checked_out += 1;
+                assert!(
+                    line.contains("--stdin") && line.contains(".patterns[]"),
+                    "{name}:{}: the patterns are the section's `.patterns[]`, read on stdin: {line}",
+                    n + 1
+                );
+            }
+        }
+        assert!(
+            !checks_out || reads_section,
+            "{name} checks php-src out and never runs `status --section corpus`"
+        );
+    }
+    assert_eq!(
+        checked_out, 2,
+        "harness.yml and dashboard.yml each check the corpus out once"
+    );
+}
+
 /// The variable's name is stated in one place that both the code and CI
 /// read (#36): `oracle::TREE_VARIABLE`, which `status --section oracle`
 /// renders and the workflow reads off it, setting the tree under that
