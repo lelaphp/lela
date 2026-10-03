@@ -824,6 +824,8 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "php_ext",
+ "php_ext_session",
+ "php_ext_standard",
 ]
 
 [[package]]
@@ -1030,6 +1032,8 @@ dependencies = [
  "php_ext",
  "php_ext_mysqlnd",
  "php_ext_pdo",
+ "php_ext_session",
+ "php_ext_standard",
 ]
 
 [[package]]
@@ -1039,6 +1043,8 @@ dependencies = [
  "libsqlite3-sys",
  "php_ext",
  "php_ext_pdo",
+ "php_ext_session",
+ "php_ext_standard",
 ]
 
 [[package]]
