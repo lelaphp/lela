@@ -5,8 +5,10 @@
 //! owns a subset, by the row's name, since the manifest derives a row for
 //! every extension and SAPI the pinned php builds. Each is read off the
 //! phpt reading that stands for it, as the `phpt` section picks it, and a
-//! reading's facts are its row's ([`phpt::row::Row`]), the rule source the
-//! dashboard reads too. The suites outside parity are named apart: those
+//! reading's facts are its row's ([`phpt::row::Row`]), the rendering
+//! `--every` hands the dashboard. A suite counts in the total only where
+//! its reading was held to a target; every other suite says which of the
+//! other states it is in. The suites outside parity are named apart: those
 //! `[parity] out` rules out, with the ruling, and those a reading measured
 //! that no row owns, which the pinned php does not build. The section
 //! writes no reading.
@@ -22,6 +24,7 @@ use super::{Table, cell, outlived, standing};
 use crate::manifest::Manifest;
 use crate::phpt::row::{Row, Target};
 use crate::phpt::{self, Root};
+use crate::reading::Reading;
 use crate::reading::{self, Store};
 use crate::status::PerReading;
 
@@ -37,14 +40,58 @@ struct Parity {
 /// One suite inside parity and the reading that stands for it.
 #[derive(Debug, Serialize)]
 struct Suite {
-    /// The subset, relative to the pinned tree.
+    /// The subset, by the scope its reading is taken under.
     #[serde(rename = "suite")]
     name: String,
+    /// Where the suite stands, and met-of-target where it was held to one.
+    #[serde(flatten)]
+    state: State,
     /// The reading that stands for the suite; null where none does.
     reading: Option<Taken>,
-    /// Met-of-target; null where no reading stands or the one that does
-    /// was held to no target, which no gauge counts.
-    target: Option<Target>,
+}
+
+/// Where one suite stands; only a suite `held` counts in the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+enum State {
+    /// Its reading was held to the subset's target (#1184).
+    Held { target: Target },
+    /// Its reading ran and was held to no target: none is kept under the
+    /// pin for the subset.
+    Untargeted,
+    /// Its reading ran nothing: the engine absent or stale, or the crate
+    /// not yet created.
+    Unmeasured,
+    /// The subset holds no test, as `ext/lexbor` holds none of its own.
+    Empty,
+    /// No reading stands for it.
+    Missing,
+}
+
+impl State {
+    /// The state of a suite whose reading is `row`, if one stands.
+    fn of(row: Option<&Row>) -> State {
+        match row {
+            None => State::Missing,
+            Some(row) => match row.target() {
+                Some(target) => State::Held { target },
+                None if row.tests() == 0 => State::Empty,
+                None if !row.measured() => State::Unmeasured,
+                None => State::Untargeted,
+            },
+        }
+    }
+
+    /// The state's word, as its JSON tag spells it.
+    fn as_str(self) -> &'static str {
+        match self {
+            State::Held { .. } => "held",
+            State::Untargeted => "untargeted",
+            State::Unmeasured => "unmeasured",
+            State::Empty => "empty",
+            State::Missing => "missing",
+        }
+    }
 }
 
 /// When the reading that stands was taken, and its verdict.
@@ -56,7 +103,7 @@ struct Taken {
 }
 
 /// The suites inside parity, summed over those held to a target.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
 struct Total {
     /// The suites inside parity.
     suites: usize,
@@ -68,6 +115,25 @@ struct Total {
     target: u64,
 }
 
+impl Total {
+    /// The total over `suites`.
+    fn of(suites: &[Suite]) -> Total {
+        let held: Vec<Target> = suites
+            .iter()
+            .filter_map(|suite| match suite.state {
+                State::Held { target } => Some(target),
+                _ => None,
+            })
+            .collect();
+        Total {
+            suites: suites.len(),
+            held: held.len(),
+            met: held.iter().map(|t| t.met).sum(),
+            target: held.iter().map(|t| t.n).sum(),
+        }
+    }
+}
+
 /// A suite parity does not count, and why.
 #[derive(Debug, Serialize)]
 struct Outside {
@@ -77,7 +143,7 @@ struct Outside {
 }
 
 /// Why a suite is outside parity.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "why", rename_all = "lowercase")]
 enum Why {
     /// `[parity] out` names it under this ticket's ruling (design §12).
@@ -96,7 +162,7 @@ pub(super) fn render(
     format: Table,
 ) -> Result<String> {
     let rows = standing(store, root)?;
-    let readings: Vec<&reading::Reading> = rows
+    let readings: Vec<&Reading> = rows
         .iter()
         .filter(|row| !outlived(manifest, row))
         .filter_map(|row| row.reading.as_ref())
@@ -109,10 +175,45 @@ pub(super) fn render(
 }
 
 /// The section's rules, a function of the manifest and the readings that
-/// stand: each suite's own run, and whatever run no suite owns, by the
-/// suite its first two segments name under `ext/` or `sapi/`.
-fn parity(manifest: &Manifest, readings: &[&reading::Reading]) -> Parity {
-    let inside: BTreeSet<PathBuf> = phpt::ROOTS
+/// stand.
+fn parity(manifest: &Manifest, readings: &[&Reading]) -> Parity {
+    let inside = inside(manifest);
+    let runs: Vec<(PathBuf, &Reading, Row)> = readings
+        .iter()
+        .filter_map(|reading| {
+            let row = <Row as PerReading>::of(reading);
+            let subset = PathBuf::from(row.run_of()?);
+            Some((subset, *reading, row))
+        })
+        .collect();
+    let suites: Vec<Suite> = inside
+        .iter()
+        .map(|suite| {
+            let run = runs.iter().find(|(subset, _, _)| subset == suite);
+            Suite {
+                name: suite.display().to_string(),
+                state: State::of(run.map(|(_, _, row)| row)),
+                reading: run.map(|(_, reading, _)| Taken {
+                    status: reading.status,
+                    at: reading.at.to_string(),
+                    commit: reading.commit.clone(),
+                }),
+            }
+        })
+        .collect();
+    let outside = outside(manifest, &inside, runs.iter().map(|(subset, _, _)| subset));
+    Parity {
+        total: Total::of(&suites),
+        suites,
+        outside,
+    }
+}
+
+/// The suites parity counts: the core's, the `Root::Dir` rows of
+/// [`phpt::ROOTS`], and every `[[crate]]` row that owns a subset, by its
+/// name, which is the scope its reading is taken under.
+fn inside(manifest: &Manifest) -> BTreeSet<PathBuf> {
+    phpt::ROOTS
         .iter()
         .filter_map(|root| match root {
             Root::Dir(dir) => Some(PathBuf::from(dir)),
@@ -125,7 +226,20 @@ fn parity(manifest: &Manifest, readings: &[&reading::Reading]) -> Parity {
                 .filter(|krate| !krate.subsets().is_empty())
                 .map(|krate| PathBuf::from(&krate.name)),
         )
-        .collect();
+        .collect()
+}
+
+/// The suites outside parity: every one `[parity] out` names, under its
+/// ruling, whether a reading measured it or not; then the suite of each
+/// run no suite inside owns, by the suite its first two segments name
+/// under `ext/` or `sapi/`, as not built. A run inside or around a suite
+/// inside parity is that suite's, a narrower run or a scope it was once
+/// read under, and never outside.
+fn outside<'a>(
+    manifest: &Manifest,
+    inside: &BTreeSet<PathBuf>,
+    runs: impl Iterator<Item = &'a PathBuf>,
+) -> Vec<Outside> {
     let mut outside: BTreeMap<PathBuf, Why> = manifest
         .parity
         .out
@@ -137,59 +251,21 @@ fn parity(manifest: &Manifest, readings: &[&reading::Reading]) -> Parity {
             out.suites.iter().map(move |suite| (suite.clone(), why))
         })
         .collect();
-    let mut runs: BTreeMap<PathBuf, (&reading::Reading, Row)> = BTreeMap::new();
-    for reading in readings {
-        let row = <Row as PerReading>::of(reading);
-        let Some(subset) = row.run_of().map(PathBuf::from) else {
-            continue;
-        };
-        if inside.contains(&subset) {
-            runs.insert(subset, (reading, row));
-        } else if !inside
+    for subset in runs {
+        let owned = inside
             .iter()
-            .any(|suite| subset.starts_with(suite) || suite.starts_with(&subset))
-            && let Some(suite) = built_suite(&subset)
-        {
-            // A suite ruled out is in the map already, under its ruling.
+            .any(|suite| subset.starts_with(suite) || suite.starts_with(subset));
+        if let Some(suite) = built_suite(subset).filter(|_| !owned) {
             outside.entry(suite).or_insert(Why::Unbuilt);
         }
     }
-
-    let mut total = Total::default();
-    let suites = inside
-        .into_iter()
-        .map(|suite| {
-            let run = runs.get(&suite);
-            let target = run.and_then(|(_, row)| row.target());
-            total.suites += 1;
-            if let Some(target) = target {
-                total.held += 1;
-                total.met += target.met;
-                total.target += target.n;
-            }
-            Suite {
-                name: suite.display().to_string(),
-                reading: run.map(|(reading, _)| Taken {
-                    status: reading.status,
-                    at: reading.at.to_string(),
-                    commit: reading.commit.clone(),
-                }),
-                target,
-            }
-        })
-        .collect();
-    let outside = outside
+    outside
         .into_iter()
         .map(|(suite, why)| Outside {
             suite: suite.display().to_string(),
             why,
         })
-        .collect();
-    Parity {
-        suites,
-        total,
-        outside,
-    }
+        .collect()
 }
 
 /// The suite of an extension or a host that `subset` is in, `ext/<name>`
@@ -203,31 +279,27 @@ fn built_suite(subset: &Path) -> Option<PathBuf> {
 }
 
 /// The section as Markdown: one row per suite, the total, then the suites
-/// outside parity on one line each for the ruling and the unbuilt.
+/// outside parity on one line per ruling and one for the unbuilt.
 fn markdown(parity: &Parity) -> String {
-    let mut out = String::from("| suite | met | target | outside | predated | reading |\n");
-    out.push_str("|---|---|---|---|---|---|\n");
+    let mut out = String::from("| suite | state | met | target | outside | predated | reading |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
     for suite in &parity.suites {
+        let counts = match suite.state {
+            State::Held { target } => {
+                [target.met, target.n, target.outside, target.predated].map(|n| n.to_string())
+            }
+            _ => Default::default(),
+        };
         let status = suite
             .reading
             .as_ref()
             .map_or(super::NO_READING, |r| r.status.as_str());
-        let cells = match suite.target {
-            Some(t) => [t.met, t.n, t.outside, t.predated].map(|n| n.to_string()),
-            None if suite.reading.is_some() => [
-                "no target".to_owned(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ],
-            None => [String::new(), String::new(), String::new(), String::new()],
-        };
         let _ = writeln!(
             out,
-            "| {} | {} | {} |",
+            "| {} | {} | {} | {status} |",
             cell(&suite.name),
-            cells.join(" | "),
-            status
+            suite.state.as_str(),
+            counts.join(" | ")
         );
     }
     let total = &parity.total;
@@ -241,9 +313,11 @@ fn markdown(parity: &Parity) -> String {
         total.suites - total.held
     );
     let mut rulings: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    let mut unbuilt = Vec::new();
     for o in &parity.outside {
-        if let Why::Ruling { ruling } = o.why {
-            rulings.entry(ruling).or_default().push(&o.suite);
+        match o.why {
+            Why::Ruling { ruling } => rulings.entry(ruling).or_default().push(&o.suite),
+            Why::Unbuilt => unbuilt.push(o.suite.as_str()),
         }
     }
     for (ruling, suites) in rulings {
@@ -253,12 +327,6 @@ fn markdown(parity: &Parity) -> String {
             suites.join(", ")
         );
     }
-    let unbuilt: Vec<&str> = parity
-        .outside
-        .iter()
-        .filter(|o| matches!(o.why, Why::Unbuilt))
-        .map(|o| o.suite.as_str())
-        .collect();
     if !unbuilt.is_empty() {
         let _ = writeln!(
             out,

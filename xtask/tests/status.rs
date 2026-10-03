@@ -979,6 +979,12 @@ fn parity_store(name: &str) -> Tree {
             phpt("ext/standard/tests/serialize", &held(500, 500)),
             phpt("ext/pgsql", &held(3, 3)),
             phpt("ext/enchant", &held(20, 20)),
+            phpt("sapi/cli", &held(99, 99)),
+            phpt("ext/lexbor", &[("tests", 0), ("run", 0)]),
+            phpt(
+                "ext/pcre",
+                &[("tests", 165), ("run", 0), ("engine_absent", 1)],
+            ),
         ])
         .unwrap();
     root
@@ -1013,9 +1019,23 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
         suite("ext/ctype")["target"],
         serde_json::json!({ "n": 48, "met": 47, "outside": 10, "predated": 2 })
     );
-    assert_eq!(suite("ext/json")["target"], serde_json::Value::Null);
+    assert_eq!(suite("ext/ctype")["state"], "held");
+    assert_eq!(
+        suite("sapi/cli")["target"],
+        serde_json::json!({ "n": 99, "met": 99, "outside": 10, "predated": 0 }),
+        "a host's suite is its row's name, the scope its reading is taken under"
+    );
+    for (name, state) in [
+        ("ext/json", "untargeted"),
+        ("ext/pcre", "unmeasured"),
+        ("ext/lexbor", "empty"),
+        ("sapi/cgi", "missing"),
+    ] {
+        assert_eq!(suite(name)["state"], state, "{name}: {json}");
+        assert_eq!(suite(name)["target"], serde_json::Value::Null, "{name}");
+    }
     assert_eq!(suite("ext/json")["reading"]["status"], "pass");
-    assert_eq!(suite("sapi/cli")["reading"], serde_json::Value::Null);
+    assert_eq!(suite("sapi/cgi")["reading"], serde_json::Value::Null);
     let suites = parity["suites"].as_array().unwrap();
     assert!(
         suites
@@ -1027,7 +1047,7 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
     );
     assert_eq!(
         parity["total"],
-        serde_json::json!({ "suites": suites.len(), "held": 2, "met": 137, "target": 148 })
+        serde_json::json!({ "suites": suites.len(), "held": 3, "met": 236, "target": 247 })
     );
     let outside = parity["outside"].as_array().unwrap();
     assert!(
@@ -1060,11 +1080,18 @@ fn parity_renders_as_markdown_for_a_session() {
     let (ok, md, err) = status(&root, &["--section", "parity"]);
     assert!(ok, "{err}");
     assert!(
-        md.contains("| ext/ctype | 47 | 48 | 10 | 2 | pass |"),
+        md.contains("| ext/ctype | held | 47 | 48 | 10 | 2 | pass |"),
         "{md}"
     );
-    assert!(md.contains("| ext/json | no target |"), "{md}");
-    assert!(md.contains("137 of 148 target tests met"), "{md}");
+    assert!(
+        md.contains("| ext/json | untargeted |  |  |  |  | pass |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| sapi/cgi | missing |  |  |  |  | no reading |"),
+        "{md}"
+    );
+    assert!(md.contains("236 of 247 target tests met"), "{md}");
     assert!(
         md.contains("#1167") && md.contains("not built by the pinned php: ext/enchant"),
         "{md}"

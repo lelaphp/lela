@@ -93,15 +93,15 @@ pub(crate) enum Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct Target {
     /// The tests in the target.
-    pub n: u64,
+    pub(crate) n: u64,
     /// The target's tests the engine met.
-    pub met: u64,
+    pub(crate) met: u64,
     /// The subset's tests outside the target: the oracle skipped or
     /// missed them.
-    pub outside: u64,
+    pub(crate) outside: u64,
     /// The subset's tests the kept target holds no verdict for, kept apart
     /// from `outside` (#1644); 0 where the reading counts none.
-    pub predated: u64,
+    pub(crate) predated: u64,
 }
 
 impl Row {
@@ -117,6 +117,16 @@ impl Row {
     /// Met-of-target, where the reading was held to one.
     pub(crate) fn target(&self) -> Option<Target> {
         self.target
+    }
+
+    /// Whether anything ran.
+    pub(crate) fn measured(&self) -> bool {
+        self.measured
+    }
+
+    /// The tests the subset holds.
+    pub(crate) fn tests(&self) -> u64 {
+        self.tests
     }
 }
 
