@@ -285,6 +285,19 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// 4528 32
 /// ```
 ///
+/// A callback that runs is handed the op array's file name and the
+/// description argument itself, as php's `ZVAL_STR` hands them, so its
+/// call peaks where php's does whatever the file's path:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// @ini_set("assert.callback", "strlen");
+/// pk(function () { try { assert(false); } catch (Error $e) {} });
+/// ```
+/// ```expect
+/// 5088 32
+/// ```
+///
 /// Under `assert.bail` without `assert.exception` the request ends there,
 /// through `zend_throw_unwind_exit`, with status zero.
 ///
@@ -324,11 +337,12 @@ fn assert(
     if truthy(req, &assertion) {
         return Ok(true);
     }
-    let text = match description {
+    let described = match description {
         Some(Union::A(object)) => return Err(throw_value(req, &object.object().as_value())),
-        Some(Union::B(text)) => Some(text.as_bytes().to_vec()),
+        Some(Union::B(text)) => Some(text),
         None => None,
     };
+    let text = described.map(|text| text.as_bytes().to_vec());
     // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
     // made once and kept as the callback until the entry changes.
     if req.assert_callback().is_none()
@@ -344,15 +358,20 @@ fn assert(
     // `AssertionError` chains it as its `previous`.
     let mut pending = None;
     if let Some(callback) = callback {
+        // `ZVAL_STR(&args[0], filename)`, the op array's file name, and
+        // `ZVAL_STR(&args[3], description_str)`, the argument itself:
+        // neither is a copy.
         let file = req.current_file().unwrap_or(b"Unknown").to_vec();
         let line = i64::from(req.current_line());
         let mut arguments = vec![
-            Value::string(PhpString::new(req, &file)?),
+            Value::string(PhpString::interned(req, &file)?),
             Value::int(line),
             Value::null(),
         ];
-        if let Some(text) = &text {
-            arguments.push(Value::string(PhpString::new(req, text)?));
+        if let Some(text) = described {
+            let text = Value::string(text);
+            req.addref(&text);
+            arguments.push(text);
         }
         let returned =
             to_callable(req, &callback).and_then(|callable| call(req, &callable, &arguments));
