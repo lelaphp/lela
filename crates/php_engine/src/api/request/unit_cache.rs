@@ -425,7 +425,7 @@ impl Request {
     ///     $s = memory_get_usage(); memory_reset_peak_usage(); include $f;
     ///     echo memory_get_peak_usage() - $s, "\n"; unlink($f);
     /// }
-    /// peak('/tmp/' . uniqid() . '.php');
+    /// peak('/tmp/' . bin2hex(random_bytes(8)) . '.php');
     /// peak(__DIR__ . '/' . str_repeat('v', 150 - strlen(__DIR__)) . '.php');
     /// peak(__DIR__ . '/' . str_repeat('w', 230 - strlen(__DIR__)) . '.php');
     /// ```

@@ -442,7 +442,7 @@ fn fsockopen_stream(
 /// slots.
 ///
 /// ```php
-/// $path = '/tmp/' . uniqid('wc') . '.sock';
+/// $path = '/tmp/' . 'wc' . bin2hex(random_bytes(8)) . '.sock';
 /// $s = stream_socket_server("unix://$path");
 /// $c = stream_socket_client("unix://$path", $code, $message);
 /// var_dump($code, $message, stream_get_meta_data($c)); unlink($path);
@@ -651,7 +651,7 @@ fn context_socket_options(req: &mut Request, context: Resource) -> Result<Socket
 /// left no text, as a unix socket's does.
 ///
 /// ```php
-/// $path = '/tmp/' . uniqid('ws') . '.sock';
+/// $path = '/tmp/' . 'ws' . bin2hex(random_bytes(8)) . '.sock';
 /// $s = stream_socket_server("udg://$path", $code, $message, STREAM_SERVER_BIND);
 /// var_dump($code, $message, stream_get_meta_data($s)['stream_type']); unlink($path);
 /// var_dump(stream_socket_server('tcp://127.0.0.1', $code, $message), $code, $message);

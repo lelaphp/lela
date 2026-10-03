@@ -3096,7 +3096,7 @@ impl Request {
     /// include's:
     ///
     /// ```php
-    /// $f = __DIR__ . '/' . uniqid() . '.php';
+    /// $f = __DIR__ . '/' . bin2hex(random_bytes(8)) . '.php';
     /// file_put_contents($f, '<?php if ($t) throw new Exception("x"); $y = 2; return $y;'); touch($f, time() - 10); clearstatcache();
     /// $t = false; include $f; $t = true; try { include $f; } catch (Exception $e) {} unset($e);
     /// $m = memory_get_usage(); try { include $f; } catch (Exception $e) {} unset($e); echo memory_get_usage() - $m, "\n";
@@ -17108,7 +17108,7 @@ impl Request {
     /// shutdown to go on from.
     ///
     /// ```php
-    /// $path = sys_get_temp_dir() . '/' . uniqid('a') . '.php';
+    /// $path = sys_get_temp_dir() . '/' . 'a' . bin2hex(random_bytes(8)) . '.php';
     /// file_put_contents($path, '<?php ignore_user_abort((bool) $argv[1]); register_shutdown_function(function () { file_put_contents("php://stderr", "shutdown " . connection_aborted() . connection_status() . "\n"); }); for ($i = 0; $i < 3; $i++) { echo str_repeat("x", 100000); file_put_contents("php://stderr", "wrote $i\n"); }');
     /// foreach ([0, 1] as $ignore) {
     ///     $p = proc_open([PHP_BINARY, '-n', $path, $ignore], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
