@@ -6,6 +6,8 @@
 //! itself; a path is blacklisted where a prefix of it matches an entry,
 //! which [`prefix_matches`] answers without the regular expression.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// The blacklist: each entry's path as `zend_accel_blacklist_loadone`
@@ -34,15 +36,19 @@ impl Blacklist {
 
     /// `zend_accel_blacklist_loadone`: each line less its line ending,
     /// the carriage returns before it and one pair of surrounding
-    /// quotes; an empty line and a `;` comment skipped; a relative entry
-    /// expanded against the directory the file really is in.
+    /// quotes; an empty line and a `;` comment skipped; each entry
+    /// expanded as [`expand`] resolves it, a relative one against the
+    /// directory the file really is in. php expands into one buffer, so an
+    /// entry it cannot expand is the one before it again, or empty.
     fn load_one(&mut self, file: &Path) {
         let Ok(text) = std::fs::read(file) else {
             return;
         };
         let base = std::fs::canonicalize(file)
             .ok()
-            .and_then(|real| real.parent().map(Path::to_path_buf));
+            .and_then(|real| real.parent().map(Path::to_path_buf))
+            .map(|base| base.into_os_string().into_encoded_bytes());
+        let mut real_path = Vec::new();
         for line in text.split(|b| *b == b'\n') {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let start = line.iter().position(|b| *b != b'\r').unwrap_or(line.len());
@@ -53,7 +59,10 @@ impl Blacklist {
             if line.is_empty() || line.starts_with(b";") {
                 continue;
             }
-            self.entries.push(expand(line, base.as_deref()));
+            if let Some(expanded) = expand(line, base.as_deref()) {
+                real_path = expanded;
+            }
+            self.entries.push(real_path.clone());
         }
     }
 
@@ -69,41 +78,201 @@ impl Blacklist {
     }
 }
 
-/// `expand_filepath_ex` under `CWD_EXPAND`: `path` against `base`, or the
-/// process's directory where the file had none, with `.` and `..` taken
-/// out and no link followed.
-fn expand(path: &[u8], base: Option<&Path>) -> Vec<u8> {
-    let joined = if path.starts_with(b"/") {
-        path.to_vec()
-    } else {
-        let base = base.map_or_else(
-            || std::env::current_dir().unwrap_or_default(),
-            Path::to_path_buf,
-        );
-        let mut joined = base.into_os_string().into_encoded_bytes();
-        joined.push(b'/');
-        joined.extend_from_slice(path);
-        joined
-    };
-    let mut parts: Vec<&[u8]> = Vec::new();
-    for part in joined.split(|b| *b == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." => {
-                parts.pop();
-            }
-            part => parts.push(part),
+/// php's `MAXPATHLEN`, `PATH_MAX` from `<limits.h>`: the longest path
+/// `expand_filepath` hands back, with its terminating NUL.
+const MAXPATHLEN: usize = if cfg!(target_os = "macos") {
+    1024
+} else {
+    4096
+};
+
+/// How many links `tsrm_realpath_r` follows in one path before it gives
+/// the path up, php's `LINK_MAX`: Linux's 127. macOS's is 32767, and a
+/// path with more than 127 links is a loop that fails there too, later.
+const LINK_MAX: u32 = 127;
+
+/// `expand_filepath_ex`, `expand_filepath_with_mode` under
+/// `CWD_FILEPATH`: `path` against `base`, or the process's directory
+/// where the file had none, resolved by [`virtual_file`]; `None` where php
+/// returns `NULL` and leaves the entry it was writing as it was.
+fn expand(path: &[u8], base: Option<&[u8]>) -> Option<Vec<u8>> {
+    if path.is_empty() {
+        return None;
+    }
+    let cwd = if path.starts_with(b"/") {
+        Vec::new()
+    } else if let Some(base) = base {
+        if base.len() > MAXPATHLEN - 1 {
+            return None;
         }
+        base.to_vec()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.into_os_string().into_encoded_bytes()
+    } else if std::fs::File::open(Path::new(OsStr::from_bytes(path))).is_ok() {
+        // php hands back the relative path as written where `getcwd()`
+        // fails and the file opens.
+        return Some(path[..path.len().min(MAXPATHLEN - 1)].to_vec());
+    } else {
+        Vec::new()
+    };
+    virtual_file(&cwd, path)
+}
+
+/// `virtual_file_ex` on Unix: `path` joined to `cwd` unless absolute,
+/// resolved by [`realpath_r`], a trailing slash kept where it was
+/// written, and `.` for a relative path that resolves to nothing.
+fn virtual_file(cwd: &[u8], path: &[u8]) -> Option<Vec<u8>> {
+    if path.is_empty() || path.len() >= MAXPATHLEN - 1 {
+        return None;
     }
-    let mut expanded = Vec::with_capacity(joined.len());
-    for part in parts {
-        expanded.push(b'/');
-        expanded.extend_from_slice(part);
+    let mut resolved = vec![0u8; MAXPATHLEN];
+    let mut start = 1;
+    let len = if path.starts_with(b"/") {
+        resolved[..path.len()].copy_from_slice(path);
+        path.len()
+    } else if cwd.is_empty() {
+        start = 0;
+        resolved[..path.len()].copy_from_slice(path);
+        path.len()
+    } else {
+        if path.len() + cwd.len() + 1 >= MAXPATHLEN - 1 {
+            return None;
+        }
+        resolved[..cwd.len()].copy_from_slice(cwd);
+        let mut at = cwd.len();
+        if !cwd.ends_with(b"/") {
+            resolved[at] = b'/';
+            at += 1;
+        }
+        resolved[at..at + path.len()].copy_from_slice(path);
+        at + path.len()
+    };
+    let add_slash = resolved[len - 1] == b'/';
+    let mut links = 0;
+    let mut len = realpath_r(&mut resolved, start, len, &mut links, false)?;
+    if start == 0 && len == 0 {
+        resolved[len] = b'.';
+        len += 1;
     }
-    if expanded.is_empty() {
-        expanded.push(b'/');
+    if add_slash && len > 0 && resolved[len - 1] != b'/' {
+        if len >= MAXPATHLEN - 1 {
+            return None;
+        }
+        resolved[len] = b'/';
+        len += 1;
     }
-    expanded
+    resolved.truncate(len);
+    Some(resolved)
+}
+
+/// `tsrm_realpath_r` under `CWD_FILEPATH`, without the realpath cache,
+/// which changes no answer: `path[..len]` resolved in place from its last
+/// component back, `path[..start]` left alone. An empty component and
+/// `.` are dropped; `..` drops the component before it once that is
+/// resolved, so it climbs out of where a link led; a link is replaced by
+/// its target, resolved in turn; a component that does not exist is kept
+/// as written; one that exists and is not a directory where a directory
+/// is due fails the path. The length resolved, or `None` where php
+/// answers `-1`.
+fn realpath_r(
+    path: &mut [u8],
+    start: usize,
+    mut len: usize,
+    links: &mut u32,
+    mut is_dir: bool,
+) -> Option<usize> {
+    loop {
+        if len <= start {
+            return Some(start);
+        }
+        let mut i = len;
+        while i > start && path[i - 1] != b'/' {
+            i -= 1;
+        }
+        if i == len || (i + 1 == len && path[i] == b'.') {
+            len = i.saturating_sub(1);
+            is_dir = true;
+            continue;
+        }
+        if i + 2 == len && path[i] == b'.' && path[i + 1] == b'.' {
+            return parent(path, start, i, links);
+        }
+        let tmp = path[..len].to_vec();
+        let meta = std::fs::symlink_metadata(Path::new(OsStr::from_bytes(&tmp))).ok();
+        let j = if meta.as_ref().is_some_and(std::fs::Metadata::is_symlink) {
+            *links += 1;
+            if *links > LINK_MAX {
+                return None;
+            }
+            let target = std::fs::read_link(Path::new(OsStr::from_bytes(&tmp))).ok()?;
+            let target = target.as_os_str().as_bytes();
+            let j = target.len();
+            if j >= MAXPATHLEN {
+                return None;
+            }
+            path[..j].copy_from_slice(target);
+            if target.starts_with(b"/") {
+                realpath_r(path, 1, j, links, is_dir)?
+            } else {
+                if i == 0 || i + j >= MAXPATHLEN - 1 {
+                    return None;
+                }
+                path.copy_within(..j, i);
+                path[..i - 1].copy_from_slice(&tmp[..i - 1]);
+                path[i - 1] = b'/';
+                realpath_r(path, start, i + j, links, is_dir)?
+            }
+        } else {
+            if meta.is_some_and(|meta| is_dir && !meta.is_dir()) {
+                return None;
+            }
+            let mut j = start;
+            if i > start + 1 {
+                // Some leading directories may be inaccessible.
+                j = realpath_r(path, start, i - 1, links, true)?;
+                if j > start {
+                    path[j] = b'/';
+                    j += 1;
+                }
+            }
+            if j + len >= MAXPATHLEN - 1 + i {
+                return None;
+            }
+            path[j..j + len - i].copy_from_slice(&tmp[i..len]);
+            j + len - i
+        };
+        return Some(j);
+    }
+}
+
+/// The `..` branch of `tsrm_realpath_r`: the directory before the `..`
+/// at `i`, resolved, less its last component; a relative path keeps a
+/// leading `..` it cannot climb out of.
+fn parent(path: &mut [u8], start: usize, i: usize, links: &mut u32) -> Option<usize> {
+    if i <= start + 1 {
+        return Some(if start > 0 { start } else { i + 2 });
+    }
+    let mut j = realpath_r(path, start, i - 1, links, true)?;
+    if j > start {
+        j -= 1;
+        while j > start && path[j] != b'/' {
+            j -= 1;
+        }
+        if start == 0 {
+            if j == 0 && path.starts_with(b"../") {
+                path[3..6].copy_from_slice(b"../");
+                j = 5;
+            } else if j > 0 && path[j + 1..].starts_with(b"../") {
+                j += 4;
+                path[j..j + 3].copy_from_slice(b"../");
+                j += 2;
+            }
+        }
+    } else if start == 0 && j == 0 {
+        path[..3].copy_from_slice(b"../");
+        j = 2;
+    }
+    Some(j)
 }
 
 /// Whether `entry`, read as `zend_accel_blacklist_update_regexp` writes it
@@ -208,7 +377,6 @@ fn fnmatch(pattern: &[u8], name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{expand, fnmatch, prefix_matches};
-    use std::path::Path;
 
     #[test]
     fn an_entry_matches_a_prefix_with_php_s_wildcards() {
@@ -236,11 +404,39 @@ mod tests {
     #[test]
     fn a_relative_entry_is_expanded_against_the_file_s_directory() {
         assert_eq!(
-            expand(b"./current.php", Some(Path::new("/t/d"))),
-            b"/t/d/current.php"
+            expand(b"./current.php", Some(b"/nonexistent-t1710/d")),
+            Some(b"/nonexistent-t1710/d/current.php".to_vec())
         );
-        assert_eq!(expand(b"../x.inc", Some(Path::new("/t/d"))), b"/t/x.inc");
-        assert_eq!(expand(b"/abs//y", None), b"/abs/y");
+        assert_eq!(
+            expand(b"../x.inc", Some(b"/nonexistent-t1710/d")),
+            Some(b"/nonexistent-t1710/x.inc".to_vec())
+        );
+        assert_eq!(
+            expand(b"/nonexistent-t1710//y/", None),
+            Some(b"/nonexistent-t1710/y/".to_vec())
+        );
+        assert_eq!(expand(b"/", None), Some(b"/".to_vec()));
+    }
+
+    #[test]
+    fn an_entry_under_a_link_is_expanded_where_the_link_leads() {
+        let dir = std::env::temp_dir().join(format!("t1710-blacklist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("a/real");
+        assert!(std::fs::create_dir_all(&real).is_ok());
+        assert!(std::os::unix::fs::symlink(&real, dir.join("link")).is_ok());
+        assert!(std::fs::write(real.join("f"), b"").is_ok());
+        let root = std::fs::canonicalize(&dir)
+            .map(|root| root.into_os_string().into_encoded_bytes())
+            .unwrap_or_default();
+        let base = dir.clone().into_os_string().into_encoded_bytes();
+        let resolved = |path: &[u8]| expand(path, Some(&base)).map(|p| p[root.len()..].to_vec());
+        assert_eq!(resolved(b"link/c.php"), Some(b"/a/real/c.php".to_vec()));
+        assert_eq!(resolved(b"link/none/x"), Some(b"/a/real/none/x".to_vec()));
+        assert_eq!(resolved(b"link/../y"), Some(b"/a/y".to_vec()));
+        assert_eq!(resolved(b"link/"), Some(b"/a/real/".to_vec()));
+        assert_eq!(expand(b"link/f/g", Some(&base)), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
