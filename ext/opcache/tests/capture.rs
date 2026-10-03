@@ -54,7 +54,8 @@ var_dump(file_exists($f), is_file($f), is_readable($f), file_exists($f . 'x'));
 /// An engine of ext/standard and this crate under `ini`.
 fn engine(ini: &[(&str, &str)]) -> Engine {
     let mut builder = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_opcache::extension()]);
+        .extensions(&[php_ext_standard::extension(), php_ext_opcache::extension()])
+        .ini("html_errors", "0");
     for (name, value) in ini {
         builder = builder.ini(name, value);
     }

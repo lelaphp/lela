@@ -42,7 +42,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_sapi::cgi::{Disk, HOST_INI, path_of};
+use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled, entry};
 use php_sapi::{
@@ -144,7 +144,7 @@ pub struct Invocation {
 /// The command line, read: the engine's entries and what is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The host's defaults and then each `-d name=value`, in order.
+    /// Each `-d name=value`, in order.
     pub ini: Vec<(String, String)>,
     /// `-c` and `-n`, which steer the search for php.ini.
     pub ini_search: Search,
@@ -175,10 +175,7 @@ impl Options {
             .get(b"QUERY_STRING")
             .filter(|query| !query.contains(&b'='))
             .is_some_and(|query| decode(query).iter().find(|b| **b > b' ') == Some(&b'-'));
-        let mut ini: Vec<(String, String)> = HOST_INI
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect();
+        let mut ini = Vec::new();
         let mut ini_search = Search::default();
         let mut invocation = Invocation {
             behavior: Behavior::Standard,

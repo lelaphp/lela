@@ -544,7 +544,7 @@ mod tests {
     /// deprecation rendered before the sentence and changing nothing.
     #[test]
     fn lint_prints_phps_sentence_and_ends_with_phps_status() {
-        let engine = Engine::builder().build();
+        let engine = Engine::builder().ini("html_errors", "0").build();
         let ok = scratch("ok.php", "<?php\necho 1;\n");
         let bad = scratch("bad.php", "<?php\necho 1 +;\n");
         let deprecated = scratch("dep.php", "<?php\n(integer)1;\n");

@@ -29,6 +29,9 @@ sha1_smol.workspace = true          # the digest of seams.toml this build is com
 # enters, which is what witness coverage counts (harness §4.5 condition 2,
 # revision 58).
 php_bundle = { path = "../crates/php_bundle", features = ["test", "witness-trace", "linked"] }
+# The CLI's ini layer, which the linked engine takes as the `php` binary does
+# (design §4.1, revision 57; #1398).
+php_sapi = { path = "../crates/php_sapi" }
 
 anyhow.workspace = true
 clap.workspace = true

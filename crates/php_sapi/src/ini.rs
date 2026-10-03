@@ -43,6 +43,22 @@ pub fn enabled(ini: &[(String, String)], name: &str, default: bool) -> bool {
     })
 }
 
+/// The CLI's `sapi_cli_ini_defaults` (`Z/sapi/cli/php_cli.c:408-412`),
+/// set before any php.ini is read, so a file overrides it
+/// ([`crate::EngineBuilder::ini_default`]).
+pub const CLI_DEFAULTS: [(&str, &str); 1] = [("display_errors", "1")];
+
+/// The CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`), prepended
+/// to its `-d` entries as its first `ini_entries`, so no php.ini
+/// overrides it; php's built-in server, a host of its own, takes none.
+pub const CLI_HARDCODED: [(&str, &str); 5] = [
+    ("html_errors", "0"),
+    ("implicit_flush", "1"),
+    ("output_buffering", "0"),
+    ("max_execution_time", "0"),
+    ("max_input_time", "-1"),
+];
+
 /// The two switches of a host's line that steer `php_init_config`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Search {

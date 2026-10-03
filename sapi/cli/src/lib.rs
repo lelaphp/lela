@@ -15,9 +15,9 @@
 //! `--ini` print, the interactive shell `-a` serves where the bundle
 //! provides one, or the built-in web server. `-c`, `-n` and every `-d` are
 //! the engine's to read before it is built, the php.ini found as
-//! `php_init_config` finds it ([`php_sapi::ini::search`]) before the
-//! `-d`s, so the binary reads them off [`Options`] and builds the engine;
-//! the host then serves
+//! `php_init_config` finds it ([`php_sapi::ini::search`]) between the
+//! CLI's `ini_defaults` and its `HARDCODED_INI` before the `-d`s, so the
+//! binary reads them off [`Options`] and builds the engine; the host then serves
 //! [`Options::ask`] on it, `--repeat`'s count of times.
 //!
 //! The binary carries php's shell callbacks
@@ -61,7 +61,7 @@ use std::process::ExitCode;
 
 use std::sync::OnceLock;
 
-use php_sapi::{Engine, IniFiles};
+use php_sapi::{Engine, EngineBuilder, IniFiles};
 
 use crate::natives::ProcessTitle;
 
@@ -204,11 +204,11 @@ fn print(text: &str) -> i32 {
 /// order and `php_bundle::Tier` bound, the CLI's `additional_functions`
 /// under `standard` ([`natives::cli`]), the shebang line of every file
 /// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
-/// carried, started over the `files` found and the line's `ini`
-/// ([`php_sapi::start`]).
+/// carried, started over the CLI's defaults, the `files` found, its
+/// `HARDCODED_INI` and the line's `ini` ([`php_sapi::start`]).
 fn engine(ini: &[(String, String)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let builder = Engine::builder()
+    let builder = cli_defaults(Engine::builder())
         .ini_files(files)
         .sapi_name(NAME)
         .extensions(&extensions)
@@ -216,25 +216,33 @@ fn engine(ini: &[(String, String)], files: IniFiles) -> Engine {
         .tier::<php_bundle::Tier>()
         .skip_shebang()
         .cli_shell();
+    let builder = php_sapi::ini::CLI_HARDCODED
+        .iter()
+        .fold(builder, |builder, (name, value)| builder.ini(name, value));
     php_sapi::start(natives::cli(builder), ini)
 }
 
-/// The built-in server's engine: the bundle as [`engine`] builds it, with
-/// php's own defaults for the two entries the CLI's `HARDCODED_INI`
-/// moves, which `main` lays only under the CLI's module
-/// (`php_cli.c:1336`), and the `cli_server` module and its natives after
-/// the bundle.
+/// `sapi_cli_ini_defaults`, which the CLI and its built-in server both set.
+fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
+    php_sapi::ini::CLI_DEFAULTS
+        .iter()
+        .fold(builder, |builder, (name, value)| {
+            builder.ini_default(name, value)
+        })
+}
+
+/// The built-in server's engine: the bundle as [`engine`] builds it,
+/// without the CLI's `HARDCODED_INI`, which `main` lays only under the
+/// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
+/// natives after the bundle.
 fn server_engine(ini: &[(String, String)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let builder = Engine::builder()
+    let builder = cli_defaults(Engine::builder())
         .ini_files(files)
         .sapi_name(server::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
-        .skip_shebang()
-        .ini("html_errors", "1")
-        .ini("implicit_flush", "0")
-        .ini("max_execution_time", "30");
+        .skip_shebang();
     php_sapi::start(natives::server(builder), ini)
 }

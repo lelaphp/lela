@@ -46,6 +46,7 @@ fn a_failed_preload_refuses_startup() {
     ] {
         let engine = Engine::builder()
             .extensions(&[php_ext_ffi::extension()])
+            .ini("html_errors", "0")
             .ini("ffi.enable", "1")
             .ini("ffi.preload", &list)
             .build();

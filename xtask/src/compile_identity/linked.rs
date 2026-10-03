@@ -32,12 +32,11 @@ use php_bundle::test::Engine;
 use super::dump::Dumped;
 use crate::oracle::{self, Normalise};
 
-/// A fresh engine of the bundle's enabled set under `ini`, each entry as
-/// the recipe writes it, `name=value`.
+/// A fresh engine of the bundle's enabled set under the CLI's layer and
+/// `ini`, each entry as the recipe writes it, `name=value`.
 pub(super) fn engine(ini: &[String]) -> Engine {
-    let entries: Vec<(&str, &str)> = ini
-        .iter()
-        .filter_map(|entry| entry.split_once('='))
+    let entries: Vec<(&str, &str)> = crate::oracle::linked::cli_layer()
+        .chain(ini.iter().filter_map(|entry| entry.split_once('=')))
         .collect();
     php_bundle::test::engine(&entries)
 }

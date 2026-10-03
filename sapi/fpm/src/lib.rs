@@ -137,10 +137,7 @@ fn usage(argv0: &[u8]) -> String {
 /// refused switch answered where they stand, as php answers them before
 /// it reads what follows.
 fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<(String, String)>, Ask) {
-    let mut ini: Vec<(String, String)> = php_sapi::cgi::HOST_INI
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect();
+    let mut ini = Vec::new();
     let mut asked = Args {
         argv: Vec::new(),
         config: None,

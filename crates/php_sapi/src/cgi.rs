@@ -17,16 +17,6 @@ use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape};
 use crate::ini::enabled;
 use crate::{Method, ResponseHead, WebRequest};
 
-/// The entries whose default php's CGI and `FastCGI` hosts keep where the
-/// engine keeps the CLI's (`php_cli.c`'s `HARDCODED_INI`): laid over the
-/// engine's defaults before the line's `-d`, as `main.c`'s own table has
-/// them.
-pub const HOST_INI: [(&str, &str); 3] = [
-    ("html_errors", "1"),
-    ("implicit_flush", "0"),
-    ("max_execution_time", "30"),
-];
-
 /// The file system as `init_request_info` asks it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disk;
