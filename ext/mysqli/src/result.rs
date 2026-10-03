@@ -247,7 +247,22 @@ pub(crate) fn fetch_object(
 /// (`zend_symtable_to_proptable`), and otherwise each written through
 /// the class's handler in the object's class's scope, the
 /// `EG(fake_scope)` `zend_merge_properties` sets: a parent's private
-/// property is out of its sight, and the column is a dynamic one.
+/// property is out of its sight, and the column is a dynamic one. A
+/// write that throws does not end the row: `write_property` returns
+/// nothing, the later columns are written with the throwable pending,
+/// each later one chained onto it, and it leaves after the loop, where
+/// the constructor is not served (`Zend/zend_API.c:1405-1424`); a fatal
+/// or an `exit` leaves at once.
+///
+/// ```php
+/// class D { public int $a; public $b; function __destruct() { var_dump($this->b); } }
+/// $m = new mysqli('127.0.0.1', 'root', '', '', 3306);
+/// try { $m->query("SELECT 'x' AS a, 'y' AS b")->fetch_object('D'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect mysql
+/// string(1) "y"
+/// Cannot assign string to property D::$a of type int
+/// ```
 ///
 /// ```php
 /// class B { private $v = 'b'; }
@@ -266,6 +281,7 @@ pub(crate) fn fetch_object(
 fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thrown> {
     let plain = declares_nothing(req, made.class());
     let mut table = PhpArray::new(req)?;
+    let mut pending: Option<Thrown> = None;
     for (key, value) in row.snapshot() {
         let name = match key {
             Key::Str(name) => PhpString::new(req, name.as_bytes())?,
@@ -276,7 +292,17 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
             table.set(req, Key::Str(name), value)?;
         } else {
             let scope = PropertyScope::Of(ClassRef(made.class()));
-            made.write_prop_in(req, scope, name, value)?;
+            let Err(thrown) = made.write_prop_in(req, scope, name, value) else {
+                continue;
+            };
+            if thrown.exception().is_none() {
+                req.release(Value::array(table));
+                return Err(thrown);
+            }
+            pending = Some(match pending.take() {
+                Some(earlier) => earlier.chain(req, thrown),
+                None => thrown,
+            });
         }
     }
     if plain {
@@ -284,7 +310,7 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
     } else {
         req.release(Value::array(table));
     }
-    Ok(())
+    pending.map_or(Ok(()), Err)
 }
 
 /// `!ce->default_properties_count && !ce->__set`.
