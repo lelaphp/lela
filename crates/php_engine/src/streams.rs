@@ -4719,6 +4719,16 @@ impl Stream {
             .flatten()
     }
 
+    /// `dup(2)` of the fd a [`Cast::Fd`] answers, the copy the caller's:
+    /// the open file, its offset and a `flock(2)` taken on it outlive the
+    /// stream, as php's persistent list keeps a `dba_popen` link's streams
+    /// past the request, to be made a stream again with
+    /// [`Request::stream_from_fd`]. `None` for a kind with no fd.
+    pub fn dup_fd(self, req: &mut Request) -> Option<OwnedFd> {
+        let fd = self.cast(req, Cast::Fd, false)?;
+        php_heap::dup_fd(fd).ok()
+    }
+
     /// `php_stream_can_cast` (`Z/main/php_streams.h:567`), `_php_stream_cast`
     /// handed no `ret`: whether the stream's kind would answer `cast`, asked
     /// of the kind alone, the stream neither flushed, sought nor converted

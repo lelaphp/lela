@@ -700,6 +700,7 @@ request::Stream::crypto
 request::Stream::crypto_enable
 request::Stream::crypto_setup
 request::Stream::ctx
+request::Stream::dup_fd
 request::Stream::eof
 request::Stream::flock
 request::Stream::flush
