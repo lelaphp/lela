@@ -395,6 +395,20 @@ impl Connection for Handle {
         true
     }
 
+    /// `pdo_sqlite_request_shutdown`, `pdo_sqlite_cleanup_callbacks`:
+    /// every function and collation taken off the library and its
+    /// callables given up, so none lingers for the next request.
+    fn persistent_shutdown(&mut self, req: &mut Request) {
+        if let Some(handler) = self.db.set_authorizer(None) {
+            handler.release(req);
+        }
+        for registration in std::mem::take(&mut self.registrations) {
+            for handler in registration.unregister() {
+                handler.release(req);
+            }
+        }
+    }
+
     /// `pdo_sqlite_get_gc`.
     fn gc(&self, visit: &mut dyn FnMut(Value)) {
         if let Some(handler) = self.db.authorizer() {
@@ -407,17 +421,10 @@ impl Connection for Handle {
         }
     }
 
-    /// `pdo_sqlite_cleanup_callbacks`: every function and collation
-    /// taken off the library and its callables given up.
+    /// `sqlite_handle_closer`: the callbacks cleaned up and `H`'s
+    /// allocation given back.
     fn close(&mut self, req: &mut Request) {
-        if let Some(handler) = self.db.set_authorizer(None) {
-            handler.release(req);
-        }
-        for registration in std::mem::take(&mut self.registrations) {
-            for handler in registration.unregister() {
-                handler.release(req);
-            }
-        }
+        self.persistent_shutdown(req);
         if let Some(allocation) = self.allocation.take() {
             allocation.free(req);
         }

@@ -507,6 +507,22 @@ pub trait Connection: Any + Send {
     fn close(&mut self, req: &mut Request) {
         let _ = req;
     }
+
+    /// `check_liveness`: whether a persistent connection found under its
+    /// key is alive and ready for another use, asked before PDO lends it
+    /// again; php's null slot answers that it is.
+    fn check_liveness(&mut self, req: &mut Request) -> bool {
+        let _ = req;
+        true
+    }
+
+    /// `persistent_shutdown`: what a persistent connection holds of the
+    /// request given back, when a `PDO` sharing it is freed and when the
+    /// request gives it back to the engine's pool, so that nothing of one
+    /// request's reaches the next.
+    fn persistent_shutdown(&mut self, req: &mut Request) {
+        let _ = req;
+    }
 }
 
 /// `pdo_stmt_methods`: a prepared statement.

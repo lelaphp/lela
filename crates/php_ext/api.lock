@@ -123,6 +123,11 @@ abi::IntoReturn::UNDECLARED
 abi::IntoReturn::declared
 abi::IntoReturn::into_return
 abi::Iterable
+abi::Lent
+abi::Lent::drain
+abi::Lent::find
+abi::Lent::get_mut
+abi::Lent::hold
 abi::Lookup
 abi::Members
 abi::Members::members
@@ -178,6 +183,9 @@ abi::OrFalse
 abi::Passed
 abi::Path
 abi::Pool
+abi::Pool::give
+abi::Pool::new
+abi::Pool::take
 abi::PostStartup
 abi::PropertiesFor
 abi::PropertyPlace

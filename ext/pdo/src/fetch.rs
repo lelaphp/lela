@@ -15,7 +15,7 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
-use crate::dbh::{Dbh, Nulls};
+use crate::dbh::Nulls;
 use crate::error::{self, On};
 use crate::stmt;
 
@@ -272,7 +272,7 @@ pub(super) fn value(
         }
     };
     let (nulls, stringify) = stmt::dbh_of(req, object)
-        .and_then(|dbh| dbh.native::<Dbh>(req).map(|d| (d.nulls, d.stringify)))
+        .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| (d.nulls, d.stringify)))
         .unwrap_or((Nulls::Natural, false));
     if nulls == Nulls::EmptyString && value.as_str_bytes().is_some_and(<[u8]>::is_empty) {
         req.release(value);

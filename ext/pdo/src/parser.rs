@@ -17,7 +17,6 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpObject, ValueRef};
 
 use crate::connector::{BindKind, Failure, OnError, Rewritten, Scanner, SqlState, Token};
-use crate::dbh::Dbh;
 use crate::error::{self, On};
 use crate::stmt::{self, Bound, BoundKey};
 
@@ -237,16 +236,14 @@ fn quote(
         (BindKind::Int, _) => return Ok(Some(to_long(req, &value)?.to_string().into_bytes())),
         _ => to_string(req, &value)?.as_bytes().to_vec(),
     };
-    let mode = dbh
-        .native::<Dbh>(req)
-        .map_or(OnError::Throw, |d| d.error_mode);
+    let mode = crate::dbh::state(req, dbh).map_or(OnError::Throw, |d| d.error_mode);
     let quoted =
         crate::dbh::with_connection(req, dbh, |req, conn| Ok(conn.quote(req, &text, ty, mode)))?;
     match quoted {
         Ok(quoted) => Ok(Some(quoted)),
         Err(failure) => {
             error::record(req, dbh, On::Dbh, failure.cause)?;
-            let state = dbh.native::<Dbh>(req).and_then(|d| d.error_code);
+            let state = crate::dbh::state(req, dbh).and_then(|d| d.error_code);
             if let Some(state) = state {
                 error::set_state(req, dbh, On::Stmt(object), state);
             }

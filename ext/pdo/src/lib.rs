@@ -73,6 +73,9 @@ pub fn extension() -> Extension {
         .class::<PDOStatement>()
         .class::<PDORow>()
         .info(pdo_info)
+        .request_state::<dbh::Persistent>()
+        .engine_state(|_| dbh::Pooled(php_ext::abi::Pool::new(dbh::POOLED)))
+        .rshutdown(dbh::rshutdown)
         .build("PDO")
 }
 

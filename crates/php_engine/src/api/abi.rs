@@ -219,11 +219,12 @@ pub struct Pool<K, V> {
 
 impl<K: Hash + Eq, V> Pool<K, V> {
     /// A pool keeping at most `capacity` idle entries; one given back past
-    /// the bound is dropped, which closes it. The engine's own for now,
-    /// its streams the one user; an extension's pool, persistent PDO's,
-    /// comes with the type a lent entry needs.
+    /// the bound is dropped, which closes it. The engine's own for its
+    /// streams, and an extension's as a field of its engine state, as
+    /// persistent PDO's is; what a request took out it holds in a
+    /// [`Lent`] of its request state.
     #[must_use]
-    pub(crate) fn new(capacity: usize) -> Pool<K, V> {
+    pub fn new(capacity: usize) -> Pool<K, V> {
         Pool {
             capacity: capacity.max(1),
             idle: Mutex::new(HashMap::new()),
@@ -239,7 +240,7 @@ impl<K: Hash + Eq, V> Pool<K, V> {
 
     /// An idle entry under `key`, lent to the caller alone: the one given
     /// back last, as php's one entry per key is the one a worker last used.
-    pub(crate) fn take(&self, key: &K) -> Option<V> {
+    pub fn take(&self, key: &K) -> Option<V> {
         let mut idle = self.idle();
         let entries = idle.get_mut(key)?;
         let entry = entries.pop();
@@ -252,13 +253,55 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     /// `entry` given back under `key` at the end of the request that
     /// held it; past the bound it is handed back to the caller, whose
     /// drop closes it outside the `Mutex`.
-    pub(crate) fn give(&self, key: K, entry: V) -> Option<V> {
+    pub fn give(&self, key: K, entry: V) -> Option<V> {
         let mut idle = self.idle();
         if idle.values().map(Vec::len).sum::<usize>() >= self.capacity {
             return Some(entry);
         }
         idle.entry(key).or_default().push(entry);
         None
+    }
+}
+
+/// The entries of a [`Pool`] one request holds, each under php's key from
+/// the ask that took it out or opened it to the request's end: a second
+/// ask by the key [`find`](Lent::find)s the one held, and the request's
+/// `rshutdown` [`drain`](Lent::drain)s them to give each back. An entry
+/// is reached by its place, which no later hold reuses within the
+/// request, so an object or a resource can name the entry it shares.
+pub struct Lent<K, V> {
+    held: Vec<Option<(K, V)>>,
+}
+
+impl<K, V> Default for Lent<K, V> {
+    fn default() -> Lent<K, V> {
+        Lent { held: Vec::new() }
+    }
+}
+
+impl<K: PartialEq, V> Lent<K, V> {
+    /// The place of the entry held under `key`.
+    pub fn find(&self, key: &K) -> Option<usize> {
+        self.held
+            .iter()
+            .position(|held| held.as_ref().is_some_and(|(k, _)| k == key))
+    }
+
+    /// The entry held at `at`, `None` once drained.
+    pub fn get_mut(&mut self, at: usize) -> Option<&mut V> {
+        self.held.get_mut(at)?.as_mut().map(|(_, entry)| entry)
+    }
+
+    /// `entry` held under `key` for the rest of the request; its place.
+    pub fn hold(&mut self, key: K, entry: V) -> usize {
+        self.held.push(Some((key, entry)));
+        self.held.len() - 1
+    }
+
+    /// Every entry held, with its key, taken out for the caller to give
+    /// back to its pool: what the request's `rshutdown` does.
+    pub fn drain(&mut self) -> Vec<(K, V)> {
+        self.held.iter_mut().filter_map(Option::take).collect()
     }
 }
 

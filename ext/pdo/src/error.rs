@@ -9,7 +9,6 @@ use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
 use crate::connector::{Cause, Failure, OnError, SqlState};
-use crate::dbh::Dbh;
 use crate::stmt::Stmt;
 
 /// `err_initializer`, each state's five characters and its description,
@@ -151,9 +150,9 @@ pub(crate) enum On {
 }
 
 /// The SQLSTATE `on` holds.
-pub(super) fn state(req: &Request, dbh: PhpObject, on: On) -> Option<SqlState> {
+pub(super) fn state(req: &mut Request, dbh: PhpObject, on: On) -> Option<SqlState> {
     match on {
-        On::Dbh => dbh.native::<Dbh>(req).and_then(|h| h.error_code),
+        On::Dbh => crate::dbh::state(req, dbh).and_then(|h| h.error_code),
         On::Stmt(stmt) => stmt.native::<Stmt>(req).and_then(|s| s.error_code),
     }
 }
@@ -162,7 +161,7 @@ pub(super) fn state(req: &Request, dbh: PhpObject, on: On) -> Option<SqlState> {
 pub(super) fn set_state(req: &mut Request, dbh: PhpObject, on: On, state: SqlState) {
     match on {
         On::Dbh => {
-            if let Some(h) = dbh.native_mut::<Dbh>(req) {
+            if let Some(h) = crate::dbh::state(req, dbh) {
                 h.error_code = Some(state);
             }
         }
@@ -174,9 +173,8 @@ pub(super) fn set_state(req: &mut Request, dbh: PhpObject, on: On, state: SqlSta
     }
 }
 
-fn error_mode(req: &Request, dbh: PhpObject) -> OnError {
-    dbh.native::<Dbh>(req)
-        .map_or(OnError::Throw, |h| h.error_mode)
+fn error_mode(req: &mut Request, dbh: PhpObject) -> OnError {
+    crate::dbh::state(req, dbh).map_or(OnError::Throw, |h| h.error_mode)
 }
 
 /// A `PDOException` with `message`, `code` and `errorInfo` written as
@@ -245,7 +243,7 @@ pub(super) fn fetch_error(
         On::Stmt(stmt) if per_statement(req, dbh) => stmt
             .native::<Stmt>(req)
             .and_then(|s| s.native_error.clone()),
-        _ => dbh.native::<Dbh>(req).and_then(|h| h.native_error.clone()),
+        _ => crate::dbh::state(req, dbh).and_then(|h| h.native_error.clone()),
     };
     if let Some((code, message)) = recorded {
         info.append(req, Value::int(code))?;
@@ -257,8 +255,8 @@ pub(super) fn fetch_error(
 
 /// Whether the connection's connector keeps a statement's error on the
 /// statement.
-fn per_statement(req: &Request, dbh: PhpObject) -> bool {
-    dbh.native::<Dbh>(req)
+fn per_statement(req: &mut Request, dbh: PhpObject) -> bool {
+    crate::dbh::state(req, dbh)
         .and_then(|h| h.driver)
         .is_some_and(crate::connector::Connector::errors_per_statement)
 }
@@ -356,7 +354,7 @@ pub(super) fn record(
                     }
                 }
                 _ => {
-                    if let Some(h) = dbh.native_mut::<Dbh>(req) {
+                    if let Some(h) = crate::dbh::state(req, dbh) {
                         h.native_error = native;
                     }
                 }
