@@ -1593,6 +1593,27 @@ pub(crate) enum Answered {
 /// (`Z/Zend/zend_object_handlers.c:2173`), which under
 /// [`PropertyPurpose::Debug`] serves the class's `get_debug_info` and
 /// the object's own table only where that answers none.
+///
+/// ```php
+/// class A { public $a = 1; protected $b = 2; private $c = 3; }
+/// print_r(new A);
+/// echo "\n";
+/// class B { public $hidden = 1; function __debugInfo() { return ['shown' => 2]; } }
+/// var_dump(new B);
+/// ```
+/// ```expect
+/// A Object
+/// (
+///     [a] => 1
+///     [b:protected] => 2
+///     [c:A:private] => 3
+/// )
+///
+/// object(B)#1 (1) {
+///   ["shown"]=>
+///   int(2)
+/// }
+/// ```
 pub(crate) fn properties_answered(
     req: &mut Request,
     object: PhpObject,
@@ -1665,6 +1686,24 @@ pub(crate) fn properties_answered(
 /// that is. `rows` is what [`properties_answered`] read, the declared
 /// rows first; where they are not the slots this walks, as a class's
 /// own `get_properties` may answer, they stand as they are.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class C { public int $i; public $j = 1; }
+/// $c = new C;
+/// $c->d = 2;
+/// debug_zval_dump($c);
+/// ```
+/// ```expect
+/// object(C)#1 (2) refcount(2){
+///   ["i"]=>
+///   uninitialized(int)
+///   ["j"]=>
+///   int(1)
+///   ["d"]=>
+///   int(2)
+/// }
+/// ```
 pub(crate) fn debug_rows(
     req: &mut Request,
     object: PhpObject,
@@ -2635,6 +2674,17 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// pair it does not hand on (`Z/Zend/zend_vm_def.h:419-430`). Neither
 /// side's owner is given up. A length past `ZSTR_MAX_LEN` is php's
 /// `Error`, `String size overflow`.
+///
+/// ```php
+/// $a = 'ab';
+/// $b = str_repeat('c', 3);
+/// var_dump($a . $b, $a . '', '' . $b);
+/// ```
+/// ```expect
+/// string(5) "abccc"
+/// string(2) "ab"
+/// string(3) "ccc"
+/// ```
 pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpString, Thrown> {
     if a.len() > ZSTR_MAX_LEN - b.len() {
         return Err(throw_error(req, "Error", "String size overflow"));
@@ -3369,6 +3419,15 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
 
 /// php's `Error` for a table a comparison's walk is already inside,
 /// `zend_hash_compare`'s and `zend_std_compare_objects`' alike.
+///
+/// ```php
+/// $o = new stdClass; $o->self = $o;
+/// $p = new stdClass; $p->self = $p;
+/// try { var_dump($o == $p); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Nesting level too deep - recursive dependency?
+/// ```
 pub(crate) fn nesting_too_deep(req: &mut Request) -> Thrown {
     crate::api::raising::throw_error(
         req,
@@ -4576,6 +4635,24 @@ pub(crate) fn array_key_exists(
 /// `double`, `string`, `array`, `object`, and `resource` or `resource
 /// (closed)`; a reference is the value it holds, and a variable nothing
 /// wrote is `null`, which the handler warned of as it read it.
+///
+/// ```php
+/// $f = fopen('php://memory', 'r');
+/// $r = &$f;
+/// echo gettype(null), ' ', gettype(true), ' ', gettype(1), ' ', gettype(1.5), "\n";
+/// echo gettype('s'), ' ', gettype([]), ' ', gettype(new stdClass), ' ', gettype($r), "\n";
+/// fclose($f);
+/// echo gettype($f), "\n";
+/// echo gettype($undefined), "\n";
+/// ```
+/// ```expect
+/// NULL boolean integer double
+/// string array object resource
+/// resource (closed)
+///
+/// Warning: Undefined variable $undefined in %s on line 8
+/// NULL
+/// ```
 pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null => b"NULL",
