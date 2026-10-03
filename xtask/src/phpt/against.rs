@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use super::miss::Miss;
 use super::target::Target;
-use super::{CORPUS, INSTRUMENT, Judgement, Lane, Tally};
+use super::{CORPUS, INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
 use crate::manifest::Manifest;
 use crate::oracle::{Pin, Runner};
@@ -73,8 +73,6 @@ fn built_from() -> Vec<&'static str> {
 }
 /// Where a workspace keeps its runs, relative to its root.
 pub(crate) const RUNS: &str = "target/phpt-runs";
-/// What a comparison's scope adds to its subset's.
-pub(crate) const SCOPE: &str = "@against";
 
 /// One subset's run as it is kept: every test's verdict by its divergence
 /// key, and what names the run without keying it.
@@ -185,11 +183,12 @@ impl Runs {
     pub(crate) fn after(
         &self,
         manifest: &Manifest,
-        scope: &str,
+        held_as: &Scope,
         (tally, runner): (&Tally, &Runner),
         subset: &Reading,
         target: Option<&Target>,
     ) -> Result<Option<Reading>> {
+        let scope = &held_as.to_string();
         let run = self.run_of(tally, runner);
         let moved = git::tracked_hash(&self.root, &built_from(), None)? != self.tree;
         if let (Some(run), false) = (&run, moved) {
@@ -216,7 +215,7 @@ impl Runs {
             (Ok(_), None) => Err(format!("this run measured no engine: {}", subset.message)),
             (Ok(was), Some(run)) => diff(&was, &run, target),
         };
-        held(manifest, &self.root, scope, &base.commit, diff).map(Some)
+        held(manifest, &self.root, held_as, &base.commit, diff).map(Some)
     }
 
     /// The run a tally is where the engine judged every test the subset
@@ -368,16 +367,16 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
 }
 
 /// The comparison's reading over `scope`, at the scope the subset's
-/// reading has with [`SCOPE`] after it.
+/// reading has, [`Scope::held_against`].
 fn held(
     manifest: &Manifest,
     root: &Path,
-    scope: &str,
+    scope: &Scope,
     commit: &str,
     diff: Result<Diff, String>,
 ) -> Result<Reading> {
-    let reading = Reading::for_scope(INSTRUMENT, &format!("{scope}{SCOPE}"), manifest, root)?
-        .under(&manifest.pin);
+    let scope = scope.held_against().to_string();
+    let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, root)?.under(&manifest.pin);
     compared(reading, commit, diff)
 }
 
@@ -437,7 +436,7 @@ pub(crate) fn compared(
 pub(crate) fn answer(readings: &[Reading]) -> Result<()> {
     let asked: Vec<&Reading> = readings
         .iter()
-        .filter(|r| r.scope.ends_with(SCOPE))
+        .filter(|r| r.scope.parse::<Scope>().is_ok_and(|scope| scope.against))
         .collect();
     let short: Vec<&str> = asked
         .iter()

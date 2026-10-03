@@ -310,13 +310,19 @@ fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
     assert_eq!(path("xtask").unwrap(), Path::new("xtask"));
 
     // A subset: the crate whose subset it is, under the crate's name and
-    // beside a tier lane or a control of the runner alike, so `done` finds
-    // the engine's reading under the crate and neither displaces it.
+    // beside a tier lane, a control of the runner or a comparison alike,
+    // so `done` finds the engine's reading under the crate and neither
+    // displaces it; a suffix the grammar has not is no scope (#1744).
     assert_eq!(path("ext/pcre@control").unwrap(), Path::new("ext/pcre"));
     assert_eq!(
-        path("php_engine@jit").unwrap(),
+        path("php_engine@force").unwrap(),
         Path::new("crates/php_engine")
     );
+    assert_eq!(
+        path("ext/pcre@control@against").unwrap(),
+        Path::new("ext/pcre")
+    );
+    assert_eq!(path("php_engine@jit"), None);
 
     // A lock: the seam's name maps to the directory the lock lives in, the
     // crate `lock_from` names when the row says so, and the workspace for a

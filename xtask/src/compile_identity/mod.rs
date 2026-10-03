@@ -49,6 +49,7 @@ use anyhow::{Context, Result, bail};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Oracle, Runner};
+use crate::phpt::Scope;
 use crate::reading::{Reading, listed};
 use crate::tally::{self, Judgement as _, Outcome};
 
@@ -166,10 +167,11 @@ impl Corpus {
     /// so a control of the runner keeps a reading of its own and never
     /// displaces the engine's.
     pub(crate) fn scope(&self, runner: &Runner) -> String {
-        match runner {
-            Runner::Control(_) => format!("{}@control", self.scope),
-            _ => self.scope.clone(),
-        }
+        let scope = Scope {
+            control: matches!(runner, Runner::Control(_)),
+            ..Scope::of(&self.scope)
+        };
+        scope.to_string()
     }
 }
 

@@ -73,8 +73,10 @@ impl Found {
 }
 
 /// The ticket a branch's work is for: the number of the GitHub issue
-/// recorded on the branch when its worktree was laid down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// recorded on the branch when its worktree was laid down, or the one a
+/// `[parity]` ruling names, read from the manifest as the bare number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(transparent)]
 pub struct Ticket(u64);
 
 impl Ticket {

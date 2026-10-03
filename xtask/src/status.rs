@@ -180,9 +180,9 @@ fn settled(row: &Row) -> bool {
         .reading
         .as_ref()
         .is_some_and(|r| r.status == reading::Status::Pass);
-    let compared_clean = COMPARISONS.iter().all(|scope| {
-        let key = scope.trim_start_matches('@');
-        !row.fact(key).starts_with(reading::Status::Fail.as_str())
+    let compared_clean = phpt::Comparison::ALL.iter().all(|how| {
+        !row.fact(how.as_str())
+            .starts_with(reading::Status::Fail.as_str())
     });
     let lines = row
         .reading
@@ -697,8 +697,10 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 
 /// The `phpt` section: per subset, the reading off the log that stands
 /// for the track `root` is on, [`reading::Chain::standing`], and never a
-/// retired branch's appended after it (#787). The dashboard's data step
-/// reads this rendering as JSON rather than taking the log's last line.
+/// retired branch's appended after it (#787). This is xtask's rule; the
+/// dashboard keeps one of its own, the latest reading in time on the
+/// chain, read off `log.jsonl` itself and not off this section, as its
+/// README says (#845, #1717).
 fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
     let log = store.log()?;
     let chain = reading::Chain::of_head(root)?;
@@ -713,11 +715,17 @@ fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
 /// directory (ADR-0008, #1269): those tests are the hosts' rows' now, and
 /// the reading that outlived its subset would stand beside them for good.
 fn outlived(manifest: &Manifest, row: &Row) -> bool {
-    let scope = row.facts.get("scope").and_then(Value::as_str).unwrap_or("");
-    let base = scope.split('@').next().unwrap_or(scope);
-    manifest
-        .crate_named(base)
-        .is_some_and(|krate| krate.subsets().is_empty())
+    scope_of(row).is_some_and(|scope| {
+        manifest
+            .crate_named(&scope.subset)
+            .is_some_and(|krate| krate.subsets().is_empty())
+    })
+}
+
+/// A phpt row's scope, decoded; none for one outside the grammar, which
+/// is then a row of its own that nothing folds, narrows or retires.
+fn scope_of(row: &Row) -> Option<phpt::Scope> {
+    row.facts.get("scope")?.as_str()?.parse().ok()
 }
 
 /// The rows of the phpt section a session is handed: each subset's, but
@@ -729,8 +737,7 @@ fn outlived(manifest: &Manifest, row: &Row) -> bool {
 /// keeps every reading.
 fn outermost(rows: Vec<Row>) -> Vec<Row> {
     let base = |row: &Row| -> String {
-        let scope = row.facts.get("scope").and_then(Value::as_str).unwrap_or("");
-        scope.split('@').next().unwrap_or(scope).to_owned()
+        scope_of(row).map_or_else(|| row.fact("scope"), |scope| scope.subset)
     };
     let bases: BTreeSet<String> = rows.iter().map(base).collect();
     rows.into_iter()
@@ -743,11 +750,6 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
         .collect()
 }
 
-/// The comparisons a subset's run is read beside, each folded into the
-/// subset's own row as a column: the regression verdict against the base
-/// and the runner's control under the oracle.
-const COMPARISONS: [&str; 2] = [phpt::against::SCOPE, phpt::CONTROL];
-
 /// The counts that size a run rather than judge it; the subset's row
 /// carries them, so a comparison's cell leaves them out.
 const SIZE: [&str; 7] = [
@@ -757,27 +759,30 @@ const SIZE: [&str; 7] = [
 /// The phpt rows as Markdown: one per subset, each comparison folded into
 /// its subset's row (#1210). A comparison is its status and the numbers
 /// that judge, `held=4833` against the base, `borked=4 failed=2` under the
-/// oracle; a comparison with no subset row stays a row of its own. The
+/// oracle; a comparison with no row of a run to fold into, which a
+/// control's comparison against a commit is too, since the control's own
+/// row is folded, stays a row of its own. The
 /// message is a failing row's, the scope it repeats cut off, since a
 /// passing row's says what its numbers say. So a subset costs one row of
 /// the local facts, not three.
 fn compared(rows: Vec<Row>) -> Vec<Row> {
     let scope = |row: &Row| row.fact("scope");
     let scopes: BTreeSet<String> = rows.iter().map(scope).collect();
-    let of = |s: &str| {
-        let (base, key) = s.rsplit_once('@')?;
-        (COMPARISONS.contains(&&s[base.len()..]) && scopes.contains(base))
-            .then(|| (base.to_owned(), key.to_owned()))
+    let of = |row: &Row| {
+        let (run, how) = scope_of(row)?.compares()?;
+        let own = run.compares().is_none() && scopes.contains(&run.to_string());
+        own.then(|| (run.to_string(), how))
     };
     let (folded, mut kept): (Vec<Row>, Vec<Row>) =
-        rows.into_iter().partition(|row| of(&scope(row)).is_some());
+        rows.into_iter().partition(|row| of(row).is_some());
     for row in folded {
-        let (Some((base, key)), Some(r)) = (of(&scope(&row)), &row.reading) else {
+        let (Some((base, how)), Some(r)) = (of(&row), &row.reading) else {
             continue;
         };
         let cell = format!("{} {}", r.status.as_str(), row.numbers_but(&SIZE));
         if let Some(own) = kept.iter_mut().find(|k| scope(k) == base) {
-            own.facts.insert(key, json!(cell.trim_end()));
+            own.facts
+                .insert(how.as_str().to_owned(), json!(cell.trim_end()));
         }
     }
     kept
@@ -1607,7 +1612,7 @@ fn table((head, line): Columns, rows: &[Row]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOCAL_SECTIONS, Row, local_template, outermost, outlived};
+    use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
     use serde_json::json;
 
     /// The opener of a region by name, if the text has one.
@@ -1689,5 +1694,49 @@ mod tests {
         .filter(|scope| outlived(&manifest, &row(scope)))
         .collect();
         assert_eq!(dropped, ["php_sapi", "php_sapi@control"]);
+    }
+
+    /// Each comparison folds into the row of the run it compares, read off
+    /// the one grammar: `@against` into the scope without it, a lane's
+    /// included, and `@control` into the engine's run, of a lane too. A
+    /// control's own
+    /// comparison has no row to fold into, its control's being folded, so
+    /// it stays a row of its own rather than vanishing (#1744).
+    #[test]
+    fn a_comparison_folds_into_the_row_of_its_run() {
+        let row = |scope: &str| {
+            let reading = crate::reading::Reading::new(crate::phpt::INSTRUMENT, scope);
+            Row::new(&[("scope", json!(scope))], Some(reading))
+        };
+        let rows = [
+            "X",
+            "X@against",
+            "X@control",
+            "X@control@against",
+            "X@force",
+            "X@force@against",
+            "X@control@force",
+            "Y@against",
+        ]
+        .map(row);
+        let kept: Vec<(String, bool, bool)> = compared(rows.into())
+            .iter()
+            .map(|r| {
+                let scope = r.facts["scope"].as_str().unwrap_or_default().to_owned();
+                let has = |key: &str| r.facts.contains_key(key);
+                (scope, has("against"), has("control"))
+            })
+            .collect();
+        let kept: Vec<(&str, bool, bool)> =
+            kept.iter().map(|(s, a, c)| (s.as_str(), *a, *c)).collect();
+        assert_eq!(
+            kept,
+            [
+                ("X", true, true),
+                ("X@control@against", false, false),
+                ("X@force", true, true),
+                ("Y@against", false, false),
+            ]
+        );
     }
 }
