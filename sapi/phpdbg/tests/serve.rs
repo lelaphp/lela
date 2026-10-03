@@ -275,6 +275,29 @@ fn the_init_file_runs_before_the_startup_run() {
     );
 }
 
+/// An init line that names no command is quoted as php's lexer left it,
+/// each quoted word unquoted in place over its opening quote and the
+/// tail kept (the pinned phpdbg's bytes for `phpdbg -qb -n -i<file>`).
+#[test]
+fn an_unrecognized_init_line_is_quoted_as_the_lexer_left_it() {
+    let (out, file, init) = initialized(
+        "init-quoted",
+        &["-qb", "-n"],
+        "echo \"cmd\"\nfoo \"ab\" 'c\\'d' x\n",
+        "<?php\necho 1;\n",
+        "q\n",
+    );
+    assert_eq!(
+        out,
+        format!(
+            "[Unrecognized command in {init}:1: echo cmdd\", The command \"echo\" could not be found!]\n\
+             [Unrecognized command in {init}:2: foo abb\" c'd'd' x, The command \"foo\" could not be found!]\n\
+             [Successful compilation of {file}]\n\
+             prompt> "
+        )
+    );
+}
+
 /// Without `-b`, notices and errors are coloured whether or not stdout
 /// is a terminal, the prompt never (the pinned phpdbg's bytes for
 /// `phpdbg -qrr -n` and `phpdbg -qr -n`).

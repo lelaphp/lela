@@ -253,6 +253,10 @@ pub(crate) struct Types {
     /// freed before the declarations were done, which
     /// [`Types::emallocs`] does not count.
     freed: std::collections::HashSet<TypeId>,
+    /// Each type and a type it holds that it owns, php's
+    /// `ZEND_FFI_TYPE_IS_OWNED` bit on the nested pointer, which
+    /// [`Types::free`] frees with it.
+    owns: std::collections::HashSet<(TypeId, TypeId)>,
 }
 
 impl Default for Types {
@@ -282,6 +286,7 @@ impl Default for Types {
                 plain(Kind::Pointer(TypeId::VOID), 8, 8),
             ],
             freed: std::collections::HashSet::new(),
+            owns: std::collections::HashSet::new(),
         }
     }
 }
@@ -415,10 +420,43 @@ impl Types {
     }
 
     /// `zend_ffi_type_dtor` over a type a declaration owned and did not
-    /// keep: still in the arena, which never shrinks, and no longer
+    /// keep, and over the types it owns in turn, a pointer's or an
+    /// array's target, a function's return and parameters, a struct's
+    /// fields: still in the arena, which never shrinks, and no longer
     /// counted as php's heap.
     pub(crate) fn free(&mut self, id: TypeId) {
-        self.freed.insert(id);
+        let mut next = vec![id];
+        while let Some(id) = next.pop() {
+            if !self.freed.insert(id) {
+                continue;
+            }
+            let held: Vec<TypeId> = match &self.get(id).kind {
+                Kind::Pointer(to) => vec![*to],
+                Kind::Array { of, .. } => vec![*of],
+                Kind::Func(f) => std::iter::once(f.ret)
+                    .chain(f.args.iter().flatten().copied())
+                    .collect(),
+                Kind::Struct(record) => record.fields.iter().map(|(_, f)| f.ty).collect(),
+                _ => Vec::new(),
+            };
+            next.extend(held.into_iter().filter(|ty| self.owns.contains(&(id, *ty))));
+        }
+    }
+
+    /// `ZEND_FFI_TYPE_MAKE_OWNED` on the pointer `owner` holds to `ty`,
+    /// where `by_dcl` says the declaration it came from owned `ty`.
+    pub(crate) fn own(&mut self, owner: TypeId, ty: TypeId, by_dcl: bool) {
+        if by_dcl {
+            self.owns.insert((owner, ty));
+        }
+    }
+
+    /// The ownership of `ty` moved from `from` to `to`, as
+    /// `zend_ffi_add_anonymous_field` moves a nested struct's fields.
+    pub(crate) fn move_owned(&mut self, from: TypeId, to: TypeId, ty: TypeId) {
+        if self.owns.remove(&(from, ty)) {
+            self.owns.insert((to, ty));
+        }
     }
 
     /// A new type, `emalloc(sizeof(zend_ffi_type))` filled in.

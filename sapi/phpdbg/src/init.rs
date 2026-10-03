@@ -261,10 +261,11 @@ fn lines(
             continue;
         }
         // `phpdbg_read_input(cmd)`: the leading blanks taken off, and the
-        // line kept as the one an empty prompt line repeats.
-        let line = input::remembered(line);
-        let line = line.as_slice();
-        let Ok(commands) = cmd::parse(line) else {
+        // line kept as the one an empty prompt line repeats. The lexer
+        // unquotes the copy it reads in place, and the message below
+        // quotes that copy.
+        let mut line = input::remembered(line);
+        let Ok(commands) = cmd::parse(&mut line) else {
             continue;
         };
         match prompt::init_line(s, here, commands) {
@@ -277,7 +278,7 @@ fn lines(
                 };
             }
             InitLine::Unrecognized(message) => {
-                let line = String::from_utf8_lossy(line);
+                let line = String::from_utf8_lossy(&line);
                 let message = match file {
                     Some(file) => format!(
                         "Unrecognized command in {}:{}: {line}, {message}!",
