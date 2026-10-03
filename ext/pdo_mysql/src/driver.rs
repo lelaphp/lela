@@ -176,7 +176,10 @@ impl Connector for Driver {
         if options.is_none() || option_long(req, options, Mysql::ATTR_MULTI_STATEMENTS, 1)? != 0 {
             connect_opts |= flag::MULTI_STATEMENTS;
         }
-        let server = Mysqlnd::init(req, false);
+        let server = Mysqlnd::init(req, source.persistent);
+        if source.persistent {
+            server.restart_psession(req);
+        }
         let mut h = H {
             server,
             assume_national_character_set_strings: false,
@@ -238,7 +241,7 @@ impl Connector for Driver {
         let state = req.state::<State>();
         let id = state.handles.len();
         state.handles.push(Some(h));
-        Ok(Box::new(Db { id }))
+        Ok(Box::new(Db { id, idle: None }))
     }
 }
 
@@ -340,6 +343,11 @@ fn low32(n: i64) -> u32 {
 /// The connection: the number of its `pdo_mysql_db_handle`.
 pub(crate) struct Db {
     pub(crate) id: usize,
+    /// A persistent connection the request gave back to the engine's
+    /// pool: its `pdo_mysql_db_handle`, out of the request's table, and
+    /// the key mysqlnd keeps the connection under until a request takes
+    /// it up.
+    idle: Option<(H, Vec<u8>)>,
 }
 
 impl Db {
@@ -611,6 +619,65 @@ impl Connection for Db {
 
     fn scanner(&self) -> Option<Scanner> {
         Some(crate::scanner::scan)
+    }
+
+    /// `pdo_mysql_check_liveness`: `mysql_ping` answered, over a
+    /// connection the pool kept taken up by the request first.
+    ///
+    /// Two persistent handles with one DSN share one connection, which
+    /// answers the ping PDO sends as the second asks for it:
+    ///
+    /// ```php
+    /// $dsn = 'mysql:host=127.0.0.1;dbname=test';
+    /// $a = new Pdo\Mysql($dsn, 'root', '', [PDO::ATTR_PERSISTENT => true]);
+    /// $b = new Pdo\Mysql($dsn, 'root', '', [PDO::ATTR_PERSISTENT => true]);
+    /// $c = new Pdo\Mysql($dsn, 'root', '');
+    /// $id = fn($db) => $db->query('SELECT CONNECTION_ID()')->fetchColumn();
+    /// var_dump($id($a) === $id($b), $id($a) === $id($c));
+    /// $a->exec('SET @shared = 1');
+    /// var_dump($b->query('SELECT @shared')->fetchColumn());
+    /// ```
+    /// ```expect mysql
+    /// bool(true)
+    /// bool(false)
+    /// int(1)
+    /// ```
+    fn check_liveness(&mut self, req: &mut Request) -> bool {
+        if let Some((mut h, key)) = self.idle.take() {
+            let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
+                return false;
+            };
+            h.server = server;
+            let state = req.state::<State>();
+            self.id = state.handles.len();
+            state.handles.push(Some(h));
+        }
+        let Some(h) = handle(req, self.id) else {
+            return false;
+        };
+        matches!(h.server.command(req, Command::Ping), Ok(true))
+    }
+
+    /// `pdo_mysql_request_shutdown`: `mysqlnd_end_psession`.
+    fn persistent_shutdown(&mut self, req: &mut Request) {
+        if let Some(h) = handle(req, self.id) {
+            let _ = h.server.end_psession(req);
+        }
+    }
+
+    /// The connection out of the request's tables and kept by mysqlnd,
+    /// its `pdo_mysql_db_handle` kept here, for the next request to take
+    /// up.
+    fn give_back(&mut self, req: &mut Request) {
+        let Some(h) = handle(req, self.id) else {
+            return;
+        };
+        if let Some(key) = h.server.give_back(req) {
+            if let Some(slot) = req.state::<State>().handles.get_mut(self.id) {
+                *slot = None;
+            }
+            self.idle = Some((h, key));
+        }
     }
 
     /// `mysql_handle_closer`.
