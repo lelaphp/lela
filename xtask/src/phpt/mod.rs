@@ -846,7 +846,8 @@ pub struct Ask {
 }
 
 /// Run what was asked for: one reading per subset, each written by the
-/// caller through `record`.
+/// caller through `record`; a subset refused is its own failing reading,
+/// and the rest of the lane runs (#1612).
 pub fn run(
     root: &Path,
     manifest: &Manifest,
@@ -856,32 +857,7 @@ pub fn run(
     // Where the tree is on this machine is the oracle module's one answer;
     // an absent tree refuses the run naming both places it looked.
     let source = manifest.pin.source.tree()?;
-    let subsets = match &ask.subset {
-        Some(name) => vec![Subset::resolve(manifest, &source, name)?],
-        None if ask.full => Subset::corpus(&source),
-        // The per-commit lane, composed from the `[[crate]]` rows that own
-        // a subset and that the binary under test carries (harness §7,
-        // revision 63). The row and the binary's declaration are where the
-        // lane lives, so neither this function nor the design's table is a
-        // second copy of either.
-        None => {
-            let lane = Subset::lane(manifest, &Carried::binary(root)?, &source);
-            let scopes: Vec<&str> = lane.iter().map(|s| s.scope.as_str()).collect();
-            println!(
-                "phpt: the per-commit lane, {} subset{} the manifest names of what {BINARY} carries: {}",
-                lane.len(),
-                if lane.len() == 1 { "" } else { "s" },
-                listed(&scopes)
-            );
-            lane
-        }
-    };
-    if subsets.is_empty() {
-        bail!(
-            "no subset to run: no [[crate]] row of the manifest owns one the pinned php-src at {} has",
-            source.display()
-        );
-    }
+    let subsets = asked(root, manifest, &source, ask)?;
     let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
     // Nothing to run, or a binary the tree has moved past: either way the
     // lane says so before the subsets rather than at the reading alone.
@@ -924,13 +900,17 @@ pub fn run(
     // sum a reader does by hand.
     let mut lane = census::Census::default();
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
-    for subset in &subsets {
-        let scope = subset.scope(&runner, ask.lane);
-        let own = Own::of(&oracle, subset, &scope, copy.is_some())?;
+    // One subset's readings: its own and the one holding it against a
+    // commit. A subset refused, for a server that did not answer or for
+    // any other cause, is that subset's failing reading, and the lane goes
+    // on, so one missing service never takes the readings the subsets
+    // before and after it wrote with it (#1612).
+    let mut taken = |subset: &Subset, scope: &str| -> Result<Vec<Reading>> {
+        let own = Own::of(&oracle, subset, scope, copy.is_some())?;
         let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(&oracle);
         let under = under.serving(own.served.as_deref());
-        let ((tally, waited), removed) = swept_around(oracle, &scope, copy.is_some(), || {
+        let ((tally, waited), removed) = swept_around(oracle, scope, copy.is_some(), || {
             let within = copy.as_ref().map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
@@ -948,7 +928,7 @@ pub fn run(
         )?;
         let held = runs.after(
             manifest,
-            &scope,
+            scope,
             (&tally, &runner),
             &reading,
             target.as_ref(),
@@ -965,8 +945,14 @@ pub fn run(
             }
             lane.add(census::misses(&tally));
         }
-        readings.push(reading);
-        readings.extend(held);
+        Ok(std::iter::once(reading).chain(held).collect())
+    };
+    for subset in &subsets {
+        let scope = subset.scope(&runner, ask.lane);
+        match taken(subset, &scope) {
+            Ok(taken) => readings.extend(taken),
+            Err(why) => readings.push(refused(root, manifest, &scope, &why)?),
+        }
     }
     // One subset's census is the census; a lane's is worth a second line
     // only where there was more than one subset to fold.
@@ -974,6 +960,49 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// The subsets `ask` names: one crate's or directory's, the whole corpus,
+/// or the per-commit lane; none is a refusal naming the tree.
+fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<Vec<Subset>> {
+    let subsets = match &ask.subset {
+        Some(name) => vec![Subset::resolve(manifest, source, name)?],
+        None if ask.full => Subset::corpus(source),
+        // The per-commit lane, composed from the `[[crate]]` rows that own
+        // a subset and that the binary under test carries (harness §7,
+        // revision 63). The row and the binary's declaration are where the
+        // lane lives, so neither this function nor the design's table is a
+        // second copy of either.
+        None => {
+            let lane = Subset::lane(manifest, &Carried::binary(root)?, source);
+            let scopes: Vec<&str> = lane.iter().map(|s| s.scope.as_str()).collect();
+            println!(
+                "phpt: the per-commit lane, {} subset{} the manifest names of what {BINARY} carries: {}",
+                lane.len(),
+                if lane.len() == 1 { "" } else { "s" },
+                listed(&scopes)
+            );
+            lane
+        }
+    };
+    if subsets.is_empty() {
+        bail!(
+            "no subset to run: no [[crate]] row of the manifest owns one the pinned php-src at {} has",
+            source.display()
+        );
+    }
+    Ok(subsets)
+}
+
+/// The reading of a subset the lane could not run, a fail whose message
+/// is the cause and whose `refused` counts it, so the lane's other
+/// readings are written beside it and its exit says it (#1612).
+fn refused(root: &Path, manifest: &Manifest, scope: &str, why: &anyhow::Error) -> Result<Reading> {
+    let mut reading = Reading::for_scope(INSTRUMENT, scope, manifest, root)?.under(&manifest.pin);
+    reading.status = crate::reading::Status::Fail;
+    reading.message = format!("{why:#}");
+    reading.count("refused", 1)?;
+    Ok(reading)
 }
 
 /// What one subset runs with beside the run: the `MySQL` server's version
