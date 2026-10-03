@@ -215,6 +215,7 @@ impl Request {
             return None;
         }
         shared.units.hit(&held, validation, now);
+        self.accel_loaded = held.unit.as_ref().ok().cloned();
         Some(held)
     }
 
@@ -388,6 +389,10 @@ impl Request {
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
         }
+        // `zend_accel_load_script` loads what opcache held or kept, not
+        // what it compiled as php without it.
+        let loaded = validation != Validation::EveryHit && filed != Filed::Compiled;
+        self.accel_loaded = cached.clone().and_then(Result::ok).filter(|_| loaded);
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the

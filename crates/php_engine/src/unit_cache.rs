@@ -265,8 +265,12 @@ pub(crate) enum Filed {
     Hit,
     /// Compiled and held, `cache_script_in_shared_memory`.
     Held,
-    /// Compiled and held nowhere.
+    /// Held nowhere: read back from the file cache, or compiled and kept
+    /// there alone, `file_cache_compile_file`.
     Unheld,
+    /// Compiled and held nowhere, by `accelerator_orig_compile_file` as
+    /// php without opcache compiles, whose classes bind early in place.
+    Compiled,
 }
 
 /// `ZCSG(preload_script)`'s name in the cache, the one pseudo-file the
@@ -427,7 +431,7 @@ impl UnitCache {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
         if unheld {
-            return (Some(unit), Filed::Unheld);
+            return (Some(unit), Filed::Compiled);
         }
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)
             && let Some(body) = wire::encode(compiled)
@@ -436,7 +440,7 @@ impl UnitCache {
             disk.store(path, stamp, size, &body);
         }
         if !memory || self.restart_pending.load(Ordering::Relaxed) {
-            return (Some(unit), Filed::Unheld);
+            return (Some(unit), disk.map_or(Filed::Compiled, |_| Filed::Unheld));
         }
         let held = self.hold(path, validation, now, unit, size, observed);
         if let Some(written) = written {
