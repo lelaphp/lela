@@ -13,8 +13,8 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time, UNSET};
 use crate::obj::{
-    CIVIL, INTERVAL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval,
-    rows_array, std_rows,
+    CIVIL, INTERVAL, IntervalObj, WALL, class_id, hold_diff, interval_fields, interval_of,
+    new_interval, rows_array, std_rows,
 };
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
@@ -284,7 +284,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
             payload.from_string = true;
             payload.date_string = Some(text);
         }
-        return Ok(());
+        return hold_diff(req, object);
     }
     let mut diff = RelTime::default();
     let long_field = |req: &mut Request, name: &[u8], default: i64| -> Result<i64, Thrown> {
@@ -337,7 +337,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         payload.from_string = false;
         payload.date_string = None;
     }
-    Ok(())
+    hold_diff(req, object)
 }
 
 /// The names `restore_custom_dateinterval_properties` passes over.
@@ -406,13 +406,33 @@ impl DateInterval {
     /// DateMalformedIntervalStringException: Unknown or bad format (P1Q)
     /// Failed to parse interval (2008-05-11T15:30:00Z)
     /// ```
+    ///
+    /// An interval holds its `timelib_rel_time` on the request's heap, as
+    /// php's timelib allocates it, made by the constructor, a clone, a
+    /// diff, `createFromDateString` and `__unserialize`, and freed with
+    /// the object.
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1D'); $a = new DateTime('2020-01-01'); $b = new DateTime('2021-01-01');
+    /// $w = [$a->diff($b), DateInterval::createFromDateString('3 days'), unserialize(serialize($i)), clone $i]; unset($w);
+    /// $m = memory_get_usage(); $c = clone $i; $d = $a->diff($b); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $s = DateInterval::createFromDateString('3 days'); $u = unserialize(serialize($i)); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $n = new DateInterval('P2D'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($c, $d, $s, $u, $n); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 352
+    /// 352
+    /// 176
+    /// -880
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, duration: PhpString) -> Result<(), Thrown> {
         let diff = initialize(req, duration.as_bytes())?;
         if let Some(payload) = this.object().native_mut::<IntervalObj>(req) {
             payload.diff = Some(diff);
             payload.civil_or_wall = WALL;
         }
-        Ok(())
+        hold_diff(req, this.object())
     }
 
     /// `DateInterval::createFromDateString(string $datetime): DateInterval`:

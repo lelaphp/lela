@@ -17,10 +17,11 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, raise, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
 use crate::format::date_format;
+use crate::held::{Held, Shape};
 use crate::interval::DateInterval;
 use crate::timezone::DateTimeZone;
 
@@ -34,14 +35,10 @@ pub(super) const WALL: i64 = 2;
 pub(crate) struct DateState {
     pub time: Option<Time>,
     rows: Vec<Value>,
-    /// What the time holds on the request's heap where php's timelib
-    /// allocates with `emalloc`: `timelib_time_ctor`'s
-    /// `sizeof(timelib_time)` and the `tz_abbr` `timelib_strdup` made.
-    held: Option<(Emalloc, Option<Emalloc>)>,
+    /// What the time holds on the request's heap: the `timelib_time`
+    /// and the `tz_abbr` `timelib_strdup` made.
+    held: Option<Held>,
 }
-
-/// `sizeof(timelib_time)`, which `timelib_time_ctor` asks `ecalloc` for.
-const TIMELIB_TIME_SIZE: usize = 240;
 
 /// The payload: `php_date_obj` keeps its state behind pointers, and so the
 /// payload is one, inside the `sizeof` php allocates (design §5.13).
@@ -84,6 +81,9 @@ impl TzKind {
 pub(crate) struct TzState {
     pub tz: Option<TzKind>,
     rows: Vec<Value>,
+    /// The `tzi.z.abbr` copy an abbreviation zone holds on the request's
+    /// heap; kept by [`set_tz`].
+    held: Option<Held>,
 }
 
 /// The payload: `php_timezone_obj` keeps its state behind pointers, and so the
@@ -97,6 +97,9 @@ pub(crate) struct IntervalState {
     pub civil_or_wall: i64,
     pub from_string: bool,
     pub date_string: Option<Vec<u8>>,
+    /// What the relative time holds on the request's heap, the
+    /// `timelib_rel_time` php's `diff` points at; kept by [`hold_diff`].
+    held: Option<Held>,
 }
 
 /// The payload: `php_interval_obj` keeps its state behind pointers, and so the
@@ -119,6 +122,9 @@ pub(crate) struct PeriodState {
     /// last iterator over the period asked for; none before any walk.
     pub cursor: Option<usize>,
     rows: Vec<Value>,
+    /// What `start`, `current`, `end` and `interval` hold on the
+    /// request's heap, in that order; kept by [`hold_period`].
+    held: [Option<Held>; 4],
 }
 
 /// The payload: `php_period_obj` keeps its state behind pointers, and so the
@@ -206,45 +212,24 @@ pub(super) fn time_of(req: &mut Request, object: PhpObject) -> Result<Time, Thro
 }
 
 /// The object's time replaced, and what it holds on the request's heap
-/// with it: the `timelib_time` kept where the object had one, and its
-/// `tz_abbr` freed and copied again, as `timelib_time_tz_abbr_update`
-/// does; none for none, `timelib_time_dtor`. The `Err` is the memory
-/// limit.
+/// with it ([`Held::hold`]): the `timelib_time` kept where the object
+/// had one and its `tz_abbr` copied again, as
+/// `timelib_time_tz_abbr_update` does; none for none,
+/// `timelib_time_dtor`. The `Err` is the memory limit.
 pub(super) fn set_time(
     req: &mut Request,
     object: PhpObject,
     time: Option<Time>,
 ) -> Result<(), Thrown> {
-    let abbr = time.as_ref().map(|t| t.tz_abbr().len());
+    let shape = time.as_ref().map(|t| Shape::time(t.tz_abbr()));
     let Some(payload) = object.native_mut::<DateObj>(req) else {
         return Ok(());
     };
     payload.time = time;
     let held = payload.held.take();
-    let (struct_held, abbr_held) = match held {
-        Some((held, abbr)) => (Some(held), abbr),
-        None => (None, None),
-    };
-    if let Some(abbr) = abbr_held {
-        abbr.free(req);
-    }
-    let Some(abbr) = abbr else {
-        if let Some(held) = struct_held {
-            held.free(req);
-        }
-        return Ok(());
-    };
-    let held = match struct_held {
-        Some(held) => held,
-        None => Emalloc::new(req, TIMELIB_TIME_SIZE)?,
-    };
-    let abbr = if abbr == 0 {
-        None
-    } else {
-        Some(Emalloc::new(req, abbr + 1)?)
-    };
+    let held = Held::hold(req, held, shape)?;
     if let Some(payload) = object.native_mut::<DateObj>(req) {
-        payload.held = Some((held, abbr));
+        payload.held = held;
     }
     Ok(())
 }
@@ -263,10 +248,34 @@ pub(super) fn new_timezone(
 ) -> Result<Instance<DateTimeZone>, Thrown> {
     let class = class_id(req, "DateTimeZone")?;
     let object = new_object(req, class)?;
-    if let Some(payload) = object.native_mut::<TzObj>(req) {
-        payload.tz = Some(kind);
-    }
+    set_tz(req, object, Some(kind))?;
     Ok(Instance::of(object))
+}
+
+/// The object's zone replaced, `set_timezone_from_timelib_time`: an
+/// abbreviation zone's `tzi.z.abbr` freed and copied again with
+/// `timelib_strdup`, the one block a `DateTimeZone` holds on the
+/// request's heap; an identifier's `tzinfo` is the request's cache's
+/// and an offset holds none. The `Err` is the memory limit.
+pub(super) fn set_tz(
+    req: &mut Request,
+    object: PhpObject,
+    kind: Option<TzKind>,
+) -> Result<(), Thrown> {
+    let shape = match &kind {
+        Some(TzKind::Abbr { abbr, .. }) => Some(Shape::abbr(abbr)),
+        _ => None,
+    };
+    let Some(payload) = object.native_mut::<TzObj>(req) else {
+        return Ok(());
+    };
+    payload.tz = kind;
+    let held = payload.held.take();
+    let held = Held::hold(req, held, shape)?;
+    if let Some(payload) = object.native_mut::<TzObj>(req) {
+        payload.held = held;
+    }
+    Ok(())
 }
 
 /// The zone a `DateTimeZone` holds, or the uninitialised error.
@@ -307,7 +316,26 @@ pub(super) fn new_interval(
         payload.from_string = date_string.is_some();
         payload.date_string = date_string;
     }
+    hold_diff(req, object)?;
     Ok(Instance::of(object))
+}
+
+/// What the interval's relative time holds on the request's heap
+/// brought to its `diff`: a `timelib_rel_time` where it has one, made by
+/// `timelib_rel_time_ctor` or `_clone` as php's `diff` is, and none
+/// where it has none, `timelib_rel_time_dtor`. Whatever sets `diff`
+/// calls it after the write. The `Err` is the memory limit.
+pub(super) fn hold_diff(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let Some(payload) = object.native_mut::<IntervalObj>(req) else {
+        return Ok(());
+    };
+    let shape = payload.diff.map(|_| Shape::rel_time());
+    let held = payload.held.take();
+    let held = Held::hold(req, held, shape)?;
+    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
+        payload.held = held;
+    }
+    Ok(())
 }
 
 /// The relative time a `DateInterval` holds, or the uninitialised error.
@@ -604,10 +632,7 @@ impl ObjectHandlers for DateHandlers {
             .map(|d| (std::mem::take(&mut d.rows), d.held.take()))
             .unzip();
         release_rows(req, rows);
-        if let Some((held, abbr)) = held.flatten() {
-            if let Some(abbr) = abbr {
-                abbr.free(req);
-            }
+        if let Some(held) = held.flatten() {
             held.free(req);
         }
     }
@@ -713,10 +738,14 @@ pub(crate) static TIMEZONE: TzHandlers = TzHandlers;
 
 impl ObjectHandlers for TzHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let rows = object
+        let (rows, held) = object
             .native_mut::<TzObj>(req)
-            .map(|t| std::mem::take(&mut t.rows));
+            .map(|t| (std::mem::take(&mut t.rows), t.held.take()))
+            .unzip();
         release_rows(req, rows);
+        if let Some(held) = held.flatten() {
+            held.free(req);
+        }
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -815,9 +844,7 @@ fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
     // after it.
     let copy = object.clone_with(req, TzObj::default())?;
     let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
-    if let Some(payload) = copy.native_mut::<TzObj>(req) {
-        payload.tz = kind;
-    }
+    set_tz(req, copy, kind)?;
     Ok(copy)
 }
 
@@ -859,6 +886,16 @@ impl IntervalHandlers {
 }
 
 impl ObjectHandlers for IntervalHandlers {
+    /// `date_object_free_storage_interval`: `timelib_rel_time_dtor`.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let held = object
+            .native_mut::<IntervalObj>(req)
+            .and_then(|i| i.held.take());
+        if let Some(held) = held {
+            held.free(req);
+        }
+    }
+
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_interval)
     }
@@ -1136,6 +1173,7 @@ fn clone_interval(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
         payload.from_string = from;
         payload.date_string = text;
     }
+    hold_diff(req, copy)?;
     Ok(copy)
 }
 
@@ -1192,10 +1230,14 @@ impl ObjectHandlers for PeriodHandlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let rows = object
+        let (rows, held) = object
             .native_mut::<PeriodObj>(req)
-            .map(|p| std::mem::take(&mut p.rows));
+            .map(|p| (std::mem::take(&mut p.rows), std::mem::take(&mut p.held)))
+            .unzip();
         release_rows(req, rows);
+        for held in held.into_iter().flatten().flatten() {
+            held.free(req);
+        }
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -1382,16 +1424,48 @@ impl PeriodState {
             initialized: self.initialized,
             cursor: None,
             rows: Vec::new(),
+            held: Default::default(),
         })
     }
 
     /// `state` put in place of the period's, the rows its readers hold
-    /// kept for `free_obj` to give back.
+    /// kept for `free_obj` to give back, and what its structs hold kept
+    /// for [`hold_period`] to bring to the new ones.
     pub(super) fn replace(&mut self, state: PeriodObj) {
         let rows = std::mem::take(&mut self.rows);
+        let held = std::mem::take(&mut self.held);
         *self = *state;
         self.rows = rows;
+        self.held = held;
     }
+}
+
+/// What the period's structs hold on the request's heap brought to
+/// them: `start`, `current` and `end` each a `timelib_time` with its
+/// `tz_abbr`, as `timelib_time_clone` copies them, and `interval` a
+/// `timelib_rel_time`, as `timelib_rel_time_clone` copies it; none for
+/// a field that is none. Whatever sets one of the four calls it after
+/// the change. The `Err` is the memory limit.
+pub(super) fn hold_period(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let Some(period) = object.native_mut::<PeriodObj>(req) else {
+        return Ok(());
+    };
+    let time = |t: &Option<Time>| t.as_ref().map(|t| Shape::time(t.tz_abbr()));
+    let shapes = [
+        time(&period.start),
+        time(&period.current),
+        time(&period.end),
+        period.interval.map(|_| Shape::rel_time()),
+    ];
+    let held = std::mem::take(&mut period.held);
+    let mut kept: [Option<Held>; 4] = Default::default();
+    for ((slot, held), shape) in kept.iter_mut().zip(held).zip(shapes) {
+        *slot = Held::hold(req, held, shape)?;
+    }
+    if let Some(period) = object.native_mut::<PeriodObj>(req) {
+        period.held = kept;
+    }
+    Ok(())
 }
 
 /// `date_object_clone_period`.
@@ -1406,5 +1480,6 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
         payload.replace(state);
     }
+    hold_period(req, copy)?;
     Ok(copy)
 }
