@@ -158,6 +158,9 @@ pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
         let mut rest = commands.into_iter();
         while let Some(command) = rest.next() {
             let asked = execute(s, here, &command);
+            if std::mem::take(&mut s.left_log) {
+                return Outcome::NotRunning;
+            }
             if s.stopped.is_some() {
                 s.queued = rest.collect();
                 return Outcome::Stopped;
@@ -1229,8 +1232,10 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     crate::watch::thaw(s);
     s.stepping |= stepping;
     match evaluated {
+        // `zend_print_zval_r` writes through the program's output, which
+        // `PHPDBG_DISCARD_OUTPUT` does not hold; the newline is phpdbg's.
         tier::Evaluated::Printed(printed) => {
-            out::write(&printed);
+            let _ = php_sapi::OutputSink::write(&mut out::Sink, &printed);
             out::out(b"\n");
         }
         // The compiler threw with the frame executing, which
@@ -1404,7 +1409,8 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// listing where nothing executes and, once the session is fully started,
 /// a prompt inside the log, under which nothing more is logged; and the
 /// status 255. Inside the log already, nothing is written, and the
-/// refusal bails out of the log with its guard left set.
+/// refusal bails out of the log with its guard left set, and of the
+/// prompt inside it.
 ///
 /// ```php
 /// $a = 1;
@@ -1432,6 +1438,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
     s.status = Some(255);
     if out::logging() {
+        s.left_log = out::in_log_prompt();
         out::stick_log();
         return;
     }

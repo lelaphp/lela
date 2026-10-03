@@ -1169,3 +1169,53 @@ fn a_yes_to_a_second_run_in_the_init_file_reads_on() {
     let expected = format!("{ran}{compiled}{ended}{ran}{ended}");
     assert!(served.out.starts_with(&expected), "{}", served.out);
 }
+
+/// After `clean` over a context that does not compile, php's next cycle
+/// compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its
+/// log stands at a prompt that writes nothing: `ev`'s value is written,
+/// its newline not; nothing is logged there; a refusal there bails out
+/// of it, and so does `c` (the pinned phpdbg's bytes for `phpdbg -qb -n`
+/// and `-qrb -n`, past the counts `clean` writes).
+#[test]
+fn after_clean_the_refused_context_stands_at_an_invisible_prompt() {
+    let source = "<?php\nfunction (\n";
+    let ended = "[Script ended normally]\n";
+    for flags in [["-qb", "-n"], ["-qrb", "-n"]] {
+        for (name, stdin, after) in [
+            ("clean-ev", "clean\nev 1\nq\n", String::from("1")),
+            (
+                "clean-print",
+                "clean\nprint exec\nprint exec\nq\n",
+                String::from("prompt> prompt> "),
+            ),
+            (
+                "clean-c",
+                "clean\nev $x\nc\nev $x\nprint exec\nq\n",
+                String::new(),
+            ),
+        ] {
+            let served = under_phpdbg(name, &flags, None, source, stdin);
+            let log = format!(
+                "[PHP Parse error:  Unclosed '(' on line 2 in {} on line 3]\n\
+                 [Could not find information about included file...]\n",
+                served.file
+            );
+            let after = if after.is_empty() {
+                format!(
+                    "prompt> [PHP Warning:  Undefined variable $x in eval()'d code on line 1]\n\
+                     \nprompt> {log}prompt> "
+                )
+            } else {
+                after
+            };
+            let start = format!("{log}prompt> Cleaning Execution Environment\n");
+            assert!(served.out.starts_with(&start), "{}", served.out);
+            assert!(
+                served.out.ends_with(&format!("{ended}{after}")),
+                "{}",
+                served.out
+            );
+            assert_eq!(served.status, Some(255));
+        }
+    }
+}

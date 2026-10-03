@@ -150,6 +150,11 @@ pub fn logging() -> bool {
     IN_LOG.get() || STUCK.get()
 }
 
+/// Whether a prompt inside the host's log stands.
+pub fn in_log_prompt() -> bool {
+    IN_LOG.get()
+}
+
 /// A refusal inside the log's prompt bails out of `php_log_err`, past
 /// the line that clears `PG(in_error_log)` (`Z/main/main.c:928-990`), so
 /// nothing is logged until the next cycle's `php_request_startup` clears
