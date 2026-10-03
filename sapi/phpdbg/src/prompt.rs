@@ -965,7 +965,23 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
     // stopping but for a throwable nothing catches, and the reading goes
     // on after it.
-    if s.initializing && s.program_held && args.is_none() {
+    // With arguments, it rebuilds `argv` in the request first; a `<file`
+    // among them, which php opens as the program's stdin there, starts
+    // a run of its own.
+    if s.initializing && s.program_held {
+        if let Some(args) = &args {
+            crate::host::set_arguments(s, args);
+            if s.stdin_file.is_some() {
+                s.stdin_file = None;
+                s.stopped = Some(Stop::RunWith(Some(args.clone())));
+                return Ret::Success;
+            }
+            if let Some(req) = here.request() {
+                let mut words = vec![s.exec.clone().unwrap_or_default()];
+                words.extend(s.args.iter().cloned());
+                tier::set_argv(req, words);
+            }
+        }
         compiled_in_init(s);
         s.inline_run = true;
         return Ret::Success;

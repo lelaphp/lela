@@ -43,7 +43,7 @@ pub use frames::{
 pub(crate) use values::values_shown;
 pub use values::{
     Identity, Key, Shown, TraceRow, Variable, backtrace, included_files, last_error, literals,
-    superglobals, user_constants, variable, variables,
+    set_argv, superglobals, user_constants, variable, variables,
 };
 
 /// The number of a safepoint within its op array; zero is the entry.

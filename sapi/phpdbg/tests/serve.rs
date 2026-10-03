@@ -1012,3 +1012,75 @@ fn a_refusal_inside_the_log_leaves_its_guard_set() {
         )
     );
 }
+
+/// `run` with arguments in the init file rebuilds `argv` in the request
+/// the file runs in and runs the program there, as php's `run` does
+/// with `php_build_argv`, every cycle (the first two cycles of the
+/// pinned phpdbg's bytes for `phpdbg -qb -n -i<file>`).
+#[test]
+fn run_with_arguments_in_the_init_file_runs_inline() {
+    let program = "<?php\n$a = 1;\necho \"prog \", $argv[1] ?? \"none\", \" \", $argc, \"\\n\";\n";
+    let looping = Setup {
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let served = under_phpdbg_with(
+        "init-run-args",
+        &["-qb", "-n"],
+        Some("ev 1\nrun foo\nev 2\n"),
+        program,
+        "q\n",
+        &looping,
+    );
+    let file = &served.file;
+    let ran = format!("1\n\n[Successful compilation of {file}]\nprog foo 2\n");
+    let expected = format!(
+        "{ran}[Successful compilation of {file}]\n[Script ended normally]\n{ran}[Script ended normally]\n"
+    );
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}
+
+/// Under `-r`, a yes to the question the startup run asks after the init
+/// file ran the program has php's next cycle resubmit the line the file
+/// read after its run, which the cleaned cycle bails out of without
+/// asking; with no line after the run, the next cycle runs it again and
+/// asks again (the first cycles of the pinned phpdbg's bytes for
+/// `phpdbg -qrb -n -i<file>`).
+#[test]
+fn a_yes_after_the_init_files_run_asks_again_only_where_nothing_followed_it() {
+    let program = "<?php\n$a = 1;\necho \"prog \", $argv[1] ?? \"none\", \" \", $argc, \"\\n\";\n";
+    let looping = Setup {
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let ask = "Do you really want to restart execution? (type y or n): ";
+    let served = under_phpdbg_with(
+        "init-run-yes",
+        &["-qrb", "-n"],
+        Some("ev 1\nrun\nb 3\n"),
+        program,
+        "y\nq\n",
+        &looping,
+    );
+    let file = &served.file;
+    let ran = format!(
+        "1\n\n[Successful compilation of {file}]\nprog none 1\n[Breakpoint #0 added at {file}:3]\n"
+    );
+    let ended = format!("{ran}[Script ended normally]\n");
+    let expected = format!("{ran}{ask}{ended}{ended}");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+    let served = under_phpdbg_with(
+        "init-run-again",
+        &["-qrb", "-n"],
+        Some("run bar\n"),
+        program,
+        "y\ny\nq\n",
+        &looping,
+    );
+    let ran = format!("[Successful compilation of {}]\nprog bar 2\n", served.file);
+    let expected = format!(
+        "{ran}{ask}{ran}{ask}{ran}{ask}Please enter either y (yes) or n (no): \
+         {ran}[Script ended normally]\n"
+    );
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}

@@ -261,20 +261,24 @@ fn inline_ran(s: &mut Session, plan: Plan) {
         return;
     }
     if plan == Plan::Run {
-        // `-rr` quits whatever the answer. Else a yes restarts with the
-        // run again and a no without it; the input's end bails out
-        // quitting, which the cycle being cleaned turns into its end, so
-        // the session goes on. A no alone reaches the module's shutdown
-        // with nothing quitting, and its notice.
+        // `-rr` quits whatever the answer. Else a yes asks for the run
+        // again and a no does not; the input's end bails out quitting,
+        // which the cycle being cleaned turns into its end, so the
+        // session goes on. A no alone reaches the module's shutdown with
+        // nothing quitting, and its notice. A yes has the next cycle's
+        // startup run resubmit the last command line the init files read
+        // after their run, where they read one, to a prompt the cleaned
+        // cycle bails out of at once, so that cycle asks nothing and ends
+        // as one with no startup run does; with none, it is `run` again.
         let answer = input::ask(b"Do you really want to restart execution?");
         if s.after_run == AfterRun::Quit {
             s.stopped = Some(Stop::Quit);
             return;
         }
         match answer {
-            input::Answer::Yes => s.stopped = Some(Stop::Restart(None)),
+            input::Answer::Yes if !s.read_after_run => s.stopped = Some(Stop::Restart(None)),
             input::Answer::No => cycle_notice(),
-            input::Answer::End => {}
+            input::Answer::Yes | input::Answer::End => {}
         }
         return;
     }
@@ -335,7 +339,7 @@ fn refused(engine: &Engine, s: &Session) -> Option<Vec<out::Written>> {
 /// `run`'s arguments, split as php's `run` splits them
 /// (`phpdbg_prompt.c:751-846`): words, a quoted one kept whole with its
 /// escapes, and `<file` the program's stdin.
-fn set_arguments(s: &mut Session, line: &[u8]) {
+pub fn set_arguments(s: &mut Session, line: &[u8]) {
     let mut args = Vec::new();
     s.stdin_file = None;
     let end = line

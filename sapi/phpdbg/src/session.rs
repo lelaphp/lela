@@ -245,6 +245,10 @@ pub struct Session {
     pub init_cleaning: bool,
     /// A `run` in the init files asked for the program inline.
     pub inline_run: bool,
+    /// A command line of the init files was read after a `run` among
+    /// them, which a yes to the question after it has php's next cycle
+    /// resubmit at its startup run (`first_command`) instead of `run`.
+    pub read_after_run: bool,
     /// The request the init files run in holds the execution context's
     /// program at its first opline, which a `run` among them runs.
     pub program_held: bool,
@@ -315,6 +319,7 @@ impl Session {
             init_rest: None,
             init_cleaning: false,
             inline_run: false,
+            read_after_run: false,
             program_held: false,
             ran_code: None,
             init_due: true,
