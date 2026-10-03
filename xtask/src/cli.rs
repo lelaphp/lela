@@ -288,8 +288,10 @@ pub(crate) enum Command {
         /// extension the binary under test carries.
         #[arg(long = "ext", value_name = "NAME", conflicts_with = "staged")]
         ext: Vec<String>,
-        /// For pre-commit: only the extensions the binary carries with a
-        /// staged change, the ones `done` holds to their rows (#1312).
+        /// For pre-commit: only the extensions the binary carries whose
+        /// rendering reads a staged file, an engine crate's reaching
+        /// every one, less those whose two readings pass over what is
+        /// staged, naming the readings (#1312, #1159).
         #[arg(long)]
         staged: bool,
     },

@@ -186,6 +186,24 @@ impl Standing {
         instrument: &str,
         scopes: &[String],
     ) -> Result<Standing> {
+        let over: Vec<(String, PathBuf)> = scopes
+            .iter()
+            .filter_map(|scope| manifest.scope_path(scope).map(|path| (scope.clone(), path)))
+            .collect();
+        Standing::for_commit_over(root, manifest, store, instrument, &over)
+    }
+
+    /// [`Standing::for_commit`] over scopes each named with the path its
+    /// reading is stamped over, for an instrument whose scope is no name
+    /// [`Manifest::scope_path`] maps, such as crosscheck's `ext/<name>/ri`
+    /// (#1159): the key is still [`key::of`] over that path.
+    pub(crate) fn for_commit_over(
+        root: &Path,
+        manifest: &Manifest,
+        store: &Store,
+        instrument: &str,
+        scopes: &[(String, PathBuf)],
+    ) -> Result<Standing> {
         let glossaries: Vec<&str> = manifest
             .rules
             .iter()
@@ -212,11 +230,9 @@ impl Standing {
         }
         let index = git::Index::read(root)?;
         let mut trees = BTreeMap::new();
-        for scope in scopes {
-            if let Some(path) = manifest.scope_path(scope) {
-                let key = key::of(root, &path, key::Content::Index(&index))?;
-                trees.insert(scope.clone(), key);
-            }
+        for (scope, path) in scopes {
+            let key = key::of(root, path, key::Content::Index(&index))?;
+            trees.insert(scope.clone(), key);
         }
         let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);

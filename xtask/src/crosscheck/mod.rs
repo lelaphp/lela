@@ -79,9 +79,10 @@ use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, linked};
-use crate::reading::{Reading, Status, Store, plural};
-use crate::sources;
+use crate::reading::{Reading, Status, Store, listed, plural};
+use crate::sources::{self, Standing};
 use crate::witness::Binary;
+use crate::{git, key};
 use host::Host;
 
 /// The instrument's name, the reading's `instrument` field.
@@ -560,10 +561,151 @@ fn reading_of(
     column: Column,
 ) -> Result<Reading> {
     let scope = host.scope(name, column);
+    let path = stamped_path(manifest, name, host);
+    Ok(Reading::stamped_over(INSTRUMENT, &scope, root, &path)?.under(&manifest.pin))
+}
+
+/// The path both columns of `name` through `host` are stamped over: the
+/// host's row for a host's own module, the extension's crate for every
+/// other, and the workspace for a name the manifest has no row for.
+fn stamped_path(manifest: &Manifest, name: &str, host: Host) -> PathBuf {
     let row = host
         .krate()
         .map_or_else(|| Column::Re.scope(name), str::to_owned);
-    let path = manifest.crate_named(&row).map(crate::manifest::Crate::path);
-    let path = path.as_deref().unwrap_or(Path::new("."));
-    Ok(Reading::stamped_over(INSTRUMENT, &scope, root, path)?.under(&manifest.pin))
+    manifest
+        .crate_named(&row)
+        .map_or_else(|| PathBuf::from("."), crate::manifest::Crate::path)
+}
+
+/// What one rendering reads, as directories of the workspace (#1159).
+/// The stamp's key ([`key::of`] over [`stamped_path`], #1318) covers the
+/// extension's crate and its workspace dependency closure: its own
+/// declarations, `php_ext`, `php_engine` and what that is built from.
+/// The rendering reads three more things the closure does not reach:
+/// `ext/reflection`, whose `ReflectionExtension` prints `--re`; the
+/// crate the engine's side is served from and the crates it is built
+/// from, `php_bundle` for the linked engine ([`served_linked`]) and the
+/// host's crate for the binary and a host's own module; and none of the
+/// other extensions that crate links, since one extension's rendering
+/// prints its own module and the load number every module is normalised
+/// out ([`oracle::normalise`]). An extension built on another names it
+/// as a dependency, so that one is in its closure already.
+#[derive(Debug, Default)]
+pub(crate) struct Reads {
+    /// The stamp's key's directories: a staged change here moves the
+    /// key, so a standing reading over what is staged covers it.
+    pub(crate) keyed: Vec<PathBuf>,
+    /// What the rendering reads beyond them: a staged change here leaves
+    /// the key where it was, so no reading stands for it and the
+    /// extension renders again.
+    pub(crate) beyond: Vec<PathBuf>,
+}
+
+/// The extension whose `ReflectionExtension` prints the `--re` column.
+const REFLECTION: &str = "ext/reflection";
+
+impl Reads {
+    /// What `name`'s rendering through `host` reads, in the workspace
+    /// whose graph is `graph`.
+    pub(crate) fn of(
+        graph: &key::Graph,
+        manifest: &Manifest,
+        linked: &Carried,
+        name: &str,
+        host: Host,
+    ) -> Reads {
+        let row = |name: &str| {
+            manifest
+                .crate_named(name)
+                .map_or_else(|| crate::layout::path(name), crate::manifest::Crate::path)
+        };
+        let keyed = graph.paths(&stamped_path(manifest, name, host));
+        let served = match host.krate() {
+            Some(krate) => krate,
+            None if served_linked(manifest, linked, name) => "php_bundle",
+            None => "sapi/cli",
+        };
+        let reflection = graph.paths(&row(REFLECTION));
+        let extensions = Path::new("ext");
+        let host_side = graph
+            .paths(&row(served))
+            .into_iter()
+            .filter(|p| !p.starts_with(extensions));
+        let mut beyond: Vec<PathBuf> = reflection
+            .into_iter()
+            .chain(host_side)
+            .filter(|p| !keyed.contains(p))
+            .collect();
+        beyond.sort();
+        beyond.dedup();
+        Reads { keyed, beyond }
+    }
+}
+
+/// `crosscheck --staged`, pre-commit's run (#1159): of the extensions
+/// `carried` names, the ones to render again for what is staged. One
+/// whose rendering reads no staged file ([`Reads`]) is not rendered,
+/// whatever its reading says, since nothing it reads is in the commit;
+/// one a staged file under [`Reads::beyond`] reaches is rendered, since
+/// its key did not move with it; and one a staged change reaches only
+/// through its key is rendered unless both its columns' readings pass
+/// over what is staged ([`Standing`]), which is how a run already taken
+/// over the commit's content, or a change to an extension's closure that
+/// was rendered before it was staged, is relied on and named.
+pub(crate) fn staged(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    carried: &[String],
+) -> Result<Vec<String>> {
+    let files: Vec<PathBuf> = git::staged(root)?
+        .into_iter()
+        .map(|change| PathBuf::from(change.path))
+        .collect();
+    let graph = key::Graph::of(root)?;
+    let linked = Carried::linked()?;
+    let mut pairs = Vec::new();
+    let mut scopes = Vec::new();
+    for name in carried {
+        for host in host::hosts(oracle::module_name(name)) {
+            let path = stamped_path(manifest, name, *host);
+            for column in Column::ALL {
+                scopes.push((host.scope(name, column), path.clone()));
+            }
+            pairs.push((name, *host));
+        }
+    }
+    let standing = Standing::for_commit_over(root, manifest, store, INSTRUMENT, &scopes)?;
+    let reached = |dirs: &[PathBuf]| {
+        files
+            .iter()
+            .find(|f| dirs.iter().any(|d| d == Path::new(".") || f.starts_with(d)))
+    };
+    let mut render: Vec<String> = Vec::new();
+    let mut unkeyed: Vec<&str> = Vec::new();
+    let mut first = None;
+    for (name, host) in pairs {
+        let reads = Reads::of(&graph, manifest, &linked, name, host);
+        let stands = Column::ALL
+            .iter()
+            .all(|column| standing.get(&host.scope(name, *column)).is_some());
+        let again = if let Some(file) = reached(&reads.beyond) {
+            first = first.or(Some(file));
+            unkeyed.push(name);
+            true
+        } else {
+            reached(&reads.keyed).is_some() && !stands
+        };
+        if again && !render.contains(name) {
+            render.push(name.clone());
+        }
+    }
+    if let Some(file) = first {
+        println!(
+            "{INSTRUMENT}: {} is staged and the rendering of {} reads it beyond its key, so no reading stands for it",
+            file.display(),
+            listed(&unkeyed)
+        );
+    }
+    Ok(render)
 }
