@@ -260,6 +260,18 @@ fn track_is_listed_by_the_help() {
     assert!(out.contains("\n  track "), "{out}");
 }
 
+/// A track is a label on the tracker, laid down by nothing (ADR-0009):
+/// `track` lays no clone, so it has no `new`.
+#[test]
+fn track_lays_no_track_down() {
+    let (code, out, _) = xtask(Path::new("."), &["track", "--help"]);
+    assert_eq!(code, 0);
+    for command in ["next", "chains", "work"] {
+        assert!(out.contains(&format!("\n  {command} ")), "{out}");
+    }
+    assert!(!out.contains("\n  new "), "{out}");
+}
+
 /// The ticket is a record on the branch, read by name (#30): a branch
 /// with none says so, and nothing is guessed from a branch name that
 /// happens to carry a number.

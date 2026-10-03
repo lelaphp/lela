@@ -23,10 +23,9 @@
 //!
 //! A track's own clone is detached at `origin/<name>`, so its `HEAD` is
 //! on no branch, and which track it is is a record on the clone too
-//! (#76): `track.name`, written once by `xtask track new` and read here
-//! for a detached `HEAD` alone, since a branch names its own track. The
-//! commit a track's clone is detached at is not the record: two tracks
-//! laid down from the same `main` share it. Beside the name the clone
+//! (#76): `track.name`, read here for a detached `HEAD` alone, since a
+//! branch names its own track. The commit a track's clone is detached at
+//! is not the record: two tracks laid down from the same `main` share it. Beside the name the clone
 //! records the model its sessions run on, role-keyed (#75):
 //! `track.model.session` and `track.model.subagent`, the second
 //! defaulting to the first. A clone with no record names no model,
@@ -386,20 +385,6 @@ fn model_of(root: &Path) -> Result<Option<Model>> {
         }
         None => Ok(None),
     }
-}
-
-/// The track and the model recorded on the clone at `root`: the one write
-/// of both records, what `track new` does to the clone it laid down.
-pub(crate) fn record_track(root: &Path, name: &str, model: &Model) -> Result<()> {
-    let mut records = vec![(NAME_KEY, name), (SESSION_KEY, model.session.as_str())];
-    if let Some(subagent) = &model.subagent {
-        records.push((SUBAGENT_KEY, subagent));
-    }
-    for (key, value) in records {
-        git(root, &["config", key, value], None)
-            .with_context(|| format!("cannot record {value:?} as {key}"))?;
-    }
-    Ok(())
 }
 
 /// The branch whose record names `ticket`, if one does: what refuses a

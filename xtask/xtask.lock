@@ -308,7 +308,6 @@ track_chains::Chains::of
 track_chains::Chains::render
 track_chains::Row
 track_chains::command
-track_new::lay
 track_next::Next
 track_next::Next::render
 track_next::Next::to_json

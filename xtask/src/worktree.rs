@@ -404,7 +404,7 @@ fn seed(dir: &Path, root: &Path) {
 /// on a build; whether it was, with what the build compiled on the line:
 /// the workspace's own crates, which a seeded worktree compiles, and the
 /// dependencies, which it does not. `whose` prefixes the lines, since
-/// `track new` and `track sync` build through this too.
+/// `track sync` builds through this too.
 pub(crate) fn build(whose: &str, dir: &Path) -> bool {
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])

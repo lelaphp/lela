@@ -64,7 +64,6 @@ pub mod test;
 pub mod ticket;
 pub mod track;
 pub mod track_chains;
-pub mod track_new;
 pub mod track_next;
 pub mod track_sync;
 pub mod track_work;
@@ -466,18 +465,6 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 /// whatever the manifest says.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
-        Command::Track {
-            command:
-                Some(TrackCommand::New {
-                    name,
-                    model,
-                    subagent_model,
-                }),
-            ..
-        } => {
-            let model = track::Model::new(model.clone(), subagent_model.clone());
-            Some(track_new::lay(root, name, &model).map(|_| ()))
-        }
         Command::Track {
             command: Some(TrackCommand::Next { track, json, why }),
             ..

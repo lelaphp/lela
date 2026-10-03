@@ -663,7 +663,7 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     let track = Track::of(root, None)?;
     let Some(model) = track.model.clone() else {
         bail!(
-            "the clone records no model, so no session is started and nothing is laid down; `xtask track new` records one, or `git config {} <name>`",
+            "the clone records no model, so no session is started and nothing is laid down; `git config {} <name>` records one",
             "track.model.session"
         );
     };
