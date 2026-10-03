@@ -969,6 +969,7 @@ values::PhpObject::unserialize_prop
 values::PhpObject::unserialize_verify
 values::PhpObject::unset_row
 values::PhpObject::update_row
+values::PhpObject::write_prop_in
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::convert
@@ -989,6 +990,7 @@ values::PhpString::new
 values::PhpString::product
 values::Place
 values::PointerMove
+values::PropertyScope
 values::RecursionGuard
 values::Resource
 values::Resource::as_value

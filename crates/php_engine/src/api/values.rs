@@ -29,7 +29,7 @@ use std::cmp::Ordering;
 
 use php_heap::{Arr, Obj, Ref, Res, Str, Zval, ZvalType};
 
-use crate::api::abi::PropertyPurpose;
+use crate::api::abi::{ClassRef, PropertyPurpose};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -1094,6 +1094,21 @@ pub enum PointerMove {
     Backward,
 }
 
+/// The scope a property is written in ([`PhpObject::write_prop_in`]),
+/// what `zend_update_property_ex` sets `EG(fake_scope)` to for the
+/// write, and so which private or protected property the name reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyScope {
+    /// `zend_update_property_ex(prop_info->ce, ..)`: the scope of the
+    /// class that declares the property, [`PhpObject::set_prop`]'s.
+    Declaring,
+    /// `zend_update_property_ex(NULL, ..)`: no fake scope, so
+    /// `get_fake_or_executed_scope` decides, the executed one.
+    Executing,
+    /// `zend_update_property_ex(ce, ..)`: the named class's scope.
+    Of(ClassRef),
+}
+
 /// An object (design §5.4): php's `zend_object *`, one allocation of
 /// the request's heap in the object store, the forty-byte header, a
 /// zval per declared property and, for an internal class, the native
@@ -1651,6 +1666,28 @@ impl PhpObject {
     /// limit refusing the dynamic table.
     pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
         req.write_property_as_declared(*self, name, value)
+    }
+
+    /// Write one property by name through the class's `write_property`,
+    /// as [`PhpObject::set_prop`] does, in the scope `scope` names, as
+    /// `zend_update_property_ex(scope, ...)` sets `EG(fake_scope)` for
+    /// the write and puts it back after: a private property the scope
+    /// cannot see is a dynamic property, and one it may not write is
+    /// php's `Error`, the `Err`.
+    pub fn write_prop_in(
+        &self,
+        req: &mut Request,
+        scope: PropertyScope,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        match scope {
+            PropertyScope::Declaring => req.write_property_as_declared(*self, name, value),
+            PropertyScope::Executing => req.write_property_in(*self, None, name, value),
+            PropertyScope::Of(ClassRef(class)) => {
+                req.write_property_in(*self, Some(class), name, value)
+            }
+        }
     }
 
     /// One property written as `unserialize()` writes it,
