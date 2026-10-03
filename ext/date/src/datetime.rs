@@ -9,12 +9,14 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use php_ext::abi::{Class, Instance, ObjectHandlers as _, OrFalse, Path, Static, This, Union};
+use php_ext::abi::{Class, ClassRef, Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
+};
 
 use crate::State;
 use crate::classes::DateTimeInterface;
@@ -739,7 +741,30 @@ fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<PhpObject
 /// `restore_custom_*_properties`: every row of the hash but the class's
 /// own fields and a reference written back as a property, php's
 /// `update_property` over each name: a private one only where the class
-/// its mangled name names exists, which `zend_lookup_class` finds.
+/// its mangled name names exists, which `zend_lookup_class` finds, and
+/// written in that class's scope, a protected or a public one in the
+/// object's class's, as `zend_update_property(ce, ...)` writes it.
+///
+/// ```php
+/// class I extends DateTimeImmutable {
+///     private int $a = 1; private $b = 0; protected int $c = 3; protected $d;
+///     function __construct() { parent::__construct('2023-03-09 17:03:11'); $this->b = 2; $this->d = 4; }
+/// }
+/// $u = unserialize(serialize(new I));
+/// var_dump((fn() => [$this->a, $this->b, $this->c, $this->d])->call($u));
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(3)
+///   [3]=>
+///   int(4)
+/// }
+/// ```
 ///
 /// ```php
 /// class I extends DateTimeImmutable { private $p = 0; }
@@ -765,22 +790,27 @@ pub(super) fn restore_properties(
             continue;
         }
         let bytes = name.as_bytes();
-        let plain: &[u8] = match bytes.strip_prefix(b"\0") {
+        let (scope, plain): (ClassId, &[u8]) = match bytes.strip_prefix(b"\0") {
             Some(rest) => {
                 let Some(at) = rest.iter().position(|b| *b == 0) else {
                     continue;
                 };
                 let owner = &rest[..at];
-                if owner != b"*" && php_ext::call::lookup_class(req, owner)?.is_none() {
-                    continue;
-                }
-                &rest[at + 1..]
+                let scope = if owner == b"*" {
+                    object.class()
+                } else {
+                    let Some(class) = php_ext::call::lookup_class(req, owner)? else {
+                        continue;
+                    };
+                    class
+                };
+                (scope, &rest[at + 1..])
             }
-            None => bytes,
+            None => (object.class(), bytes),
         };
-        let plain = php_ext::values::PhpString::new(req, plain)?;
+        let plain = PhpString::new(req, plain)?;
         req.addref(&value);
-        php_ext::abi::Std.write_property(req, object, plain, value)?;
+        object.write_prop_in(req, PropertyScope::Of(ClassRef(scope)), plain, value)?;
     }
     Ok(())
 }
