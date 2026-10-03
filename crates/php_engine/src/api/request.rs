@@ -7515,9 +7515,31 @@ impl Request {
         last.line != line || last.file.as_bytes() != file
     }
 
-    /// `log_errors`, whether a diagnostic reaches the host's log.
+    /// `log_errors`, whether a diagnostic reaches the host's log; one
+    /// raised as the engine starts, before php's `module_initialized`,
+    /// reaches it too while `display_startup_errors` or `display_errors`
+    /// is off (`Z/main/main.c:1453-1454`):
+    ///
+    /// ```php
+    /// foreach (['display_startup_errors', 'display_errors'] as $off) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'disable_functions=exit', '-d', "$off=0", '-r', 'echo 1;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     var_dump(stream_get_contents($pipes[1]), stream_get_contents($pipes[2])); proc_close($p);
+    /// }
+    /// ```
+    /// ```expect process
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// ```
     fn log_errors(&self) -> bool {
+        let off = |name: &[u8]| self.ini_get(name).is_some_and(|v| !ini_truth(Some(v)));
         ini_truth(self.ini_get(b"log_errors"))
+            || (self.display_direct
+                && (off(b"display_startup_errors")
+                    || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic

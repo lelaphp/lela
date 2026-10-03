@@ -21,3 +21,7 @@ php_ext_mysqlnd = { path = "../mysqlnd" }
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+# session, and standard below it, for the save handler that writes through
+# a link in session's `RSHUTDOWN` (#1689).
+php_ext_session = { path = "../session" }
+php_ext_standard = { path = "../standard" }
