@@ -274,14 +274,30 @@ fn zip_entry_read(
     } else {
         usize::try_from(len).unwrap_or(usize::MAX)
     };
-    let Some(e) = entry.native_mut::<Entry>(req) else {
-        return Ok(OrFalse::False);
+    let dir = entry.native::<Entry>(req).map_or(0, |e| e.dir);
+    let mut file = dir_data(req, dir).and_then(|d| d.stdio.take());
+    let chunk = match entry.native_mut::<Entry>(req).and_then(|e| e.data.as_mut()) {
+        Some(zf) => zf.read_through(len, &mut file),
+        None => return Ok(OrFalse::False),
     };
-    let Some(zf) = &mut e.data else {
-        return Ok(OrFalse::False);
-    };
-    let chunk = zf.read(len).unwrap_or_default();
-    Ok(OrFalse::Value(PhpString::new(req, &chunk)?))
+    if let Some(d) = dir_data(req, dir) {
+        d.stdio = file;
+    }
+    Ok(OrFalse::Value(PhpString::new(
+        req,
+        &chunk.unwrap_or_default(),
+    )?))
+}
+
+/// The data of the archive directory resource `dir` holds, whose `FILE`
+/// its entries are read through.
+fn dir_data(req: &mut Request, dir: i64) -> Option<&mut crate::archive::Data> {
+    req.resource(dir)?
+        .native_mut::<Dir>(req)?
+        .za
+        .as_deref_mut()?
+        .data
+        .as_mut()
 }
 
 /// `php_zip_entry_get_info`: the entry's stat, while the directory it

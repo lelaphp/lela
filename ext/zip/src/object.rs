@@ -17,6 +17,7 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, Valu
 use crate::archive::{self as za, Archive, Source};
 use crate::c;
 use crate::error::{Done, Er, Status};
+use crate::read::Stdio;
 use crate::write::Hooks;
 
 /// A callable kept past the call that registered it, with one owner of
@@ -65,7 +66,60 @@ pub(crate) struct Intern {
 /// The archive numbered `id` discarded: its entries' streams read php's
 /// `Containing zip archive was closed` from here.
 fn discarded(req: &mut Request, id: u64) {
-    req.state::<crate::State>().closed.insert(id);
+    let state = req.state::<crate::State>();
+    state.closed.insert(id);
+    state.files.remove(&id);
+}
+
+/// Archive `id`'s stdio `FILE`, out of the request for one read.
+pub(crate) fn file(req: &mut Request, id: u64) -> Option<Stdio> {
+    req.state::<crate::State>().files.remove(&id)
+}
+
+/// Archive `id`'s stdio `FILE` back.
+pub(crate) fn file_back(req: &mut Request, id: u64, file: Option<Stdio>) {
+    if let Some(f) = file {
+        req.state::<crate::State>().files.insert(id, f);
+    }
+}
+
+/// `op` on the object's archive with the archive's `FILE` lent to it.
+///
+/// One `FILE` serves the archive and every stream over its entries, so
+/// a stream reads what another entry's opening left in its buffer:
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('file-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+/// foreach (['a', 'b'] as $n) { $z->addFromString($n, str_repeat($n, 20000)); $z->setCompressionName($n, ZipArchive::CM_STORE); }
+/// $z->close(); $z->open('file-witness.zip'); $s = $z->getStream('a'); $t = $z->getStream('b');
+/// $h = fopen('file-witness.zip', 'r+'); ftruncate($h, 1000); fclose($h);
+/// var_dump(strlen(fread($s, 8192)), fread($t, 8192), strlen($z->getFromName('a', 100))); $z->close(); unlink('file-witness.zip');
+/// ```
+/// ```expect
+///
+/// Warning: fread(): Zip stream error: Premature end of file in %s on line %d
+/// int(969)
+/// bool(false)
+/// int(100)
+/// ```
+pub(crate) fn with_file<T>(
+    req: &mut Request,
+    object: PhpObject,
+    op: impl FnOnce(&mut Archive) -> T,
+) -> Option<T> {
+    let id = object.native::<Intern>(req).map_or(0, |i| i.id);
+    let mut f = file(req, id);
+    let za = object
+        .native_mut::<Intern>(req)
+        .and_then(|i| i.za.as_deref_mut());
+    let out = za.map(|za| {
+        za.lend(&mut f);
+        let out = op(za);
+        za.lend(&mut f);
+        out
+    });
+    file_back(req, id, f);
+    out
 }
 
 /// `zip_prop_handlers`: the six properties, each read from the object.
@@ -937,13 +991,16 @@ impl ZipArchive {
             Ok(flags) => Archive::open(host(&resolved), flags),
             Err(_) => Err(Status::of(Er::Inval, 0)),
         };
-        let archive = match opened {
+        let mut archive = match opened {
             Ok(archive) => archive,
             Err(status) => return Ok(Union::B(i64::from(status.zip))),
         };
         let state = req.state::<crate::State>();
         state.archives += 1;
         let id = state.archives;
+        if let Some(f) = archive.data.as_mut().and_then(|d| d.stdio.take()) {
+            state.files.insert(id, f);
+        }
         if let Some(i) = object.native_mut::<Intern>(req) {
             i.za = Some(Box::new(archive));
             i.filename = Some(resolved);
@@ -2596,13 +2653,15 @@ fn get_from(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, len: i64, flags:
     if st.size < 1 {
         return Ok(OrFalse::Value(PhpString::new(req, b"")?));
     }
-    let len = if len < 1 { st.size } else { c::u64(len) };
-    let Ok(mut zf) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
+    let len = usize::try_from(if len < 1 { st.size } else { c::u64(len) }).unwrap_or(usize::MAX);
+    let idx = usize::try_from(st.index).unwrap_or(usize::MAX);
+    let data = with_file(req, this.object(), |za| {
+        let mut zf = za.fopen(idx, flags, None).ok()?;
+        Some(za.read_entry(&mut zf, len).unwrap_or_default())
+    });
+    let Some(Some(data)) = data else {
         return Ok(OrFalse::False);
     };
-    let data = zf
-        .read(usize::try_from(len).unwrap_or(usize::MAX))
-        .unwrap_or_default();
     Ok(OrFalse::Value(PhpString::new(req, &data)?))
 }
 
@@ -2617,11 +2676,12 @@ fn get_stream(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, flags: i64) ->
     let Some(st) = locate(za, which, flags) else {
         return Ok(Untyped(OrFalse::False));
     };
-    let Ok(zf) = za.fopen(usize::try_from(st.index).unwrap_or(usize::MAX), flags, None) else {
+    let idx = usize::try_from(st.index).unwrap_or(usize::MAX);
+    let Some(Ok(zf)) = with_file(req, this.object(), |za| za.fopen(idx, flags, None)) else {
         return Ok(Untyped(OrFalse::False));
     };
     let id = this.object().native::<Intern>(req).map_or(0, |i| i.id);
-    let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None)?;
+    let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None, None)?;
     Ok(Untyped(
         stream.map_or(OrFalse::False, |s| OrFalse::Value(s.resource())),
     ))
