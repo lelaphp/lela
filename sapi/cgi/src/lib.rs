@@ -44,9 +44,10 @@ use std::process::ExitCode;
 use php_proto::cgi::{Environment, RequestInfo};
 use php_sapi::cgi::{Disk, HOST_INI, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
-use php_sapi::ini::{define, enabled, entry};
+use php_sapi::ini::{Search, define, enabled, entry};
 use php_sapi::{
-    Aborted, Engine, Observables, OutputSink, RequestDescription, ResponseHead, WebRequest,
+    Aborted, Engine, IniFiles, Observables, OutputSink, RequestDescription, ResponseHead,
+    WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -145,6 +146,8 @@ pub struct Invocation {
 pub struct Options {
     /// The host's defaults and then each `-d name=value`, in order.
     pub ini: Vec<(String, String)>,
+    /// `-c` and `-n`, which steer the search for php.ini.
+    pub ini_search: Search,
     pub ask: Ask,
 }
 
@@ -176,6 +179,7 @@ impl Options {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
+        let mut ini_search = Search::default();
         let mut invocation = Invocation {
             behavior: Behavior::Standard,
             origin: if server {
@@ -192,6 +196,7 @@ impl Options {
         if skip {
             return Options {
                 ini,
+                ini_search,
                 ask: Ask::Serve(invocation),
             };
         }
@@ -199,6 +204,8 @@ impl Options {
         for (code, value) in switches(&argv) {
             match code {
                 b'd' => ini.push(define(&String::from_utf8_lossy(&value))),
+                b'c' => ini_search.path = Some(value),
+                b'n' => ini_search.ignore = true,
                 b'b' => refused = true,
                 b's' => invocation.behavior = Behavior::Highlight,
                 _ => {}
@@ -213,7 +220,11 @@ impl Options {
             None if server => Ask::Serve(invocation),
             None => shell_pass(&argv, invocation),
         };
-        Options { ini, ask }
+        Options {
+            ini,
+            ini_search,
+            ask,
+        }
     }
 }
 
@@ -749,6 +760,13 @@ pub fn main() -> ExitCode {
     let argv: Vec<OsString> = words.collect();
     let env = environment();
     let options = Options::parse(&argv, &env);
+    let engine = |ini: &[(String, String)], origin| {
+        engine(
+            ini,
+            php_sapi::ini::search(NAME, &options.ini_search, false),
+            origin,
+        )
+    };
     let status = match &options.ask {
         Ask::Usage { stderr, exit_code } => {
             let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
@@ -778,13 +796,14 @@ fn print(text: &str) -> i32 {
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
 /// order and `php_bundle::Tier` bound, and what php-cgi declares itself
-/// after them ([`natives::declare`]), started over the line's `ini`
-/// ([`php_sapi::start`]); a file's shebang
+/// after them ([`natives::declare`]), started over the `files` found and
+/// the line's `ini` ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
-fn engine(ini: &[(String, String)], origin: Origin) -> Engine {
+fn engine(ini: &[(String, String)], files: IniFiles, origin: Origin) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .ini_files(files)
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)

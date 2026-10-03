@@ -10,7 +10,8 @@
 //! command lines with; [`cgi`], the CGI environment made a request
 //! description and the response's head written, which php's CGI and its
 //! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
-//! `php_ini_builder` reads them; and [`start`], `php_module_startup` over
+//! `php_ini_builder` reads them, and `php_init_config`'s search for the
+//! php.ini files; and [`start`], `php_module_startup` over
 //! them, with what a host prints before it serves anything. [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]

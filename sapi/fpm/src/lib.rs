@@ -55,8 +55,8 @@ use std::os::fd::AsRawFd as _;
 use std::process::ExitCode;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
-use php_sapi::ini::define;
-use php_sapi::{Engine, RequestDescription};
+use php_sapi::ini::{Search, define};
+use php_sapi::{Engine, IniFiles, RequestDescription};
 
 use crate::master::{Args, Became, EXIT_CONFIG, EXIT_OK, EXIT_USAGE, Fpm, Init};
 
@@ -132,10 +132,11 @@ fn usage(argv0: &[u8]) -> String {
     )
 }
 
-/// `main`'s `php_getopt` loop over `argv[1..]`: the `-d` entries so far
-/// and what is asked, `-m`, `-v`, `-h` and a refused switch answered where
-/// they stand, as php answers them before it reads what follows.
-fn parse(argv: &[Vec<u8>]) -> (Vec<(String, String)>, Ask) {
+/// `main`'s `php_getopt` loop over `argv[1..]`: the `-d` entries so far,
+/// `-c` and `-n` onto `search`, and what is asked, `-m`, `-v`, `-h` and a
+/// refused switch answered where they stand, as php answers them before
+/// it reads what follows.
+fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<(String, String)>, Ask) {
     let mut ini: Vec<(String, String)> = php_sapi::cgi::HOST_INI
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -170,7 +171,9 @@ fn parse(argv: &[Vec<u8>]) -> (Vec<(String, String)>, Ask) {
                     b'F' => asked.daemonize = Some(false),
                     b'O' => asked.force_stderr = true,
                     b'v' => return (ini, Ask::Version),
-                    b'c' | b'n' | b'e' => {}
+                    b'c' => search.path = Some(value),
+                    b'n' => search.ignore = true,
+                    b'e' => {}
                     _ => return (ini, Ask::Usage(EXIT_OK)),
                 }
             }
@@ -187,16 +190,18 @@ fn parse(argv: &[Vec<u8>]) -> (Vec<(String, String)>, Ask) {
 }
 
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
-/// and `cgi-fcgi` after them, over `-d`'s entries.
-fn engine(ini: &[(String, String)]) -> Engine {
-    php_sapi::start(builder(), ini)
+/// and `cgi-fcgi` after them, over the `files` found and `-d`'s entries.
+fn engine(ini: &[(String, String)], files: &IniFiles) -> Engine {
+    php_sapi::start(builder(files), ini)
 }
 
-/// php-fpm's engine before its entries: its name, the bundle's enabled
-/// set, its tier, and its own `cgi-fcgi` after them ([`natives`]).
-fn builder() -> php_sapi::EngineBuilder {
+/// php-fpm's engine before its entries: its name, the php.ini `files` the
+/// master found, which a child reads as the master did, the bundle's
+/// enabled set, its tier, and its own `cgi-fcgi` after them ([`natives`]).
+fn builder(files: &IniFiles) -> php_sapi::EngineBuilder {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     Engine::builder()
+        .ini_files(files.clone())
         .sapi_name(worker::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
@@ -227,7 +232,10 @@ pub fn main() -> ExitCode {
         .map(std::ffi::OsString::into_encoded_bytes)
         .collect();
     let argv0 = words.first().cloned().unwrap_or_default();
-    let (ini, ask) = parse(words.get(1..).unwrap_or_default());
+    let mut search = Search::default();
+    let (ini, ask) = parse(words.get(1..).unwrap_or_default(), &mut search);
+    let files = php_sapi::ini::search(worker::NAME, &search, true);
+    let engine = |ini: &[(String, String)]| engine(ini, &files);
     let status = match ask {
         Ask::Usage(code) => {
             let _ = engine(&ini);
@@ -256,7 +264,7 @@ pub fn main() -> ExitCode {
         }
         Ask::Run(mut args) => {
             args.argv = words;
-            run(&ini, args)
+            run(&ini, &files, args)
         }
     };
     php_sapi::exit_code(i32::from(status))
@@ -264,8 +272,8 @@ pub fn main() -> ExitCode {
 
 /// `fpm_init` and `fpm_run`, and a child's requests once this process
 /// is one.
-fn run(ini: &[(String, String)], args: Args) -> u8 {
-    let engine = engine(ini);
+fn run(ini: &[(String, String)], files: &IniFiles, args: Args) -> u8 {
+    let engine = engine(ini, files);
     let mut fpm = match Fpm::init(&engine, args) {
         Init::Continue(fpm) => fpm,
         Init::ExitOk => return EXIT_OK,
@@ -293,7 +301,7 @@ fn run(ini: &[(String, String)], args: Args) -> u8 {
     drop(engine);
     match fpm.run() {
         Err(Became::Child(pool, slot)) => {
-            let worker = worker::init(&mut fpm, pool, slot, ini, &started);
+            let worker = worker::init(&mut fpm, pool, slot, (ini, files), &started);
             drop(fpm);
             worker.run()
         }

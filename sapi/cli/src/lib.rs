@@ -13,9 +13,11 @@
 //! program highlighted or stripped as `zend_highlight` and `zend_strip`
 //! write it, the reports `--rf`, `--rc`, `--re`, `--rz`, `--ri` and
 //! `--ini` print, the interactive shell `-a` serves where the bundle
-//! provides one, or the built-in web server. `-n` and every `-d` are the
-//! engine's to lay over its defaults before it is built, so the binary
-//! reads them off [`Options`] and builds the engine; the host then serves
+//! provides one, or the built-in web server. `-c`, `-n` and every `-d` are
+//! the engine's to read before it is built, the php.ini found as
+//! `php_init_config` finds it ([`php_sapi::ini::search`]) before the
+//! `-d`s, so the binary reads them off [`Options`] and builds the engine;
+//! the host then serves
 //! [`Options::ask`] on it, `--repeat`'s count of times.
 //!
 //! The binary carries php's shell callbacks
@@ -24,8 +26,8 @@
 //! asks `cli_shell_callbacks.cli_shell_run`, and is `do_cli`'s sentence
 //! where it has none.
 //!
-//! The switches taken and changing nothing: `-c`, `-e` and `-H`: no `php.ini` is looked for
-//! anywhere, the compiler emits no extended info, and `-H` blanks copies
+//! The switches taken and changing nothing: `-e` and `-H`: the compiler
+//! emits no extended info, and `-H` blanks copies
 //! of the arguments nothing reads again; `-C` and `-q`, php's own no-ops. `--ini=diff` is refused with
 //! php's usage: the engine keeps no default apart from an entry's value.
 //!
@@ -59,7 +61,7 @@ use std::process::ExitCode;
 
 use std::sync::OnceLock;
 
-use php_sapi::Engine;
+use php_sapi::{Engine, IniFiles};
 
 use crate::natives::ProcessTitle;
 
@@ -108,7 +110,7 @@ pub fn main() -> ExitCode {
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
     let _ = TITLE.set(ffi::save_ps_args().map(ProcessTitle::new));
-    let options = match Options::parse(&argv, &|ini| engine(ini).has_shell()) {
+    let options = match Options::parse(&argv, &|ini| engine(ini, IniFiles::default()).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
             let _ = std::io::stderr()
@@ -120,13 +122,15 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(refused.exit_code);
         }
     };
+    let found = |sapi| php_sapi::ini::search(sapi, &options.ini_search, true);
+    let engine = |ini: &[(String, String)]| engine(ini, found(NAME));
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
         Ask::Version => print(&version(&engine(&options.ini))),
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
         Ask::Server(server) => server::run(
-            server_engine(&options.ini),
+            server_engine(&options.ini, found(server::NAME)),
             server,
             php_sapi::ini::enabled(&options.ini, "cli_server.color", false),
         ),
@@ -200,10 +204,12 @@ fn print(text: &str) -> i32 {
 /// order and `php_bundle::Tier` bound, the CLI's `additional_functions`
 /// under `standard` ([`natives::cli`]), the shebang line of every file
 /// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
-/// carried, started over the line's `ini` ([`php_sapi::start`]).
-fn engine(ini: &[(String, String)]) -> Engine {
+/// carried, started over the `files` found and the line's `ini`
+/// ([`php_sapi::start`]).
+fn engine(ini: &[(String, String)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .ini_files(files)
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
@@ -218,9 +224,10 @@ fn engine(ini: &[(String, String)]) -> Engine {
 /// moves, which `main` lays only under the CLI's module
 /// (`php_cli.c:1336`), and the `cli_server` module and its natives after
 /// the bundle.
-fn server_engine(ini: &[(String, String)]) -> Engine {
+fn server_engine(ini: &[(String, String)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .ini_files(files)
         .sapi_name(server::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)

@@ -82,6 +82,8 @@ const HARDCODED: [(&str, &str); 8] = [
 #[derive(Debug, Default)]
 struct Line {
     ini: Vec<(String, String)>,
+    /// `-c` and `-n`.
+    search: php_sapi::ini::Search,
     /// `-r` once runs at start, twice runs and quits.
     run: u32,
     stdin_delimiter: Option<Vec<u8>>,
@@ -120,6 +122,8 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                         .push(php_sapi::ini::define(&String::from_utf8_lossy(&value))),
                     b's' => line.stdin_delimiter = Some(value),
                     b'I' => line.init_default = false,
+                    b'c' => line.search.path = Some(value),
+                    b'n' => line.search.ignore = true,
                     b'b' => line.boring = true,
                     b'v' => line.verbose = true,
                     b'i' => line.init_file = (!value.is_empty()).then_some(value),
@@ -148,6 +152,7 @@ pub fn main() -> ExitCode {
     let line = read_line(&argv);
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .ini_files(php_sapi::ini::search(NAME, &line.search, true))
         .extensions(&extensions)
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
