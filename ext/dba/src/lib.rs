@@ -10,11 +10,13 @@
 //! is `php-src/ext/dba/tests`, through `xtask phpt --subset`.
 //!
 //! A connection is a `Dba\Connection` object over a link, php's
-//! `dba_info`, kept in the request's state. A `dba_popen` link is kept in
-//! the request's list of persistent links under php's key, so a second
-//! `dba_popen` of one path, `$mode` and handler answers a new object over
-//! the same link, and `dba_close` leaves it open, as php's
-//! `EG(persistent_list)` does for the life of a CLI process.
+//! `dba_info`, kept in the request's state. A `dba_popen` link is held by
+//! the request under php's key, so a second `dba_popen` of one path,
+//! `$mode` and handler answers a new object over the same link, and
+//! `dba_close` leaves it open; at the request's end it is given back to
+//! the engine's pool (design §4.10, revision 55) with its fds and the
+//! `flock(2)` they hold, and lent to the next request asking the key, as
+//! php's `EG(persistent_list)` keeps it for the life of a php-fpm worker.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -38,7 +40,7 @@ mod natives;
 
 use std::cmp::Ordering;
 
-use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool};
 use php_ext::attr::php_class;
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
@@ -82,6 +84,8 @@ pub fn extension() -> Extension {
         ])
         .class::<Connection>()
         .request_state::<State>()
+        .engine_state(|_| Pooled(Pool::new(POOLED)))
+        .rshutdown(rshutdown)
         .ini(vec![IniDecl {
             name: Name(DEFAULT_HANDLER.into()),
             default: Some(b"flatfile".as_slice().into()),
@@ -176,7 +180,36 @@ struct State {
     keys: Vec<Vec<u8>>,
     counter: u32,
     links: Vec<Option<Link>>,
-    persistent: Vec<(Vec<u8>, LinkId)>,
+    /// The persistent links the request took out of the pool or opened.
+    persistent: Lent<Vec<u8>, LinkId>,
+}
+
+/// The engine's pool of `dba_popen` links, keyed as php keys them.
+struct Pooled(Pool<Vec<u8>, link::Kept>);
+
+/// The idle persistent links the pool keeps; php bounds them by nothing
+/// but the process, and this is the engine's own streams' bound.
+const POOLED: usize = 1024;
+
+/// dba's `RSHUTDOWN` in this engine: every persistent link the request
+/// holds given back to the engine's pool; one past its bound closed.
+fn rshutdown(req: &mut Request) {
+    for (key, id) in req.state::<State>().persistent.drain() {
+        let Some(link) = req.state::<State>().slot(id).and_then(Option::take) else {
+            continue;
+        };
+        let Some(kept) = link.keep(req) else {
+            continue;
+        };
+        let back = req
+            .engine::<Pooled>()
+            .and_then(|Pooled(pool)| pool.give(key, kept));
+        if let Some(back) = back
+            && let Ok(link) = back.take_up(req)
+        {
+            link.close(req);
+        }
+    }
 }
 
 impl State {

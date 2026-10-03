@@ -573,7 +573,24 @@ fn class_object(
 /// `FETCH_INTO` column in the executing one, `zend_update_property_ex`
 /// with `ce` and with `NULL` (`ext/pdo/pdo_stmt.c:798-812, 911-914`),
 /// so a parent's private property is a dynamic one and a protected
-/// one is php's `Error`.
+/// one is php's `Error`. A write that throws does not end the row:
+/// `zend_update_property_ex` returns nothing, the later columns are
+/// written with the throwable pending, each later one chained onto it,
+/// and it leaves after the loop, where the constructor is not served
+/// (`ext/pdo/pdo_stmt.c:911-914, 924-929`).
+///
+/// ```php
+/// class P { protected $a; public $b; }
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query("SELECT 'x' AS a, 'y' AS b");
+/// $s->setFetchMode(PDO::FETCH_INTO, $p = new P);
+/// try { $s->fetch(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($p->b);
+/// ```
+/// ```expect
+/// Cannot access protected property P::$a
+/// string(1) "y"
+/// ```
 ///
 /// ```php
 /// class B { private $v; }
@@ -644,6 +661,7 @@ fn fill(
     })
     .unwrap_or_default();
     let mut arguments = Vec::new();
+    let mut pending: Option<Thrown> = None;
     let mut at = next;
     while usize::try_from(at).is_ok_and(|a| a < count) {
         let fetched = value(req, object, at, None)?;
@@ -678,8 +696,7 @@ fn fill(
             }
             Kind::Class | Kind::Obj | Kind::Into => {
                 if let Some(made) = out.as_object().copied() {
-                    let name = PhpString::new(req, &name)?;
-                    made.write_prop_in(req, scope(kind, class), name, fetched)?;
+                    write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
                 }
             }
             Kind::Func => arguments.push(fetched),
@@ -687,6 +704,7 @@ fn fill(
         }
         at += 1;
     }
+    let mut out = settle(req, out, pending)?;
     if kind == Kind::Class
         && !flags.has(Flag::PropsLate)
         && !flags.has(Flag::Serialize)
@@ -706,6 +724,44 @@ fn fill(
         out = answered?;
     }
     Ok(Some((out, key)))
+}
+
+/// One column of an object's row, `zend_update_property_ex`: a write
+/// that throws leaves the throwable pending, chained onto one already
+/// there, for the row's later columns to be written past; a fatal or an
+/// `exit` is the `Err`.
+fn write_column(
+    req: &mut Request,
+    pending: &mut Option<Thrown>,
+    made: PhpObject,
+    scope: PropertyScope,
+    name: &[u8],
+    fetched: Value,
+) -> Result<(), Thrown> {
+    let name = PhpString::new(req, name)?;
+    let Err(thrown) = made.write_prop_in(req, scope, name, fetched) else {
+        return Ok(());
+    };
+    if thrown.exception().is_none() {
+        return Err(thrown);
+    }
+    *pending = Some(match pending.take() {
+        Some(earlier) => earlier.chain(req, thrown),
+        None => thrown,
+    });
+    Ok(())
+}
+
+/// The row past its columns: the throwable a column's write left
+/// pending is what the fetch returns, the row given up.
+fn settle(req: &mut Request, out: Value, pending: Option<Thrown>) -> Result<Value, Thrown> {
+    match pending {
+        Some(thrown) => {
+            req.release(out);
+            Err(thrown)
+        }
+        None => Ok(out),
+    }
 }
 
 /// The scope `do_fetch` writes an object's column in: the fetch class's

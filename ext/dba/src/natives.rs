@@ -202,12 +202,20 @@ fn open(
     )
     .into_bytes();
     if persistent {
-        let found = req
-            .state::<State>()
-            .persistent
-            .iter()
-            .find(|(held, _)| *held == key)
-            .map(|(_, link)| *link);
+        let held = &mut req.state::<State>().persistent;
+        let mut found = held.find(&key).and_then(|at| held.get_mut(at).copied());
+        if found.is_none() {
+            let kept = req
+                .engine::<crate::Pooled>()
+                .and_then(|crate::Pooled(pool)| pool.take(&key));
+            if let Some(kept) = kept {
+                let link = kept.take_up(req)?;
+                let state = req.state::<State>();
+                let id = state.store(link);
+                state.persistent.hold(key.clone(), id);
+                found = Some(id);
+            }
+        }
         if let Some(link) = found {
             let object = new_connection(req)?;
             list(req, object, link, &key)?;
@@ -240,7 +248,7 @@ fn open(
     };
     let id = req.state::<State>().store(link);
     if persistent {
-        req.state::<State>().persistent.push((key.clone(), id));
+        req.state::<State>().persistent.hold(key.clone(), id);
     }
     list(req, object, id, &key)?;
     Ok(OrFalse::Value(Instance::of(object)))

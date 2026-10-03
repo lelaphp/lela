@@ -300,6 +300,16 @@ pub struct FormatDate(pub FormatDateFn);
 /// and whether it is taken in the request's zone.
 type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
 
+/// `php_syslog(priority, "%s", message)` (`Z/main/php_syslog.c`), which
+/// shares libc's one connection with userland `openlog()`: ext/standard
+/// hands it to [`ExtensionBuilder::register`], and `php_log_err` sends
+/// an entry through it at its priority where `error_log` is `syslog`.
+/// An engine without it sends that entry to the host's log.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
+
 /// A handler of the buffer stack an extension hands to
 /// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
 /// `php_output_handler_alias_register` from its `MINIT`, with the
@@ -5734,9 +5744,15 @@ impl Request {
                     let name = self.declared_name(function);
                     let name = Value::string(self.interned(name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
-                    if let Some(class) = self.method_class(function).or(scope) {
-                        // `ce->name` whole: an anonymous class's with its NUL and site.
-                        let class = self.class_name_bytes(class);
+                    // `ce->name` whole: an anonymous class's with its NUL
+                    // and site; a receiver's class name for a function of
+                    // no scope it is passed to, `zend_ffi_get_func`'s.
+                    let class = match (self.method_class(function).or(scope), this) {
+                        (Some(class), _) => Some(self.class_name_bytes(class)),
+                        (None, Some(this)) => Some(this.handlers(self).get_class_name(self, this)),
+                        (None, None) => None,
+                    };
+                    if let Some(class) = class {
                         let class = Value::string(self.interned(&class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
@@ -6029,6 +6045,22 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// A native trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`), the C
+    /// function `zend_ffi_get_func` makes, has no site of its own to give
+    /// what it calls, so the walk goes on to the user code that called
+    /// it; and its row, of no scope, names its receiver's class:
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
+    /// $ffi->signal(SIGUSR1, function ($sig) { debug_print_backtrace(); echo debug_backtrace()[1]['class'], "\n"; });
+    /// $ffi->raise(SIGUSR1);
+    /// ```
+    /// ```expect process
+    /// #0 %s(4): {closure:%s:3}(%d)
+    /// #1 %s(4): FFI->raise(%d)
+    /// FFI
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -6047,14 +6079,24 @@ impl Request {
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
         let mut rows = Vec::new();
-        for at in 0..chain.len() {
-            let site = match chain.get(at.saturating_add(1)) {
+        // The site of the link at `below`: a native's is none, but where
+        // it is a trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`) the walk
+        // goes on to the user code that called it.
+        let site_of = |mut below: usize| loop {
+            break match chain.get(below) {
                 Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
+                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
+                    below = below.saturating_add(1);
+                    continue;
+                }
                 Some(Link::Call(_)) | None => None,
             };
-            match &chain[at] {
+        };
+        for (at, link) in chain.iter().enumerate() {
+            let site = site_of(at.saturating_add(1));
+            match link {
                 Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
@@ -6756,9 +6798,11 @@ impl Request {
     /// appended to the file `error_log` names, as it stands when the
     /// entry is written, opened `O_CREAT | O_APPEND` against the working
     /// directory with the permissions `error_log_mode` names where they
-    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
-    /// log where no file is named, where it names `syslog`, or where the
-    /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
+    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`;
+    /// through the registered [`Syslog`] at `priority` where it names
+    /// `syslog`; the host's log where no file is named, where it names
+    /// `syslog` and no [`Syslog`] is registered, or where the file
+    /// cannot be opened. The stamp is `d-M-Y H:i:s e` in the
     /// request's default zone ([`Request::log_stamp`]). Whether the
     /// host's log took it; nothing, and `false`, while an entry is being
     /// logged already, `PG(in_error_log)`'s guard against re-entry.
@@ -6804,21 +6848,26 @@ impl Request {
     /// prompt> [Script ended normally]
     /// prompt>
     /// ```
-    fn log_err(&mut self, entry: &[u8]) -> bool {
+    fn log_err(&mut self, entry: &[u8], priority: i32) -> bool {
         if self.in_error_log {
             return false;
         }
         self.in_error_log = true;
-        let took = self.log_err_guarded(entry);
+        let took = self.log_err_guarded(entry, priority);
         self.in_error_log = false;
         took
     }
 
     /// [`Request::log_err`] inside its guard.
-    fn log_err_guarded(&mut self, entry: &[u8]) -> bool {
+    fn log_err_guarded(&mut self, entry: &[u8], priority: i32) -> bool {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
+        let syslog = self.registered::<Syslog>().next().copied();
         let named = self.ini_get(b"error_log").unwrap_or_default();
+        if let (b"syslog", Some(Syslog(syslog))) = (named, syslog) {
+            syslog(self, priority, entry);
+            return false;
+        }
         if named.is_empty() || named == b"syslog" {
             self.sink.get().log(entry);
             return true;
@@ -7192,7 +7241,19 @@ impl Request {
         }
         // "Always clear the last backtrace."
         self.clear_fatal_error_backtrace();
-        if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        // "Report about uncaught exception in case of fatal errors": the
+        // pending throwable rendered as a warning and given up, and no
+        // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
+        // object in the slot that is no `Throwable`, which no PHP code
+        // leaves there, stays where it is.
+        if let Some(Raised::Throwable(pending)) = self.raised {
+            let throwable = self
+                .class_named(b"Throwable")
+                .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
+            if throwable && fatal_errors(level) {
+                let _ = self.exception_error(Level::Warning);
+            }
+        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
@@ -7288,7 +7349,18 @@ impl Request {
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
             };
-            let logged = self.log_err(&text);
+            // `syslog_type_int`: `LOG_ERR`, `LOG_WARNING`, `LOG_INFO`
+            // for a deprecation, `LOG_NOTICE` for the rest.
+            let priority = match level {
+                _ if fatal_errors(level) => 3,
+                Level::Warning
+                | Level::CoreWarning
+                | Level::CompileWarning
+                | Level::UserWarning => 4,
+                Level::Deprecated | Level::UserDeprecated => 6,
+                _ => 5,
+            };
+            let logged = self.log_err(&text, priority);
             self.heap.free_block(buffer);
             if logged && fatal_errors(level) {
                 // What follows a fatal in the host's log is still inside
@@ -7487,9 +7559,31 @@ impl Request {
         last.line != line || last.file.as_bytes() != file
     }
 
-    /// `log_errors`, whether a diagnostic reaches the host's log.
+    /// `log_errors`, whether a diagnostic reaches the host's log; one
+    /// raised as the engine starts, before php's `module_initialized`,
+    /// reaches it too while `display_startup_errors` or `display_errors`
+    /// is off (`Z/main/main.c:1453-1454`):
+    ///
+    /// ```php
+    /// foreach (['display_startup_errors', 'display_errors'] as $off) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'disable_functions=exit', '-d', "$off=0", '-r', 'echo 1;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     var_dump(stream_get_contents($pipes[1]), stream_get_contents($pipes[2])); proc_close($p);
+    /// }
+    /// ```
+    /// ```expect process
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// ```
     fn log_errors(&self) -> bool {
+        let off = |name: &[u8]| self.ini_get(name).is_some_and(|v| !ini_truth(Some(v)));
         ini_truth(self.ini_get(b"log_errors"))
+            || (self.display_direct
+                && (off(b"display_startup_errors")
+                    || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic
@@ -18146,7 +18240,7 @@ impl Request {
     /// `error_log()` to the host's log: `php_log_err` with the message
     /// as given, one entry.
     pub fn error_log(&mut self, message: &[u8]) {
-        let _ = self.log_err(message);
+        let _ = self.log_err(message, 5);
     }
 
     /// `EG(error_reporting)` as it stands: what `error_reporting()`
@@ -20149,7 +20243,7 @@ impl Request {
     /// error_prepend_string => no value => no value
     /// error_reporting => 30719 => 30719
     /// expose_php => On => On
-    /// extension_dir => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925 => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925
+    /// extension_dir => %s => %s
     /// fatal_error_backtraces => Off => Off
     /// fiber.stack_size => no value => no value
     /// file_uploads => On => On
@@ -20164,7 +20258,7 @@ impl Request {
     /// ignore_repeated_source => Off => Off
     /// ignore_user_abort => Off => Off
     /// implicit_flush => On => On
-    /// include_path => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear
+    /// include_path => %s => %s
     /// input_encoding => no value => no value
     /// internal_encoding => no value => no value
     /// log_errors => Off => Off
@@ -20266,7 +20360,7 @@ impl Request {
     /// <tr><td class="e">error_prepend_string</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">error_reporting</td><td class="v">30719</td><td class="v">30719</td></tr>
     /// <tr><td class="e">expose_php</td><td class="v">On</td><td class="v">On</td></tr>
-    /// <tr><td class="e">extension_dir</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td></tr>
+    /// <tr><td class="e">extension_dir</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">fatal_error_backtraces</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">fiber.stack_size</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">file_uploads</td><td class="v">On</td><td class="v">On</td></tr>
@@ -20281,7 +20375,7 @@ impl Request {
     /// <tr><td class="e">ignore_repeated_source</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">ignore_user_abort</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">implicit_flush</td><td class="v">Off</td><td class="v">Off</td></tr>
-    /// <tr><td class="e">include_path</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td></tr>
+    /// <tr><td class="e">include_path</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">input_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">log_errors</td><td class="v">Off</td><td class="v">Off</td></tr>

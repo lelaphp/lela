@@ -58,6 +58,20 @@ fn a_configuration_test_says_the_file_is_sound() {
     assert!(out.status.success(), "{out:?}");
 }
 
+/// With no `-y`, the file tested is `php-fpm.conf` under the engine's
+/// `PHP_SYSCONFDIR`, the build's layout (#1404), named whether it opens
+/// or not.
+#[test]
+fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        .args(["-n", "-t"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    let expected = format!("{}/php-fpm.conf", php_sapi::PHP_SYSCONFDIR);
+    assert!(said.contains(&expected), "{out:?}");
+}
+
 /// One `FastCGI` record of request 1.
 fn record(kind: u8, content: &[u8]) -> Vec<u8> {
     let len = u16::try_from(content.len()).unwrap().to_be_bytes();

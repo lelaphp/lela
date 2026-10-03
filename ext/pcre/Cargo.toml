@@ -15,8 +15,14 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 # libpcre2-8 with its JIT (design §7.2), bound in `src/ffi/` alone
-# (`unsafe.homes`).
+# (`unsafe.homes`): the library the pinned keg links, found through
+# pkg-config and never vendored, the crate's declarations kept (#624, #717).
 pcre2-sys = { workspace = true }
+
+# `build.rs` fails the build where pkg-config finds no libpcre2-8, rather
+# than let pcre2-sys fall back to the source it bundles.
+[build-dependencies]
+pkg-config = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

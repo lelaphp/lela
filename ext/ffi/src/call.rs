@@ -7,7 +7,7 @@
 
 use php_ext::abi::Callable;
 use php_ext::coerce::{callable_checked, to_double, to_long, to_string, truthy, value_name};
-use php_ext::raising::{Thrown, fatal};
+use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
@@ -498,7 +498,48 @@ pub(crate) fn create_callback(
 /// are read into PHP values, the callable called, and its return
 /// written back where C reads it, unless `ret` is zero because C was
 /// given a zeroed return already. A throwable the callable leaves is
-/// php's fatal, since it cannot unwind through C.
+/// php's fatal, since it cannot unwind through C, and the fatal reports
+/// it first as a warning, as `zend_error_noreturn` does with
+/// `EG(exception)` set, whether C called the callback inside a call
+/// into C or from a signal handler served at the interrupt check:
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
+/// $ffi->signal(SIGUSR1, function ($sig) { echo "caught $sig\n"; throw new Exception("x"); });
+/// try { echo "a" . $ffi->raise(SIGUSR1) . "b\n"; } catch (Throwable $e) { echo get_class($e), "\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect process exit=255
+/// caught %d
+///
+/// Warning: Uncaught Exception: x in %s:3
+/// Stack trace:
+/// #0 %s(4): {closure:%s:3}(%d)
+/// #1 %s(4): FFI->raise(%d)
+/// #2 {main}
+///   thrown in %s on line 3
+///
+/// Fatal error: Throwing from FFI callbacks is not allowed in %s on line 4
+/// ```
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h);");
+/// $ffi->signal(SIGUSR1, function ($sig) { echo "caught $sig\n"; throw new Exception("x"); });
+/// try { posix_kill(posix_getpid(), SIGUSR1); echo "after\n"; } catch (Throwable $e) { echo get_class($e), "\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect process exit=255
+/// caught %d
+///
+/// Warning: Uncaught Exception: x in %s:3
+/// Stack trace:
+/// #0 [internal function]: {closure:%s:3}(%d)
+/// #1 %s(4): posix_kill(%d, %d)
+/// #2 {main}
+///   thrown in %s on line 3
+///
+/// Fatal error: Throwing from FFI callbacks is not allowed in %s on line 4
+/// ```
 fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
     let Some((callable, ty)) = req
         .state::<State>()
@@ -532,9 +573,19 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
     for value in values {
         req.release(value);
     }
-    let Ok(returned) = called else {
-        let _ = fatal(req, "Throwing from FFI callbacks is not allowed");
-        return;
+    let returned = match called {
+        Ok(returned) => returned,
+        Err(thrown) => {
+            // `zend_error_noreturn` with `EG(exception)` set, which
+            // reports the throwable as a warning before the fatal.
+            let refuse = |req: &mut Request| {
+                let _ = fatal(req, "Throwing from FFI callbacks is not allowed");
+            };
+            if while_pending(req, &thrown, refuse).is_none() {
+                refuse(req);
+            }
+            return;
+        }
     };
     if ret != 0 && !matches!(types(req).get(shape.ret).kind, Kind::Void) {
         let _ = write_value(req, ret, shape.ret, &returned);

@@ -125,11 +125,16 @@ pub fn main() -> ExitCode {
         Ask::Version => started(&options.ini, version),
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => started(&options.ini, php_sapi::modules),
-        Ask::Server(server) => server::run(
-            server_engine(&options.ini),
-            server,
-            php_sapi::ini::enabled(&options.ini, "cli_server.color", false),
-        ),
+        Ask::Server(server) => {
+            let engine = server_engine(&options.ini);
+            match request::started(&engine, server::NAME) {
+                0 => {
+                    let color = php_sapi::ini::enabled(&options.ini, "cli_server.color", false);
+                    server::run(engine, server, color)
+                }
+                failed => failed,
+            }
+        }
         ask => {
             if options.interactive {
                 print("Interactive shell\n\n");
@@ -215,7 +220,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 /// ```
 fn started(ini: &[(String, String)], text: fn(&Engine) -> String) -> i32 {
     let engine = engine(ini);
-    match request::started(&engine) {
+    match request::started(&engine, NAME) {
         0 => print(&text(&engine)),
         failed => failed,
     }

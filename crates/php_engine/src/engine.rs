@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use php_compile::multibyte::Multibyte;
@@ -628,9 +628,11 @@ pub(crate) struct Shared {
     startup_errors: String,
     /// What the extensions' `on_modify` raised as the engine registered
     /// their ini entries ([`Engine::register_ini`]), which php shows once
-    /// `php_module_startup` is done and before any request's `RINIT`:
-    /// each request raises it again first, at no file and no line.
+    /// `php_module_startup` is done and before any request's `RINIT`,
+    /// once: the first request raises it first, at no file and no line.
     startup_raised: Vec<(Level, Vec<u8>)>,
+    /// Whether a request has raised [`Shared::startup_raised`].
+    startup_shown: AtomicBool,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -1432,8 +1434,8 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     ("internal_encoding", None),
     ("input_encoding", None),
     ("output_encoding", None),
-    // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
-    // which `DEFAULT_INCLUDE_PATH` says too.
+    // `PHP_INCLUDE_PATH`, this build's `.:${PEAR_INSTALLDIR}`, which
+    // `DEFAULT_INCLUDE_PATH` says too.
     ("include_path", Some(crate::constants::PHP_INCLUDE_PATH)),
     // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
     // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
@@ -2549,6 +2551,7 @@ impl EngineBuilder {
                 shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
+                startup_shown: AtomicBool::new(false),
                 configuration: configuration.table,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
@@ -3392,9 +3395,13 @@ impl Engine {
         let _ = req.hash_environment();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
-        // sent by it and a session may still start.
-        for (level, message) in &self.shared.startup_raised {
-            req.note_startup_error(*level, message);
+        // sent by it and a session may still start; and once, as php
+        // writes it to the process's `stdout` as its modules start, so a
+        // later request of a long-lived host carries none of it.
+        if !self.shared.startup_shown.swap(true, Ordering::Relaxed) {
+            for (level, message) in &self.shared.startup_raised {
+                req.note_startup_error(*level, message);
+            }
         }
         // An `E_CORE_ERROR` bailed out of `php_module_startup`, which
         // failed, and the host ends with status 1 before any request.
@@ -3612,8 +3619,8 @@ impl Engine {
         // deactivated after them, with the header block committed if
         // nothing had, and the shutdown entries freed behind it
         // (`php_free_shutdown_functions`); then `PG(http_globals)` given
-        // up; then `shutdown_executor`,
-        // which closes the open resources first, destroys the symbol
+        // up; then `shutdown_executor`, after each extension's
+        // `deactivate`, which closes the open resources first, destroys the symbol
         // table after them (`zend_shutdown_executor_values`) and frees
         // the object storage last. The globals stand through all of it,
         // as php's `EG(symbol_table)` does, so the shutdown functions
@@ -3653,6 +3660,14 @@ impl Engine {
         req.free_shutdown_functions();
         req.destroy_http_globals();
         req.destroy_uploaded_files();
+        // `zend_deactivate` reaches `shutdown_executor`: each extension's
+        // `deactivate`, in reverse, before the resources are closed.
+        for extension in self.shared.extensions.iter().rev() {
+            if let Some(deactivate) = extension.deactivate {
+                deactivate(req);
+            }
+        }
+        req.catch_bailout();
         req.close_resources();
         req.return_persistent();
         req.free_user_handlers();
@@ -4270,6 +4285,20 @@ mod tests {
         };
         assert_eq!(dir_under("/srv/one"), "/srv/one");
         assert_eq!(dir_under("/srv/two"), "/srv/two");
+    }
+
+    /// `error_log=syslog` with no `request::Syslog` registered, as
+    /// without ext/standard: the entry reaches the host's log (#1364).
+    #[test]
+    fn error_log_syslog_without_a_registered_syslog_reaches_the_host_s_log() {
+        let engine = Engine::builder().ini("error_log", "syslog").build();
+        let mut sink = Kept::default();
+        let source = "<?php ini_set('log_errors', 1); ini_set('display_errors', 0); echo $u;";
+        engine.serve(description(source), &mut sink);
+        assert_eq!(
+            sink.logged(),
+            "PHP Warning:  Undefined variable $u in witness.php on line 1\n"
+        );
     }
 
     fn served(engine: &Engine, source: &str) -> (String, Observables) {

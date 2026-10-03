@@ -1391,7 +1391,7 @@ fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
 /// var_dump(ini_restore("nope"), ini_restore("enable_dl"));
 /// ```
 /// ```expect
-/// string(47) ".:/opt/homebrew/Cellar/php/8.5.9/share/php/pear"
+/// string(%d) "%s"
 /// NULL
 /// bool(true)
 /// 0.33333333333333

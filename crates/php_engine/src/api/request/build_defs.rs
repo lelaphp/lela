@@ -105,8 +105,11 @@ pub(crate) fn build_date() -> String {
 }
 
 #[cfg(test)]
+mod layout;
+
+#[cfg(test)]
 mod tests {
-    use super::{configure, date};
+    use super::{configure, date, layout::layout};
 
     #[test]
     fn the_build_date_is_phps_date_and_time_in_utc() {
@@ -122,5 +125,80 @@ mod tests {
             configure(&["--enable-mbstring", "--with-openssl"]),
             "'--enable-mbstring' '--with-openssl'"
         );
+    }
+
+    /// What `./configure --disable-all` writes into `main/build-defs.h`
+    /// at the pin, and with `--prefix=/opt/x`: every value follows the
+    /// prefix, and php-fpm's default configuration is
+    /// `$sysconfdir/php-fpm.conf`.
+    #[test]
+    fn the_layout_is_configures_with_no_option_and_follows_the_prefix() {
+        let at = |prefix: &str| {
+            let named = |name: &str| {
+                (name == "PHP_PREFIX" && !prefix.is_empty()).then(|| prefix.to_owned())
+            };
+            layout(&named)
+        };
+        let value = |layout: &[(&str, String)], name: &str| {
+            layout
+                .iter()
+                .find(|(each, _)| *each == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        for (prefix, root) in [("", "/usr/local"), ("/opt/x", "/opt/x")] {
+            let layout = at(prefix);
+            let expected = [
+                ("PEAR_INSTALL_DIR", String::new()),
+                ("PHP_INCLUDE_PATH", ".:".to_owned()),
+                (
+                    "PHP_EXTENSION_DIR",
+                    format!("{root}/lib/php/extensions/no-debug-non-zts-20250925"),
+                ),
+                ("PHP_PREFIX", root.to_owned()),
+                ("PHP_BINDIR", format!("{root}/bin")),
+                ("PHP_SBINDIR", format!("{root}/sbin")),
+                ("PHP_MANDIR", format!("{root}/php/man")),
+                ("PHP_LIBDIR", format!("{root}/lib/php")),
+                ("PHP_DATADIR", format!("{root}/share/php")),
+                ("PHP_SYSCONFDIR", format!("{root}/etc")),
+                ("PHP_LOCALSTATEDIR", format!("{root}/var")),
+                ("PHP_CONFIG_FILE_PATH", format!("{root}/lib")),
+                ("PHP_CONFIG_FILE_SCAN_DIR", String::new()),
+            ];
+            assert_eq!(layout.len(), expected.len());
+            for (name, want) in expected {
+                assert_eq!(value(&layout, name), want, "{name} under {root}");
+            }
+        }
+        assert_eq!(
+            format!("{}/php-fpm.conf", value(&at("/opt/x"), "PHP_SYSCONFDIR")),
+            "/opt/x/etc/php-fpm.conf"
+        );
+    }
+
+    #[test]
+    fn a_named_value_is_taken_as_it_is_named() {
+        let named = |name: &str| match name {
+            "PHP_PREFIX" => Some("/p".to_owned()),
+            "PHP_LIBDIR" => Some("/l".to_owned()),
+            "PEAR_INSTALL_DIR" => Some("/pear".to_owned()),
+            "PHP_CONFIG_FILE_SCAN_DIR" => Some("/p/conf.d".to_owned()),
+            _ => None,
+        };
+        let layout = layout(&named);
+        let get = |name: &str| {
+            layout
+                .iter()
+                .find(|(each, _)| *each == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(
+            get("PHP_EXTENSION_DIR"),
+            Some("/l/extensions/no-debug-non-zts-20250925")
+        );
+        assert_eq!(get("PHP_INCLUDE_PATH"), Some(".:/pear"));
+        assert_eq!(get("PHP_CONFIG_FILE_SCAN_DIR"), Some("/p/conf.d"));
+        assert_eq!(get("PHP_SYSCONFDIR"), Some("/p/etc"));
     }
 }

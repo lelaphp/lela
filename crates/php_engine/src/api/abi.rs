@@ -250,6 +250,13 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         entry
     }
 
+    /// The entries idle under every key, which php counts as a process's
+    /// inactive persistent links, `MyG(num_inactive_persistent)`.
+    #[must_use]
+    pub fn idle_len(&self) -> usize {
+        self.idle().values().map(Vec::len).sum()
+    }
+
     /// `entry` given back under `key` at the end of the request that
     /// held it; past the bound it is handed back to the caller, whose
     /// drop closes it outside the `Mutex`.
@@ -623,6 +630,8 @@ pub struct Extension {
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
+    /// What [`ExtensionBuilder::deactivate`] was handed.
+    pub(crate) deactivate: Option<fn(&mut Request)>,
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) ticks: Option<TicksHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
@@ -691,6 +700,7 @@ pub struct ExtensionBuilder {
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
+    deactivate: Option<fn(&mut Request)>,
     interrupt: Option<InterruptHook>,
     ticks: Option<TicksHook>,
     compile_file: Option<CompileFileHook>,
@@ -892,6 +902,20 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn rshutdown(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.rshutdown = Some(hook);
+        self
+    }
+
+    /// Served after every extension's `rshutdown`, where php's
+    /// `zend_deactivate` reaches `shutdown_executor`
+    /// (`Z/Zend/zend.c:1352`), before the open resources are closed
+    /// (`Z/Zend/zend_execute_API.c:277`) and the objects freed: every
+    /// extension's hook in reverse bundle order, with every request
+    /// state still live. What php frees with the request's objects and
+    /// resources, which another extension's `RSHUTDOWN` may still use,
+    /// such as a link a session save handler writes through.
+    #[must_use]
+    pub fn deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.deactivate = Some(hook);
         self
     }
 
@@ -1213,6 +1237,7 @@ impl ExtensionBuilder {
             engine_state: self.engine_state,
             rinit: self.rinit,
             rshutdown: self.rshutdown,
+            deactivate: self.deactivate,
             interrupt: self.interrupt,
             ticks: self.ticks,
             compile_file: self.compile_file,

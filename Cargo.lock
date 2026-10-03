@@ -968,6 +968,8 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_mysqlnd",
+ "php_ext_session",
+ "php_ext_standard",
 ]
 
 [[package]]
@@ -1011,6 +1013,7 @@ version = "0.0.0"
 dependencies = [
  "pcre2-sys",
  "php_ext",
+ "pkg-config",
 ]
 
 [[package]]

@@ -128,7 +128,7 @@ fn usage(argv0: &[u8]) -> String {
          \x20                  force output to stderr in nodaemonize even if stderr is not a TTY\n\
          \x20 -R, --allow-to-run-as-root\n\
          \x20                  Allow pool to run as root (disabled by default)\n",
-        conf::PHP_PREFIX
+        php_sapi::PHP_PREFIX
     )
 }
 
