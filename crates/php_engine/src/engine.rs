@@ -2434,7 +2434,11 @@ impl EngineBuilder {
             // configuration table, where `get_cfg_var()` finds it, as
             // `zend_register_ini_entries_ex` reads that table by the
             // names it registers and by no other.
-            if !ini.iter().any(|(n, _)| *n == name) {
+            // `zend_register_ini_entries_ex` takes the value only where
+            // the entry's `on_modify` does, and the default stays.
+            if !ini.iter().any(|(n, _)| *n == name)
+                || Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected
+            {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);

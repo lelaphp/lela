@@ -21322,12 +21322,42 @@ impl Request {
     /// string(1) "&"
     /// string(1) "&"
     /// ```
+    ///
+    /// `OnUpdateStringUnempty`'s entries (`Z/main/main.c:829-851`)
+    /// refuse the empty value too, at startup as at `ini_set`, and keep
+    /// what they held: `-d extension_dir=` leaves `PHP_EXTENSION_DIR`,
+    /// where an `extension=` line looks.
+    ///
+    /// ```php
+    /// var_dump(ini_set('include_path', ''), ini_get('include_path') !== '');
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=', '-d', 'variables_order=', '-d', 'extension=x', '-r', 'var_dump(ini_get("extension_dir") === PHP_EXTENSION_DIR, ini_get("variables_order"));'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// preg_match('/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m', $out, $m);
+    /// echo str_replace(PHP_EXTENSION_DIR, 'DIR', "$m[1]: $m[2], $m[3]\n"), substr($out, strpos($out, 'bool'));
+    /// ```
+    /// ```expect process
+    /// bool(false)
+    /// bool(true)
+    /// 0
+    /// PHP Startup: Unable to load dynamic library 'x': DIR/x, DIR/x.so
+    /// bool(true)
+    /// string(5) "EGPCS"
+    /// ```
     pub(crate) fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
             // `OnSetPrecision` and `OnSetSerializePrecision`
             // (`Z/main/main.c:120-141`): nothing below -1.
             b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
-            b"arg_separator.output" | b"arg_separator.input" if value.is_empty() => {
+            b"arg_separator.output"
+            | b"arg_separator.input"
+            | b"extension_dir"
+            | b"include_path"
+            | b"variables_order"
+            | b"doc_root"
+            | b"sys_temp_dir"
+            | b"upload_tmp_dir"
+                if value.is_empty() =>
+            {
                 IniVerdict::Rejected
             }
             b"zend.exception_string_param_max_len"
