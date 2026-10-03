@@ -31,8 +31,9 @@ use anyhow::{Result, bail};
 use super::Subset;
 use crate::oracle::{Oracle, Pin, Program};
 
-/// The corpus directories whose tests need the server.
-const SUITES: [&str; 2] = ["ext/mysqli/tests", "ext/pdo_mysql/tests"];
+/// The corpus directories whose tests need the server: the extensions'
+/// subsets as the design derives them (#1590), and any directory inside.
+const SUITES: [&str; 2] = ["ext/mysqli", "ext/pdo_mysql"];
 
 /// What the pinned php runs to ask: the suites' own defaults where the
 /// recipe names none (`ext/pdo_mysql/tests/inc/config.inc`).
@@ -51,10 +52,11 @@ pub(crate) const START: &str = "`docker compose -f ci/mysql/compose.yaml up -d -
 
 /// Whether the subset's tests need the server.
 pub(crate) fn needs(subset: &Subset) -> bool {
-    subset
-        .dirs
-        .iter()
-        .any(|dir| SUITES.iter().any(|suite| dir.under == Path::new(suite)))
+    subset.dirs.iter().any(|dir| {
+        SUITES
+            .iter()
+            .any(|suite| dir.under.starts_with(Path::new(suite)))
+    })
 }
 
 /// The server's version where the subset needs one and its tests will run

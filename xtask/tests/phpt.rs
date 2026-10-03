@@ -191,6 +191,28 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "run"), 1);
 }
 
+/// An extension's derived subset is every `.phpt` under `ext/<name>`, as
+/// run-tests.php walks the directory, so a test in a directory beside
+/// `tests/`, as `ext/intl/uchar/tests` stands beside `ext/intl/tests`, is
+/// the extension's with no `phpt` key in its row (#1590, #1598).
+#[test]
+fn a_nested_test_directory_is_held_in_the_extensions_derived_subset() {
+    if oracle().is_none() {
+        return;
+    }
+    let pass = "--TEST--\nHeld\n--FILE--\n<?php echo \"ok\";\n--EXPECT--\nok\n";
+    let scratch = Scratch::new("nested", &[("top.phpt", pass)]);
+    let nested = scratch.root.join("corpus/ext/fixture/uchar/tests");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("nested.phpt"), pass).unwrap();
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(reading.scope, "ext/fixture");
+    assert_eq!(count(&reading, "tests"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "files"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 2, "{reading:#?}");
+}
+
 #[test]
 fn the_same_missed_expectation_passes_under_an_accepted_divergence_row() {
     if oracle().is_none() {
@@ -734,16 +756,150 @@ fn planting_engine(scratch: &Scratch) -> PathBuf {
     path
 }
 
-/// The ids `ipcs -a` lists of one kind, `m`, `s` or `q`.
-fn ipcs_ids(kind: &str) -> Vec<String> {
-    let listed = Command::new("ipcs").arg("-a").output().unwrap();
-    String::from_utf8_lossy(&listed.stdout)
+/// One object `ipcs -a` lists, read by its section's header line as the
+/// sweep reads it: its kind's letter, id, key, mode and the process that
+/// made a segment or last sent to a queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ipc {
+    kind: String,
+    id: String,
+    key: String,
+    mode: String,
+    pid: String,
+}
+
+/// The processes that last operated on each semaphore of the set `id`, as
+/// the sweep reads them, `ipcs` printing none.
+fn semaphore_pids(id: &str) -> Vec<String> {
+    let read = Command::new("perl")
+        .args([
+            "-e",
+            "use IPC::SysV qw(GETPID); for (my $i = 0; defined(my $pid = semctl($ARGV[0], $i, GETPID, 0)); $i++) { print \"$pid\\n\" }",
+            id,
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&read.stdout)
         .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            (fields.next()? == kind).then(|| fields.next().map(str::to_owned))?
-        })
+        .map(str::to_owned)
         .collect()
+}
+
+/// Every object `ipcs -a` lists now.
+fn ipcs() -> Vec<Ipc> {
+    let listed = Command::new("ipcs").arg("-a").output().unwrap();
+    let mut header: Vec<String> = Vec::new();
+    let mut objects = Vec::new();
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.first() {
+            Some(&"T") => header = fields.iter().map(|f| (*f).to_owned()).collect(),
+            Some(kind) if ["m", "s", "q"].contains(kind) => {
+                let column = |name: &str| {
+                    header
+                        .iter()
+                        .position(|h| h == name)
+                        .and_then(|at| fields.get(at))
+                        .map(|v| (*v).to_owned())
+                        .unwrap_or_default()
+                };
+                objects.push(Ipc {
+                    kind: (*kind).to_owned(),
+                    id: column("ID"),
+                    key: column("KEY"),
+                    mode: column("MODE"),
+                    pid: if *kind == "m" {
+                        column("CPID")
+                    } else {
+                        column("LSPID")
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+    objects
+}
+
+/// Whether `ipcs -a` here prints the tables with a `T` header line, which
+/// is all the sweep reads; why the test returns where it does not.
+fn ipcs_readable() -> Option<&'static str> {
+    let Ok(listed) = Command::new("ipcs").arg("-a").output() else {
+        return Some("no ipcs on this machine");
+    };
+    let readable = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .any(|line| line.starts_with("T "));
+    (!readable)
+        .then_some("ipcs prints no table with a `T` header here, which is all the sweep reads")
+}
+
+/// What the test's program made, read off the machine while it stands,
+/// and what `perl` made beside it.
+struct Made {
+    /// The segment, the set and the keyed queue, each naming its process.
+    named: Vec<Ipc>,
+    /// The unused private queue, by the id the program printed; none where
+    /// another run made one in the same moment and it is not told apart.
+    unused: Option<Ipc>,
+    /// The ids of `perl`'s segment and keyed queue, a space between.
+    perl: String,
+}
+
+/// Wait for the test's program to print its pid and the private queues
+/// that appeared between its two reads of `ipcs -q` at `started`, read
+/// its objects off the machine, have `perl` make a private segment and a
+/// keyed queue, and mark `made` so the program ends.
+fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
+    let mut printed = String::new();
+    for _ in 0..500 {
+        printed = fs::read_to_string(started).unwrap_or_default();
+        if !printed.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut words = printed.split_whitespace();
+    let pid = words.next().unwrap_or_default().to_owned();
+    let appeared: Vec<&str> = words.collect();
+    let unused = if let [one] = appeared.as_slice() {
+        Some(Ipc {
+            kind: "q".to_owned(),
+            id: (*one).to_owned(),
+            key: "0x00000000".to_owned(),
+            mode: String::new(),
+            pid: String::new(),
+        })
+    } else {
+        eprintln!("the unused queue is not told apart: {appeared:?}");
+        None
+    };
+    let keyed = format!(
+        "0x{:08x}",
+        0x5a00_0000 + pid.parse::<u64>().unwrap_or(u64::MAX - 0x5a00_0000)
+    );
+    let named = ipcs()
+        .into_iter()
+        .filter(|o| !stood.contains(o))
+        .filter(|o| match o.kind.as_str() {
+            "m" => o.pid == pid,
+            "s" => o.key == "0x00000000" && semaphore_pids(&o.id).contains(&pid),
+            _ => o.key == keyed,
+        })
+        .collect();
+    let perl = Command::new("perl")
+        .args([
+            "-e",
+            "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600), ' ', msgget(0x5b000000 + $$, IPC_CREAT | 0600)",
+        ])
+        .output()
+        .unwrap();
+    fs::write(made, "").unwrap();
+    Made {
+        named,
+        unused,
+        perl: String::from_utf8(perl.stdout).unwrap(),
+    }
 }
 
 /// A run removes what its own tests leave of System V IPC (#1412): a
@@ -753,64 +909,85 @@ fn ipcs_ids(kind: &str) -> Vec<String> {
 /// process, as php's `msg_get_queue(0)` leaves one (#1482); while a
 /// segment another process creates while the test runs, `perl` here,
 /// stands, and so does a keyed queue `perl` makes then as the runner's own
-/// user, naming no process either. The control: a runner that removes
-/// every object new since the run began with nothing attached removes
-/// those two too.
+/// user, naming no process either.
+///
+/// Another run on the machine may make private objects of this user in
+/// the same seconds, which the rule for an object naming no process takes
+/// as this run's, and its own sweep may take this test's private queue
+/// (#1582). So the test counts only the objects its own program made,
+/// each told apart by what it printed: its pid, which names the segment
+/// and the set and is in the keyed queue's key, and the id of the private
+/// queue that appeared between two reads of `ipcs -q` around it. It holds
+/// those gone; the reading's count is at
+/// least the three that name the test's process, which no other run's
+/// sweep can take.
 #[test]
 fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     if oracle().is_none() {
         return;
     }
-    if Command::new("ipcs").arg("-a").output().is_err() {
-        eprintln!("skipped: no ipcs on this machine");
+    if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
         return;
     }
     let marks = Tree::new("phpt-sysv-marks").unwrap();
     let (started, made) = (marks.join("started"), marks.join("made"));
     let leaves = format!(
-        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\ntouch('{}');\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\n$m = shmop_open(0, \"c\", 0600, 64);\n$s = sem_get(0, 1);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid());\nmsg_send($q, 1, \"x\");\n$unused = msg_get_queue(0);\necho \"left\";\n--EXPECT--\nleft\n",
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\n$m = shmop_open(0, \"c\", 0604, 64);\n$s = sem_get(0, 1, 0604);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid(), 0604);\nmsg_send($q, 1, \"x\");\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$unused = msg_get_queue(0);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\necho \"left\";\n--EXPECT--\nleft\n",
         started.display(),
         made.display()
     );
     let scratch = Scratch::new("sysv", &[("leaves.phpt", &leaves)]);
-    // Another process's segment, made while the test runs: new since the
-    // subset began, nothing attached, and its creator no process of the run.
-    let outside = std::thread::spawn(move || {
-        for _ in 0..500 {
-            if started.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let made_by_perl = Command::new("perl")
-            .args([
-                "-e",
-                "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600), ' ', msgget(0x5b000000 + $$, IPC_CREAT | 0600)",
-            ])
-            .output()
-            .unwrap();
-        fs::write(&made, "").unwrap();
-        String::from_utf8(made_by_perl.stdout).unwrap()
-    });
+    let stood: Vec<Ipc> = ipcs();
+    // While the test's program stands, its objects are read off the
+    // machine by what it printed, and another process makes a segment and
+    // a keyed queue: new since the subset began, nothing attached, and
+    // their creator no process of the run.
+    let outside = std::thread::spawn(move || made_while_it_runs(&started, &made, &stood));
     let reading = scratch.run(&registry(""), &scratch.engine);
-    let outside = outside.join().unwrap();
-    let (segment, keyed) = outside.split_once(' ').unwrap_or((&outside, ""));
-    let (segments, queues) = (ipcs_ids("m"), ipcs_ids("q"));
+    let made = outside.join().unwrap();
+    let (segment, keyed) = made.perl.split_once(' ').unwrap_or((&made.perl, ""));
+    let after = ipcs();
     let _ = Command::new("ipcrm").args(["-m", segment]).status();
     let _ = Command::new("ipcrm").args(["-q", keyed]).status();
     assert!(
         !segment.is_empty() && !keyed.is_empty(),
-        "perl made {outside:?}"
+        "perl made {:?}",
+        made.perl
     );
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(count(&reading, "sysv_removed"), 4, "{reading:#?}");
-    assert!(
-        segments.iter().any(|id| id == segment),
-        "the segment perl made, {segment}, was removed: {segments:?}"
+    let mut kinds: Vec<&str> = made.named.iter().map(|o| o.kind.as_str()).collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        ["m", "q", "s"],
+        "the test's program made a segment, a set and a keyed queue: {:#?}",
+        made.named
+    );
+    // The unused queue by the id the program printed, which another run's
+    // sweep may have taken before it was read here.
+    let standing: Vec<&Ipc> = made
+        .named
+        .iter()
+        .chain(&made.unused)
+        .filter(|o| after.iter().any(|a| a.kind == o.kind && a.id == o.id))
+        .collect();
+    assert_eq!(
+        standing,
+        Vec::<&Ipc>::new(),
+        "the run left its test's objects"
     );
     assert!(
-        queues.iter().any(|id| id == keyed),
-        "the keyed queue perl made, {keyed}, was removed: {queues:?}"
+        count(&reading, "sysv_removed") >= 3,
+        "the run removed the three objects that name its test's process: {reading:#?}"
+    );
+    assert!(
+        after.iter().any(|o| o.kind == "m" && o.id == segment),
+        "the segment perl made, {segment}, was removed"
+    );
+    assert!(
+        after.iter().any(|o| o.kind == "q" && o.id == keyed),
+        "the keyed queue perl made, {keyed}, was removed"
     );
 }
 

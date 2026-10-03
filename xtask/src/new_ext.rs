@@ -212,8 +212,8 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
     let mut out = format!(
         "//! The `{name}` extension: `php-src/ext/{name}` as one crate under `ext/`\n\
          //! (ADR-0004). One dependency, the facade; one entry, `extension()`; its\n\
-         //! state on the value (ADR-0005). The phpt subset is\n\
-         //! `php-src/ext/{name}/tests`, through `xtask phpt --subset`.\n\
+         //! state on the value (ADR-0005). The phpt subset is every `.phpt`\n\
+         //! under `php-src/ext/{name}`, through `xtask phpt --subset`.\n\
          #![forbid(unsafe_code)]\n"
     );
     out.push_str(&lint_attributes(manifest, &format!("ext/{name}")));

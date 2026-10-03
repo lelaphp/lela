@@ -99,11 +99,12 @@
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
-//! owns `ext/<name>/tests` by the design, and a crate that owns none is
-//! asked for no phpt reading. A bare call is the per-commit lane, which is
-//! every subset of every crate the binary under test carries, in manifest
-//! order (harness §7, revision 63; [`Carried`]); `--subset` is one crate's
-//! subsets or one directory of the pinned tree.
+//! owns every `.phpt` under `ext/<name>` by the design (#1590), and a
+//! crate that owns none is asked for no phpt reading. A bare call is the
+//! per-commit lane, which is every subset of every crate the binary under
+//! test carries, in manifest order (harness §7, revision 63;
+//! [`Carried`]); `--subset` is one crate's subsets or one directory of
+//! the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
@@ -341,17 +342,19 @@ impl Subset {
     }
 
     /// Every subset of the corpus at `source`: the nightly lane's, which
-    /// is `Zend`, `tests` and every `tests` directory under `ext` and
-    /// `sapi`.
+    /// is `Zend/tests`, `tests`, every `tests` directory under `sapi` and
+    /// every extension's subset as a row with no `phpt` key derives it,
+    /// `ext/<name>` whole (#1590), each where it holds a `.phpt`.
     pub(crate) fn corpus(source: &Path) -> Vec<Subset> {
         let mut subsets = Vec::new();
         let mut push = |under: PathBuf| {
-            if source.join(&under).is_dir() {
-                subsets.push(Subset {
-                    scope: under.to_string_lossy().into_owned(),
-                    dirs: vec![Dir::at(source, under)],
-                    root: source.to_path_buf(),
-                });
+            let subset = Subset {
+                scope: under.to_string_lossy().into_owned(),
+                dirs: vec![Dir::at(source, under)],
+                root: source.to_path_buf(),
+            };
+            if subset.tests().is_ok_and(|tests| !tests.is_empty()) {
+                subsets.push(subset);
             }
         };
         for name in ["Zend/tests", "tests"] {
@@ -367,7 +370,11 @@ impl Subset {
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                push(Path::new(parent).join(name).join("tests"));
+                push(if parent == "ext" {
+                    crate::manifest::derived_subset(name)
+                } else {
+                    Path::new(parent).join(name).join("tests")
+                });
             }
         }
         subsets
@@ -554,13 +561,15 @@ pub(crate) fn reading(
     } = under;
     let scope = subset.scope(runner, lane);
     let absent = subset.absent();
-    // A directory the design derives for an extension and the pinned tree
-    // has not: an extension with no tests of its own, whose reading is a
-    // skip naming the directory, and not the manifest and the pin
-    // disagreeing, which a row that names its directories is (#1231).
+    // A directory the design derives for an extension that the pinned tree
+    // has not, or that holds no `.phpt`: an extension with no tests of its
+    // own, whose reading is a skip naming the directory, and not the
+    // manifest and the pin disagreeing, which a row that names its
+    // directories is (#1231, #1598).
     let testless = manifest
         .crate_named(&subset.scope)
-        .is_some_and(Crate::derives_subset);
+        .is_some_and(Crate::derives_subset)
+        && (!absent.is_empty() || subset.tests()?.is_empty());
     // A subset of a crate not yet created: its tests are that crate's, and
     // an engine built without it would not answer for it, so the reading
     // says so ahead of whether an engine is built, as `budget` and
@@ -574,7 +583,7 @@ pub(crate) fn reading(
     // and the pin disagree, and no run can settle it. It is the reading,
     // ahead of whether an engine is built, because building one would not
     // answer it.
-    let outcome = if !absent.is_empty() && testless {
+    let outcome = if testless {
         Outcome::Absent(NO_TESTS)
     } else if !absent.is_empty() {
         Outcome::Failed
@@ -722,13 +731,16 @@ fn words(
     manifest: &Manifest,
 ) -> String {
     let absent = subset.absent();
-    if uncreated && absent.is_empty() {
+    // A derived subset the tree has but holds no `.phpt`: named as an
+    // absent one is, by its directory.
+    let empty = absent.is_empty() && matches!(outcome, Outcome::Absent(why) if *why == NO_TESTS);
+    if uncreated && absent.is_empty() && !empty {
         format!(
             "{scope}: {}; the subset holds {} tests",
             sources::NOT_YET_CREATED,
             tally.found
         )
-    } else if absent.is_empty() {
+    } else if absent.is_empty() && !empty {
         match &outcome {
             Outcome::Failed => format!(
                 "{scope}: {} of {} missed their expectation{}",
@@ -765,17 +777,30 @@ fn words(
             ),
         }
     } else {
-        let named: Vec<String> = absent
-            .iter()
-            .map(|under| under.to_string_lossy().into_owned())
-            .collect();
+        let named: Vec<String> = if empty {
+            subset
+                .dirs
+                .iter()
+                .map(|place| place.under.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            absent
+                .iter()
+                .map(|under| under.to_string_lossy().into_owned())
+                .collect()
+        };
         let named: Vec<&str> = named.iter().map(String::as_str).collect();
         let (whose, why) = match outcome {
             Outcome::Absent(why) => ("the design derives", format!("; {why}")),
             _ => ("the [[crate]] row names", String::new()),
         };
+        let has = if empty {
+            "holds no .phpt under it"
+        } else {
+            "has no such directory"
+        };
         format!(
-            "{scope}: {whose} {}, and the pinned php-src at {} ({}) has no such directory{why}",
+            "{scope}: {whose} {}, and the pinned php-src at {} ({}) {has}{why}",
             listed(&named),
             source.display(),
             manifest.pin.source.tag

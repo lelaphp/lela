@@ -276,3 +276,66 @@ fn the_namespace_is_unshare_around_the_binary() {
         assert_eq!(Namespace::of("ext/sysvmsg"), None);
     }
 }
+
+/// Which namespace a System V subset runs in on Linux: the bare one where
+/// `unshare --ipc` runs, as root or in a container with the capability
+/// does; the one in the runner's own user namespace where only that runs,
+/// as an unprivileged user does where the kernel allows it; and none
+/// where neither does, as a container under the default seccomp profile
+/// refuses both, where the sweep is what removes a test's objects (#1582).
+#[test]
+fn the_first_namespace_unshare_permits_is_the_one_a_subset_runs_in() {
+    let [bare, user] = Namespace::tries("/usr/bin/unshare");
+    assert_eq!(
+        Namespace::chosen("/usr/bin/unshare", |_| true),
+        Some(bare.clone())
+    );
+    assert_eq!(
+        Namespace::chosen("/usr/bin/unshare", |ns| *ns == user),
+        Some(user.clone())
+    );
+    assert_eq!(
+        user.to_string(),
+        "each program runs in a private IPC namespace (unshare --user --map-current-user --ipc)"
+    );
+    assert_eq!(Namespace::chosen("/usr/bin/unshare", |_| false), None);
+}
+
+/// On Linux, where `unshare` permits one, an object a program makes in the
+/// namespace a System V subset runs in goes with the program: a queue
+/// `ipcmk` makes under it is not on the machine after (#1582). Where it
+/// permits neither, the test says so and returns.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_queue_made_in_the_namespace_does_not_outlive_its_program() {
+    let Some(namespace) = Namespace::of("ext/sysvmsg") else {
+        eprintln!("skipped: unshare permits neither namespace here");
+        return;
+    };
+    let keys = |listed: &[u8]| -> Vec<String> {
+        String::from_utf8_lossy(listed)
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|key| key.starts_with("0x"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let (program, args) = namespace.0.split_first().unwrap();
+    let inside = std::process::Command::new(program)
+        .args(args)
+        .args(["sh", "-c", "ipcmk -Q >/dev/null && ipcs -q"])
+        .output()
+        .unwrap();
+    assert!(inside.status.success(), "{inside:?}");
+    let made = keys(&inside.stdout);
+    assert_eq!(made.len(), 1, "one queue in the namespace: {inside:?}");
+    let outside = std::process::Command::new("ipcs")
+        .arg("-q")
+        .output()
+        .unwrap();
+    assert!(
+        !keys(&outside.stdout).contains(&made[0]),
+        "the queue {} outlived its namespace: {outside:?}",
+        made[0]
+    );
+}

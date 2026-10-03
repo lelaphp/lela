@@ -243,28 +243,31 @@ impl Crate {
     }
 
     /// The subsets of the pinned corpus this crate owns, relative to the
-    /// pinned tree: the ones its row names, or `ext/<name>/tests` for an
+    /// pinned tree: the ones its row names, or `ext/<name>` for an
     /// extension, whose subset the design already states (design §12,
-    /// `ext/AGENTS.md`). A crate that owns none is not asked for a phpt
-    /// reading, and `phpt` refuses to guess one for it (harness §4.5
-    /// condition 1, §7).
+    /// `ext/AGENTS.md`): every `.phpt` under the extension's directory, as
+    /// run-tests.php walks one, so `ext/intl/uchar/tests` is `ext/intl`'s
+    /// beside `ext/intl/tests` with no key in the row (#1590, #1598). A
+    /// crate that owns none is not asked for a phpt reading, and `phpt`
+    /// refuses to guess one for it (harness §4.5 condition 1, §7).
     pub fn subsets(&self) -> Vec<PathBuf> {
         if !self.phpt.is_empty() {
             return self.phpt.iter().map(PathBuf::from).collect();
         }
         match self.name.strip_prefix("ext/") {
-            Some(extension) => vec![Path::new("ext").join(extension).join("tests")],
+            Some(extension) => vec![derived_subset(extension)],
             None => Vec::new(),
         }
     }
 
     /// Whether the crate's subset is the one the design derives for an
-    /// extension, `ext/<name>/tests`, and not one its row names. A derived
-    /// directory the pinned tree does not have is an extension with no
-    /// tests of its own, as `ext/lexbor`, php-src's vendored library whose
-    /// tests are `ext/dom`'s and `ext/uri`'s, is: its reading is a skip that
-    /// says so. A named one the tree does not have is the manifest and the
-    /// pin disagreeing, and its reading fails (#18, #1231).
+    /// extension, `ext/<name>`, and not one its row names. A derived
+    /// directory that holds no `.phpt` in the pinned tree, or that the
+    /// tree does not have, is an extension with no tests of its own, as
+    /// `ext/lexbor`, php-src's vendored library whose tests are
+    /// `ext/dom`'s and `ext/uri`'s, is: its reading is a skip that says
+    /// so. A named one the tree does not have is the manifest and the pin
+    /// disagreeing, and its reading fails (#18, #1231).
     pub(crate) fn derives_subset(&self) -> bool {
         self.phpt.is_empty() && self.name.starts_with("ext/")
     }
@@ -274,6 +277,14 @@ impl Crate {
     pub fn optional(&self) -> bool {
         self.feature.is_some()
     }
+}
+
+/// The subset the design derives for the extension `name`, relative to
+/// the pinned tree: its directory, every `.phpt` under which is the
+/// subset's (#1590). The one statement of the rule, read by a row with no
+/// `phpt` key and by the nightly lane's corpus alike.
+pub(crate) fn derived_subset(name: &str) -> PathBuf {
+    Path::new("ext").join(name)
 }
 
 /// `[[seam]]`: one locked seam (design §4.5).
