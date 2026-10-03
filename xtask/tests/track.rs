@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::scratch::Tree;
-use xtask::track::{Base, Found, Model, Ticket, Track};
+use xtask::track::{Found, Model, Ticket, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -251,19 +251,6 @@ fn json_is_the_same_facts_as_one_object() {
     assert_eq!(value["branch"], serde_json::Value::Null);
     assert_eq!(value["found"], "detached");
     assert_eq!(value["track"], "main");
-}
-
-/// `done`'s base is the track's, taken through the same function.
-#[test]
-fn dones_base_is_the_tracks() {
-    let root = on_a_track("base");
-    let base = Base::of(&root, None).unwrap();
-    let track = Track::of(&root, None).unwrap();
-    assert_eq!(base.since, track.name);
-    assert_eq!(base.commit, track.base);
-    let given = Base::of(&root, Some("main")).unwrap();
-    assert_eq!(given.since, "main");
-    assert_eq!(given.commit, rev(&root, "main"));
 }
 
 #[test]

@@ -5,8 +5,9 @@
 //! `done` measures since, which root holds the track's store, and which
 //! ticket the branch's work is for. `xtask track` prints them, as text or
 //! as one JSON object, and writes no reading, since it measures nothing;
-//! `done` takes its base through [`Base::of`]; and the add command asks
-//! for a branch not yet made.
+//! and the add command asks for a branch not yet made. `done` takes its
+//! base through [`Base::of`], the merge base with `main`, which asks no
+//! track (ADR-0009).
 //!
 //! The rule once lived in `done`'s reads and again in a prefix loop of the
 //! add command, and the console was about to write a third. This module
@@ -253,8 +254,8 @@ impl Track {
 }
 
 /// The commit the changes are measured since, and the ref it was taken
-/// from: `--base`'s, or the branch's track ([`Track::of`]), which is
-/// [`MAIN`] for a branch that is on none (harness-design.md §4.5).
+/// from: `--base`'s, or [`MAIN`], every ticket's branch being cut from it
+/// (ADR-0009, harness-design.md §4.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Base {
     pub since: String,
@@ -262,20 +263,14 @@ pub struct Base {
 }
 
 impl Base {
-    /// The base of a bare `done`: the branch's track, or [`MAIN`]; with a
-    /// ref, the merge base of `HEAD` with it, the ref first and then
-    /// `origin`'s, for a checkout that has only the remote's.
+    /// The merge base of `HEAD` with `since`, [`MAIN`] for a bare `done`:
+    /// the ref first and then `origin`'s, for a checkout that has only the
+    /// remote's.
     pub fn of(root: &Path, since: Option<&str>) -> Result<Base> {
-        if let Some(since) = since {
-            return Ok(Base {
-                since: since.to_owned(),
-                commit: merge_base(root, "HEAD", since)?,
-            });
-        }
-        let track = Track::of(root, None)?;
+        let since = since.unwrap_or(MAIN);
         Ok(Base {
-            since: track.name,
-            commit: track.base,
+            since: since.to_owned(),
+            commit: merge_base(root, "HEAD", since)?,
         })
     }
 }

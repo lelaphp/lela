@@ -104,7 +104,7 @@ pub(crate) enum Command {
     /// exit 1 while any is; the Stop hook, pre-push and CI read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
-        /// default the branch's track, and `main` for a branch on none.
+        /// default `main`, or `origin`'s where the checkout has none.
         #[arg(long, value_name = "REF", conflicts_with = "hook")]
         base: Option<String>,
         /// Read the Stop hook's stdin: exit 0 when `stop_hook_active`,

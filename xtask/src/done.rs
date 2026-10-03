@@ -2,9 +2,9 @@
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
 //! command hook, pre-push, and CI per commit) read one list. The base is
-//! the merge base of `HEAD` with the branch's track ([`Base`], taken through
-//! `track`, the one statement of the rule), or with `--base`; the changes are every file the working tree differs in from
-//! it, committed since or not, plus the untracked files.
+//! the merge base of `HEAD` with `main` ([`Base`]), or with `--base`; the
+//! changes are every file the working tree differs in from it, committed
+//! since or not, plus the untracked files.
 //!
 //! The conditions, one sentence each, are §4.5's seven:
 //!
@@ -298,8 +298,8 @@ fn names(id: &str, part: &str) -> bool {
     id.contains(&format!("/{}/", part.trim_matches('/')))
 }
 
-/// Judge the changes since the merge base with `base`, the branch's
-/// track ([`Base::of`]) when none is given.
+/// Judge the changes since the merge base with `base`, `main`
+/// ([`Base::of`]) when none is given.
 pub fn judge(
     root: &Path,
     manifest: &Manifest,
