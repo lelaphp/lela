@@ -931,6 +931,7 @@ values::PhpObject::debug_info
 values::PhpObject::declared_rows
 values::PhpObject::entries
 values::PhpObject::extend_properties
+values::PhpObject::free_beside
 values::PhpObject::handlers
 values::PhpObject::index
 values::PhpObject::instance_of

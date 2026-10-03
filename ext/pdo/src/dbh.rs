@@ -594,6 +594,9 @@ fn open(
     let mut dead = None;
     let key = persistent.then(|| persistent_key(source, username, password, named.as_deref()));
     if let Some(key) = &key {
+        // `efree(dbh)`: the object's own `pdo_dbh_t` gives way to the
+        // persistent one, lent or made.
+        object.free_beside(req);
         match lend(req, key) {
             Ok(at) => {
                 share(req, object, at);
@@ -1386,6 +1389,19 @@ impl PDO {
     /// bool(true)
     /// SQLSTATE[HY000]: General error: 1 no such table: t
     /// int(1)
+    /// ```
+    ///
+    /// A persistent `PDO` costs the request its object alone, the
+    /// `pdo_dbh_t` allocated beside it freed as it switches over:
+    ///
+    /// ```php
+    /// $w = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $m = memory_get_usage(); $p = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]); $n = memory_get_usage(); unset($p);
+    /// var_dump($n - $m, memory_get_usage() - $n);
+    /// ```
+    /// ```expect
+    /// int(104)
+    /// int(-104)
     /// ```
     fn __construct(
         req: &mut Request,
