@@ -359,7 +359,53 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
 /// with every section but the credits, in a request started before
 /// `do_repeat` set `php_self` or an `argv`, and 0.
 pub fn info(engine: &Engine) -> i32 {
+    let code = b"phpinfo(INFO_ALL & ~INFO_CREDITS);".to_vec();
+    let _ = in_request(engine, unnamed(), code);
+    0
+}
+
+/// `php_module_startup` as `main` runs it before `-v` and `-S`
+/// (`php_cli.c:1341`), which php serves with no request: what the
+/// startup raised is displayed at a request's first moment here, so an
+/// empty one under the host's `name` is served first, on `stdout`, and
+/// its status 1 where the startup failed is the answer. The built-in
+/// server's responses carry none of it, since php wrote it to the
+/// process's `stdout` before any client connected; a startup that failed
+/// leaves no server.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+/// mkdir($dir);
+/// file_put_contents("$dir/index.php", '<?php echo "body\n";');
+/// $port = 18000 + random_int(0, 999);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-d', 'disable_functions=exit', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+/// usleep(300000);
+/// echo file_get_contents("http://127.0.0.1:$port/"), file_get_contents("http://127.0.0.1:$port/");
+/// proc_terminate($p); proc_close($p);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'magic_quotes_gpc=1', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// unlink("$dir/index.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// body
+/// body
+/// <br />
+/// <b>Fatal error</b>:  Directive 'magic_quotes_gpc' is no longer available in PHP in <b>Unknown</b> on line <b>0</b><br />
+/// Stack trace:
+/// #0 {main}
+/// 1
+/// ```
+pub(crate) fn started(engine: &Engine, name: &str) -> i32 {
     let description = RequestDescription {
+        sapi_name: String::from(name),
+        ..unnamed()
+    };
+    in_request(engine, description, Vec::new())
+}
+
+/// A request before `do_repeat` set `php_self` or an `argv`.
+fn unnamed() -> RequestDescription {
+    RequestDescription {
         env: std::env::vars_os()
             .map(|(n, v)| (n.as_encoded_bytes().to_vec(), v.as_encoded_bytes().to_vec()))
             .collect(),
@@ -367,13 +413,7 @@ pub fn info(engine: &Engine) -> i32 {
         server: server_variables(b"", b""),
         sapi_name: String::from(NAME),
         ..RequestDescription::default()
-    };
-    let _ = in_request(
-        engine,
-        description,
-        b"phpinfo(INFO_ALL & ~INFO_CREDITS);".to_vec(),
-    );
-    0
+    }
 }
 
 /// A reflector made by `made` over `name`, printed as `zend_print_zval`

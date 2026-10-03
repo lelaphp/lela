@@ -68,6 +68,7 @@ abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::compile_file
 abi::ExtensionBuilder::constants
 abi::ExtensionBuilder::constants_with
+abi::ExtensionBuilder::deactivate
 abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_state
@@ -767,6 +768,7 @@ request::StreamOps::stat
 request::StreamOps::write
 request::StreamOption
 request::StreamWrapper
+request::Syslog
 request::UnitCache
 request::UnitCache::compile
 request::UnitCache::holds

@@ -302,6 +302,16 @@ pub struct FormatDate(pub FormatDateFn);
 /// and whether it is taken in the request's zone.
 type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
 
+/// `php_syslog(priority, "%s", message)` (`Z/main/php_syslog.c`), which
+/// shares libc's one connection with userland `openlog()`: ext/standard
+/// hands it to [`ExtensionBuilder::register`], and `php_log_err` sends
+/// an entry through it at its priority where `error_log` is `syslog`.
+/// An engine without it sends that entry to the host's log.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
+
 /// A handler of the buffer stack an extension hands to
 /// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
 /// `php_output_handler_alias_register` from its `MINIT`, with the
@@ -6790,9 +6800,11 @@ impl Request {
     /// appended to the file `error_log` names, as it stands when the
     /// entry is written, opened `O_CREAT | O_APPEND` against the working
     /// directory with the permissions `error_log_mode` names where they
-    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`; the host's
-    /// log where no file is named, where it names `syslog`, or where the
-    /// file cannot be opened. The stamp is `d-M-Y H:i:s e` in the
+    /// lie within `0777`, `0644` where they do not, and written as `[<stamp>] <entry>\n`;
+    /// through the registered [`Syslog`] at `priority` where it names
+    /// `syslog`; the host's log where no file is named, where it names
+    /// `syslog` and no [`Syslog`] is registered, or where the file
+    /// cannot be opened. The stamp is `d-M-Y H:i:s e` in the
     /// request's default zone ([`Request::log_stamp`]). Whether the
     /// host's log took it; nothing, and `false`, while an entry is being
     /// logged already, `PG(in_error_log)`'s guard against re-entry.
@@ -6838,21 +6850,26 @@ impl Request {
     /// prompt> [Script ended normally]
     /// prompt>
     /// ```
-    fn log_err(&mut self, entry: &[u8]) -> bool {
+    fn log_err(&mut self, entry: &[u8], priority: i32) -> bool {
         if self.in_error_log {
             return false;
         }
         self.in_error_log = true;
-        let took = self.log_err_guarded(entry);
+        let took = self.log_err_guarded(entry, priority);
         self.in_error_log = false;
         took
     }
 
     /// [`Request::log_err`] inside its guard.
-    fn log_err_guarded(&mut self, entry: &[u8]) -> bool {
+    fn log_err_guarded(&mut self, entry: &[u8], priority: i32) -> bool {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
+        let syslog = self.registered::<Syslog>().next().copied();
         let named = self.ini_get(b"error_log").unwrap_or_default();
+        if let (b"syslog", Some(Syslog(syslog))) = (named, syslog) {
+            syslog(self, priority, entry);
+            return false;
+        }
         if named.is_empty() || named == b"syslog" {
             self.sink.get().log(entry);
             return true;
@@ -7325,7 +7342,18 @@ impl Request {
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
             };
-            let logged = self.log_err(text.as_bytes());
+            // `syslog_type_int`: `LOG_ERR`, `LOG_WARNING`, `LOG_INFO`
+            // for a deprecation, `LOG_NOTICE` for the rest.
+            let priority = match level {
+                _ if fatal_errors(level) => 3,
+                Level::Warning
+                | Level::CoreWarning
+                | Level::CompileWarning
+                | Level::UserWarning => 4,
+                Level::Deprecated | Level::UserDeprecated => 6,
+                _ => 5,
+            };
+            let logged = self.log_err(text.as_bytes(), priority);
             self.heap.free_block(buffer);
             if logged && fatal_errors(level) {
                 // What follows a fatal in the host's log is still inside
@@ -7517,9 +7545,31 @@ impl Request {
         last.line != line || last.file.as_bytes() != file
     }
 
-    /// `log_errors`, whether a diagnostic reaches the host's log.
+    /// `log_errors`, whether a diagnostic reaches the host's log; one
+    /// raised as the engine starts, before php's `module_initialized`,
+    /// reaches it too while `display_startup_errors` or `display_errors`
+    /// is off (`Z/main/main.c:1453-1454`):
+    ///
+    /// ```php
+    /// foreach (['display_startup_errors', 'display_errors'] as $off) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'disable_functions=exit', '-d', "$off=0", '-r', 'echo 1;'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     var_dump(stream_get_contents($pipes[1]), stream_get_contents($pipes[2])); proc_close($p);
+    /// }
+    /// ```
+    /// ```expect process
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// string(1) "1"
+    /// string(66) "PHP Warning:  Cannot disable function exit() in Unknown on line 0
+    /// "
+    /// ```
     fn log_errors(&self) -> bool {
+        let off = |name: &[u8]| self.ini_get(name).is_some_and(|v| !ini_truth(Some(v)));
         ini_truth(self.ini_get(b"log_errors"))
+            || (self.display_direct
+                && (off(b"display_startup_errors")
+                    || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic
@@ -18176,7 +18226,7 @@ impl Request {
     /// `error_log()` to the host's log: `php_log_err` with the message
     /// as given, one entry.
     pub fn error_log(&mut self, message: &[u8]) {
-        let _ = self.log_err(message);
+        let _ = self.log_err(message, 5);
     }
 
     /// `EG(error_reporting)` as it stands: what `error_reporting()`

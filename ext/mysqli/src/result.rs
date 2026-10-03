@@ -6,7 +6,7 @@
 #![allow(non_camel_case_types)]
 
 use php_ext::abi::{
-    ClassIterator, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, This, True, Union,
+    ClassIterator, ClassRef, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, This, True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -15,7 +15,7 @@ use php_ext::call::{
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
@@ -245,7 +245,24 @@ pub(crate) fn fetch_object(
 /// The row as `made`'s properties: its table in place of the object's
 /// where the class declares no property and no `__set`
 /// (`zend_symtable_to_proptable`), and otherwise each written through
-/// the class's handler, `zend_merge_properties`.
+/// the class's handler in the object's class's scope, the
+/// `EG(fake_scope)` `zend_merge_properties` sets: a parent's private
+/// property is out of its sight, and the column is a dynamic one.
+///
+/// ```php
+/// class B { private $v = 'b'; }
+/// #[AllowDynamicProperties] class D extends B {}
+/// $m = new mysqli('127.0.0.1', 'root', '', '', 3306);
+/// var_dump($m->query("SELECT 'x' AS v")->fetch_object('D'));
+/// ```
+/// ```expect mysql
+/// object(D)#3 (2) {
+///   ["v":"B":private]=>
+///   string(1) "b"
+///   ["v"]=>
+///   string(1) "x"
+/// }
+/// ```
 fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thrown> {
     let plain = declares_nothing(req, made.class());
     let mut table = PhpArray::new(req)?;
@@ -258,7 +275,8 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         if plain {
             table.set(req, Key::Str(name), value)?;
         } else {
-            made.set_prop(req, name, value)?;
+            let scope = PropertyScope::Of(ClassRef(made.class()));
+            made.write_prop_in(req, scope, name, value)?;
         }
     }
     if plain {

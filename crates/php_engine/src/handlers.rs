@@ -5908,8 +5908,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
         Some(value) if op.extended_value & ISEMPTY == 0 => crate::ops::is_set(&value),
         Some(value) => !crate::ops::is_true(req, &value),
     };
-    write_out(req, frame, code, op, &Value::bool(answer));
-    Ok(advance(req, frame))
+    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// The name an `ISSET_ISEMPTY_VAR` asks after,
@@ -9952,10 +9951,7 @@ pub(crate) fn instanceof<T: Tier>(
         (None, _) => false,
     };
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::bool(answer));
-    req.release(previous);
-    Ok(advance(req, frame))
+    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// `zend_fetch_class_by_name` with `ZEND_FETCH_CLASS_EXCEPTION` over a
@@ -18212,7 +18208,8 @@ pub(crate) fn is_smaller<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_smaller)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_smaller);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_IS_SMALLER_OR_EQUAL`: [`crate::ops::is_smaller_or_equal`], the
@@ -18223,21 +18220,21 @@ pub(crate) fn is_smaller_or_equal<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_smaller_or_equal)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_smaller_or_equal);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
-/// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. php's
-/// handler branches on the answer where a `JMPZ` or a `JMPNZ` follows
-/// (`ZEND_VM_SMART_BRANCH`); the compiler emits the two oplines and the
-/// jump reads the temporary, which is the same observable path one
-/// opline longer.
+/// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. Each
+/// comparison branches over a `JMPZ` or a `JMPNZ` after it
+/// ([`smart_branch`]).
 pub(crate) fn is_equal<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_equal)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_equal);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_IS_NOT_EQUAL`: [`crate::ops::is_not_equal`], the same way.
@@ -18247,7 +18244,8 @@ pub(crate) fn is_not_equal<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_not_equal)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_not_equal);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
@@ -18259,7 +18257,8 @@ pub(crate) fn is_identical<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_identical)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_identical);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_IS_NOT_IDENTICAL`: [`crate::ops::is_not_identical`], the same
@@ -18270,7 +18269,8 @@ pub(crate) fn is_not_identical<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::is_not_identical)
+    let computed = binary_kernel(req, frame, code, op, crate::ops::is_not_identical);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_SPACESHIP`: [`crate::ops::spaceship`], the same way, the long
@@ -18420,10 +18420,7 @@ pub(crate) fn strlen<T: Tier>(
 
 /// `ZEND_TYPE_CHECK`: [`crate::ops::type_check`] over the operand with
 /// the mask in `extended_value`, into the temporary; the operand freed
-/// after it. php's handler branches on the answer where a `JMPZ` or a
-/// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the compiler emits the two
-/// oplines and the jump reads the temporary, which is the same
-/// observable path one opline longer.
+/// after it, or branched on ([`smart_branch`]).
 pub(crate) fn type_check<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -18431,9 +18428,10 @@ pub(crate) fn type_check<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let mask = op.extended_value;
-    unary(req, frame, code, op, |_, value| {
+    let computed = unary_kernel(req, frame, code, op, |_, value| {
         Ok(Value::bool(crate::ops::type_check(value, mask)))
-    })
+    });
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_CAST`: [`crate::ops::cast`] over the operand to the type
@@ -18627,9 +18625,8 @@ const ISEMPTY: u32 = 1 << 0;
 /// no warning and nothing made of it. Under `isset` the answer is
 /// [`crate::ops::is_set`]; under `ZEND_ISEMPTY` it is
 /// [`crate::ops::is_true`] negated, `!i_zend_is_true`, which is the arm
-/// that can warn, over a NAN. php branches on the answer where a `JMPZ`
-/// or a `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the temporary is
-/// written here and the jump reads it, as `TYPE_CHECK`'s is.
+/// that can warn, over a NAN. The answer is branched on as every
+/// `ISSET_ISEMPTY_*`'s is ([`smart_branch`]).
 ///
 /// ```php
 /// $a = 1; $n = null; $z = "0";
@@ -18656,8 +18653,7 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
     } else {
         !crate::ops::is_true(req, &value)
     };
-    write_out(req, frame, code, op, &Value::bool(answer));
-    Ok(advance(req, frame))
+    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9239`),
@@ -18737,11 +18733,7 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
         !crate::ops::is_true(req, &held)
     };
     req.release(held);
-    write_out(req, frame, code, op, &Value::bool(answer));
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    Ok(advance(req, frame))
+    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
@@ -18844,13 +18836,7 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier>(
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    match answer {
-        Ok(answer) => {
-            write_out(req, frame, code, op, &Value::bool(answer));
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_PROP_OBJ` (`Z/Zend/zend_vm_def.h:7625`), what
@@ -18864,9 +18850,8 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier>(
 /// `empty`, with nothing raised, which is php's `result =
 /// (opline->extended_value & ZEND_ISEMPTY)`.
 ///
-/// php branches on the answer where a `JMPZ` or a `JMPNZ` follows
-/// (`ZEND_VM_SMART_BRANCH`); the temporary stands and the jump reads it,
-/// as it does for every `ISSET_ISEMPTY_*` here.
+/// The answer is branched on as every `ISSET_ISEMPTY_*`'s is
+/// ([`smart_branch`]).
 ///
 /// ```php
 /// class C { public $p = 1; public $n = null; private $q = 2; public int $t; }
@@ -18921,13 +18906,7 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
     };
     member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    match answer {
-        Ok(answer) => {
-            write_out(req, frame, code, op, &Value::bool(answer));
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `zend_isset_dim_slow` and `zend_isempty_dim_slow`
@@ -19025,10 +19004,11 @@ pub(crate) fn defined<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    unary(req, frame, code, op, |req, value| {
+    let computed = unary_kernel(req, frame, code, op, |req, value| {
         let name = value.as_str_bytes().unwrap_or_default();
         Ok(Value::bool(crate::ops::defined(req, name)))
-    })
+    });
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9639`), what php's
@@ -19335,9 +19315,7 @@ pub(crate) fn get_type<T: Tier>(
 /// (`zend_array_key_exists_error`) the key and then the array warned of
 /// where nothing wrote them, and php's `TypeError` naming what the array
 /// is where neither warning threw. The answer into the temporary, the
-/// array freed and then the key. php branches on it where a `JMPZ` or a
-/// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the jump reads the
-/// temporary here, as after [`type_check`].
+/// array freed and then the key, or branched on ([`smart_branch`]).
 ///
 /// ```php
 /// $a = ['k' => null]; $r = &$a;
@@ -19396,15 +19374,7 @@ pub(crate) fn array_key_exists<T: Tier>(
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    match answered {
-        Ok(found) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, Value::bool(found));
-            req.release(previous);
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => threw(req, frame, &thrown),
-    }
+    smart_branch::<T>(req, frame, code, op, answered.map(Value::bool))
 }
 
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
@@ -19430,13 +19400,21 @@ pub(crate) fn count<T: Tier>(
 /// the number the compiler wrote in `result`. A forward jump is neither
 /// and costs one comparison.
 pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
-    let back = op.op1 <= req.vm().opline(frame);
-    req.vm_mut().jump(frame, op.op1);
-    if back {
+    let at = req.vm().opline(frame);
+    jumped::<T>(req, frame, at, op.op1, op.out)
+}
+
+/// `ZEND_VM_JMP` from the opline at `at` to `target`, the frame left at
+/// the target; a target at or before `at` is the back-edge, where the
+/// interrupt is tested and then the loop safepoint raised with
+/// `number`, the one the compiler wrote into the jump's `result`.
+fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, number: u32) -> Edge {
+    req.vm_mut().jump(frame, target);
+    if target <= at {
         if crate::interrupt::check(req)? {
             return Ok(Stepped::Threw(frame));
         }
-        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
+        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(number))))?;
     }
     Ok(Stepped::Same(frame))
 }
@@ -19465,15 +19443,8 @@ pub(crate) fn jmpnz<T: Tier>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    let back = op.op2 <= req.vm().opline(frame);
-    req.vm_mut().jump(frame, op.op2);
-    if back {
-        if crate::interrupt::check(req)? {
-            return Ok(Stepped::Threw(frame));
-        }
-        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
-    }
-    Ok(Stepped::Same(frame))
+    let at = req.vm().opline(frame);
+    jumped::<T>(req, frame, at, op.op2, op.out)
 }
 
 /// `ZEND_JMPZ`: `ZEND_JMPNZ` with the test the other way round, the jump
@@ -19506,15 +19477,8 @@ pub(crate) fn jmpz<T: Tier>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    let back = op.op2 <= req.vm().opline(frame);
-    req.vm_mut().jump(frame, op.op2);
-    if back {
-        if crate::interrupt::check(req)? {
-            return Ok(Stepped::Threw(frame));
-        }
-        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
-    }
-    Ok(Stepped::Same(frame))
+    let at = req.vm().opline(frame);
+    jumped::<T>(req, frame, at, op.op2, op.out)
 }
 
 /// `ZEND_JMPZ_EX` (`Z/Zend/zend_vm_def.h:3180`), the jump
@@ -19845,10 +19809,8 @@ pub(crate) fn r#match<T: Tier>(
 /// in `op2` and `$strict` in `extended_value`, into the
 /// temporary; the needle freed after it. An undefined CV is
 /// `ZVAL_UNDEFINED_OP1`, the warning [`exec::operand`] raises, and then
-/// `null`, which is what php's handler looks up after it warns. php
-/// branches on the answer where a `JMPZ` or a `JMPNZ` follows
-/// (`ZEND_VM_SMART_BRANCH`); the jump reads the temporary here, as
-/// after [`type_check`].
+/// `null`, which is what php's handler looks up after it warns; the
+/// answer branched on as [`type_check`]'s is.
 pub(crate) fn in_array<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -19860,9 +19822,10 @@ pub(crate) fn in_array<T: Tier>(
         return Err(no_table("IN_ARRAY"));
     };
     let strict = op.extended_value != 0;
-    unary(req, frame, code, op, |req, needle| {
+    let computed = unary_kernel(req, frame, code, op, |req, needle| {
         crate::ops::in_array(req, needle, table, strict).map(Value::bool)
-    })
+    });
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_MATCH_ERROR`: [`crate::ops::match_unhandled_error`] over the
@@ -19903,7 +19866,8 @@ pub(crate) fn case<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    compared(req, frame, code, op, crate::ops::is_equal)
+    let computed = compared(req, frame, code, op, crate::ops::is_equal);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_CASE_STRICT`: [`crate::ops::is_identical`], the same way, for
@@ -19914,7 +19878,8 @@ pub(crate) fn case_strict<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    compared(req, frame, code, op, crate::ops::is_identical)
+    let computed = compared(req, frame, code, op, crate::ops::is_identical);
+    smart_branch::<T>(req, frame, code, op, computed)
 }
 
 /// `ZEND_QM_ASSIGN`: the operand into the temporary `result` names, a
@@ -20080,12 +20045,25 @@ fn binary(
     op: &Opline,
     kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
 ) -> Edge {
+    let computed = binary_kernel(req, frame, code, op, kernel);
+    computed_into(req, frame, code, op, computed)
+}
+
+/// [`binary`] up to the write: what the kernel computed, both operands
+/// freed.
+fn binary_kernel(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
+) -> Result<Value, Thrown> {
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
     let computed = kernel(req, &left, &right);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    computed_into(req, frame, code, op, computed)
+    computed
 }
 
 /// What a kernel computed, written into the temporary the opline's
@@ -20113,6 +20091,58 @@ fn computed_into(
     }
 }
 
+/// `ZEND_VM_SMART_BRANCH` (`Z/Zend/zend_execute.c:5803`), how each
+/// handler `zend_is_smart_branch` names ends: where the opline after it
+/// is the `JMPZ` or `JMPNZ` `zend_emit_cond_jump` left over its
+/// temporary, which is when php's compiler marks the `result`, the
+/// handler is one over both oplines (design §5.8). It writes nothing,
+/// goes on past the jump where the jump is not taken, and takes the
+/// jump as [`jumped`] does from the jump's opline, a backward one
+/// raising the loop safepoint with the jump's number; a throwable
+/// pending stops it at this opline. Anywhere else the answer is
+/// written into the temporary, as [`computed_into`] writes it.
+///
+/// ```php
+/// function f($n) { $i = 0; while ($i < $n) { $i++; } return isset($n) && $n == $i ? "met $i" : "no"; }
+/// echo f(3), "\n";
+/// class A {} $a = new A; $k = ['x' => 1];
+/// if ($a instanceof A) echo "A "; if (!is_int($a)) echo "obj "; if (array_key_exists('x', $k)) echo "x ";
+/// for ($j = 0; $j <= 2; $j++) { if ($j === 1) continue; echo $j; } echo "\n";
+/// set_error_handler(function ($no, $text) { throw new Exception($text); });
+/// try { if ($u == 1) echo "no"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// met 3
+/// A obj x 02
+/// Undefined variable $u
+/// ```
+fn smart_branch<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    computed: Result<Value, Thrown>,
+) -> Edge {
+    let at = req.vm().opline(frame).saturating_add(1);
+    let fused = exec::opline_at(code, at).copied().filter(|jump| {
+        matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
+            && op.out_type == OperandKind::Tmp
+            && jump.op1_type == OperandKind::Tmp
+            && jump.op1 == op.out
+    });
+    let (Some(jump), Ok(answer)) = (fused, &computed) else {
+        return computed_into(req, frame, code, op, computed);
+    };
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    if (answer.as_bool() == Some(true)) != (jump.opcode == Opcode::Jmpnz) {
+        req.vm_mut().jump(frame, at.saturating_add(1));
+        return Ok(Stepped::Same(frame));
+    }
+    jumped::<T>(req, frame, at, jump.op2, jump.out)
+}
+
 /// The body the one-operand kernels' handlers share: the operand
 /// addressed, the kernel called, the operand freed (`FREE_OP1`), and
 /// what the kernel returned written into the temporary the opline's
@@ -20125,10 +20155,23 @@ fn unary(
     op: &Opline,
     kernel: impl FnOnce(&mut Request, &Value) -> Result<Value, Thrown>,
 ) -> Edge {
+    let computed = unary_kernel(req, frame, code, op, kernel);
+    computed_into(req, frame, code, op, computed)
+}
+
+/// [`unary`] up to the write: what the kernel computed, the operand
+/// freed.
+fn unary_kernel(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    kernel: impl FnOnce(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Result<Value, Thrown> {
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
     let computed = kernel(req, &operand);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    computed_into(req, frame, code, op, computed)
+    computed
 }
 
 /// `zend_incdec_typed_ref` (`Z/Zend/zend_execute.c:2230`): the step over
@@ -20365,23 +20408,12 @@ fn compared(
     code: &OpArray,
     op: &Opline,
     kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
-) -> Edge {
+) -> Result<Value, Thrown> {
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
     let computed = kernel(req, &left, &right);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    match computed {
-        Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
-    }
+    computed
 }
 
 /// Where a jump-table opcode sends the frame: `ZEND_VM_SET_RELATIVE_OPCODE`
@@ -21664,6 +21696,77 @@ mod tests {
             1,
             "nothing more was asked"
         );
+    }
+
+    /// A unit whose main op array is `NOP`, `IS_SMALLER` over the
+    /// constants `left` and one into temporary zero, and a `JMPNZ` over
+    /// that temporary aimed at the `NOP` with safepoint number seven:
+    /// `do {} while ($i < 1)` over a constant.
+    fn compared_loop(left: i64) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline::default(),
+                    Opline {
+                        opcode: Opcode::IsSmaller,
+                        op1_type: OperandKind::Const,
+                        op2_type: OperandKind::Const,
+                        op2: 1,
+                        out_type: OperandKind::Tmp,
+                        out: 0,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::Jmpnz,
+                        op1_type: OperandKind::Tmp,
+                        op1: 0,
+                        op2: 0,
+                        out: 7,
+                        ..Opline::default()
+                    },
+                    Opline::default(),
+                ]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)]
+                    .into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// Design §5.8: a comparison with a `JMPNZ` over its temporary after
+    /// it is one handler over both oplines. Taken backward, the fused
+    /// handler raises one loop safepoint with the branch opline's
+    /// number and leaves the frame at the target; not taken, one `step`
+    /// lands past the jump, raising nothing.
+    #[test]
+    fn a_comparison_branches_over_the_jump_after_it_as_one_step() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let taken = compared_loop(0);
+        let frame = req.pushed(Arc::clone(&taken));
+        let code = crate::exec::code_of(&taken);
+        let op = code.oplines.get(1).copied().unwrap_or_default();
+        req.vm_mut().jump(frame, 1);
+
+        assert_eq!(
+            is_smaller::<Probe>(&mut req, frame, code, &op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().opline(frame), 0);
+        assert_eq!(
+            req.state::<Asked>().sites,
+            vec![(Site::Loop(SafepointIdx(7)), frame)]
+        );
+
+        let not_taken = compared_loop(1);
+        let frame = req.pushed(Arc::clone(&not_taken));
+        req.vm_mut().jump(frame, 1);
+        assert_eq!(crate::tier::step(&mut req, frame), Ok(Stepped::Same(frame)));
+        assert_eq!(req.vm().opline(frame), 3, "past the jump in one step");
+        assert_eq!(req.state::<Asked>().sites.len(), 1);
     }
 
     /// A unit whose main op array is one `RETURN null`, its safepoint

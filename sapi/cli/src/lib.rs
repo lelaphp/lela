@@ -126,13 +126,24 @@ pub fn main() -> ExitCode {
     let engine = |ini: &[(String, String)]| engine(ini, found(NAME));
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => print(&version(&engine(&options.ini))),
+        Ask::Version => {
+            let engine = engine(&options.ini);
+            match request::started(&engine, NAME) {
+                0 => print(&version(&engine)),
+                failed => failed,
+            }
+        }
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
         Ask::Server(server) => {
             let engine = server_engine(&options.ini, found(server::NAME));
-            let color = php_sapi::ini::enabled(&engine, "cli_server.color");
-            server::run(engine, server, color)
+            match request::started(&engine, server::NAME) {
+                0 => {
+                    let color = php_sapi::ini::enabled(&engine, "cli_server.color");
+                    server::run(engine, server, color)
+                }
+                failed => failed,
+            }
         }
         ask => {
             if options.interactive {
