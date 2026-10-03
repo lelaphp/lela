@@ -6,13 +6,15 @@
 //! `fetch()`, `fetchAll()`, `fetchColumn()`, `fetchObject()` and
 //! `setFetchMode()` over it.
 
-use php_ext::abi::{Callable, OrFalse, Raw, True};
+use php_ext::abi::{Callable, ClassRef, OrFalse, Raw, True};
 use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{Level, Thrown, arg_count_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
+};
 
 use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
 use crate::dbh::Nulls;
@@ -566,7 +568,32 @@ fn class_object(
 
 /// The body of `do_fetch` past the container's making: the group key,
 /// a serialized object's payload, each column written as the style
-/// writes it, and the constructor or the function served after.
+/// writes it, and the constructor or the function served after. A
+/// `FETCH_CLASS` column is written in the fetch class's scope and a
+/// `FETCH_INTO` column in the executing one, `zend_update_property_ex`
+/// with `ce` and with `NULL` (`ext/pdo/pdo_stmt.c:798-812, 911-914`),
+/// so a parent's private property is a dynamic one and a protected
+/// one is php's `Error`.
+///
+/// ```php
+/// class B { private $v; }
+/// #[AllowDynamicProperties] class D extends B {}
+/// class P { protected $v; }
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->query("SELECT 'x' AS v")->fetchObject('D'));
+/// $s = $db->query("SELECT 'y' AS v");
+/// $s->setFetchMode(PDO::FETCH_INTO, new P);
+/// try { $s->fetch(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(D)#3 (2) {
+///   ["v":"B":private]=>
+///   NULL
+///   ["v"]=>
+///   string(1) "x"
+/// }
+/// Cannot access protected property P::$v
+/// ```
 #[allow(clippy::too_many_arguments)]
 fn fill(
     req: &mut Request,
@@ -652,7 +679,7 @@ fn fill(
             Kind::Class | Kind::Obj | Kind::Into => {
                 if let Some(made) = out.as_object().copied() {
                     let name = PhpString::new(req, &name)?;
-                    made.set_prop(req, name, fetched)?;
+                    made.write_prop_in(req, scope(kind, class), name, fetched)?;
                 }
             }
             Kind::Func => arguments.push(fetched),
@@ -679,6 +706,17 @@ fn fill(
         out = answered?;
     }
     Ok(Some((out, key)))
+}
+
+/// The scope `do_fetch` writes an object's column in: the fetch class's
+/// for `FETCH_CLASS`, `NULL`'s for `FETCH_INTO` and `stdClass`'s for
+/// `FETCH_OBJ`, which declares nothing.
+fn scope(kind: Kind, class: Option<ClassId>) -> PropertyScope {
+    match (kind, class) {
+        (Kind::Class, Some(class)) => PropertyScope::Of(ClassRef(class)),
+        (Kind::Into, _) => PropertyScope::Executing,
+        _ => PropertyScope::Declaring,
+    }
 }
 
 /// `zend_symtable_update` on the row's array.

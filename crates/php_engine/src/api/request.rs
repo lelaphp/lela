@@ -2306,6 +2306,11 @@ pub struct Request {
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
+    /// The name `setlocale()` last answered for each category it moved,
+    /// by `<locale.h>` value, and php's `BG(ctype_string)`: the
+    /// `LC_CTYPE` name while it is not `C` (revision 56).
+    locale_names: Vec<(usize, Vec<u8>)>,
+    ctype_locale: Option<Vec<u8>>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -2847,6 +2852,8 @@ impl Request {
             static_vars: HashMap::new(),
             beside: HashMap::new(),
             preloading: None,
+            locale_names: Vec::new(),
+            ctype_locale: None,
             #[cfg(debug_assertions)]
             dirty: None,
             walk: None,
@@ -4656,6 +4663,23 @@ impl Request {
         })
     }
 
+    /// `zend_update_property_ex(scope, ...)`: the write through the
+    /// object's `write_property` with `EG(fake_scope)` set to `scope`,
+    /// `None` leaving the executed scope to decide, and put back after.
+    pub(crate) fn write_property_in(
+        &mut self,
+        object: PhpObject,
+        scope: Option<ClassId>,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let table = self.object_handlers(object.heap());
+        let saved = std::mem::replace(&mut self.fake_scope, scope);
+        let done = table.write_property(self, object, name, value);
+        self.fake_scope = saved;
+        done
+    }
+
     /// `f` called with `EG(fake_scope)` the class whose declaration
     /// `class`'s table holds for `name`, as `zend_update_property_ex(ce,
     /// ...)` makes a write, and put back after it; a name no class
@@ -5712,9 +5736,15 @@ impl Request {
                     let name = self.declared_name(function);
                     let name = Value::string(self.interned(name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", name)?;
-                    if let Some(class) = self.method_class(function).or(scope) {
-                        // `ce->name` whole: an anonymous class's with its NUL and site.
-                        let class = self.class_name_bytes(class);
+                    // `ce->name` whole: an anonymous class's with its NUL
+                    // and site; a receiver's class name for a function of
+                    // no scope it is passed to, `zend_ffi_get_func`'s.
+                    let class = match (self.method_class(function).or(scope), this) {
+                        (Some(class), _) => Some(self.class_name_bytes(class)),
+                        (None, Some(this)) => Some(this.handlers(self).get_class_name(self, this)),
+                        (None, None) => None,
+                    };
+                    if let Some(class) = class {
                         let class = Value::string(self.interned(&class)?);
                         self.set_string_key(&mut row, b"class", class)?;
                         if provide_object && let Some(this) = this {
@@ -6007,6 +6037,22 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// A native trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`), the C
+    /// function `zend_ffi_get_func` makes, has no site of its own to give
+    /// what it calls, so the walk goes on to the user code that called
+    /// it; and its row, of no scope, names its receiver's class:
+    ///
+    /// ```php
+    /// $ffi = FFI::cdef("typedef void (*handler)(int); handler signal(int sig, handler h); int raise(int sig);");
+    /// $ffi->signal(SIGUSR1, function ($sig) { debug_print_backtrace(); echo debug_backtrace()[1]['class'], "\n"; });
+    /// $ffi->raise(SIGUSR1);
+    /// ```
+    /// ```expect process
+    /// #0 %s(4): {closure:%s:3}(%d)
+    /// #1 %s(4): FFI->raise(%d)
+    /// FFI
+    /// ```
     fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -6025,14 +6071,24 @@ impl Request {
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
         let mut rows = Vec::new();
-        for at in 0..chain.len() {
-            let site = match chain.get(at.saturating_add(1)) {
+        // The site of the link at `below`: a native's is none, but where
+        // it is a trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`) the walk
+        // goes on to the user code that called it.
+        let site_of = |mut below: usize| loop {
+            break match chain.get(below) {
                 Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
+                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
+                    below = below.saturating_add(1);
+                    continue;
+                }
                 Some(Link::Call(_)) | None => None,
             };
-            match &chain[at] {
+        };
+        for (at, link) in chain.iter().enumerate() {
+            let site = site_of(at.saturating_add(1));
+            match link {
                 Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
@@ -7166,7 +7222,19 @@ impl Request {
         }
         // "Always clear the last backtrace."
         self.clear_fatal_error_backtrace();
-        if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        // "Report about uncaught exception in case of fatal errors": the
+        // pending throwable rendered as a warning and given up, and no
+        // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
+        // object in the slot that is no `Throwable`, which no PHP code
+        // leaves there, stays where it is.
+        if let Some(Raised::Throwable(pending)) = self.raised {
+            let throwable = self
+                .class_named(b"Throwable")
+                .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
+            if throwable && fatal_errors(level) {
+                let _ = self.exception_error(Level::Warning);
+            }
+        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
@@ -11185,6 +11253,17 @@ impl Request {
             if o.slot_uninit(p.slot) {
                 return self.write_std_property(object, name, value);
             }
+        }
+        // `zend_get_property_offset` refusing a slot the scope may not
+        // reach, silent only for a class with a `__set` to serve it.
+        if let Some(p) = placed.as_ref()
+            && !self.reaches(p)
+            && !self.serves_accessor(class, b"__set")
+        {
+            let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
         if bad_name && !self.serves_accessor(class, b"__set") {
@@ -20100,7 +20179,7 @@ impl Request {
     /// error_prepend_string => no value => no value
     /// error_reporting => 30719 => 30719
     /// expose_php => On => On
-    /// extension_dir => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925 => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925
+    /// extension_dir => %s => %s
     /// fatal_error_backtraces => Off => Off
     /// fiber.stack_size => no value => no value
     /// file_uploads => On => On
@@ -20115,7 +20194,7 @@ impl Request {
     /// ignore_repeated_source => Off => Off
     /// ignore_user_abort => Off => Off
     /// implicit_flush => On => On
-    /// include_path => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear
+    /// include_path => %s => %s
     /// input_encoding => no value => no value
     /// internal_encoding => no value => no value
     /// log_errors => Off => Off
@@ -20217,7 +20296,7 @@ impl Request {
     /// <tr><td class="e">error_prepend_string</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">error_reporting</td><td class="v">30719</td><td class="v">30719</td></tr>
     /// <tr><td class="e">expose_php</td><td class="v">On</td><td class="v">On</td></tr>
-    /// <tr><td class="e">extension_dir</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td></tr>
+    /// <tr><td class="e">extension_dir</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">fatal_error_backtraces</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">fiber.stack_size</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">file_uploads</td><td class="v">On</td><td class="v">On</td></tr>
@@ -20232,7 +20311,7 @@ impl Request {
     /// <tr><td class="e">ignore_repeated_source</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">ignore_user_abort</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">implicit_flush</td><td class="v">Off</td><td class="v">Off</td></tr>
-    /// <tr><td class="e">include_path</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td></tr>
+    /// <tr><td class="e">include_path</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">input_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">log_errors</td><td class="v">Off</td><td class="v">Off</td></tr>
@@ -21509,6 +21588,37 @@ impl Request {
             self.description.env.push((name.to_vec(), value.to_vec()));
         }
         true
+    }
+
+    /// The name `setlocale()` last answered for `category`, by the
+    /// pinned build's `<locale.h>` value, or `None` while the request
+    /// has not moved it (design §4.4, revision 56). The names go with the
+    /// request, as `basic_functions`'s `RSHUTDOWN` puts the locale back.
+    #[must_use]
+    pub fn locale_name(&self, category: usize) -> Option<&[u8]> {
+        self.locale_names
+            .iter()
+            .find(|(c, _)| *c == category)
+            .map(|(_, name)| name.as_slice())
+    }
+
+    /// What `setlocale()` writes once a category has moved to `name`.
+    pub fn set_locale_name(&mut self, category: usize, name: Vec<u8>) {
+        self.locale_names.retain(|(c, _)| *c != category);
+        self.locale_names.push((category, name));
+    }
+
+    /// php's `BG(ctype_string)`: the name `setlocale()` answered when it
+    /// last moved `LC_CTYPE`, `None` where that was `C` or nothing moved
+    /// it, which ext/pcre keys its compiled patterns by (revision 56).
+    #[must_use]
+    pub fn ctype_locale(&self) -> Option<&[u8]> {
+        self.ctype_locale.as_deref()
+    }
+
+    /// What `setlocale()` writes to [`Request::ctype_locale`].
+    pub fn set_ctype_locale(&mut self, name: Option<Vec<u8>>) {
+        self.ctype_locale = name;
     }
 
     /// The facts of the build serving the request, php's

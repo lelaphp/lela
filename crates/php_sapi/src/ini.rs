@@ -8,7 +8,7 @@
 use std::ffi::OsString;
 
 use crate::cgi::path_of;
-use crate::{IniFile, IniFiles, PHP_INI_PATH, PHP_INI_SCAN_PATH};
+use crate::{IniFile, IniFiles, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR};
 
 /// `php_ini_builder_define`'s split of one `-d`: `name=value` at the
 /// first `=`, or `name=1` for a bare name. Its line, quoted or not, and what the INI
@@ -72,7 +72,7 @@ pub struct Search {
 /// named `sapi`, which searches the cwd unless it sets
 /// `php_ini_ignore_cwd`: `-c` as the file and the path, or else `PHPRC`
 /// as both, then the cwd, the binary's directory and
-/// `PHP_INI_PATH`; the file opened directly, else
+/// `PHP_CONFIG_FILE_PATH`; the file opened directly, else
 /// `php-<sapi>.ini` and then `php.ini` along the path; then each `.ini`
 /// of each directory of `PHP_INI_SCAN_DIR`, or of the build's scan
 /// directory, in `php_alphasort` order. Under `-n` only `-c` is read.
@@ -106,7 +106,7 @@ pub fn search(sapi: &str, given: &Search, ignore_cwd: bool) -> IniFiles {
                 _ => add(&binary),
             }
         }
-        add(PHP_INI_PATH.as_bytes());
+        add(PHP_CONFIG_FILE_PATH.as_bytes());
     }
     let mut loaded = None;
     if !given.ignore || given.path.is_some() {
@@ -124,14 +124,14 @@ pub fn search(sapi: &str, given: &Search, ignore_cwd: bool) -> IniFiles {
             .or_else(|| along(format!("php-{sapi}.ini").as_bytes(), &path))
             .or_else(|| along(b"php.ini", &path));
     }
-    let scan = env("PHP_INI_SCAN_DIR").unwrap_or_else(|| PHP_INI_SCAN_PATH.into());
+    let scan = env("PHP_INI_SCAN_DIR").unwrap_or_else(|| PHP_CONFIG_FILE_SCAN_DIR.into());
     if given.ignore || scan.is_empty() {
-        return IniFiles::new(PHP_INI_PATH.as_bytes(), loaded, None, Vec::new());
+        return IniFiles::new(PHP_CONFIG_FILE_PATH.as_bytes(), loaded, None, Vec::new());
     }
     let mut scanned = Vec::new();
     for dir in scan.split(|b| *b == b':') {
         let dir = if dir.is_empty() {
-            PHP_INI_SCAN_PATH.as_bytes()
+            PHP_CONFIG_FILE_SCAN_DIR.as_bytes()
         } else {
             dir
         };
@@ -156,7 +156,12 @@ pub fn search(sapi: &str, given: &Search, ignore_cwd: bool) -> IniFiles {
             }
         }
     }
-    IniFiles::new(PHP_INI_PATH.as_bytes(), loaded, Some(&scan), scanned)
+    IniFiles::new(
+        PHP_CONFIG_FILE_PATH.as_bytes(),
+        loaded,
+        Some(&scan),
+        scanned,
+    )
 }
 
 /// `php_fopen_with_path`: `name` opened in each directory of `path` until

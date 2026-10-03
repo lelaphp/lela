@@ -536,6 +536,8 @@ pub(crate) struct Under<'a> {
     /// one (the `server` module); a runner handed such a subset without it
     /// refuses.
     pub served: Option<&'a str>,
+    /// The directory the tests' conflict keys are held in as locks.
+    pub locks: &'a Path,
 }
 
 impl<'a> Under<'a> {
@@ -843,6 +845,11 @@ pub struct Ask {
     pub against: Option<String>,
     /// How many tests run at once; the machine's cores unless named.
     pub jobs: Option<NonZeroUsize>,
+    /// The directory a test's conflict keys are held in as locks, where
+    /// every run on the machine meets (#1313): the temporary directory
+    /// unless named. A test of the harness names one of its own, so a real
+    /// run beside it holding `all` makes it wait for nothing (#1675).
+    pub locks: Option<PathBuf>,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -881,12 +888,14 @@ pub fn run(
     {
         println!("phpt: nothing runs; {why}");
     }
+    let locks = ask.locks.clone().unwrap_or_else(across::machine);
     let under = Under {
         runner: &runner,
         lane: ask.lane,
         oracle_absent: oracle_absent.as_deref(),
         jobs: ask.jobs.unwrap_or_else(tally::cores),
         served: None,
+        locks: &locks,
     };
     // The run's own copy of the pinned tree, which every subset runs in and
     // which goes when the run does; none where no test will run.
@@ -1187,6 +1196,7 @@ pub(crate) fn run_subset(
         oracle_absent,
         jobs,
         served,
+        locks,
     } = under;
     let tests = subset.tests()?;
     let unrun = (Tally::found(tests.len()), across::Waited::default());
@@ -1228,7 +1238,7 @@ pub(crate) fn run_subset(
     let batch = adapter::batch(&apart, jobs);
     let waited = Mutex::new(across::Waited::default());
     let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
-        let (_held, wait) = across::hold(keys)?;
+        let (_held, wait) = across::hold(locks, keys)?;
         waited
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

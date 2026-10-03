@@ -112,12 +112,14 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
     let binary = oracle().unwrap();
     let manifest = manifest();
     let oracle = manifest.pin.oracle();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     run_subset(&oracle, registry, subset, under).unwrap().0
 }
@@ -247,12 +249,14 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     let manifest = manifest();
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -335,12 +339,14 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     let mut manifest = manifest();
     manifest.pin.recipe.limits.timeout_s = 1;
     let oracle = manifest.pin.oracle();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -1013,12 +1019,14 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
         manifest.pin.oracle.path.display()
     );
     let oracle = manifest.pin.oracle();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &engine,
         lane: None,
         oracle_absent: Some(&why),
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -1411,12 +1419,14 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
     // the manifest has and the tree holds.
     subset.scope = "ext/pcre".to_owned();
     let manifest = manifest();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     let source = manifest.pin.source.tree().unwrap_or_default();
     let reading = reading(&tally, &workspace(), &manifest, &source, &subset, under).unwrap();
@@ -1434,12 +1444,14 @@ fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
     let mut manifest = manifest();
     manifest.pin.recipe.limits.timeout_s = limit_s;
     let oracle = manifest.pin.oracle();
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
         jobs: NonZeroUsize::new(jobs).unwrap(),
         served: None,
+        locks: locks.path(),
     };
     run_subset(&oracle, &registry(""), subset, under).unwrap().0
 }
@@ -1718,12 +1730,14 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     );
     let binary = oracle().unwrap();
     let runner = Runner::Engine(binary);
+    let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         runner: &runner,
         lane: None,
         oracle_absent: None,
         jobs: crate::tally::cores(),
         served: None,
+        locks: locks.path(),
     };
     let unserved = run_subset(&down.pin.oracle(), &registry(""), &subset, under);
     assert!(unserved.is_err(), "{unserved:#?}");

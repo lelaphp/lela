@@ -60,7 +60,9 @@ mod wrapper;
 pub use api::request::ini_files::IniFile;
 pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
-pub use constants::{PHP_INI_PATH, PHP_INI_SCAN_PATH};
+pub use constants::{
+    PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
+};
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
     Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,

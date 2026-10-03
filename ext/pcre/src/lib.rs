@@ -157,10 +157,16 @@ pub fn extension() -> Extension {
 }
 
 /// The constants `register_php_pcre_symbols` registers, in its order.
-/// `PCRE_VERSION` and its two numbers are the linked library's.
+/// `PCRE_VERSION` is the linked library's, `pcre2_config`'s, so the keg's;
+/// its two numbers are `PCRE2_MAJOR` and `PCRE2_MINOR`, the header php's
+/// build compiled against, which for the pinned build is 10.47's though
+/// the keg it links is newer (`php -n --re pcre`). The library's Unicode
+/// is the keg's too: U+10940, a letter Unicode 17 assigns, is `\p{L}` and
+/// `\p{Sidetic}` under `/u`.
 ///
 /// ```php
 /// var_dump(PREG_PATTERN_ORDER, PREG_SET_ORDER, PREG_OFFSET_CAPTURE, PREG_UNMATCHED_AS_NULL, PREG_SPLIT_NO_EMPTY, PREG_SPLIT_DELIM_CAPTURE, PREG_SPLIT_OFFSET_CAPTURE, PREG_GREP_INVERT, PREG_NO_ERROR, PREG_INTERNAL_ERROR, PREG_BACKTRACK_LIMIT_ERROR, PREG_RECURSION_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR, PREG_JIT_STACKLIMIT_ERROR, PCRE_VERSION_MAJOR, PCRE_JIT_SUPPORT, is_string(PCRE_VERSION));
+/// var_dump(PCRE_VERSION, PCRE_VERSION_MINOR, preg_match('/^\p{L}$/u', "\u{10940}"), preg_match('/^\p{Sidetic}$/u', "\u{10940}"));
 /// ```
 /// ```expect
 /// int(1)
@@ -181,6 +187,10 @@ pub fn extension() -> Extension {
 /// int(10)
 /// bool(true)
 /// bool(true)
+/// string(16) "10.48 2026-08-31"
+/// int(47)
+/// int(1)
+/// int(1)
 /// ```
 #[php_const]
 pub(crate) mod constants {
@@ -202,29 +212,18 @@ pub(crate) mod constants {
     pub(crate) const PREG_BAD_UTF8_OFFSET_ERROR: i64 = 5;
     pub(crate) const PREG_JIT_STACKLIMIT_ERROR: i64 = 6;
 
-    /// The linked library's version, `"10.46 2025-08-27"`.
+    /// The linked library's version, the keg's `"10.48 2026-08-31"`.
     pub(crate) fn PCRE_VERSION() -> String {
         ffi::version()
     }
-    pub(crate) fn PCRE_VERSION_MAJOR() -> i64 {
-        crate::version_number(0)
-    }
-    pub(crate) fn PCRE_VERSION_MINOR() -> i64 {
-        crate::version_number(1)
-    }
+    /// `PCRE2_MAJOR` of the header the pinned php was built against.
+    pub(crate) const PCRE_VERSION_MAJOR: i64 = 10;
+    /// `PCRE2_MINOR` of the header the pinned php was built against,
+    /// 10.47's, not the linked library's minor.
+    pub(crate) const PCRE_VERSION_MINOR: i64 = 47;
     pub(crate) fn PCRE_JIT_SUPPORT() -> bool {
         ffi::jit_supported()
     }
-}
-
-/// The linked library's version's `at`th number, split at the space and
-/// the dot.
-fn version_number(at: usize) -> i64 {
-    ffi::version()
-        .split([' ', '.'])
-        .nth(at)
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
 }
 
 /// What `Z_PARAM_ARRAY_HT_OR_STR` holds, `array|string`: the pattern,

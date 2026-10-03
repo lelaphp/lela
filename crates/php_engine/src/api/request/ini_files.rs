@@ -33,7 +33,12 @@ pub struct IniFiles {
 
 impl Default for IniFiles {
     fn default() -> IniFiles {
-        IniFiles::new(crate::PHP_INI_PATH.as_bytes(), None, None, Vec::new())
+        IniFiles::new(
+            crate::PHP_CONFIG_FILE_PATH.as_bytes(),
+            None,
+            None,
+            Vec::new(),
+        )
     }
 }
 

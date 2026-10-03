@@ -83,7 +83,7 @@ _Avoid_: module globals, persistent state, static (php's `read_static_prop`, `wr
 
 **Request description**:
 Everything a host knows about one request before it starts: arguments, environment, working directory, server variables, request headers, body stream, SAPI name, and whether it is a web request. One plain value, handed over once.
-_Avoid_: SAPI (the host; php's `sapi_name`), context, config
+_Avoid_: SAPI (the host; php's `sapi_name`), context, config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`)
 
 **Output sink**:
 Where a request's bytes go: one rendered header block, then body bytes. The engine owns headers, status, output buffering and the commit moment; a sink only writes.
@@ -161,7 +161,7 @@ _Avoid_: scoreboard, summary, aggregator
 
 **Seam manifest**:
 The one tracked data file, `seams.toml`, that declares each seam once: producer, consumers, lock file, permitted edges, `unsafe` homes, forbidden types, line ceilings, the ADR that decided it, and the text a failure prints. Every rule sensor is derived from it; a rule stated anywhere else is a copy.
-_Avoid_: config, rules file, policy, `api-check`'s tables
+_Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rules file, policy, `api-check`'s tables
 
 **Reading**:
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's tree hash, commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.

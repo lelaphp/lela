@@ -124,45 +124,42 @@ const LANGINFO: [(i64, libc::nl_item); 57] = items!(
 );
 
 /// A request's locale: the `locale_t` installed on the thread serving it
-/// once `setlocale()` has built one, and each category's name by
-/// `<locale.h>` value, `LC_ALL`'s slot unused.
-#[derive(Debug)]
+/// once `setlocale()` has built one. Each category's name is the
+/// request's environment's (design §4.4, revision 56).
+#[derive(Debug, Default)]
 pub(super) struct Locale {
-    names: [Vec<u8>; 7],
     installed: Option<Installed>,
 }
 
-impl Default for Locale {
-    fn default() -> Locale {
-        let mut names: [Vec<u8>; 7] = std::array::from_fn(|_| b"C".to_vec());
-        names[2] = b"C.UTF-8".to_vec();
-        Locale {
-            names,
-            installed: None,
-        }
+/// One category's name, `C.UTF-8` for `LC_CTYPE` and `C` for the rest
+/// until `setlocale()` moves it.
+fn name(req: &Request, category: usize) -> Vec<u8> {
+    req.locale_name(category).map_or_else(
+        || {
+            if category == 2 {
+                b"C.UTF-8".to_vec()
+            } else {
+                b"C".to_vec()
+            }
+        },
+        <[u8]>::to_vec,
+    )
+}
+
+/// `setlocale(category, NULL)`: for `LC_ALL` the one name when every
+/// category agrees, else the six in order joined by `/`.
+fn query(req: &Request, category: usize) -> Vec<u8> {
+    if category != 0 {
+        return name(req, category);
     }
+    let names: Vec<Vec<u8>> = (1..7).map(|c| name(req, c)).collect();
+    if names.iter().all(|n| *n == names[0]) {
+        return names[0].clone();
+    }
+    names.join(&b'/')
 }
 
 impl Locale {
-    /// `setlocale(LC_ALL, NULL)`: the one name when every category
-    /// agrees, else the six in order joined by `/`.
-    fn all(&self) -> Vec<u8> {
-        let names = &self.names[1..];
-        if names.iter().all(|n| *n == names[0]) {
-            return names[0].clone();
-        }
-        names.join(&b'/')
-    }
-
-    /// `setlocale(category, NULL)`.
-    fn query(&self, category: usize) -> Vec<u8> {
-        if category == 0 {
-            self.all()
-        } else {
-            self.names[category].clone()
-        }
-    }
-
     /// Install `locale` on the thread from here to the request's end, in
     /// place of the one installed before it.
     fn install(&mut self, locale: c::Locale) {
@@ -200,7 +197,7 @@ fn c_string(bytes: &[u8]) -> CString {
 fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>> {
     let category = usize::try_from(category).ok().filter(|c| *c < 7)?;
     if loc == b"0" {
-        return Some(req.state::<crate::State>().string.locale.query(category));
+        return Some(query(req, category));
     }
     if loc.len() >= 255 {
         docref(req, Level::Warning, "Specified locale name is too long");
@@ -222,14 +219,13 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
         built = built.with(self::category(*target)?, &name).ok()?;
         names.push(name.into_bytes());
     }
-    let locale = &mut req.state::<crate::State>().string.locale;
-    locale.install(built);
+    req.state::<crate::State>().string.locale.install(built);
     for (target, name) in targets.iter().zip(names) {
-        locale.names[*target] = name;
+        req.set_locale_name(*target, name);
     }
-    let retval = locale.query(category);
-    if (category == 0 || category == 2) && retval == b"C" {
-        return Some(b"C".to_vec());
+    let retval = query(req, category);
+    if category == 0 || category == 2 {
+        req.set_ctype_locale((retval != b"C").then(|| retval.clone()));
     }
     Some(retval)
 }

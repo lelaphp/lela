@@ -342,6 +342,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         census: ask.census,
         against: ask.against,
         jobs: ask.jobs,
+        locks: None,
     };
     let readings = phpt::run(root, manifest, &registry, &ask)?;
     let outcome = recorded(store, &readings)?;
