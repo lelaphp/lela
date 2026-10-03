@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Clock, Kind, Namespace, Object, Runner, Standing, Swept, left, offset, second_of_day,
+    Clock, Ctime, Kind, Namespace, Object, Runner, Standing, Swept, left, offset, second_of_day,
     unnamed_left,
 };
 use crate::oracle::Ran;
@@ -45,7 +45,7 @@ fn made(kind: Kind, id: u64, named: &[u32], key: u64, creator: &str, ctime: &str
     Object {
         key,
         creator: creator.to_owned(),
-        ctime: second_of_day(ctime),
+        ctime: second_of_day(ctime).map(Ctime::Day),
         ..object(kind, id, named, 0)
     }
 }
@@ -82,6 +82,85 @@ fn ipcs_is_read_by_each_sections_header() {
             made(Kind::Semaphores, 131_082, &[], 0, "mitchell", "1:46:23"),
         ]
     );
+}
+
+/// `/proc/sysvipc/msg`, `shm` and `sem` as Linux prints them, in the
+/// formats of `ipc/msg.c`, `ipc/shm.c` and `ipc/sem.c`: six objects like
+/// [`IPCS`]'s, a database's keyed segment and set beside what the subsets'
+/// tests left, one key above `INT_MAX` printed negative.
+const PROC_MSG: &str = "\
+       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime
+         0          0     0           0          0     0     0  1000  1000  1000  1000          0          0 1759355129
+         1      32769   666           0          0  4242  4243  1000  1000  1000  1000 1759355290 1759355290 1759355290
+";
+const PROC_SHM: &str = "\
+       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap
+  70132550          0   600                    56   824   824      6  1000  1000  1000  1000 1759344310 1759348592 1759344310                  4096                     0
+         0      32769   666                  1024 77085 77085      0  1000  1000  1000  1000 1759355288 1759355288 1759355288                     0                     0
+";
+const PROC_SEM: &str = "\
+       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime
+-889275714          0   600         20  1000  1000   999   999 1759344310 1759344310
+         0      32769     0          3  1000  1000  1000  1000          0 1759282783
+";
+
+/// Linux's `/proc/sysvipc` read as `ipcs -a` is on macOS (#1643): each
+/// object with its id, the processes the kernel names on it, its attached
+/// count, its key as the `key_t` it is, its creator's uid and its `ctime`
+/// as the instant it prints. A header alone, as a machine with no object
+/// prints, is no object.
+#[test]
+fn proc_sysvipc_is_read_by_each_files_header() {
+    let standing = Standing::of_proc(PROC_SHM, PROC_MSG, PROC_SEM);
+    let at = |kind, id, named: &[u32], key, creator: &str, ctime| Object {
+        key,
+        creator: creator.to_owned(),
+        ctime: Some(Ctime::Epoch(ctime)),
+        ..object(kind, id, named, 0)
+    };
+    assert_eq!(
+        standing.0,
+        [
+            at(Kind::Queue, 0, &[], 0, "1000", 1_759_355_129),
+            at(Kind::Queue, 32_769, &[4242, 4243], 1, "1000", 1_759_355_290),
+            Object {
+                attached: 6,
+                ..at(Kind::Memory, 0, &[824], 0x042e_2346, "1000", 1_759_344_310)
+            },
+            at(Kind::Memory, 32_769, &[77_085], 0, "1000", 1_759_355_288),
+            at(Kind::Semaphores, 0, &[], 0xcafe_babe, "999", 1_759_344_310),
+            at(Kind::Semaphores, 32_769, &[], 0, "1000", 1_759_282_783),
+        ]
+    );
+    let header = |listed: &str| listed.lines().next().unwrap().to_owned() + "\n";
+    assert_eq!(
+        Standing::of_proc(&header(PROC_SHM), &header(PROC_MSG), &header(PROC_SEM)),
+        Standing::default()
+    );
+}
+
+/// The rule for an object naming no process holds over Linux's `ctime`,
+/// an instant and not a time of day, as it does over `ipcs`'s: a private
+/// queue of the runner's uid made while a program ran is removed, and one
+/// made a second before it began, or another uid's, stands (#1643).
+#[test]
+fn an_instant_from_proc_is_held_to_the_programs_runs_as_a_time_of_day_is() {
+    let q = |id, creator: &str, after: i64| Object {
+        creator: creator.to_owned(),
+        ctime: Some(Ctime::Epoch(AT_2300 + after)),
+        ..object(Kind::Queue, id, &[], 0)
+    };
+    let after = Standing(vec![q(1, "501", 5), q(2, "501", 3), q(3, "1000", 5)]);
+    let gone: Vec<u64> = unnamed_left(
+        &Standing::default(),
+        &after,
+        &[ran(4_500, 6_200)],
+        (&runner(), &clock()),
+    )
+    .into_iter()
+    .map(|o| o.id)
+    .collect();
+    assert_eq!(gone, [1]);
 }
 
 /// The rule, one counterexample per clause: only an object new since the

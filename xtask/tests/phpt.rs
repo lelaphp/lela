@@ -991,6 +991,57 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     );
 }
 
+/// On Linux, a run where no private IPC namespace is in play still removes
+/// what its test leaves (#1643): the fixture's subset is no System V
+/// subset, so its program runs in the machine's own namespace, as every
+/// subset's does where `unshare` is refused, and the keyed queue its test
+/// sends to and leaves, naming the test's process, is gone from
+/// `/proc/sysvipc/msg` after the run. Before #1643 the sweep read
+/// `ipcs -a` by a `T` header util-linux never prints, and the queue stood.
+/// It returns elsewhere, where there is no `/proc/sysvipc`, and where the
+/// oracle has no sysvmsg.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
+    if oracle().is_none() {
+        return;
+    }
+    let keys = || -> Vec<String> {
+        fs::read_to_string("/proc/sysvipc/msg")
+            .unwrap_or_default()
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+            .collect()
+    };
+    if fs::metadata("/proc/sysvipc/msg").is_err() {
+        eprintln!("skipped: no /proc/sysvipc here");
+        return;
+    }
+    let marks = Tree::new("phpt-sysv-linux").unwrap();
+    let pid = marks.join("pid");
+    let leaves = format!(
+        "--TEST--\nleaves a queue\n--SKIPIF--\n<?php if (!function_exists('msg_get_queue')) die('skip no sysvmsg');\n--FILE--\n<?php\n$q = msg_get_queue(0x5c000000 + getmypid(), 0600);\nmsg_send($q, 1, \"x\");\nfile_put_contents('{}', getmypid());\necho \"left\";\n--EXPECT--\nleft\n",
+        pid.display()
+    );
+    let scratch = Scratch::new("sysv-linux", &[("leaves.phpt", &leaves)]);
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    let Ok(pid) = fs::read_to_string(&pid) else {
+        eprintln!("skipped: the oracle has no sysvmsg: {}", reading.message);
+        return;
+    };
+    let key = (0x5c00_0000 + pid.trim().parse::<i64>().unwrap()).to_string();
+    let stood = keys().contains(&key);
+    if stood {
+        let _ = Command::new("ipcrm")
+            .args(["-Q", &format!("0x{:08x}", key.parse::<i64>().unwrap())])
+            .status();
+    }
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert!(!stood, "the run left the queue of key {key}: {reading:#?}");
+    assert!(count(&reading, "sysv_removed") >= 1, "{reading:#?}");
+}
+
 /// Two runs on one machine keep apart on what upstream's conflict keys
 /// name (#1313): a subset whose `CONFLICTS` names `all`, as
 /// `sapi/fpm/tests` does for `FPM\Tester`'s ports, whose every test binds

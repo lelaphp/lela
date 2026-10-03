@@ -39,12 +39,19 @@
 //! `unshare` permits, so nothing they make outlives its program, and the
 //! sweep there is a check that finds nothing ([`Namespace`]).
 //!
-//! **How the kernel is read.** `ipcs -a` lists the objects with their
-//! processes, keys, creators and `CTIME`, and `ipcrm` removes them;
-//! neither prints a semaphore's process, so `perl`'s `semctl(GETPID)`
-//! reads it. `ipcs` prints `CTIME` as the local time of day alone, so the
-//! sweep reads the zone's offset from `date +%z` and takes the latest such
-//! second not after now, the object being new since the subset began. A
+//! Where `unshare` is refused, as Docker's default seccomp profile refuses
+//! it, they run in the machine's own, and the sweep removes what they left
+//! as it does on macOS (#1643).
+//!
+//! **How the kernel is read.** On Linux, `/proc/sysvipc/shm`, `msg` and
+//! `sem` list the objects with their processes, keys, creators' uids and
+//! `ctime` as seconds since the epoch; util-linux's `ipcs` prints none of
+//! that in the table macOS's does. Elsewhere `ipcs -a` lists them with
+//! their processes, keys, creators and `CTIME`, which it prints as the
+//! local time of day alone, so the sweep reads the zone's offset from
+//! `date +%z` and takes the latest such second not after now, the object
+//! being new since the subset began. `ipcrm` removes them on both. Neither
+//! names a semaphore's process, so `perl`'s `semctl(GETPID)` reads it. A
 //! machine without them reads no object, and the subset's sweep says so
 //! rather than failing the run.
 //!
@@ -52,6 +59,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -114,32 +122,35 @@ pub(crate) struct Object {
     /// The key it was made under; `IPC_PRIVATE` is 0.
     pub key: u64,
     /// The user who made it, as `ipcs` prints the creator: a name, or the
-    /// number where the user database has none.
+    /// number where the user database has none, which `/proc/sysvipc`
+    /// always prints.
     pub creator: String,
-    /// When it was made or last set, as the local second of the day.
-    pub ctime: Option<u32>,
+    /// When it was made or last set.
+    pub ctime: Option<Ctime>,
 }
+
+/// When an object was made or last set, as the kernel's listing gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ctime {
+    /// The local second of the day, all `ipcs` prints.
+    Day(u32),
+    /// Seconds since the epoch, as `/proc/sysvipc` prints it.
+    Epoch(i64),
+}
+
+/// Where Linux lists each kind's objects.
+const PROC: &str = "/proc/sysvipc";
 
 /// The objects standing on the machine at one moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Standing(pub Vec<Object>);
 
 impl Standing {
-    /// The machine's objects now, read through `ipcs` and, for each
-    /// semaphore set's processes, `perl`.
+    /// The machine's objects now, read from `/proc/sysvipc` where the
+    /// machine has it and through `ipcs` where it has not, and, for each
+    /// semaphore set's processes, through `perl`.
     pub(crate) fn now() -> Result<Standing> {
-        let listed = Command::new("ipcs")
-            .arg("-a")
-            .output()
-            .context("running ipcs -a")?;
-        if !listed.status.success() {
-            bail!(
-                "ipcs -a exited {}: {}",
-                listed.status,
-                String::from_utf8_lossy(&listed.stderr).trim()
-            );
-        }
-        let mut standing = Standing::parse(&String::from_utf8_lossy(&listed.stdout));
+        let mut standing = Standing::proc(Path::new(PROC))?.map_or_else(Standing::ipcs, Ok)?;
         let sets: Vec<String> = standing
             .0
             .iter()
@@ -155,6 +166,22 @@ impl Standing {
             }
         }
         Ok(standing)
+    }
+
+    /// The machine's objects as `ipcs -a` lists them.
+    fn ipcs() -> Result<Standing> {
+        let listed = Command::new("ipcs")
+            .arg("-a")
+            .output()
+            .context("running ipcs -a")?;
+        if !listed.status.success() {
+            bail!(
+                "ipcs -a exited {}: {}",
+                listed.status,
+                String::from_utf8_lossy(&listed.stderr).trim()
+            );
+        }
+        Ok(Standing::parse(&String::from_utf8_lossy(&listed.stdout)))
     }
 
     /// What `ipcs -a` printed, read by each section's header line: an
@@ -198,7 +225,7 @@ impl Standing {
                     // `CTIME` is the last column, and a time `ipcs` leaves
                     // unset is the one word `no-entry`, so the field is the
                     // line's last.
-                    let ctime = fields.last().and_then(|t| second_of_day(t));
+                    let ctime = fields.last().and_then(|t| second_of_day(t)).map(Ctime::Day);
                     let (named, attached): (&[&str], _) = match kind {
                         Kind::Memory => (&["CPID"], column("NATTCH").unwrap_or(0)),
                         Kind::Queue => (&["LSPID", "LRPID"], 0),
@@ -221,6 +248,84 @@ impl Standing {
                     });
                 }
                 None => {}
+            }
+        }
+        Standing(objects)
+    }
+
+    /// The objects `dir`, Linux's `/proc/sysvipc`, lists; none where the
+    /// machine has no such directory.
+    fn proc(dir: &Path) -> Result<Option<Standing>> {
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        let read = |name: &str| {
+            let file = dir.join(name);
+            std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
+        };
+        Ok(Some(Standing::of_proc(
+            &read("shm")?,
+            &read("msg")?,
+            &read("sem")?,
+        )))
+    }
+
+    /// What `/proc/sysvipc/shm`, `msg` and `sem` print, each read by its
+    /// header line as [`Standing::parse`] reads `ipcs`: a segment's `cpid`
+    /// and a queue's `lspid` and `lrpid` are its processes, a segment's
+    /// `nattch` its attached count; the key is the signed decimal the
+    /// kernel prints, the creator the `cuid`, and `ctime` seconds since the
+    /// epoch. A semaphore set names no process here either.
+    pub(crate) fn of_proc(shm: &str, msg: &str, sem: &str) -> Standing {
+        let mut objects = Vec::new();
+        for (kind, listed, id, named) in [
+            (Kind::Queue, msg, "msqid", &["lspid", "lrpid"][..]),
+            (Kind::Memory, shm, "shmid", &["cpid"][..]),
+            (Kind::Semaphores, sem, "semid", &[][..]),
+        ] {
+            let mut lines = listed.lines();
+            let header: Vec<&str> = lines
+                .next()
+                .map(|line| line.split_whitespace().collect())
+                .unwrap_or_default();
+            for line in lines {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                let text = |name: &str| {
+                    header
+                        .iter()
+                        .position(|h| *h == name)
+                        .and_then(|at| fields.get(at))
+                        .copied()
+                };
+                let column = |name: &str| text(name).and_then(|v| v.parse::<u64>().ok());
+                let Some(id) = column(id) else {
+                    continue;
+                };
+                // A `key_t` is an `int`, which the kernel prints signed.
+                let key = text("key")
+                    .and_then(|k| k.parse::<i32>().ok())
+                    .map_or(u64::MAX, |k| u64::from(u32::from_ne_bytes(k.to_ne_bytes())));
+                let named = named
+                    .iter()
+                    .filter_map(|name| column(name))
+                    .filter(|pid| *pid != 0)
+                    .filter_map(|pid| u32::try_from(pid).ok())
+                    .collect();
+                objects.push(Object {
+                    kind,
+                    id,
+                    named,
+                    attached: if kind == Kind::Memory {
+                        column("nattch").unwrap_or(0)
+                    } else {
+                        0
+                    },
+                    key,
+                    creator: text("cuid").unwrap_or_default().to_owned(),
+                    ctime: text("ctime")
+                        .and_then(|t| t.parse::<i64>().ok())
+                        .map(Ctime::Epoch),
+                });
             }
         }
         Standing(objects)
@@ -342,6 +447,14 @@ impl Clock {
         })
     }
 
+    /// When `ctime` was, as seconds since the epoch.
+    fn at(&self, ctime: Ctime) -> i64 {
+        match ctime {
+            Ctime::Day(second) => self.when(second),
+            Ctime::Epoch(at) => at,
+        }
+    }
+
     /// The latest instant, as seconds since the epoch, not after now
     /// whose local time of day is `second`.
     fn when(&self, second: u32) -> i64 {
@@ -407,8 +520,8 @@ pub(crate) fn unnamed_left<'a>(
         .filter(|o| o.named.is_empty() && o.attached == 0)
         .filter(|o| o.key == 0 && runner.made(&o.creator))
         .filter(|o| {
-            o.ctime.is_some_and(|second| {
-                let made = clock.when(second);
+            o.ctime.is_some_and(|ctime| {
+                let made = clock.at(ctime);
                 windows
                     .iter()
                     .any(|(from, to)| *from <= made && made <= *to)
