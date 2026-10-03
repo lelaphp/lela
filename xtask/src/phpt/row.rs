@@ -90,18 +90,34 @@ pub(crate) enum Role {
 }
 
 /// The reading held to its subset's target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct Target {
     /// The tests in the target.
-    n: u64,
+    pub n: u64,
     /// The target's tests the engine met.
-    met: u64,
+    pub met: u64,
     /// The subset's tests outside the target: the oracle skipped or
     /// missed them.
-    outside: u64,
+    pub outside: u64,
     /// The subset's tests the kept target holds no verdict for, kept apart
     /// from `outside` (#1644); 0 where the reading counts none.
-    predated: u64,
+    pub predated: u64,
+}
+
+impl Row {
+    /// The subset whose own run the reading is: the engine's, beside no
+    /// control, lane or comparison; none for every other reading.
+    pub(crate) fn run_of(&self) -> Option<&str> {
+        match (self.role, self.lane) {
+            (Some(Role::Engine), None) => self.subset.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Met-of-target, where the reading was held to one.
+    pub(crate) fn target(&self) -> Option<Target> {
+        self.target
+    }
 }
 
 impl PerReading for Row {

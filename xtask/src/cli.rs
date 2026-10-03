@@ -756,6 +756,11 @@ pub enum Section {
     /// are kept. CI reads them here and writes no directory of the corpus
     /// (#1713, #1733).
     Corpus,
+    /// Met-of-target per suite and in total, from the phpt reading that
+    /// stands for each suite parity counts, and the suites outside parity
+    /// with the ruling that put them there or as not built (design §1,
+    /// §12; #1761).
+    Parity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

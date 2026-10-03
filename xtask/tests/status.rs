@@ -943,6 +943,134 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
     }
 }
 
+/// A scratch workspace whose store holds the phpt readings the parity
+/// tests read.
+fn parity_store(name: &str) -> Tree {
+    let root = scratch(name);
+    let phpt = |scope: &str, counts: &[(&str, i64)]| {
+        let mut r = Reading::new("phpt", scope);
+        r.status = Status::Pass;
+        r.at = "2026-10-03T12:00:00Z".parse().unwrap();
+        for (key, n) in counts {
+            r.numbers.insert((*key).into(), (*n).into());
+        }
+        r
+    };
+    let held = |n: i64, met: i64| {
+        [
+            ("tests", n + 10),
+            ("run", n + 10),
+            ("target", n),
+            ("met", met),
+            ("outside", 10),
+        ]
+    };
+    Store::of_workspace(&root)
+        .record(&[
+            phpt("Zend/tests", &held(100, 90)),
+            phpt(
+                "ext/ctype",
+                &[&held(48, 47)[..], &[("predated", 2)]].concat(),
+            ),
+            phpt("ext/json", &[("tests", 88), ("run", 88), ("passed", 88)]),
+            phpt("ext/ctype@control", &[("tests", 50), ("run", 50)]),
+            phpt("ext/ctype@against", &[("held", 47)]),
+            phpt("ext/ctype@force", &held(1000, 1000)),
+            phpt("ext/standard/tests/serialize", &held(500, 500)),
+            phpt("ext/pgsql", &held(3, 3)),
+            phpt("ext/enchant", &held(20, 20)),
+        ])
+        .unwrap();
+    root
+}
+
+/// The `parity` section (design §1, #1761): each suite parity counts with
+/// met-of-target off the phpt reading that stands for it, the total over
+/// the suites held to a target, and the suites outside parity with the
+/// ruling that put them there or as not built; a control, a lane, a
+/// comparison and a narrower run are no suite's own, and a reading held to
+/// no target is in no total.
+#[test]
+fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
+    let root = parity_store("parity");
+    let (ok, json, err) = status(&root, &["--section", "parity", "--format", "json"]);
+    assert!(ok, "{err}");
+    let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let suite = |name: &str| {
+        parity["suites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["suite"] == name)
+            .unwrap_or_else(|| panic!("no suite {name}: {json}"))
+            .clone()
+    };
+    assert_eq!(
+        suite("Zend/tests")["target"],
+        serde_json::json!({ "n": 100, "met": 90, "outside": 10, "predated": 0 })
+    );
+    assert_eq!(
+        suite("ext/ctype")["target"],
+        serde_json::json!({ "n": 48, "met": 47, "outside": 10, "predated": 2 })
+    );
+    assert_eq!(suite("ext/json")["target"], serde_json::Value::Null);
+    assert_eq!(suite("ext/json")["reading"]["status"], "pass");
+    assert_eq!(suite("sapi/cli")["reading"], serde_json::Value::Null);
+    let suites = parity["suites"].as_array().unwrap();
+    assert!(
+        suites
+            .iter()
+            .all(|s| !s["suite"].as_str().unwrap().contains('@')
+                && s["suite"] != "ext/standard/tests/serialize"
+                && s["suite"] != "ext/pgsql"),
+        "{json}"
+    );
+    assert_eq!(
+        parity["total"],
+        serde_json::json!({ "suites": suites.len(), "held": 2, "met": 137, "target": 148 })
+    );
+    let outside = parity["outside"].as_array().unwrap();
+    assert!(
+        outside.contains(
+            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": 1167 })
+        ),
+        "{json}"
+    );
+    assert!(
+        outside
+            .contains(&serde_json::json!({ "suite": "ext/ldap", "why": "ruling", "ruling": 1167 })),
+        "a suite ruled out is named whether or not a reading measured it: {json}"
+    );
+    assert!(
+        outside.contains(&serde_json::json!({ "suite": "ext/enchant", "why": "unbuilt" })),
+        "{json}"
+    );
+    assert_eq!(
+        outside.len(),
+        8,
+        "the seven under #1167 and ext/enchant: {json}"
+    );
+}
+
+/// The same section as Markdown: a row per suite, the total, and the
+/// suites outside parity by ruling and as not built.
+#[test]
+fn parity_renders_as_markdown_for_a_session() {
+    let root = parity_store("parity-md");
+    let (ok, md, err) = status(&root, &["--section", "parity"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| ext/ctype | 47 | 48 | 10 | 2 | pass |"),
+        "{md}"
+    );
+    assert!(md.contains("| ext/json | no target |"), "{md}");
+    assert!(md.contains("137 of 148 target tests met"), "{md}");
+    assert!(
+        md.contains("#1167") && md.contains("not built by the pinned php: ext/enchant"),
+        "{md}"
+    );
+}
+
 /// `--session` is the map plus the local facts in one block, for the
 /// session-start hook; the local file is laid down from its template when
 /// the clone has none, and an unrendered region is said to be one.

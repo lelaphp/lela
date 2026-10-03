@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 pub(crate) mod every;
+mod parity;
 pub(crate) use every::PerReading;
 
 use crate::api_check;
@@ -140,6 +141,7 @@ pub fn render(
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Parity => return parity::render(manifest, store, root, format),
     };
     Ok(match format {
         Table::Json => {
