@@ -203,3 +203,19 @@ fn zend_multibyte_support_is_disabled_without_a_provider() {
         "{stdout}"
     );
 }
+
+/// #1556: argument #6's bound is the integer `ZEND_ULONG_FMT` names,
+/// `PHP_TIMEOUT_ULL_MAX / 1000000`; the pinned php prints what a register
+/// held there, so the witness beside `fsockopen` holds the digits
+/// and this holds the number (`trace:fsockopen-timeout-bound`).
+#[test]
+fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
+    let (stdout, fatal) = served(
+        "<?php try { fsockopen('127.0.0.1', 1, $c, $m, 1e20); } catch (ValueError $e) { echo $e->getMessage(), \"\\n\"; }\ntry { pfsockopen('udp://127.0.0.1', 9, $c, $m, -2.0); } catch (ValueError $e) { echo $e->getMessage(); }",
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709"
+    );
+}

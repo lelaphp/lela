@@ -196,6 +196,10 @@ pub(crate) fn default_timeout(req: &Request) -> f64 {
 
 /// `PHP_TIMEOUT_ULL_MAX / 1000000.0`, the most seconds a timeout holds.
 const TIMEOUT_MAX: f64 = 18_446_744_073_709.55;
+/// The same bound as the unsigned integer `ZEND_ULONG_FMT` names, which
+/// `fsockopen()`'s argument #6 error prints; php passes the double to it
+/// and prints what a register held (`trace:fsockopen-timeout-bound`).
+const TIMEOUT_MAX_SHOWN: u64 = 18_446_744_073_709;
 
 /// A timeout of seconds as the natives turn it into a `timeval`: `None`,
 /// no limit, below zero and at or past the most a timeout holds, and the
@@ -287,6 +291,26 @@ fn assign_error(
 /// Warning: fsockopen(): Unable to connect to 127.0.0.1:%d (The hostname must not contain null bytes) in %s on line 8
 /// bool(false)
 /// ```
+///
+/// A timeout outside `-1` and the bound is argument #6's `ValueError`,
+/// the bound printed as the integer php's format names; the pinned php
+/// prints whatever its integer register holds there, so the line holds
+/// the digits and nothing after them (`trace:fsockopen-timeout-bound`).
+///
+/// ```php
+/// foreach ([1e20, -2.0, NAN] as $t) {
+///     try { fsockopen('127.0.0.1', 1, $code, $message, $t); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+///     try { pfsockopen('udp://127.0.0.1', 9, $code, $message, $t); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// fsockopen(): Argument #6 must be -1 or between 0 and %d
+/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
+/// fsockopen(): Argument #6 must be -1 or between 0 and %d
+/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
+/// fsockopen(): Argument #6 must be -1 or between 0 and %d
+/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
+/// ```
 #[php_function]
 fn fsockopen(
     req: &mut Request,
@@ -360,7 +384,7 @@ fn fsockopen_stream(
     #[allow(clippy::float_cmp)] // php's `timeout != -1.0`
     let limited = timeout != -1.0;
     if limited && !(0.0..=TIMEOUT_MAX).contains(&timeout) {
-        let text = format!("must be -1 or between 0 and {TIMEOUT_MAX}");
+        let text = format!("must be -1 or between 0 and {TIMEOUT_MAX_SHOWN}");
         return Err(argument_error(req, "ValueError", 6, &text));
     }
     let mut hostname = host.clone();
