@@ -34,12 +34,13 @@ impl Blacklist {
         blacklist
     }
 
-    /// `zend_accel_blacklist_loadone`: each line less its line ending,
-    /// the carriage returns before it and one pair of surrounding
-    /// quotes; an empty line and a `;` comment skipped; each entry
-    /// expanded as [`expand`] resolves it, a relative one against the
-    /// directory the file really is in. php expands into one buffer, so an
-    /// entry it cannot expand is the one before it again, or empty.
+    /// `zend_accel_blacklist_loadone`: each line as [`fgets`] hands it
+    /// over, less its line ending, the carriage returns before it and one
+    /// pair of surrounding quotes, which takes a lone `"` to nothing; an
+    /// empty line and a `;` comment skipped; each entry expanded as
+    /// [`expand`] resolves it, a relative one against the directory the
+    /// file really is in. php expands into one buffer, so an entry it
+    /// cannot expand is the one before it again, or empty.
     fn load_one(&mut self, file: &Path) {
         let Ok(text) = std::fs::read(file) else {
             return;
@@ -49,12 +50,16 @@ impl Blacklist {
             .and_then(|real| real.parent().map(Path::to_path_buf))
             .map(|base| base.into_os_string().into_encoded_bytes());
         let mut real_path = Vec::new();
-        for line in text.split(|b| *b == b'\n') {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
+        for line in fgets(&text) {
+            let line = match line.strip_suffix(b"\n") {
+                Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
+                None => line,
+            };
             let start = line.iter().position(|b| *b != b'\r').unwrap_or(line.len());
             let mut line = &line[start..];
-            if line.len() >= 2 && line.starts_with(b"\"") && line.ends_with(b"\"") {
-                line = &line[1..line.len() - 1];
+            if line.starts_with(b"\"") && line.ends_with(b"\"") {
+                // php's `path_length -= 2`, which a lone `"` takes below one.
+                line = line.get(1..line.len() - 1).unwrap_or_default();
             }
             if line.is_empty() || line.starts_with(b";") {
                 continue;
@@ -76,6 +81,27 @@ impl Blacklist {
     pub(crate) fn is_blacklisted(&self, path: &[u8]) -> bool {
         self.entries.iter().any(|entry| prefix_matches(entry, path))
     }
+}
+
+/// `fgets(buf, MAXPATHLEN, fp)` read to the end, each piece cut at its
+/// first NUL as `strlen` reads it: a line with its `\n`, or the first
+/// `MAXPATHLEN - 1` bytes of a longer one, whose rest is the next piece.
+fn fgets(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let most = rest.len().min(MAXPATHLEN - 1);
+        let take = rest[..most]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(most, |at| at + 1);
+        let (piece, tail) = rest.split_at(take);
+        rest = tail;
+        let end = piece.iter().position(|b| *b == 0).unwrap_or(piece.len());
+        Some(&piece[..end])
+    })
 }
 
 /// php's `MAXPATHLEN`, `PATH_MAX` from `<limits.h>`: the longest path
@@ -376,7 +402,19 @@ fn fnmatch(pattern: &[u8], name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand, fnmatch, prefix_matches};
+    use super::{MAXPATHLEN, expand, fgets, fnmatch, prefix_matches};
+
+    #[test]
+    fn a_line_is_read_in_the_pieces_fgets_hands_over() {
+        let mut long = vec![b'a'; MAXPATHLEN + 3];
+        long.extend_from_slice(b"\nb\0c\nd");
+        let pieces: Vec<&[u8]> = fgets(&long).collect();
+        assert_eq!(pieces.len(), 4);
+        assert_eq!(pieces[0].len(), MAXPATHLEN - 1);
+        assert_eq!(pieces[1], b"aaaa\n");
+        assert_eq!(pieces[2], b"b");
+        assert_eq!(pieces[3], b"d");
+    }
 
     #[test]
     fn an_entry_matches_a_prefix_with_php_s_wildcards() {

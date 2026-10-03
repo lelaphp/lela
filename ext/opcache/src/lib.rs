@@ -891,6 +891,20 @@ fn opcache_jit_blacklist(closure: Instance<Closure>) {
 /// D/a/real/
 /// bool(false)
 /// ```
+///
+/// A line is read as `fgets` hands it over and loses one pair of
+/// surrounding quotes, so a line of a lone `"` is no entry at all.
+///
+/// ```php
+/// $list = tempnam(sys_get_temp_dir(), 'blacklist');
+/// file_put_contents($list, "\"\n/x\n\"/q\"\n\"\"\n");
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 -d opcache.blacklist_filename=$list -r 'echo implode(\"\\n\", opcache_get_configuration()[\"blacklist\"]), \"\\n\";'");
+/// unlink($list);
+/// ```
+/// ```expect process
+/// /x
+/// /q
+/// ```
 #[php_function]
 fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     if !api_allowed(req) {
