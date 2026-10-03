@@ -830,6 +830,7 @@ syntax::scanned
 syntax::strip
 test::Capture
 test::Engine
+test::Engine::activated_ini
 test::Engine::build_defs
 test::Engine::builder
 test::Engine::command_line
@@ -839,6 +840,7 @@ test::Engine::frameless
 test::Engine::has_shell
 test::Engine::highlight
 test::Engine::ini_get
+test::Engine::ini_value
 test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape};
 
 use crate::ini::enabled;
-use crate::{Method, ResponseHead, WebRequest};
+use crate::{Engine, IniEvent, IniValue, Method, ResponseHead, WebRequest};
 
 /// The file system as `init_request_info` asks it.
 #[derive(Debug, Default, Clone, Copy)]
@@ -38,13 +38,13 @@ pub fn path_of(bytes: &[u8]) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(bytes))
 }
 
-/// The two entries `init_request_info` reads, `cgi.fix_pathinfo` on and
-/// `cgi.discard_path` off where the line sets neither.
+/// The two entries `init_request_info` reads, `cgi.fix_pathinfo` and
+/// `cgi.discard_path`, as the engine started with them.
 #[must_use]
-pub fn settings(ini: &[(String, String)]) -> Settings {
+pub fn settings(engine: &Engine) -> Settings {
     Settings {
-        fix_pathinfo: enabled(ini, "cgi.fix_pathinfo", true),
-        discard_path: enabled(ini, "cgi.discard_path", false),
+        fix_pathinfo: enabled(engine, "cgi.fix_pathinfo"),
+        discard_path: enabled(engine, "cgi.discard_path"),
         ..Settings::default()
     }
 }
@@ -130,6 +130,88 @@ pub fn head(head: &ResponseHead) -> Vec<u8> {
     };
     let shape = Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"));
     php_proto::cgi::head(shape, head.code, head.status_line.as_deref(), &head.lines)
+}
+
+/// The directory `php_cgi_ini_activate_user_config` scans to for
+/// `path_translated`: its directory, with the slash after it.
+#[must_use]
+pub fn user_ini_dir(path_translated: &[u8]) -> Vec<u8> {
+    let mut dir = match path_translated.iter().rposition(|b| *b == b'/') {
+        Some(at) => path_translated[..at].to_vec(),
+        None => b".".to_vec(),
+    };
+    dir.push(b'/');
+    dir
+}
+
+/// `php_cgi_ini_activate_user_config`'s scan, which php-fpm keeps a copy
+/// of (`Z/sapi/cgi/cgi_main.c:783-859`): `user_ini.filename` read in each
+/// directory from `doc_root`, one trailing slash dropped, down to `dir`
+/// ([`user_ini_dir`]) where `dir` lies under it, or in `dir` alone where
+/// it does not, a relative `dir` made real first; each file's entries in
+/// order, a later one replacing an earlier of its name. The host sets
+/// them as `IniOrigin::PerDir` after the php.ini's `[PATH=]` tables, and
+/// caches them for `user_ini.cache_ttl` seconds where it serves more
+/// than one request. Nothing where the filename is empty.
+#[must_use]
+pub fn user_ini(engine: &Engine, dir: &[u8], doc_root: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let filename = engine.ini_get(b"user_ini.filename").unwrap_or_default();
+    if filename.is_empty() {
+        return Vec::new();
+    }
+    let doc_root = doc_root.strip_suffix(b"/").unwrap_or(doc_root);
+    let path = if dir.first() == Some(&b'/') {
+        dir.to_vec()
+    } else {
+        match std::fs::canonicalize(path_of(dir)) {
+            Ok(real) => real.into_os_string().into_encoded_bytes(),
+            Err(_) => return Vec::new(),
+        }
+    };
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut read = |at: &[u8]| {
+        let file = [at, b"/", &filename].concat();
+        let Ok(text) = std::fs::read(path_of(&file)) else {
+            return;
+        };
+        for event in engine.parse_ini(&text).0 {
+            if let IniEvent::Entry(key, Some(value)) = event {
+                let key = ini_text(&key);
+                entries.retain(|(k, _)| *k != key);
+                entries.push((key, ini_text(&value)));
+            }
+        }
+    };
+    let (shorter, longer) = if path.len() > doc_root.len() {
+        (doc_root, path.as_slice())
+    } else {
+        (path.as_slice(), doc_root)
+    };
+    if longer.starts_with(shorter) {
+        let mut at = doc_root.len();
+        while let Some(slash) = path
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|b| *b == b'/'))
+        {
+            read(&path[..at + slash]);
+            at += slash + 1;
+        }
+    } else {
+        read(path.strip_suffix(b"/").unwrap_or(&path));
+    }
+    entries
+}
+
+/// An INI value's text, which the normal scanner always makes.
+#[must_use]
+pub fn ini_text(value: &IniValue) -> Vec<u8> {
+    match value {
+        IniValue::Str(s) => s.clone(),
+        IniValue::Bool(true) => b"1".to_vec(),
+        IniValue::Long(n) => n.to_string().into_bytes(),
+        IniValue::Double(d) => d.to_string().into_bytes(),
+        IniValue::Bool(false) | IniValue::Null => Vec::new(),
+    }
 }
 
 #[cfg(test)]

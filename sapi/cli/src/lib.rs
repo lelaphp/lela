@@ -133,7 +133,7 @@ pub fn main() -> ExitCode {
             let engine = server_engine(&options.ini, found(server::NAME));
             match request::started(&engine, server::NAME) {
                 0 => {
-                    let color = php_sapi::ini::enabled(&options.ini, "cli_server.color", false);
+                    let color = php_sapi::ini::enabled(&engine, "cli_server.color");
                     server::run(engine, server, color)
                 }
                 failed => failed,

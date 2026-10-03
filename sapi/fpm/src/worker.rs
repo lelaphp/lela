@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
+use php_sapi::cgi::ini_text;
 use php_sapi::{
     Aborted, Body, Engine, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
@@ -993,7 +994,7 @@ impl Worker {
             let (events, _) = self.engine.parse_ini(&text);
             for event in events {
                 let (key, value) = if let IniEvent::Entry(key, value) = event {
-                    (text_of(&key), value.as_ref().map(text_of))
+                    (ini_text(&key), value.as_ref().map(ini_text))
                 } else {
                     zlog!(
                         Error @ fastcgi_ini_parser:1404,
@@ -1027,26 +1028,14 @@ impl Worker {
         }
     }
 
-    /// `sapi_cgi_pre_request_init`'s `.user.ini` files: each from the
-    /// document root down to the program's directory, cached for
-    /// `user_ini.cache_ttl` seconds per directory.
+    /// `sapi_cgi_pre_request_init`'s `.user.ini` files
+    /// ([`php_sapi::cgi::user_ini`]), cached for `user_ini.cache_ttl`
+    /// seconds per directory.
     fn user_ini(&mut self, path_translated: &[u8], env: &Environment) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let filename = self
-            .engine
-            .ini_get(b"user_ini.filename")
-            .unwrap_or_default();
-        if filename.is_empty() {
-            return Vec::new();
-        }
-        let Some(doc_root) = env.get(b"DOCUMENT_ROOT").map(<[u8]>::to_vec) else {
+        let Some(doc_root) = env.get(b"DOCUMENT_ROOT") else {
             return Vec::new();
         };
-        let doc_root = doc_root.strip_suffix(b"/").unwrap_or(&doc_root).to_vec();
-        let mut dir = match path_translated.iter().rposition(|b| *b == b'/') {
-            Some(at) => path_translated[..at].to_vec(),
-            None => b".".to_vec(),
-        };
-        dir.push(b'/');
+        let dir = php_sapi::cgi::user_ini_dir(path_translated);
         let now = crate::scoreboard::epoch();
         let ttl = crate::conf::atoi(
             &self
@@ -1059,48 +1048,7 @@ impl Worker {
         {
             return cached.entries.clone();
         }
-        let path = if dir.first() == Some(&b'/') {
-            dir.clone()
-        } else {
-            match std::fs::canonicalize(crate::conf::path(&dir)) {
-                Ok(real) => real.into_os_string().into_encoded_bytes(),
-                Err(_) => return Vec::new(),
-            }
-        };
-        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let (shorter, longer) = if path.len() > doc_root.len() {
-            (&doc_root, &path)
-        } else {
-            (&path, &doc_root)
-        };
-        let mut read = |at: &[u8]| {
-            let mut file = at.to_vec();
-            file.push(b'/');
-            file.extend_from_slice(&filename);
-            let Ok(text) = std::fs::read(crate::conf::path(&file)) else {
-                return;
-            };
-            let (events, _) = self.engine.parse_ini(&text);
-            for event in events {
-                if let IniEvent::Entry(key, Some(value)) = event {
-                    let key = text_of(&key);
-                    entries.retain(|(k, _)| *k != key);
-                    entries.push((key, text_of(&value)));
-                }
-            }
-        };
-        if longer.starts_with(shorter) {
-            let mut at = doc_root.len();
-            while let Some(slash) = path
-                .get(at..)
-                .and_then(|rest| rest.iter().position(|b| *b == b'/'))
-            {
-                read(&path[..at + slash]);
-                at += slash + 1;
-            }
-        } else {
-            read(path.strip_suffix(b"/").unwrap_or(&path));
-        }
+        let entries = php_sapi::cgi::user_ini(&self.engine, &dir, doc_root);
         self.user_config.retain(|(d, _)| *d != dir);
         self.user_config.push((
             dir,
@@ -1112,7 +1060,11 @@ impl Worker {
         entries
     }
 
-    /// The request description of a request of the web.
+    /// The request description of a request of the web: its entries the
+    /// `PHP_VALUE`s kept, then the php.ini's `[HOST=]` table of its
+    /// `SERVER_NAME` and `[PATH=]` tables along its directory, which
+    /// `sapi_cgi_activate` sets ([`Engine::activated_ini`]), then its
+    /// `.user.ini` lines.
     fn describe(
         &mut self,
         env: &Environment,
@@ -1122,6 +1074,7 @@ impl Worker {
     ) -> RequestDescription {
         let mut ini = self.sticky.clone();
         if let Some(path) = &info.path_translated {
+            ini.extend(self.engine.activated_ini(env.get(b"SERVER_NAME"), path));
             ini.extend(
                 self.user_ini(path, env)
                     .into_iter()
@@ -1184,17 +1137,6 @@ impl Worker {
             ini,
             ..RequestDescription::default()
         }
-    }
-}
-
-/// An INI value's text, which the normal scanner always makes.
-fn text_of(value: &php_sapi::IniValue) -> Vec<u8> {
-    match value {
-        php_sapi::IniValue::Str(s) => s.clone(),
-        php_sapi::IniValue::Bool(true) => b"1".to_vec(),
-        php_sapi::IniValue::Long(n) => n.to_string().into_bytes(),
-        php_sapi::IniValue::Double(d) => d.to_string().into_bytes(),
-        php_sapi::IniValue::Bool(false) | php_sapi::IniValue::Null => Vec::new(),
     }
 }
 

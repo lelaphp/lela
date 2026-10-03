@@ -1,14 +1,15 @@
 //! The line's `-d` entries as a host reads them before the engine does
 //! (`Z/main/php_ini_builder.c`): split as `php_ini_builder_define` splits
-//! them, and the few a host reads itself, php's CGI its `cgi.*` entries
-//! and `arg_separator.input`, read as the engine will read them; and
+//! them; the few a host reads itself once the engine has started, php's
+//! CGI its `cgi.*` entries and the built-in server `cli_server.color`,
+//! read from the engine as `INI_BOOL` reads them; and
 //! `php_init_config`'s search for the php.ini files the engine reads
 //! (design §4.1, revision 57).
 
 use std::ffi::OsString;
 
 use crate::cgi::path_of;
-use crate::{IniFile, IniFiles, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR};
+use crate::{Engine, IniFile, IniFiles, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR};
 
 /// `php_ini_builder_define`'s split of one `-d`: `name=value` at the
 /// first `=`, or `name=1` for a bare name. Its line, quoted or not, and what the INI
@@ -21,20 +22,12 @@ pub fn define(given: &str) -> (String, String) {
     }
 }
 
-/// An entry of the line, the last one of its name.
+/// The engine's entry `name` read as `OnUpdateBool` reads it: the value
+/// php.ini, the line or the entry's default left it at startup.
 #[must_use]
-pub fn entry<'a>(ini: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    ini.iter()
-        .rev()
-        .find(|(had, _)| had == name)
-        .map(|(_, value)| value.as_str())
-}
-
-/// An entry read as `OnUpdateBool` reads it, `default` where the line
-/// sets none.
-#[must_use]
-pub fn enabled(ini: &[(String, String)], name: &str, default: bool) -> bool {
-    entry(ini, name).map_or(default, |value| {
+pub fn enabled(engine: &Engine, name: &str) -> bool {
+    engine.ini_get(name.as_bytes()).is_some_and(|value| {
+        let value = String::from_utf8_lossy(&value);
         let value = value.trim();
         ["on", "yes", "true"]
             .iter()
