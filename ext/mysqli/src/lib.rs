@@ -109,6 +109,9 @@ pub(crate) struct State {
     /// `hash_key`: each persistent connection it took out of the pool or
     /// opened, open on a link or free for the next connect.
     pub(crate) plinks: Lent<Vec<u8>, link::Plinks>,
+    /// The links `mysqli_init` made that connected without `p:`: their
+    /// stream is persistent as php opens it, so `rshutdown` frees them.
+    pub(crate) unkeyed: Vec<PhpObject>,
 }
 
 /// The engine's pool of persistent connections, keyed by `hash_key`: the
@@ -140,6 +143,7 @@ impl Default for State {
             num_active_persistent: 0,
             num_free_persistent: 0,
             plinks: Lent::default(),
+            unkeyed: Vec::new(),
         }
     }
 }
