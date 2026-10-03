@@ -244,7 +244,7 @@ fn textdomain(
 /// rmdir("$dir/en_US.UTF-8/LC_MESSAGES"); rmdir("$dir/en_US.UTF-8"); rmdir($dir);
 /// try { gettext(str_repeat('x', 4097)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect locale=en_US.UTF-8
 /// string(10) "Basic test"
 /// string(5) "items"
 /// string(10) "Basic test"
