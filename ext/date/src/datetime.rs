@@ -355,13 +355,19 @@ fn last_errors(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     crate::parse::errors_value(req, &errors).map(OrFalse::Value)
 }
 
+/// `php_format_date_obj`: the object's time formatted, none where no
+/// constructor set it.
+pub(crate) fn format_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
+    let t = object
+        .native::<DateObj>(req)
+        .and_then(|d| d.time.as_ref())?;
+    Some(format_time(format, t, t.is_localtime != 0))
+}
+
 /// `date_format` and `format` of both classes.
 fn format_of(req: &mut Request, object: PhpObject, format: PhpString) -> Result<PhpString, Thrown> {
-    let text = {
-        let Some(t) = object.native::<DateObj>(req).and_then(|d| d.time.as_ref()) else {
-            return Err(crate::obj::uninitialized(req, object.class()));
-        };
-        format_time(format.as_bytes(), t, t.is_localtime != 0)
+    let Some(text) = format_obj(req, format.as_bytes(), object) else {
+        return Err(crate::obj::uninitialized(req, object.class()));
     };
     PhpString::new(req, &text)
 }

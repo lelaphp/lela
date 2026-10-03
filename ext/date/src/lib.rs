@@ -49,6 +49,7 @@ use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::PhpObject;
 
 use crate::classes::{
     DateError, DateException, DateInvalidOperationException, DateInvalidTimeZoneException,
@@ -95,6 +96,14 @@ struct State {
 /// The thrown `DateError`.
 pub fn get_timezone_info(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
     zone::default_zone(req)
+}
+
+/// `php_format_date_obj()`, what `php_date.h` declares `PHPAPI` (design
+/// §4.10): a `DateTimeInterface` object's time in `date()`'s `format`,
+/// none where no constructor set it. `ext/soap`'s `to_xml_datetime_ex`
+/// writes a date with it, past a subclass's `format()`.
+pub fn php_format_date_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
+    datetime::format_obj(req, format, object)
 }
 
 /// The extension value (design §7.1): declarations paired with entries,

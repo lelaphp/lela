@@ -19,8 +19,8 @@ use crate::sdl::wsdl::{Ctx, sdl_restore_uri_credentials, sdl_set_uri_credentials
 use crate::sdl::{get_encoder, nscat};
 use crate::table::{Key, Table};
 use crate::xml::{
-    attr_content, attr_is_equal, attribute, get_node, href, node_is_equal_one_of, parse_file,
-    parse_namespace,
+    attr_content, attr_is_equal, attribute, get_node, href, node_is_equal_one_of,
+    parse_file_before_fatal, parse_namespace,
 };
 use crate::{Error, Res, soap_error};
 
@@ -246,7 +246,7 @@ fn schema_load_file(
         return Ok(());
     }
     sdl_set_uri_credentials(req, ctx, &location)?;
-    let parsed = parse_file(req, &location);
+    let parsed = parse_file_before_fatal(req, &location);
     sdl_restore_uri_credentials(req, ctx)?;
     let loc = lossy(&location).into_owned();
     let Some(doc) = parsed? else {

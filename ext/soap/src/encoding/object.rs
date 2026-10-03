@@ -396,7 +396,23 @@ fn object_class(req: &mut Request, e: &Enc, pce: Option<ClassId>) -> Res<ClassId
     }
 }
 
-/// `to_zval_object_ex`.
+/// `to_zval_object_ex`: an extension of a complex type decoded into the
+/// class the classmap names for it, the base's converter handed that class.
+///
+/// ```php
+/// $w = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t"><types><x:schema targetNamespace="urn:t"><x:complexType name="B"><x:sequence><x:element name="a" type="x:string"/></x:sequence></x:complexType><x:complexType name="D"><x:complexContent><x:extension base="t:B"><x:sequence><x:element name="b" type="x:int"/></x:sequence></x:extension></x:complexContent></x:complexType></x:schema></types><message name="m"/><message name="r"><part name="o" type="t:D"/></message><portType name="P"><operation name="f"><input message="t:m"/><output message="t:r"/></operation></portType><binding name="N" type="t:P"><s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/><operation name="f"><input><s:body use="literal" namespace="urn:t"/></input><output><s:body use="literal" namespace="urn:t"/></output></operation></binding><service name="S"><port name="p" binding="t:N"><s:address location="http://x/"/></port></service></definitions>';
+/// class Y { public $b; public $a; }
+/// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, ?string $u = null): string { return '<E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/"><E:Body><t:fResponse xmlns:t="urn:t"><o><a>A</a><b>7</b></o></t:fResponse></E:Body></E:Envelope>'; } }
+/// var_dump((new C('data://text/plain;base64,' . base64_encode($w), ['cache_wsdl' => WSDL_CACHE_NONE, 'classmap' => ['D' => 'Y']]))->f());
+/// ```
+/// ```expect
+/// object(Y)#3 (2) {
+///   ["b"]=>
+///   int(7)
+///   ["a"]=>
+///   string(1) "A"
+/// }
+/// ```
 fn to_zval_object_ex(
     req: &mut Request,
     cx: &mut Cx,
@@ -464,9 +480,9 @@ fn to_zval_object_ex(
             };
             soap_add_xml_ref(req, cx, &ret, data);
             redo_any = get_zval_property(req, &ret, b"any").is_some();
-            // php then sets `zobj->ce = ce` on what the base made; the
-            // engine has no rebinding of an object's class, so an object
-            // made by another class's converter keeps that class.
+            // php then sets `zobj->ce = ce` on what the base made; an
+            // object made by another class's converter keeps that class
+            // here (#1593).
             ret
         } else {
             if let Some(v) = soap_check_xml_ref(req, cx, data) {

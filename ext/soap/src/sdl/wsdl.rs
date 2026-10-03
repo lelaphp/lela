@@ -26,7 +26,7 @@ use crate::sdl::get_element;
 use crate::table::{Key, Table};
 use crate::xml::{
     attr_content, attribute, get_attribute, get_node, get_node_with_attribute, href, node_is_equal,
-    parse_file,
+    parse_file_before_fatal,
 };
 use crate::{Error, Res, soap_error};
 
@@ -244,7 +244,7 @@ fn load_wsdl_ex(req: &mut Request, struri: &[u8], ctx: &mut Ctx, include: bool) 
         return Ok(());
     }
     sdl_set_uri_credentials(req, ctx, struri)?;
-    let parsed = parse_file(req, struri);
+    let parsed = parse_file_before_fatal(req, struri);
     sdl_restore_uri_credentials(req, ctx)?;
     let Some(wsdl) = parsed? else {
         return Err(match Raised::last() {

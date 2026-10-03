@@ -2,7 +2,7 @@
 //! `Parser::soap`, and the node and attribute lookups every other file
 //! walks a tree with.
 
-use php_ext::raising::Thrown;
+use php_ext::raising::{Level, Thrown, uncaught_at};
 use php_ext::request::Request;
 use php_ext_libxml::ffi::{Kind, Node, Ns, Parser, Source};
 
@@ -57,6 +57,39 @@ pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<No
         cleanup_xml_node(d);
     }
     Ok(doc)
+}
+
+/// [`parse_file`] where the caller's `NULL` is an `E_ERROR`, a WSDL's or
+/// an imported schema's: what a stream wrapper threw stays pending in
+/// php, and `zend_error` renders it "Uncaught ..." at `E_WARNING` and
+/// gives it up before the fatal (`Z/Zend/zend.c:1518`), so the parse
+/// answers none. Under a client that throws, the warning is one the soap
+/// handler drops while a WSDL is parsed, and the fault is all there is.
+///
+/// ```php
+/// class W { public $context; function stream_open($p, $m, $o, &$x) { throw new RuntimeException("open $p"); } function url_stat($p, $f) { return []; } }
+/// stream_wrapper_register('boom', 'W');
+/// $i = '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t"><xsd:import namespace="urn:u" schemaLocation="boom://s.xsd"/></xsd:schema>';
+/// foreach (["<types>$i</types>", '<import namespace="urn:v" location="boom://w.wsdl"/>'] as $body) {
+///     try { new SoapClient('data://text/plain,' . urlencode("<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' targetNamespace='urn:t'>$body</definitions>"), ['cache_wsdl' => WSDL_CACHE_NONE]); }
+///     catch (SoapFault $e) { var_dump($e->getMessage(), $e->getPrevious()); }
+/// }
+/// ```
+/// ```expect
+/// string(67) "SOAP-ERROR: Parsing Schema: can't import schema from 'boom://s.xsd'"
+/// NULL
+/// string(110) "SOAP-ERROR: Parsing WSDL: Couldn't load from 'boom://w.wsdl' : failed to load external entity "boom://w.wsdl"
+/// "
+/// NULL
+/// ```
+pub(crate) fn parse_file_before_fatal(
+    req: &mut Request,
+    filename: &[u8],
+) -> Result<Option<Node>, Thrown> {
+    match parse_file(req, filename) {
+        Err(t) => uncaught_at(req, t, Level::Warning).map(|()| None),
+        r => r,
+    }
 }
 
 /// `soap_xmlParseMemory`: the document in `buf`, not cleaned.
