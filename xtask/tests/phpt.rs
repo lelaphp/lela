@@ -834,6 +834,43 @@ fn ipcs_readable() -> Option<&'static str> {
         .then_some("ipcs prints no table with a `T` header here, which is all the sweep reads")
 }
 
+/// Why the machine's System V tables have no room for what the System V
+/// test makes (#1508), none where they have: three queues, two segments
+/// and a set among the test's program and `perl`, against each table's
+/// limit as `ipcs -Q`, `-M` and `-S` print it and the objects `ipcs -a`
+/// lists. A table full of other programs' objects fails `msg_get_queue`
+/// or `shmop_open` with "No space left on device", which says nothing of
+/// the sweep. A limit `ipcs` does not print is not held.
+fn no_room() -> Option<String> {
+    let stood = ipcs();
+    let needs = [
+        ("q", "-Q", "msgmni", 3),
+        ("m", "-M", "shmmni", 2),
+        ("s", "-S", "semmni", 1),
+    ];
+    for (kind, flag, limit, need) in needs {
+        let Ok(info) = Command::new("ipcs").arg(flag).output() else {
+            continue;
+        };
+        let most = String::from_utf8_lossy(&info.stdout)
+            .lines()
+            .find_map(|line| {
+                let rest = line.trim().strip_prefix(limit)?.strip_prefix(':')?;
+                rest.split_whitespace().next()?.parse::<usize>().ok()
+            });
+        let Some(most) = most else {
+            continue;
+        };
+        let standing = stood.iter().filter(|o| o.kind == kind).count();
+        if standing + need > most {
+            return Some(format!(
+                "the machine's {limit} is {most} and {standing} stand, no room for the {need} the test makes"
+            ));
+        }
+    }
+    None
+}
+
 /// What the test's program made, read off the machine while it stands,
 /// and what `perl` made beside it.
 struct Made {
@@ -921,12 +958,20 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
 /// those gone; the reading's count is at
 /// least the three that name the test's process, which no other run's
 /// sweep can take.
+///
+/// A machine whose tables have no room for what the test makes skips it
+/// and says so (#1508); a miss names what the program printed in the
+/// run's `fail` line, which the failure prints.
 #[test]
 fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     if oracle().is_none() {
         return;
     }
     if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    if let Some(why) = no_room() {
         eprintln!("skipped: {why}");
         return;
     }
@@ -1101,6 +1146,77 @@ fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
         }),
         "the wait is said before the engine's stamp, which stays last: {readings:#?}"
     );
+}
+
+/// A test naming `all` in one run runs beside no test of another key in a
+/// second run (#1559), as upstream's `all` runs beside nothing
+/// (run-tests.php:1365-1370): one run's subset names `all` and its one
+/// test sleeps a while, the other's names a key of its own and its three
+/// tests sleep a while each, both run at once from two workspaces, and
+/// every test writes when it started and ended. No keyed test's span
+/// meets the `all` test's. Before #1559 `all` was a lock named `all`
+/// beside the other key's, and the spans met.
+#[test]
+fn a_test_naming_all_runs_beside_no_other_runs_keyed_test() {
+    fn borrowed(files: &[(String, String)]) -> Vec<(&str, &str)> {
+        files
+            .iter()
+            .map(|(f, t)| (f.as_str(), t.as_str()))
+            .collect()
+    }
+    if oracle().is_none() {
+        return;
+    }
+    let marks = Tree::new("phpt-all-across").unwrap();
+    let log = marks.join("spans");
+    let spans = |name: &str, micros: u32| {
+        (
+            format!("{name}.phpt"),
+            format!(
+                "--TEST--\n{name}\n--FILE--\n<?php\n$from = microtime(true);\nusleep({micros});\nfile_put_contents('{}', sprintf(\"{name} %.6f %.6f\\n\", $from, microtime(true)), FILE_APPEND | LOCK_EX);\necho \"slept\\n\";\n--EXPECT--\nslept\n",
+                log.display()
+            ),
+        )
+    };
+    let alone = [spans("alone", 1_500_000)];
+    let keyed = ["one", "two", "three"].map(|name| spans(name, 400_000));
+    let files = |tests: &[(String, String)], conflicts: &str| -> Vec<(String, String)> {
+        let mut files = tests.to_vec();
+        files.push(("CONFLICTS".to_owned(), conflicts.to_owned()));
+        files
+    };
+    let key = format!("keyed-{}\n", std::process::id());
+    let (alone, keyed) = (files(&alone, "all\n"), files(&keyed, &key));
+    let (first, second) = (
+        Scratch::new("all-alone", &borrowed(&alone)),
+        Scratch::new("all-keyed", &borrowed(&keyed)),
+    );
+    let readings = std::thread::scope(|scope| {
+        let runs = [&first, &second]
+            .map(|scratch| scope.spawn(move || scratch.run(&registry(""), &scratch.engine)));
+        runs.map(|run| run.join().unwrap())
+    });
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    }
+    let written = fs::read_to_string(&log).unwrap();
+    let spans: Vec<(&str, f64, f64)> = written
+        .lines()
+        .map(|line| {
+            let mut words = line.split(' ');
+            let name = words.next().unwrap();
+            let mut at = || words.next().unwrap().parse::<f64>().unwrap();
+            (name, at(), at())
+        })
+        .collect();
+    assert_eq!(spans.len(), 4, "{written}");
+    let (_, from, to) = *spans.iter().find(|(name, ..)| *name == "alone").unwrap();
+    for (name, f, t) in spans.iter().filter(|(name, ..)| *name != "alone") {
+        assert!(
+            *t <= from || *f >= to,
+            "{name} ran {f}..{t}, beside alone's {from}..{to}: {written}"
+        );
+    }
 }
 
 /// `--against <commit>` (#664): the run a checkout of the merge base kept

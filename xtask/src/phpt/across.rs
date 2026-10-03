@@ -11,18 +11,28 @@
 //! a builder, met on them: a run read 95 of `sapi/fpm`'s 120 for "Address
 //! already in use" while another held 127.0.0.1:9008.
 //!
-//! So a test holds each of its conflict keys, `all` among them, as a lock
-//! in the temporary directory while it runs, and waits for a key another
-//! run holds; the keys are taken in one order, so two runs never wait on
-//! each other. A key that names a path of the tree costs a wait only where
-//! two runs reach the same test at once. A lock is the operating system's
-//! and goes with the process however it ends, so a killed run holds
-//! nothing. The subset's reading counts the tests that waited and for how
-//! long.
+//! So a test holds each of its conflict keys as a lock in the temporary
+//! directory while it runs, and waits for a key another run holds; the
+//! keys are taken in one order, so two runs never wait on each other. A
+//! key that names a path of the tree costs a wait only where two runs
+//! reach the same test at once. A lock is the operating system's and goes
+//! with the process however it ends, so a killed run holds nothing. The
+//! subset's reading counts the tests that waited and for how long.
+//!
+//! `all` is not a key beside the others but upstream's "nothing beside"
+//! (run-tests.php:1365-1370), and among runs it means the same (#1559):
+//! every test with a key holds the `all` lock shared before its keys, and
+//! a test naming `all` holds it exclusive, so it runs beside no keyed test
+//! of any run. A test with no key holds nothing, as upstream's `all` test
+//! runs once every keyed one has. An `all` test that waits first takes the
+//! turnstile, which every keyed test passes through before its shared
+//! hold, so a run whose keyed tests overlap one another does not keep it
+//! waiting for the whole run. Within one run the queue already holds an
+//! `all` test alone, so a run never waits on itself.
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -53,30 +63,69 @@ impl Waited {
     }
 }
 
+/// The key that names upstream's "nothing beside".
+const ALL: &str = "all";
+
 /// Every key of `keys` held, in order, waiting for one another run holds;
-/// how long the wait was, zero when there was none.
+/// how long the wait was, zero when there was none. The `all` lock comes
+/// first, shared, or exclusive where `keys` names `all`; no key holds
+/// nothing.
 pub(crate) fn hold(keys: &[String]) -> Result<(Held, Duration)> {
-    let keys: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
-    let mut locks = Vec::with_capacity(keys.len());
+    let mut keys: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    if keys.is_empty() {
+        return Ok((Held { _locks: Vec::new() }, Duration::ZERO));
+    }
+    let alone = keys.remove(ALL);
+    let mut locks = Vec::with_capacity(keys.len() + 1);
     let mut waited = Duration::ZERO;
+    let turnstile = std::env::temp_dir().join(format!("{PREFIX}-turnstile"));
+    let (turnstile, wait) = take(&turnstile, Mode::Exclusive)?;
+    waited += wait;
+    let mode = if alone { Mode::Exclusive } else { Mode::Shared };
+    let (all, wait) = take(&lock_of(ALL), mode)?;
+    waited += wait;
+    drop(turnstile);
+    locks.push(all);
     for key in keys {
-        let path = lock_of(key);
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("opening the lock {}", path.display()))?;
-        if file.try_lock().is_err() {
-            let since = Instant::now();
-            file.lock()
-                .with_context(|| format!("waiting for the lock {}", path.display()))?;
-            waited += since.elapsed();
-        }
+        let (file, wait) = take(&lock_of(key), Mode::Exclusive)?;
+        waited += wait;
         locks.push(file);
     }
     Ok((Held { _locks: locks }, waited))
+}
+
+/// How a lock is held: beside other shared holders, or alone.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    Shared,
+    Exclusive,
+}
+
+/// The lock file at `path`, made where it is not there yet, held as
+/// `mode` says, waiting where another holder stands in the way; how long
+/// the wait was.
+fn take(path: &Path, mode: Mode) -> Result<(File, Duration)> {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("opening the lock {}", path.display()))?;
+    let free = match mode {
+        Mode::Shared => file.try_lock_shared().is_ok(),
+        Mode::Exclusive => file.try_lock().is_ok(),
+    };
+    if free {
+        return Ok((file, Duration::ZERO));
+    }
+    let since = Instant::now();
+    match mode {
+        Mode::Shared => file.lock_shared(),
+        Mode::Exclusive => file.lock(),
+    }
+    .with_context(|| format!("waiting for the lock {}", path.display()))?;
+    Ok((file, since.elapsed()))
 }
 
 /// The lock file of one key: its readable characters, and the hash of the
@@ -97,16 +146,83 @@ mod tests {
 
     use super::{Waited, hold, lock_of};
 
+    /// The tests that hold locks one at a time within this process, since
+    /// every keyed holder takes the `all` lock one of them holds alone.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn a_key_held_by_another_holder_is_waited_for_and_then_held() {
+        let _serial = serial();
         let key = format!("held-test-{}", std::process::id());
-        let (first, waited) = hold(std::slice::from_ref(&key)).unwrap();
-        assert_eq!(waited, Duration::ZERO);
+        let (first, _) = hold(std::slice::from_ref(&key)).unwrap();
         let second = std::thread::spawn(move || hold(&[key]).unwrap().1);
         std::thread::sleep(Duration::from_millis(200));
         drop(first);
         let waited = second.join().unwrap();
         assert!(waited >= Duration::from_millis(100), "{waited:?}");
+    }
+
+    /// A test naming `all` and a test of another key never hold at once
+    /// (#1559), whichever came first: a keyed holder waits for an `all`
+    /// holder, and an `all` holder for a keyed one. A key held under `all`
+    /// alone, before #1559, waited for neither.
+    #[test]
+    fn all_and_another_key_wait_for_each_other_both_ways() {
+        let _serial = serial();
+        let key = format!("all-test-{}", std::process::id());
+        let all = || vec!["all".to_owned()];
+        for all_first in [true, false] {
+            let (first, second): (Vec<String>, Vec<String>) = if all_first {
+                (all(), vec![key.clone()])
+            } else {
+                (vec![key.clone()], all())
+            };
+            let (held, _) = hold(&first).unwrap();
+            let after = std::thread::spawn(move || hold(&second).unwrap().1);
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+            let waited = after.join().unwrap();
+            assert!(
+                waited >= Duration::from_millis(150),
+                "all first: {all_first}, waited {waited:?}"
+            );
+        }
+    }
+
+    /// Two keyed holders of different keys share the `all` lock and do
+    /// not wait on each other, and a test with no key holds nothing.
+    #[test]
+    fn two_other_keys_hold_at_once_and_no_key_holds_nothing() {
+        let pid = std::process::id();
+        let _serial = serial();
+        let (one, _) = hold(&[format!("one-test-{pid}")]).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let two = std::thread::spawn(move || {
+            let held = hold(&[format!("two-test-{pid}")]).unwrap();
+            sent.send(()).unwrap();
+            held
+        });
+        let both = received.recv_timeout(Duration::from_secs(30));
+        drop(one);
+        drop(two.join().unwrap());
+        assert!(both.is_ok(), "the second key waited for the first");
+        let (none, waited) = hold(&[]).unwrap();
+        assert_eq!(waited, Duration::ZERO);
+        let (sent, received) = std::sync::mpsc::channel();
+        let all = std::thread::spawn(move || {
+            let held = hold(&["all".to_owned()]).unwrap();
+            sent.send(()).unwrap();
+            held
+        });
+        let alone = received.recv_timeout(Duration::from_secs(30));
+        drop(none);
+        drop(all.join().unwrap());
+        assert!(alone.is_ok(), "a test with no key held the all lock");
     }
 
     #[test]
