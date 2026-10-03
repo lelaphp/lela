@@ -2201,6 +2201,7 @@ pub struct EngineBuilder {
     additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
+    shebang_while: Option<&'static str>,
     cli_shell: bool,
     configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
@@ -2342,6 +2343,16 @@ impl EngineBuilder {
         self
     }
 
+    /// [`EngineBuilder::skip_shebang`] where the entry `name` reads on once
+    /// startup has read the ini, as php-cgi sets `CG(skip_shebang)` from
+    /// `cgi.check_shebang_line` after `php_module_startup`
+    /// (`Z/sapi/cgi/cgi_main.c:2523`).
+    #[must_use]
+    pub fn skip_shebang_while(mut self, name: &'static str) -> EngineBuilder {
+        self.shebang_while = Some(name);
+        self
+    }
+
     /// The host carries php's table of shell callbacks, the CLI's
     /// `php_cli_get_shell_callbacks` (`Z/sapi/cli/php_cli.c:110`), which
     /// an extension's [`Shell`](crate::api::abi::Shell) fills: every body
@@ -2440,6 +2451,16 @@ impl EngineBuilder {
             ini.push((name, Some(value)));
         }
         let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
+        let on = |name: &str| {
+            ini.iter()
+                .find(|(n, _)| n.as_slice() == name.as_bytes())
+                .and_then(|(_, value)| value.as_deref())
+                .is_some_and(Request::ini_parse_bool)
+        };
+        let shebang = match self.shebang_while {
+            Some(name) if on(name) => php_compile::Shebang::Skipped,
+            _ => self.shebang,
+        };
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
             function_table(&core, &extensions, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
@@ -2508,7 +2529,7 @@ impl EngineBuilder {
                 constant_values,
                 sapi_names,
                 build_defs: BuildDefs::of(self.configure),
-                shebang: self.shebang,
+                shebang,
                 shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -2865,6 +2886,7 @@ impl Engine {
             additional_functions: Vec::new(),
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
+            shebang_while: None,
             cli_shell: false,
             configure: &[],
             #[cfg(feature = "witness-trace")]

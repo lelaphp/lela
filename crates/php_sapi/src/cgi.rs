@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape};
 
 use crate::ini::enabled;
-use crate::{Method, ResponseHead, WebRequest};
+use crate::{Engine, Method, ResponseHead, WebRequest};
 
 /// The file system as `init_request_info` asks it.
 #[derive(Debug, Default, Clone, Copy)]
@@ -38,13 +38,13 @@ pub fn path_of(bytes: &[u8]) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(bytes))
 }
 
-/// The two entries `init_request_info` reads, `cgi.fix_pathinfo` on and
-/// `cgi.discard_path` off where the line sets neither.
+/// The two entries `init_request_info` reads, `cgi.fix_pathinfo` and
+/// `cgi.discard_path`, as the engine started with them.
 #[must_use]
-pub fn settings(ini: &[(String, String)]) -> Settings {
+pub fn settings(engine: &Engine) -> Settings {
     Settings {
-        fix_pathinfo: enabled(ini, "cgi.fix_pathinfo", true),
-        discard_path: enabled(ini, "cgi.discard_path", false),
+        fix_pathinfo: enabled(engine, "cgi.fix_pathinfo"),
+        discard_path: enabled(engine, "cgi.discard_path"),
         ..Settings::default()
     }
 }
