@@ -438,7 +438,7 @@ mod tests {
 
     fn stepped(source: &str) -> (String, Vec<String>) {
         SEEN.with_borrow_mut(Vec::clear);
-        let engine = Engine::builder().tier::<Stepper>().build();
+        let engine = Engine::cli_builder().tier::<Stepper>().build();
         let served = engine.serve_capture(source, Capture::default());
         (
             String::from_utf8_lossy(&served.stdout).into_owned(),
@@ -521,7 +521,7 @@ mod tests {
     fn initialized(code: &[&'static [u8]], source: &str) -> (String, Vec<String>) {
         SEEN.with_borrow_mut(Vec::clear);
         CODE.with_borrow_mut(|held| *held = code.to_vec());
-        let engine = Engine::builder().tier::<Initializer>().build();
+        let engine = Engine::cli_builder().tier::<Initializer>().build();
         let served = engine.serve_capture(source, Capture::default());
         (
             String::from_utf8_lossy(&served.stdout).into_owned(),

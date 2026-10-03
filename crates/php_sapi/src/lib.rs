@@ -10,7 +10,8 @@
 //! command lines with; [`cgi`], the CGI environment made a request
 //! description and the response's head written, which php's CGI and its
 //! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
-//! `php_ini_builder` reads them; and [`start`], `php_module_startup` over
+//! `php_ini_builder` reads them, and `php_init_config`'s search for the
+//! php.ini files; and [`start`], `php_module_startup` over
 //! them, with what a host prints before it serves anything. [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]
@@ -33,10 +34,10 @@ use std::process::ExitCode;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
-    FileHandles, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
-    PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
-    PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
-    WebRequest,
+    FileHandles, HostValue, IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, Observables,
+    OutputSink, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX,
+    PHP_SYSCONFDIR, PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
+    Uncaught, WebRequest,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host

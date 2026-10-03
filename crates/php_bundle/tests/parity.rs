@@ -84,6 +84,7 @@ const SHAPES: &[&str] = &[
 fn engine(source: &str) -> String {
     let engine = Engine::builder()
         .extensions(&[extension::extension(), php_ext_reflection::extension()])
+        .ini("html_errors", "0")
         .build();
     let served = engine.serve_capture(source, Capture::default());
     let mut out = String::from_utf8_lossy(&served.stdout).into_owned();

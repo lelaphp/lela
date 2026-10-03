@@ -21580,7 +21580,7 @@ mod tests {
     /// target, which is the opline a tier is asked with.
     #[test]
     fn a_backward_jump_raises_the_loop_safepoint_and_a_forward_one_does_not() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
         let frame = req.pushed(Arc::clone(&unit));
@@ -21616,7 +21616,7 @@ mod tests {
     /// and the tier is not asked.
     #[test]
     fn the_interrupt_is_tested_at_a_back_edge() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
         let frame = req.pushed(Arc::clone(&unit));
@@ -21664,7 +21664,7 @@ mod tests {
     /// taken goes on to the next opline and raises nothing.
     #[test]
     fn a_conditional_jump_is_the_back_edge_only_when_it_is_taken() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let taken = conditional(php_heap::Zval::bool(true));
         let frame = req.pushed(Arc::clone(&taken));
@@ -21794,7 +21794,7 @@ mod tests {
     /// of this serving, and pops it to its caller.
     #[test]
     fn a_return_in_no_entry_frame_raises_the_return_safepoint_and_pops() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = returning(1);
         let outer = req.pushed(Arc::clone(&unit));
@@ -21887,7 +21887,7 @@ mod tests {
     /// program can grow the table; this unit is that program.
     #[test]
     fn a_call_by_name_resolves_the_lowered_constant_and_serves_the_native() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
@@ -21921,7 +21921,7 @@ mod tests {
     /// nothing up.
     #[test]
     fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
@@ -21998,7 +21998,7 @@ mod tests {
     /// stands at another entry and is not what it primed.
     #[test]
     fn a_function_called_twice_reads_on_its_second_call_what_its_first_primed() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = declaring_f(&engine, &mut strings);
@@ -22073,7 +22073,7 @@ mod tests {
     /// primes the slot; the second pass makes neither.
     #[test]
     fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = Arc::new(Unit {
@@ -22128,7 +22128,7 @@ mod tests {
     /// nothing declares looks the table up again and throws again.
     #[test]
     fn a_call_by_name_nothing_declares_primes_no_slot() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = Arc::new(Unit {
@@ -22206,7 +22206,7 @@ mod tests {
     /// nothing up.
     #[test]
     fn a_catch_looks_the_class_up_once_and_reads_its_slot_after() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"Error", b"error");
@@ -22285,7 +22285,7 @@ mod tests {
     /// and resolves no method.
     #[test]
     fn a_static_call_over_two_constants_resolves_its_class_and_callee_once() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = static_method_call(
@@ -22329,7 +22329,7 @@ mod tests {
     /// on the class either way.
     #[test]
     fn a_static_call_naming_no_method_primes_the_class_alone() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
@@ -22363,7 +22363,7 @@ mod tests {
     /// `ZEND_LAST_CATCH` for the unwinder.
     #[test]
     fn a_catch_of_no_class_primes_no_slot() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"NoPe", b"nope");
@@ -22395,7 +22395,7 @@ mod tests {
     /// names the class the slot held.
     #[test]
     fn new_instanceof_and_a_class_constant_read_the_class_off_their_slot() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = Arc::new(Unit {
@@ -22526,7 +22526,7 @@ mod tests {
     /// no lookup.
     #[test]
     fn a_frameless_jump_primes_a_hit_once_and_jumps_on_it_after() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
@@ -22555,7 +22555,7 @@ mod tests {
     /// on the first pass, and the jump is not taken on either.
     #[test]
     fn a_frameless_jump_primes_a_miss_once_and_falls_through_on_it_after() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"strlen");
@@ -22604,7 +22604,7 @@ mod tests {
         let extension = ExtensionBuilder::default()
             .functions(vec![(decl, seven as crate::api::abi::Entry)])
             .build("nullary");
-        Engine::builder().extensions(&[extension]).build()
+        Engine::cli_builder().extensions(&[extension]).build()
     }
 
     /// `ZEND_FRAMELESS_ICALL_0` serves the native at the table's row
@@ -22662,7 +22662,7 @@ mod tests {
     /// names it, never a read past the end.
     #[test]
     fn a_row_the_table_has_not_is_an_internal_error() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = Arc::new(Unit {
             main: OpArray {
@@ -22695,7 +22695,7 @@ mod tests {
     /// line against the oracle.
     #[test]
     fn a_call_by_name_of_no_function_raises_over_the_name_as_written() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
@@ -22776,7 +22776,7 @@ mod tests {
     /// is the value and never the cell.
     #[test]
     fn an_assign_into_a_cv_holding_a_reference_writes_the_referent() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = assigning();
         let frame = req.pushed(Arc::clone(&unit));
@@ -22831,7 +22831,7 @@ mod tests {
     /// alone, so no witness pins it (`trace:assign-obj-entry-container-under-a-handler`).
     #[test]
     fn the_object_a_handler_frees_with_its_array_is_held_across_the_write() {
-        let served = Engine::builder().build().serve_capture(
+        let served = Engine::cli_builder().build().serve_capture(
             "<?php class C { public $p = 1; function __destruct() { echo \"dtor \", $this->p ?? \"NULL\", \"\\n\"; } }\nset_error_handler(function($code, $msg) use (&$a) { echo \"Error: $msg\\n\"; $a = 0; });\n$a = [new C];\n$a[0]->p = $y;\nvar_dump($a);\necho \"DONE\\n\";",
             crate::test::Capture::default(),
         );
@@ -22849,7 +22849,7 @@ mod tests {
     /// against the oracle; this holds the engine to it.
     #[test]
     fn a_foreach_over_an_object_walks_the_properties_the_scope_may_see() {
-        let served = Engine::builder().build().serve_capture(
+        let served = Engine::cli_builder().build().serve_capture(
             "<?php class P { public $a = 1; private $b = 2; public $c = 3; } foreach (new P as $k => $v) echo \"$k=$v \";",
             crate::test::Capture::default(),
         );
@@ -22861,7 +22861,7 @@ mod tests {
     /// `zend_check_property_access` lets the declaring scope through.
     #[test]
     fn a_foreach_over_this_walks_the_private_properties_too() {
-        let served = Engine::builder().build().serve_capture(
+        let served = Engine::cli_builder().build().serve_capture(
             "<?php class C { public $n = 1; protected $p = 2; public $s = 'x'; private $q = 3; public function all() { foreach ($this as $k => $v) echo \"$k=$v \"; } } $c = new C; foreach ($c as $k => $v) echo \"$k=$v \"; $c->all();",
             crate::test::Capture::default(),
         );
@@ -22875,7 +22875,7 @@ mod tests {
     /// other.
     #[test]
     fn a_foreach_over_an_object_of_no_properties_runs_its_body_no_time() {
-        let served = Engine::builder().build().serve_capture(
+        let served = Engine::cli_builder().build().serve_capture(
             "<?php foreach (new stdClass as $v) echo 'no'; class U { public $kept = 2; public $null; } foreach (new U as $k => $v) echo $k, ' ';",
             crate::test::Capture::default(),
         );
@@ -22889,7 +22889,7 @@ mod tests {
     /// which is the jump past the loop.
     #[test]
     fn the_walk_over_an_object_of_properties_the_scope_may_not_see_finds_nothing() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let named = req.class_named(b"exception");
         assert!(named.is_some(), "the engine declares Exception");
@@ -22922,7 +22922,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = Arc::new(Unit {
             main: OpArray {

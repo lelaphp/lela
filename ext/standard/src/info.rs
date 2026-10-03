@@ -207,17 +207,6 @@ fn stream_hash(req: &mut Request, name: &str, names: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// A constant's value as the page prints it, the empty string for none.
-fn constant_text(req: &mut Request, name: &[u8]) -> String {
-    match php_ext::call::constant(req, name) {
-        Ok(Some(value)) => value
-            .as_str_bytes()
-            .map(|s| String::from_utf8_lossy(s).into_owned())
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
 /// `get_zend_version()`: the engine's line and one for each Zend
 /// extension loaded, as `zend_append_version_info` appends it.
 fn zend_version(req: &Request) -> String {
@@ -270,7 +259,7 @@ fn general(req: &mut Request) {
     let uname = String::from_utf8_lossy(&get_uname(b'a')).into_owned();
     let api = pretty_name(req.sapi_name()).to_owned();
     let defs = req.build_defs().clone();
-    let ini_path = constant_text(req, b"PHP_CONFIG_FILE_PATH");
+    let [ini_path, loaded, scan_dir, scanned] = ini_cells(req);
     let wrappers: Vec<Vec<u8>> = req
         .stream_wrappers()
         .into_iter()
@@ -307,9 +296,9 @@ fn general(req: &mut Request) {
         ["Server API", &api],
         ["Virtual Directory Support", "disabled"],
         ["Configuration File (php.ini) Path", &ini_path],
-        ["Loaded Configuration File", "(none)"],
-        ["Scan this dir for additional .ini files", "(none)"],
-        ["Additional .ini files parsed", "(none)"],
+        ["Loaded Configuration File", &loaded],
+        ["Scan this dir for additional .ini files", &scan_dir],
+        ["Additional .ini files parsed", &scanned],
         ["PHP API", "20250925"],
         ["PHP Extension", "20250925"],
         ["Zend Extension", "420250925"],
@@ -983,34 +972,87 @@ fn php_uname(
     PhpString::new(req, &get_uname(mode))
 }
 
+/// `php_ini_scanned_files`, the string `php_init_config` joins: each
+/// scanned file that parsed, `,\n` between and `\n` after the last;
+/// none where none was.
+fn scanned_list(req: &Request) -> Option<Vec<u8>> {
+    let files: Vec<&[u8]> = req.ini_files().scanned().collect();
+    (!files.is_empty()).then(|| [files.join(b",\n".as_slice()), b"\n".to_vec()].concat())
+}
+
+/// The general table's four php.ini rows: `PHP_CONFIG_FILE_PATH`, then
+/// the file read, the scan path and the files scanned, `(none)` for each
+/// there was none of.
+fn ini_cells(req: &Request) -> [String; 4] {
+    let files = req.ini_files();
+    let scanned = scanned_list(req);
+    [
+        Some(files.ini_path()),
+        files.loaded(),
+        files.scan_dir(),
+        scanned.as_deref(),
+    ]
+    .map(|path| {
+        path.map_or_else(
+            || String::from("(none)"),
+            |path| String::from_utf8_lossy(path).into_owned(),
+        )
+    })
+}
+
 /// `php_ini_scanned_files(): string|false`,
 /// `PHP_FUNCTION(php_ini_scanned_files)` (`Z/ext/standard/info.c:1336`):
-/// the engine scans no directory for ini files, so `false`.
+/// the files the scan read, `false` where it read none, as under `-n`
+/// or an empty `PHP_INI_SCAN_DIR`. A file that does not parse is not
+/// listed, and a scanned value stands over the php.ini's and under a
+/// `-d`:
 ///
 /// ```php
 /// var_dump(php_ini_scanned_files());
+/// mkdir('d'); file_put_contents('d/b.ini', "precision=5\n"); file_put_contents('d/a.ini', "precision=4\nserialize_precision=4\n"); file_put_contents('d/c.ini', "x=(\n"); file_put_contents('d/x.txt', "precision=9\n");
+/// file_put_contents('x.ini', "precision=3\nserialize_precision=3\nmemory_limit=3M\n");
+/// $p = proc_open([PHP_BINARY, '-c', 'x.ini', '-d', 'serialize_precision=6', '-r', 'echo ini_get("precision"), " ", ini_get("serialize_precision"), " ", ini_get("memory_limit"), "\n", str_replace(getcwd(), ".", php_ini_scanned_files());'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['PHP_INI_SCAN_DIR' => getcwd() . '/d']);
+/// echo stream_get_contents($pipes[1]), str_replace(getcwd(), '.', stream_get_contents($pipes[2])); proc_close($p);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(false)
+/// 5 6 3M
+/// ./d/a.ini,
+/// ./d/b.ini
+/// PHP:  syntax error, unexpected END_OF_LINE in ./d/c.ini on line 2
 /// ```
 #[php_function]
-fn php_ini_scanned_files() -> OrFalse<PhpString> {
-    OrFalse::False
+fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    match scanned_list(req) {
+        Some(list) => PhpString::new(req, &list).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
+    }
 }
 
 /// `php_ini_loaded_file(): string|false`,
 /// `PHP_FUNCTION(php_ini_loaded_file)` (`Z/ext/standard/info.c:1349`):
-/// the engine reads no `php.ini`, so `false`, as php's `-n` has it.
+/// the php.ini read, as its path was recorded, `false` where none was;
+/// under `-n` a `-c` is still read, though nothing is scanned:
 ///
 /// ```php
 /// var_dump(php_ini_loaded_file());
+/// file_put_contents('n.ini', "precision=3\n");
+/// $p = proc_open([PHP_BINARY, '-n', '-c', 'n.ini', '-r', 'var_dump(basename(php_ini_loaded_file()), php_ini_scanned_files(), ini_get("precision"), get_cfg_var("cfg_file_path") === php_ini_loaded_file());'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['PHP_INI_SCAN_DIR' => getcwd()]);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]); proc_close($p);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(false)
+/// string(5) "n.ini"
+/// bool(false)
+/// string(1) "3"
+/// bool(true)
 /// ```
 #[php_function]
-fn php_ini_loaded_file() -> OrFalse<PhpString> {
-    OrFalse::False
+fn php_ini_loaded_file(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    match req.ini_files().loaded().map(<[u8]>::to_vec) {
+        Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
+    }
 }
 
 /// The PHP Group row, `Z/ext/standard/credits.c:41`.

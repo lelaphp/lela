@@ -63,6 +63,8 @@ mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
 mod hash_bytes;
+pub(crate) mod ini_files;
+pub use ini_files::IniFiles;
 mod scanner_file;
 pub use scanner_file::ScannerFile;
 mod hold;
@@ -21727,6 +21729,12 @@ impl Request {
         &self.shared.build_defs
     }
 
+    /// The php.ini files the engine read at startup ([`IniFiles`]).
+    #[must_use]
+    pub fn ini_files(&self) -> &IniFiles {
+        &self.shared.ini_files
+    }
+
     /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
     pub fn sapi_name(&self) -> &str {
@@ -24047,7 +24055,7 @@ mod tests {
                 vec![(method, writes_d as crate::api::abi::Entry)],
             )])
             .build("destructible");
-        let engine = Engine::builder().extensions(&[destructible]).build();
+        let engine = Engine::cli_builder().extensions(&[destructible]).build();
 
         let served = engine.serve_capture(
             "<?php $a = new Destructible(); $a = 1; echo \"after\\n\";",
@@ -24062,7 +24070,7 @@ mod tests {
     /// `open(%s, O_RDWR) failed: %s (%d)` and every message like it.
     #[test]
     fn os_error_text_is_strerror() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let req = Request::new(
             std::sync::Arc::clone(&engine.shared),
             RequestDescription::default(),
@@ -24102,7 +24110,7 @@ mod tests {
             }])
             .on_modify(b"t.flag", guarded)
             .build("modified");
-        let engine = Engine::builder().extensions(&[extension]).build();
+        let engine = Engine::cli_builder().extensions(&[extension]).build();
         let served = engine.serve_capture(
             "<?php var_dump(ini_set('t.flag', '0'), ini_set('t.flag', 'bad'), ini_get('t.flag'));",
             crate::test::Capture::default(),
@@ -24126,7 +24134,7 @@ mod tests {
     #[test]
     fn a_thrown_refusal_takes_no_fatal_trace_and_a_raised_one_does() {
         let served = |script: &str| {
-            let out = Engine::builder()
+            let out = Engine::cli_builder()
                 .ini("fatal_error_backtraces", "1")
                 .build()
                 .serve_capture(script, crate::test::Capture::default());
@@ -24175,7 +24183,7 @@ mod tests {
                 .build("modified")
         };
         let script = "<?php var_dump(ini_get('t.flag'), ini_set('t.flag', '3'));";
-        let refused = Engine::builder()
+        let refused = Engine::cli_builder()
             .extensions(&[extension()])
             .ini("t.flag", "bad")
             .build()
@@ -24184,7 +24192,7 @@ mod tests {
             String::from_utf8_lossy(&refused.stdout),
             "\nWarning: PHP Startup: t.flag refused in Unknown on line 0\nstring(1) \"1\"\nstring(1) \"1\"\n"
         );
-        let taken = Engine::builder()
+        let taken = Engine::cli_builder()
             .extensions(&[extension()])
             .ini("t.flag", "2")
             .build()
@@ -24218,7 +24226,7 @@ mod tests {
                 vec![(method, never_served as crate::api::abi::Entry)],
             )])
             .build("destructible");
-        let engine = Engine::builder().extensions(&[destructible]).build();
+        let engine = Engine::cli_builder().extensions(&[destructible]).build();
         let mut request = request(&engine);
         let Ok(object) = request.new_object_of("Destructible") else {
             return;
@@ -24261,7 +24269,7 @@ mod tests {
     /// warning fetches none.
     #[test]
     fn a_core_level_is_rendered_past_error_reporting() {
-        let engine = Engine::builder().ini("error_reporting", "0").build();
+        let engine = Engine::cli_builder().ini("error_reporting", "0").build();
         let file = b"witness.php";
         let mut request = request(&engine);
         request.note_error_in(Level::CoreWarning, "core", file, 2);
@@ -24288,7 +24296,7 @@ mod tests {
     #[test]
     fn the_second_html_format_carries_the_trace_after_the_line() {
         let file = b"witness.php";
-        let engine = Engine::builder().ini("html_errors", "1").build();
+        let engine = Engine::cli_builder().ini("html_errors", "1").build();
         let mut req = request(&engine);
         req.note_error_in(Level::UserError, "b<o>om", file, 2);
         req.note_error_in(Level::Error, "b<o>om", file, 3);
@@ -24298,7 +24306,7 @@ mod tests {
              <br />\n<b>Fatal error</b>:  b&lt;o&gt;om in <b>witness.php</b> on line <b>3</b><br />\n"
         );
 
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .ini("html_errors", "1")
             .ini("fatal_error_backtraces", "0")
             .build();
@@ -24321,7 +24329,7 @@ mod tests {
     #[test]
     fn the_log_form_and_the_xml_fault_carry_the_trace() {
         let file = b"witness.php";
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .ini("log_errors", "1")
             .ini("xmlrpc_errors", "1")
             .build();

@@ -441,6 +441,12 @@ request::Handshake
 request::HostPath
 request::InfoRow
 request::IniEntry
+request::IniFiles
+request::IniFiles::ini_path
+request::IniFiles::loaded
+request::IniFiles::new
+request::IniFiles::scan_dir
+request::IniFiles::scanned
 request::Input
 request::Interrupt
 request::Interrupt::raise
@@ -558,6 +564,7 @@ request::Request::info_ini_table
 request::Request::info_rows
 request::Request::info_table
 request::Request::ini_entries
+request::Request::ini_files
 request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes

@@ -5489,7 +5489,7 @@ mod tests {
     fn a_nesting_deeper_than_the_thread_is_refused_at_its_floor() {
         let source = "<?php\n$a = $b = [];\nfor ($i = 0; $i < 200000; $i++) { $a = [$a]; $b = [$b]; }\ntry { $a == $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\ntry { $a === $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\necho 'done';";
         for limit in ["0", "-1", "256K"] {
-            let served = Engine::builder()
+            let served = Engine::cli_builder()
                 .ini("zend.max_allowed_stack_size", limit)
                 .build()
                 .serve_capture(source, Capture::default());
@@ -5518,7 +5518,7 @@ mod tests {
     #[test]
     fn var_dump_and_define_are_refused_at_the_floor() {
         let source = "<?php\n$a = []; for ($i = 0; $i < 200000; $i++) { $a = [$a]; }\ntry { define('DEEP', $a); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\nvar_dump($a);";
-        let served = Engine::builder()
+        let served = Engine::cli_builder()
             .build()
             .serve_capture(source, Capture::default());
         let stdout = String::from_utf8_lossy(&served.stdout);
