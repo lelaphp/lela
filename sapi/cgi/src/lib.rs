@@ -145,7 +145,7 @@ pub struct Invocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Each `-d name=value`, in order.
-    pub ini: Vec<(String, String)>,
+    pub ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `-c` and `-n`, which steer the search for php.ini.
     pub ini_search: Search,
     pub ask: Ask,
@@ -200,7 +200,7 @@ impl Options {
         let mut refused = false;
         for (code, value) in switches(&argv) {
             match code {
-                b'd' => ini.push(define(&String::from_utf8_lossy(&value))),
+                b'd' => ini.push(define(&value)),
                 b'c' => ini_search.path = Some(value),
                 b'n' => ini_search.ignore = true,
                 b'b' => refused = true,
@@ -764,7 +764,7 @@ pub fn main() -> ExitCode {
     let argv: Vec<OsString> = words.collect();
     let env = environment();
     let options = Options::parse(&argv, &env);
-    let engine = |ini: &[(String, String)], origin| {
+    let engine = |ini: &[(Vec<u8>, Vec<u8>)], origin| {
         engine(
             ini,
             php_sapi::ini::search(NAME, &options.ini_search, false),
@@ -799,7 +799,7 @@ fn print(text: &str) -> i32 {
 /// the line's `ini` ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
-fn engine(ini: &[(String, String)], files: IniFiles, origin: Origin) -> Engine {
+fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, origin: Origin) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .ini_files(files)
@@ -841,7 +841,7 @@ mod tests {
         );
         assert_eq!(
             options.ini.last(),
-            Some(&("precision".to_owned(), "3".to_owned()))
+            Some(&(b"precision".to_vec(), b"3".to_vec()))
         );
         assert_eq!(
             served(options).map(|i| (i.origin, i.file, i.head, i.no_chdir)),

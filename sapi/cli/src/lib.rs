@@ -123,7 +123,7 @@ pub fn main() -> ExitCode {
         }
     };
     let found = |sapi| php_sapi::ini::search(sapi, &options.ini_search, true);
-    let engine = |ini: &[(String, String)]| engine(ini, found(NAME));
+    let engine = |ini: &[(Vec<u8>, Vec<u8>)]| engine(ini, found(NAME));
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
         Ask::Version => started(&options.ini, found(NAME), version),
@@ -222,7 +222,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 ///
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
 /// ```
-fn started(ini: &[(String, String)], files: IniFiles, text: fn(&Engine) -> String) -> i32 {
+fn started(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, text: fn(&Engine) -> String) -> i32 {
     let engine = engine(ini, files);
     match request::started(&engine, NAME) {
         0 => print(&text(&engine)),
@@ -242,7 +242,7 @@ fn print(text: &str) -> i32 {
 /// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
 /// carried, started over the CLI's defaults, the `files` found, its
 /// `HARDCODED_INI` and the line's `ini` ([`php_sapi::start`]).
-fn engine(ini: &[(String, String)], files: IniFiles) -> Engine {
+fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
         .ini_files(files)
@@ -271,7 +271,7 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// without the CLI's `HARDCODED_INI`, which `main` lays only under the
 /// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
 /// natives after the bundle.
-fn server_engine(ini: &[(String, String)], files: IniFiles) -> Engine {
+fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
         .ini_files(files)

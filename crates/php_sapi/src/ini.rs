@@ -12,13 +12,14 @@ use crate::cgi::path_of;
 use crate::{Engine, IniFile, IniFiles, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR};
 
 /// `php_ini_builder_define`'s split of one `-d`: `name=value` at the
-/// first `=`, or `name=1` for a bare name. Its line, quoted or not, and what the INI
-/// grammar reads from it are the engine's builder's.
+/// first `=`, or `name=1` for a bare name, the argument's bytes as given.
+/// Its line, quoted or not, and what the INI grammar reads from it are
+/// the engine's builder's.
 #[must_use]
-pub fn define(given: &str) -> (String, String) {
-    match given.split_once('=') {
-        Some((name, value)) => (name.to_owned(), value.to_owned()),
-        None => (given.to_owned(), String::from("1")),
+pub fn define(given: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    match given.iter().position(|b| *b == b'=') {
+        Some(at) => (given[..at].to_vec(), given[at + 1..].to_vec()),
+        None => (given.to_vec(), b"1".to_vec()),
     }
 }
 
@@ -207,6 +208,17 @@ fn expand(path: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `-d` is split at its first `=` and keeps its bytes, as
+    /// `php_ini_builder_define` copies them; a bare name is `name=1`.
+    #[test]
+    fn a_define_keeps_its_bytes() {
+        assert_eq!(
+            define(b"extension_dir=a/\xE4/w=x"),
+            (b"extension_dir".to_vec(), b"a/\xE4/w=x".to_vec())
+        );
+        assert_eq!(define(b"\xE4"), (b"\xE4".to_vec(), b"1".to_vec()));
+    }
 
     /// `-c` naming a directory finds `php-<sapi>.ini` before `php.ini`,
     /// a file is read as given, and `-n` beside it scans nothing.

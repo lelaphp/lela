@@ -376,7 +376,7 @@ pub(crate) fn init(
     fpm: &mut Fpm,
     pool: usize,
     slot: usize,
-    ini: (&[(String, String)], &php_sapi::IniFiles),
+    ini: (&[crate::Define], &php_sapi::IniFiles),
     started: &str,
 ) -> Worker {
     let failed = |name: &str| -> ! {
@@ -478,7 +478,7 @@ fn truth(value: &[u8]) -> bool {
 /// `php_value`s and `php_admin_value`s as `fpm_php_apply_defines` sets
 /// them, each one php does not know logged.
 fn build(
-    (ini, files): (&[(String, String)], &php_sapi::IniFiles),
+    (ini, files): (&[crate::Define], &php_sapi::IniFiles),
     config: &PoolConfig,
     started: &str,
 ) -> Engine {

@@ -1567,17 +1567,16 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
 /// where it opens with a byte that is neither alphanumeric nor a quote,
 /// so that ` off` and `;x` stand as written while `off ` is the boolean
 /// and `UTC;` is `UTC` before a comment.
-fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
+fn define_line(entries: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     let quoted = value
-        .bytes()
-        .next()
-        .is_some_and(|first| !first.is_ascii_alphanumeric() && first != b'"' && first != b'\'');
-    entries.extend_from_slice(name.as_bytes());
+        .first()
+        .is_some_and(|first| !first.is_ascii_alphanumeric() && *first != b'"' && *first != b'\'');
+    entries.extend_from_slice(name);
     entries.push(b'=');
     if quoted {
         entries.push(b'"');
     }
-    entries.extend_from_slice(value.as_bytes());
+    entries.extend_from_slice(value);
     if quoted {
         entries.push(b'"');
     }
@@ -2100,6 +2099,10 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
 /// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
+/// // A directory that is not UTF-8 is written as its bytes.
+/// $p = proc_open([PHP_BINARY, '-n', '-d', "extension_dir=a/\xE4/w", '-d', 'extension=x', '-r', ''], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo proc_close($p), "\n";
+/// preg_match('/^Warning: (.+) \(tried: (\S+) \(.+?\), (a\S+) \(.+\)\) in Unknown on line 0$/m', $out, $m); echo addcslashes("$m[1]: $m[2], $m[3]", "\200..\377"), "\n";
 /// ```
 /// ```expect process
 /// 0
@@ -2110,6 +2113,8 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// Failed loading Zend extension 'y': /z/y, /z/y.so
 /// PHP Startup: Unable to load dynamic library '/a/q.so': /a/q.so, /z///a/q.so.so
 /// ran
+/// 0
+/// PHP Startup: Unable to load dynamic library 'x': a/\344/w/x, a/\344/w/x.so
 /// ```
 fn register_extensions(req: &mut Request, loads: &Loads) -> String {
     const NO_LOADER: &str = "dynamic modules are not supported";
@@ -2416,8 +2421,8 @@ impl EngineBuilder {
     /// string(3) "UTC"
     /// ```
     #[must_use]
-    pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
-        define_line(&mut self.ini_entries, name, value);
+    pub fn ini(mut self, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> EngineBuilder {
+        define_line(&mut self.ini_entries, name.as_ref(), value.as_ref());
         self
     }
 
@@ -4752,7 +4757,7 @@ mod tests {
         );
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
-            .ini("t.preload", &script.to_string_lossy())
+            .ini("t.preload", script.as_os_str().as_encoded_bytes())
             .build();
         let program = format!(
             "<?php echo pre_f(), (new PreB)->m(), (new PreC) instanceof PreI ? 'y' : 'n', \
@@ -4821,7 +4826,7 @@ mod tests {
         let engine = || {
             Engine::cli_builder()
                 .extensions(&[file_caching(&dir)])
-                .ini("t.file_cache", &cache.to_string_lossy())
+                .ini("t.file_cache", cache.as_os_str().as_encoded_bytes())
                 .build()
         };
         let program = format!("<?php echo include '{}';", script.display());
