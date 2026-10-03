@@ -3502,8 +3502,8 @@ impl Request {
 
     /// `zend_free_extra_named_params`: each name and value of a call's
     /// or a frame's extra named arguments given up.
-    fn release_named(&mut self, named: Vec<(PhpString, Value)>) {
-        for (name, value) in named {
+    pub(crate) fn release_named(&mut self, named: exec::ExtraNamed) {
+        for (name, value) in named.free(self) {
             self.release(Value::string(name));
             self.release(value);
         }
@@ -3815,7 +3815,7 @@ impl Request {
             receiver,
             called_scope,
             closure,
-            extra_named: extra_named.to_vec(),
+            extra_named: exec::ExtraNamed::laid(self, extra_named.to_vec())?,
             stage: CallStage::Serving,
             frameless: false,
             return_value: exec::ReturnValue::Used,
@@ -18603,8 +18603,27 @@ impl Request {
     /// from `zend_unexpected_extra_named_error`
     /// (`Z/Zend/zend_API.c:394`), since a variadic native that reads
     /// them by name reads [`Request::named_arguments`] instead. The
-    /// witness stands beside `array_merge` in `ext/standard`, which is
-    /// where the oracle's text is pinned.
+    /// witness of the text stands beside `array_merge` in `ext/standard`.
+    ///
+    /// The extra named arguments stand in their table on the request's
+    /// heap, `EX(extra_named_params)`, across the throw, and a user
+    /// function's untyped variadic takes the table as its array.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { try { array_merge(...['x' => [1]]); } catch (ArgumentCountError $e) {} });
+    /// function f(...$a) { return memory_get_usage(); }
+    /// $m = memory_get_usage(); $u = f(x: 1); echo $u - $m, "\n";
+    /// $k = []; for ($i = 0; $i < 9; $i++) $k["k$i"] = $i;
+    /// pk(function () use ($k) { f(...$k); });
+    /// pk(function () { call_user_func('f', x: 1, y: 2); });
+    /// ```
+    /// ```expect
+    /// 3184 32
+    /// 376
+    /// 1016 0
+    /// 752 0
+    /// ```
     pub fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
         let Some(call) = self.vm.serving_call() else {
             return Ok(Vec::new());

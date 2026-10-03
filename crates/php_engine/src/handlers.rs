@@ -1356,7 +1356,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -1763,7 +1763,7 @@ fn init_call(
         receiver: None,
         called_scope: None,
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -2501,7 +2501,7 @@ pub(crate) fn init_user_call<T: Tier>(
         receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -2725,6 +2725,7 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                     Ok(named) => {
                         if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
                             req.addref(&Value::string(name));
+                            lay_extra_named(req)?;
                         }
                         (ArgSlot::Named(named.at), named.number)
                     }
@@ -3032,6 +3033,9 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
         Ok(named) => {
             if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
                 req.addref(&Value::string(name));
+                if let Err(thrown) = lay_extra_named(req) {
+                    return Ok(Err(thrown));
+                }
             }
             Ok(Reserved {
                 slot: ArgSlot::Named(named.at),
@@ -3040,6 +3044,20 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
         }
         Err(refused) => Err(refused.throw(req, name)),
     })
+}
+
+/// `zend_handle_named_arg`'s `zend_new_array(0)` and the add that
+/// grows it: the building call's table laid for its extra named rows.
+fn lay_extra_named(req: &mut Request) -> Result<(), Thrown> {
+    let Some(call) = req.vm_mut().building_call() else {
+        return Ok(());
+    };
+    let mut named: exec::ExtraNamed = std::mem::take(&mut call.extra_named);
+    let laid = named.lay(req);
+    if let Some(call) = req.vm_mut().building_call() {
+        call.extra_named = named;
+    }
+    laid
 }
 
 /// The next positional slot of the call being built, past every
@@ -3814,6 +3832,25 @@ pub(crate) fn recv_variadic<T: Tier>(
         .at(frame)
         .map(|state| state.extra_named.clone())
         .unwrap_or_default();
+    // An untyped variadic with no positional extras is php's
+    // `ZVAL_ARR(params, EX(extra_named_params))`, the frame's table
+    // itself, which the array collected here stands for.
+    let untyped = req
+        .vm()
+        .at(frame)
+        .and_then(|state| state.function)
+        .and_then(|function| req.function_decl(function))
+        .and_then(|decl| decl.parameters.get(at))
+        .is_none_or(|parameter| parameter.ty.is_none());
+    if count == 0 && untyped {
+        let table = req
+            .vm_mut()
+            .at_mut(frame)
+            .map(|state| state.extra_named.take_table());
+        if let Some(table) = table {
+            table.free(req);
+        }
+    }
     // `ZVAL_EMPTY_ARRAY(params)` where nothing is collected; an extra
     // named argument is php's `SEPARATE_ARRAY` of it, a table of its own.
     let collected = if count == 0 && named.is_empty() {
@@ -4695,7 +4732,7 @@ pub(crate) fn new<T: Tier>(
         receiver: this.map(exec::Receiver::Owned),
         called_scope: constructor.map(|_| class),
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -5056,7 +5093,7 @@ fn static_call_frame(
         receiver: this,
         called_scope: Some(called),
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -5170,7 +5207,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
             _ => declaring,
         }),
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -5367,7 +5404,7 @@ pub(crate) fn init_method_call<T: Tier>(
         receiver: this,
         called_scope: Some(called),
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
@@ -10663,7 +10700,7 @@ fn frameless_call(
         receiver: None,
         called_scope: None,
         closure: None,
-        extra_named: Vec::new(),
+        extra_named: exec::ExtraNamed::default(),
         stage: CallStage::Serving,
         send_arg_by_ref: false,
         frameless: true,
@@ -21880,7 +21917,7 @@ mod tests {
                 receiver: None,
                 called_scope: None,
                 closure: None,
-                extra_named: Vec::new(),
+                extra_named: exec::ExtraNamed::default(),
                 stage: CallStage::Serving,
                 send_arg_by_ref: false,
                 frameless: false,

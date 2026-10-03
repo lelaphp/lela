@@ -17,7 +17,7 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, raise, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
 use crate::format::date_format;
@@ -34,7 +34,14 @@ pub(super) const WALL: i64 = 2;
 pub(crate) struct DateState {
     pub time: Option<Time>,
     rows: Vec<Value>,
+    /// What the time holds on the request's heap where php's timelib
+    /// allocates with `emalloc`: `timelib_time_ctor`'s
+    /// `sizeof(timelib_time)` and the `tz_abbr` `timelib_strdup` made.
+    held: Option<(Emalloc, Option<Emalloc>)>,
 }
+
+/// `sizeof(timelib_time)`, which `timelib_time_ctor` asks `ecalloc` for.
+const TIMELIB_TIME_SIZE: usize = 240;
 
 /// The payload: `php_date_obj` keeps its state behind pointers, and so the
 /// payload is one, inside the `sizeof` php allocates (design §5.13).
@@ -198,17 +205,54 @@ pub(super) fn time_of(req: &mut Request, object: PhpObject) -> Result<Time, Thro
     }
 }
 
-/// The object's time replaced.
-pub(super) fn set_time(req: &mut Request, object: PhpObject, time: Option<Time>) {
-    if let Some(payload) = object.native_mut::<DateObj>(req) {
-        payload.time = time;
+/// The object's time replaced, and what it holds on the request's heap
+/// with it: the `timelib_time` kept where the object had one, and its
+/// `tz_abbr` freed and copied again, as `timelib_time_tz_abbr_update`
+/// does; none for none, `timelib_time_dtor`. The `Err` is the memory
+/// limit.
+pub(super) fn set_time(
+    req: &mut Request,
+    object: PhpObject,
+    time: Option<Time>,
+) -> Result<(), Thrown> {
+    let abbr = time.as_ref().map(|t| t.tz_abbr().len());
+    let Some(payload) = object.native_mut::<DateObj>(req) else {
+        return Ok(());
+    };
+    payload.time = time;
+    let held = payload.held.take();
+    let (struct_held, abbr_held) = match held {
+        Some((held, abbr)) => (Some(held), abbr),
+        None => (None, None),
+    };
+    if let Some(abbr) = abbr_held {
+        abbr.free(req);
     }
+    let Some(abbr) = abbr else {
+        if let Some(held) = struct_held {
+            held.free(req);
+        }
+        return Ok(());
+    };
+    let held = match struct_held {
+        Some(held) => held,
+        None => Emalloc::new(req, TIMELIB_TIME_SIZE)?,
+    };
+    let abbr = if abbr == 0 {
+        None
+    } else {
+        Some(Emalloc::new(req, abbr + 1)?)
+    };
+    if let Some(payload) = object.native_mut::<DateObj>(req) {
+        payload.held = Some((held, abbr));
+    }
+    Ok(())
 }
 
 /// `object_init_ex(zv, ce)` with its time set, one owner, the caller's.
 pub(super) fn new_date(req: &mut Request, class: ClassId, time: Time) -> Result<PhpObject, Thrown> {
     let object = new_object(req, class)?;
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(object)
 }
 
@@ -555,10 +599,17 @@ pub(crate) static DATE: DateHandlers = DateHandlers;
 
 impl ObjectHandlers for DateHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let rows = object
+        let (rows, held) = object
             .native_mut::<DateObj>(req)
-            .map(|d| std::mem::take(&mut d.rows));
+            .map(|d| (std::mem::take(&mut d.rows), d.held.take()))
+            .unzip();
         release_rows(req, rows);
+        if let Some((held, abbr)) = held.flatten() {
+            if let Some(abbr) = abbr {
+                abbr.free(req);
+            }
+            held.free(req);
+        }
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -649,7 +700,7 @@ pub(super) fn clone_date(req: &mut Request, object: PhpObject) -> Result<PhpObje
     let copy = object.clone_with(req, DateObj::default())?;
     let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
     if time.is_some() {
-        set_time(req, copy, time);
+        set_time(req, copy, time)?;
     }
     Ok(copy)
 }

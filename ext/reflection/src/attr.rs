@@ -24,7 +24,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString};
+use php_ext::values::{ClassId, FreshString, Key, PhpArray, PhpObject, PhpString};
 
 use super::{
     class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
@@ -95,6 +95,26 @@ fn target_names(flags: i64) -> String {
         out.push_str(name);
     }
     out
+}
+
+/// `zend_get_attribute_target_names(flags)` as php lays it down: the
+/// names appended to a `smart_str`, which starts at its 256-byte bin,
+/// and `smart_str_extract` trimming it to their length by
+/// `zend_string_realloc`; none where no bit names a target, the empty
+/// string php allocates nothing for. The string stands until the
+/// caller frees it.
+fn held_target_names(
+    req: &mut Request,
+    flags: i64,
+) -> Result<(String, Option<FreshString>), Thrown> {
+    let names = target_names(flags);
+    if names.is_empty() {
+        return Ok((names, None));
+    }
+    let laid = FreshString::new(req, 256 - 25)?;
+    let mut held = laid.truncate(req, names.len())?;
+    held.bytes_mut().copy_from_slice(names.as_bytes());
+    Ok((names, Some(held)))
 }
 
 /// What `reflect_attributes` reads off the subject whose attributes it
@@ -540,6 +560,20 @@ impl ReflectionAttribute {
     /// #0 %s(9): ReflectionAttribute->newInstance()
     /// #1 {main}
     /// ```
+    ///
+    /// The target refusal holds `zend_get_attribute_target_names`' two
+    /// strings on the request's heap across its throw.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// #[Attribute(Attribute::TARGET_CLASS)] class A {}
+    /// #[A] function g() {}
+    /// $a = (new ReflectionFunction('g'))->getAttributes()[0];
+    /// pk(function () use ($a) { try { $a->newInstance(); } catch (Error $e) {} });
+    /// ```
+    /// ```expect
+    /// 2520 32
+    /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
@@ -553,15 +587,20 @@ impl ReflectionAttribute {
         };
         let flags = marker_flags(req, class, &written)?;
         if kept.target & flags == 0 {
-            return Err(throw_error(
+            let location = held_target_names(req, kept.target)?;
+            let allowed = held_target_names(req, flags & TARGET_ALL)?;
+            let thrown = throw_error(
                 req,
                 "Error",
                 &format!(
                     "Attribute \"{written}\" cannot target {} (allowed targets: {})",
-                    target_names(kept.target),
-                    target_names(flags & TARGET_ALL)
+                    location.0, allowed.0
                 ),
-            ));
+            );
+            for held in [location.1, allowed.1].into_iter().flatten() {
+                held.free(req);
+            }
+            return Err(thrown);
         }
         // `zend_attribute.validation_error`: the refusal of an internal
         // attribute's validator `#[\DelayedTargetValidation]` deferred,

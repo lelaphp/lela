@@ -80,7 +80,7 @@ pub(super) fn initialize(
     timezone: Option<PhpObject>,
     how: Init,
 ) -> Result<bool, Thrown> {
-    set_time(req, object, None);
+    set_time(req, object, None)?;
     let text: &[u8] = if format.is_none() && text.is_empty() {
         b"now"
     } else {
@@ -154,7 +154,7 @@ pub(super) fn initialize(
     now.unixtime2local(sec);
     now.us = usec;
     if format.is_none() && text == b"now" {
-        set_time(req, object, Some(now));
+        set_time(req, object, Some(now))?;
         return Ok(true);
     }
     let options = NO_CLONE | if how.format { OVERRIDE_TIME } else { 0 };
@@ -162,7 +162,7 @@ pub(super) fn initialize(
     parsed.update_ts(zone.as_ref());
     parsed.update_from_sse();
     parsed.have_relative = 0;
-    set_time(req, object, Some(parsed));
+    set_time(req, object, Some(parsed))?;
     Ok(true)
 }
 
@@ -328,12 +328,23 @@ fn create_from_timestamp(
     timestamp: Union<i64, f64>,
     fallback: &str,
 ) -> Result<Static, Thrown> {
+    // `object_init_ex` before the timestamp is read, so the object
+    // stands across `php_date_initialize_from_ts_double`'s
+    // `DateRangeError`, and `zval_ptr_dtor` after it.
+    let class = called_or(req, fallback)?;
+    let object = new_object(req, class)?;
     let time = match timestamp {
         Union::A(n) => from_timestamp(n, 0),
-        Union::B(f) => from_float(req, f)?,
+        Union::B(f) => match from_float(req, f) {
+            Ok(time) => time,
+            Err(thrown) => {
+                req.release(object.as_value());
+                return Err(thrown);
+            }
+        },
     };
-    let class = called_or(req, fallback)?;
-    new_date(req, class, time).map(Static)
+    set_time(req, object, Some(time))?;
+    Ok(Static(object))
 }
 
 /// `date_get_last_errors` and `getLastErrors` of both classes.
@@ -428,7 +439,7 @@ fn modify(
     time.update_from_sse();
     time.have_relative = 0;
     time.relative = RelTime::default();
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(true)
 }
 
@@ -442,7 +453,7 @@ fn add(req: &mut Request, object: PhpObject, interval: PhpObject) -> Result<(), 
     } else {
         time.add(&diff)
     };
-    set_time(req, object, Some(new));
+    set_time(req, object, Some(new))?;
     Ok(())
 }
 
@@ -473,7 +484,7 @@ fn sub(
     } else {
         time.sub(&diff)
     };
-    set_time(req, object, Some(new));
+    set_time(req, object, Some(new))?;
     Ok(())
 }
 
@@ -508,7 +519,7 @@ fn timezone_set(req: &mut Request, object: PhpObject, timezone: PhpObject) -> Re
     }
     let sse = time.sse;
     time.unixtime2local(sse);
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(())
 }
 
@@ -544,7 +555,7 @@ fn time_set(
     time.us = microsecond;
     time.update_ts(None);
     time.update_from_sse();
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(())
 }
 
@@ -561,7 +572,7 @@ fn date_set(
     time.m = month;
     time.d = day;
     time.update_ts(None);
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(())
 }
 
@@ -581,7 +592,7 @@ fn isodate_set(
     time.relative.d = ffi::daynr_from_weeknr(year, week, day_of_week);
     time.have_relative = 1;
     time.update_ts(None);
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(())
 }
 
@@ -591,7 +602,7 @@ fn timestamp_set(req: &mut Request, object: PhpObject, timestamp: i64) -> Result
     time.unixtime2local(timestamp);
     time.update_ts(None);
     time.us = 0;
-    set_time(req, object, Some(time));
+    set_time(req, object, Some(time))?;
     Ok(())
 }
 
@@ -1602,6 +1613,20 @@ impl DateTime {
     /// string(8) "2.000000"
     /// DateTime::createFromTimestamp(): Argument #1 ($timestamp) must be a finite number between -9223372036854775808 and 9223372036854775807.999999, INF given
     /// ```
+    ///
+    /// The object is made before the float is read, so it stands across
+    /// the `DateRangeError`; a made one holds its `timelib_time` on the
+    /// request's heap.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { try { DateTime::createFromTimestamp(NAN); } catch (DateRangeError $e) {} });
+    /// $m = memory_get_usage(); $d = DateTime::createFromTimestamp(1); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 3120 32
+    /// 304
+    /// ```
     #[php(tentative)]
     fn createFromTimestamp(
         req: &mut Request,
@@ -1797,6 +1822,20 @@ impl DateTime {
     /// int(123456)
     /// DateTime::setMicrosecond(): Argument #1 ($microsecond) must be between 0 and 999999, 1000000 given
     /// ```
+    ///
+    /// The receiver stands across the `DateRangeError` with what its
+    /// time holds on the request's heap, the `timelib_time` and the
+    /// copy of its abbreviation, as php's timelib allocates them.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { try { (new DateTime)->setMicrosecond(-1); } catch (DateRangeError $e) {} });
+    /// $tz = new DateTimeZone('+01:00'); $m = memory_get_usage(); $d = new DateTime('now', $tz); $e = new DateTime('@1'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 3328 32
+    /// 624
+    /// ```
     fn setMicrosecond(
         req: &mut Request,
         this: This<Self>,
@@ -1806,7 +1845,7 @@ impl DateTime {
         let object = this.object();
         let mut time = time_of(req, object)?;
         time.us = microsecond;
-        set_time(req, object, Some(time));
+        set_time(req, object, Some(time))?;
         // `RETURN_OBJ_COPY`, answered as `static`.
         req.addref(&object.as_value());
         Ok(Static(object))
@@ -2198,7 +2237,7 @@ impl DateTimeImmutable {
         let mut time = time_of(req, object)?;
         time.us = microsecond;
         let copy = clone_date(req, object)?;
-        set_time(req, copy, Some(time));
+        set_time(req, copy, Some(time))?;
         Ok(Static(copy))
     }
 
