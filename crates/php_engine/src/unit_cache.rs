@@ -285,15 +285,19 @@ pub(crate) fn now() -> i64 {
 
 impl UnitCache {
     /// An empty cache holding at most `capacity` names, for this build
-    /// over a bundle that declares `functions` and `classes`
-    /// ([`build_identity`]).
+    /// over a bundle that declares `functions` and `classes`, under the
+    /// tier's `hooked` ([`build_identity`]).
     pub(crate) fn new(
         capacity: usize,
+        hooked: php_compile::Hooked,
         functions: &[php_unit::decl::FunctionDecl],
         classes: &[php_unit::decl::ClassDecl],
     ) -> UnitCache {
         let names = functions.iter().map(|decl| &*decl.name.0);
-        let build = build_identity(names.chain(classes.iter().map(|decl| &*decl.name.0)));
+        let build = build_identity(
+            hooked,
+            names.chain(classes.iter().map(|decl| &*decl.name.0)),
+        );
         UnitCache {
             held: Cache::new(capacity),
             taken: AtomicU64::new(0),

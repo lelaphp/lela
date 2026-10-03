@@ -2671,7 +2671,7 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(MAX_ACCELERATED_FILES, &functions, &classes);
+        let units = UnitCache::new(MAX_ACCELERATED_FILES, self.hooked, &functions, &classes);
         let shell = self
             .cli_shell
             .then(|| extensions.iter().filter_map(|e| e.shell).next_back())
