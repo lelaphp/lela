@@ -140,22 +140,24 @@ fn extract_file(
     if basedir_refuses(req, &full) {
         return Ok(false);
     }
-    let Some(archive) = object
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut())
+    let Some(Ok(mut zf)) = crate::object::with_file(req, object, |za| za.fopen(idx, 0, None))
     else {
-        return Ok(false);
-    };
-    let Ok(mut zf) = archive.fopen(idx, 0, None) else {
         return Ok(false);
     };
     let Some(stream) = req.open_stream(&full, b"w+b", false)? else {
         return Ok(false);
     };
-    while let Ok(chunk) = zf.read(8192)
-        && !chunk.is_empty()
-    {
-        stream.write(req, &chunk);
+    let id = object.native::<Intern>(req).map_or(0, |i| i.id);
+    loop {
+        let mut file = crate::object::file(req, id);
+        let chunk = zf.read_through(8192, &mut file);
+        crate::object::file_back(req, id, file);
+        match chunk {
+            Ok(chunk) if !chunk.is_empty() => {
+                stream.write(req, &chunk);
+            }
+            _ => break,
+        }
     }
     req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))))?;
     stream.free(req);

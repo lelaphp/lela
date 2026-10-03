@@ -38,20 +38,154 @@ fn carry(status: Status) -> io::Error {
     io::Error::other(Carried(status))
 }
 
-/// `_zip_source_window_new` over a file: `len` bytes from `start`, read
-/// by position, so every window on one archive shares its file.
-pub(crate) struct Window {
+/// The stdio `FILE` libzip reads an archive through
+/// (`zip_source_file_stdio.c`), as the system's stdio buffers it: one
+/// buffer of the file's `st_blksize`, refilled a block at a time, a read
+/// longer than the buffer read straight past it with its last part kept
+/// (`__fread`), and a seek inside what the buffer holds served from it
+/// (`_fseeko`), so what it read stays readable after the file changes
+/// under it.
+pub(crate) struct Stdio {
     file: File,
+    size: usize,
+    /// What the buffer holds, the bytes before the file's offset.
+    buffer: Vec<u8>,
+    /// How much of it has been read.
+    at: usize,
+    /// The file's offset.
+    offset: u64,
+}
+
+impl Stdio {
+    pub(crate) fn new(file: File) -> Stdio {
+        use std::os::unix::fs::MetadataExt;
+        let size = file
+            .metadata()
+            .map_or(1024, |m| m.blksize())
+            .clamp(1, 1 << 24);
+        Stdio {
+            file,
+            size: usize::try_from(size).unwrap_or(1024),
+            buffer: Vec::new(),
+            at: 0,
+            offset: 0,
+        }
+    }
+
+    /// `read(2)` at the file's offset.
+    fn sys_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.file.read_at(buf, self.offset) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Ok(n) => {
+                    self.offset += n as u64;
+                    return Ok(n);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `__srefill`: the buffer read again from the file's offset; `false`
+    /// at the end of the file.
+    fn refill(&mut self) -> io::Result<bool> {
+        let mut buffer = std::mem::take(&mut self.buffer);
+        buffer.resize(self.size, 0);
+        let got = self.sys_read(&mut buffer);
+        buffer.truncate(*got.as_ref().unwrap_or(&0));
+        self.buffer = buffer;
+        self.at = 0;
+        got.map(|n| n > 0)
+    }
+
+    /// `_fseeko` to `target`.
+    pub(crate) fn seek(&mut self, target: u64) {
+        let held = self.buffer.len() as u64;
+        let first = self.offset - held;
+        if target >= first && target < first + held {
+            self.at = usize::try_from(target - first).unwrap_or(0);
+            return;
+        }
+        let block = target & !(self.size as u64 - 1);
+        self.offset = block;
+        self.buffer.clear();
+        self.at = 0;
+        let into = usize::try_from(target - block).unwrap_or(0);
+        if into > 0 {
+            if self.refill().unwrap_or(false) && self.buffer.len() >= into {
+                self.at = into;
+            } else {
+                self.offset = target;
+                self.buffer.clear();
+            }
+        }
+    }
+
+    /// `__fread`: up to `out.len()` bytes, fewer only at the file's end.
+    ///
+    /// An entry read after its archive is cut reads what the buffer held:
+    /// the block its local header was read from, less the header.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('stdio-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('st', str_repeat('x', 195000)); $z->setCompressionName('st', ZipArchive::CM_STORE); $z->close();
+    /// $z->open('stdio-witness.zip'); $s = $z->getStream('st'); $h = fopen('stdio-witness.zip', 'r+'); ftruncate($h, 1000); fclose($h);
+    /// $t = 0; while (!feof($s)) { $r = fread($s, 8192); if ($r === false) break; $t += strlen($r); } echo $t, "\n";
+    /// var_dump(strlen($z->getFromName('st'))); $z->close(); unlink('stdio-witness.zip');
+    /// ```
+    /// ```expect
+    /// 4064
+    /// int(968)
+    /// ```
+    pub(crate) fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let held = (self.buffer.len() - self.at).min(out.len());
+        out[..held].copy_from_slice(&self.buffer[self.at..self.at + held]);
+        self.at += held;
+        let mut got = held;
+        let rest = out.len() - got;
+        if rest > self.size {
+            while got < out.len() {
+                let n = self.sys_read(&mut out[got..])?;
+                if n == 0 {
+                    self.buffer.clear();
+                    self.at = 0;
+                    return Ok(got);
+                }
+                got += n;
+            }
+            let kept = rest - self.size * ((rest - 1) / self.size);
+            self.buffer = out[out.len() - kept..].to_vec();
+            self.at = kept;
+            return Ok(got);
+        }
+        while got < out.len() {
+            if !self.refill()? {
+                return Ok(got);
+            }
+            let n = (out.len() - got).min(self.buffer.len());
+            out[got..got + n].copy_from_slice(&self.buffer[..n]);
+            self.at = n;
+            got += n;
+        }
+        Ok(got)
+    }
+}
+
+/// `_zip_source_window_new` over a file: `len` bytes from `start`, read
+/// through a stdio `FILE`, its own or the archive's it is lent.
+pub(crate) struct Window {
+    file: Stdio,
     start: u64,
     len: u64,
     offset: u64,
     /// The archive's own data, where libzip reads every failure as
-    /// `ZIP_ER_EOF`; a file source's otherwise.
+    /// `ZIP_ER_EOF` and reads through the archive's `FILE`; a file
+    /// source's otherwise, read through its own.
     archive: bool,
 }
 
 impl Window {
-    pub(crate) fn new(file: File, start: u64, len: u64, archive: bool) -> Window {
+    pub(crate) fn new(file: Stdio, start: u64, len: u64, archive: bool) -> Window {
         Window {
             file,
             start,
@@ -61,25 +195,23 @@ impl Window {
         }
     }
 
-    /// `window_read`: up to `buf.len()` bytes, `0` at the window's end.
+    /// `window_read`: the seek to where the window is read to, then up to
+    /// `buf.len()` bytes, `0` at the window's end.
     fn read_some(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         let left = usize::try_from(self.len - self.offset).unwrap_or(usize::MAX);
         let n = left.min(buf.len());
         if n == 0 {
             return Ok(0);
         }
-        loop {
-            return match self.file.read_at(&mut buf[..n], self.start + self.offset) {
-                Ok(0) if self.archive => Err(Status::of(Er::Eof, 0)),
-                Ok(0) => Err(Status::of(Er::DataLength, 0)),
-                Ok(k) => {
-                    self.offset += k as u64;
-                    Ok(k)
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) if self.archive => Err(Status::of(Er::Eof, 0)),
-                Err(e) => Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
-            };
+        self.file.seek(self.start + self.offset);
+        match self.file.read(&mut buf[..n]) {
+            Ok(0) | Err(_) if self.archive => Err(Status::of(Er::Eof, 0)),
+            Ok(0) => Err(Status::of(Er::DataLength, 0)),
+            Ok(k) => {
+                self.offset += k as u64;
+                Ok(k)
+            }
+            Err(e) => Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
         }
     }
 
@@ -238,6 +370,15 @@ impl Read for Raw {
                 Ok(n)
             }
             Raw::Aes(a) => a.read_some(buf).map_err(carry),
+        }
+    }
+}
+
+impl Raw {
+    fn window(&mut self) -> &mut Window {
+        match self {
+            Raw::Plain(w) | Raw::Pkware(w, _) => w,
+            Raw::Aes(a) => &mut a.window,
         }
     }
 }
@@ -1259,6 +1400,39 @@ impl Reader {
         };
         let pulled = Pulled::new(codec, l.check);
         Ok(Reader::new(Body::Pulled(Box::new(pulled)), crc, false))
+    }
+
+    /// The window the entry is read through, where it has one.
+    fn window_mut(&mut self) -> Option<&mut Window> {
+        match &mut self.body {
+            Body::Bytes { .. } => None,
+            Body::Window(w) => Some(w),
+            Body::Decrypted(raw) => Some(raw.window()),
+            Body::Compressed(d) => Some(d.lower.window()),
+            Body::Pulled(p) => p.codec.feed().map(|f| f.lower.window()),
+        }
+    }
+
+    /// `zip_fread` through `file`, the archive's `FILE`, which its data
+    /// is read through where an added file's is read through its own: it
+    /// is lent to the window for the read and taken back.
+    pub(crate) fn read_through(
+        &mut self,
+        len: usize,
+        file: &mut Option<Stdio>,
+    ) -> Result<Vec<u8>, Status> {
+        self.lend(file);
+        let got = self.read(len);
+        self.lend(file);
+        got
+    }
+
+    fn lend(&mut self, file: &mut Option<Stdio>) {
+        if let (Some(w), Some(f)) = (self.window_mut(), file.as_mut())
+            && w.archive
+        {
+            std::mem::swap(&mut w.file, f);
+        }
     }
 
     /// `zip_file_is_seekable`.
