@@ -2,8 +2,10 @@
 //! the `flock(2)` as types read once from the arguments (`php_dba_open`), and
 //! the link, php's `dba_info`, with its streams and its handler's state.
 
-use php_ext::raising::{Level, docref};
-use php_ext::request::{Request, Stream};
+use std::os::fd::OwnedFd;
+
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::{FdStream, Request, Stream};
 
 use crate::cdb::{Maker, Reader};
 use crate::flatfile::Flatfile;
@@ -259,18 +261,34 @@ impl Mode {
 }
 
 /// The handler's own state, `info->dbf`, with the database stream of a
-/// handler that has one opened for it, `info->fp`.
-pub(crate) enum Store {
+/// handler that has one opened for it, `info->fp`: a stream in a request,
+/// its fd while the engine's pool keeps a persistent link.
+pub(crate) enum Store<F = Stream> {
     /// The library's open database; `None` where `dbm_open` refused, which
     /// `dba_open_ndbm` answers as success all the same.
     #[cfg(target_os = "macos")]
     Ndbm(Option<crate::ffi::Ndbm>),
-    Flatfile(Flatfile, Stream),
-    Inifile(Inifile, Stream),
+    Flatfile(Flatfile, F),
+    Inifile(Inifile, F),
     /// A cdb opened to read, under either name.
-    CdbReader(Reader, Stream),
+    CdbReader(Reader, F),
     /// A cdb opened `n`, made as it is written; `None` once finished.
-    CdbMaker(Option<Maker>, Stream),
+    CdbMaker(Option<Maker>, F),
+}
+
+impl<F> Store<F> {
+    /// The handler's state over what `f` makes of the database's stream or
+    /// fd.
+    fn map<G, E>(self, f: impl FnOnce(F) -> Result<G, E>) -> Result<Store<G>, E> {
+        Ok(match self {
+            #[cfg(target_os = "macos")]
+            Store::Ndbm(db) => Store::Ndbm(db),
+            Store::Flatfile(walk, file) => Store::Flatfile(walk, f(file)?),
+            Store::Inifile(ini, file) => Store::Inifile(ini, f(file)?),
+            Store::CdbReader(reader, file) => Store::CdbReader(reader, f(file)?),
+            Store::CdbMaker(maker, file) => Store::CdbMaker(maker, f(file)?),
+        })
+    }
 }
 
 impl Store {
@@ -360,6 +378,77 @@ impl Link {
         if let Some(lock) = self.lock_file {
             lock.free(req);
         }
+    }
+}
+
+/// A `dba_popen` link between requests, what the engine's pool keeps of
+/// php's persistent `dba_info`: the database's and the `.lck` file's fds,
+/// open so the `flock(2)` they hold stands, the path, the access, the
+/// handler and its walk state. The streams are made again over the fds by
+/// the request that takes it up.
+pub(crate) struct Kept {
+    path: Vec<u8>,
+    access: Access,
+    handler: Handler,
+    lock: Held,
+    lock_file: Option<OwnedFd>,
+    store: Store<OwnedFd>,
+}
+
+impl Link {
+    /// The persistent link given back at the request's end: its streams'
+    /// fds duplicated, written out first, and the streams freed; `None`
+    /// where a fd could not be had, the link closed.
+    pub(crate) fn keep(self, req: &mut Request) -> Option<Kept> {
+        let file = self.store.stream();
+        let file_fd = file.map(|file| file.dup_fd(req));
+        let lock_fd = self.lock_file.map(|lock| lock.dup_fd(req));
+        if matches!(file_fd, Some(None)) || matches!(lock_fd, Some(None)) {
+            self.close(req);
+            return None;
+        }
+        for stream in file.into_iter().chain(self.lock_file) {
+            stream.free(req);
+        }
+        let store = self.store.map(|_| file_fd.flatten().ok_or(())).ok()?;
+        Some(Kept {
+            path: self.path,
+            access: self.access,
+            handler: self.handler,
+            lock: self.lock,
+            lock_file: lock_fd.flatten(),
+            store,
+        })
+    }
+}
+
+impl Kept {
+    /// The link taken up by this request, its streams made over the fds
+    /// as `php_stream_fopen_from_fd` makes them. The `Err` is the memory
+    /// limit, met registering a stream.
+    pub(crate) fn take_up(self, req: &mut Request) -> Result<Link, Thrown> {
+        let mode = Mode {
+            access: self.access,
+            locking: Locking::Database,
+            test: false,
+        }
+        .file_mode();
+        let store = self
+            .store
+            .map(|fd| req.stream_from_fd(fd, FdStream::File { mode }))?;
+        let lock_file = match self.lock_file {
+            Some(fd) => Some(req.stream_from_fd(fd, FdStream::File { mode: b"rb" })?),
+            None => None,
+        };
+        Ok(Link {
+            path: self.path,
+            access: self.access,
+            handler: self.handler,
+            persistent: true,
+            lock: self.lock,
+            lock_file,
+            store,
+        })
     }
 }
 
