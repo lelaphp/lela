@@ -276,11 +276,17 @@ fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Re
     Ok(true)
 }
 
-/// mysqli's `RSHUTDOWN` in this engine: every persistent connection the
-/// request holds given back to the engine's pool, one still open on a link
-/// first given back as `php_mysqli_close` gives it, as php's free of the
-/// link at the request's end does; one past the pool's bound closed.
+/// mysqli's `RSHUTDOWN` in this engine: a link `mysqli_init` made and
+/// connected without `p:` freed, as php's free of the link at the
+/// request's end closes its stream, before the engine's end would keep
+/// that stream in its pool; then every persistent connection the request
+/// holds given back to the engine's pool, one still open on a link first
+/// given back as `php_mysqli_close` gives it; one past the pool's bound
+/// closed.
 pub(crate) fn rshutdown(req: &mut Request) {
+    for object in std::mem::take(&mut req.state::<State>().unkeyed) {
+        free_link(req, object);
+    }
     for (key, plinks) in req.state::<State>().plinks.drain() {
         for handle in plinks.open {
             if !matches!(end_psession(req, handle), Ok(true)) {
@@ -450,6 +456,12 @@ pub(crate) fn common_connect(
             return Ok(None);
         }
         connected(req, handle);
+        if !new_connection
+            && mysql.hash_key.is_none()
+            && let Some(object) = object
+        {
+            req.state::<State>().unkeyed.push(object);
+        }
         if let Some(key) = &mysql.hash_key
             && let Some(held) = plinks(req, key)
         {
@@ -594,6 +606,7 @@ pub(crate) fn close(req: &mut Request, on: On) -> Result<True, Thrown> {
 
 /// `mysqli_link_free_storage`.
 fn free_link(req: &mut Request, object: PhpObject) {
+    req.state::<State>().unkeyed.retain(|o| *o != object);
     let link = crate::payload::<Link>(req, object)
         .map(std::mem::take)
         .unwrap_or_default();

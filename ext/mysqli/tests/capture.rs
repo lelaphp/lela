@@ -44,3 +44,38 @@ fn a_persistent_link_serves_the_next_request() {
         )
     );
 }
+
+/// A link `mysqli_init()` made and the first request connected without
+/// `p:`, held by two variables so that no destructor pass frees it, is
+/// closed as that request ends, as php's free of the link closes its
+/// stream, and not kept in the engine's pool of persistent streams:
+/// the server's `SHOW PROCESSLIST`, read in the second request, no longer
+/// lists its thread. Against the server of `ci/mysql/compose.yaml`; with
+/// none listening the test says so and passes.
+#[test]
+fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .build();
+    let first = "<?php $l = mysqli_init(); $kept = $l; $l->real_connect('127.0.0.1', 'root', '', 'test'); echo $l->thread_id;";
+    let served = engine.serve_capture(first, Capture::default());
+    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    assert!(thread.parse::<u64>().is_ok(), "{thread}");
+    let second = format!(
+        "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        for ($i = 0; $i < 50; $i++) {{
+            $open = false;
+            $r = mysqli_query($l, 'SHOW PROCESSLIST');
+            while ($row = mysqli_fetch_assoc($r)) $open = $open || $row['Id'] == {thread};
+            if (!$open) break;
+            mysqli_query($l, 'DO SLEEP(0.02)');
+        }}
+        echo $open ? 'open' : 'gone';"
+    );
+    let served = engine.serve_capture(&second, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "gone");
+}
