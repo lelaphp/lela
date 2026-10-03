@@ -4243,6 +4243,20 @@ mod tests {
         assert_eq!(dir_under("/srv/two"), "/srv/two");
     }
 
+    /// `error_log=syslog` with no `request::Syslog` registered, as
+    /// without ext/standard: the entry reaches the host's log (#1364).
+    #[test]
+    fn error_log_syslog_without_a_registered_syslog_reaches_the_host_s_log() {
+        let engine = Engine::builder().ini("error_log", "syslog").build();
+        let mut sink = Kept::default();
+        let source = "<?php ini_set('log_errors', 1); ini_set('display_errors', 0); echo $u;";
+        engine.serve(description(source), &mut sink);
+        assert_eq!(
+            sink.logged(),
+            "PHP Warning:  Undefined variable $u in witness.php on line 1\n"
+        );
+    }
+
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
         let mut sink = Kept::default();
         let observables = engine.serve(description(source), &mut sink);

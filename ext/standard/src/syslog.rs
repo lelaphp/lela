@@ -196,7 +196,27 @@ fn facility(req: &Request) -> i32 {
 
 /// `php_syslog` (`Z/main/php_syslog.c:57`): the log opened with
 /// `syslog.ident` and `syslog.facility` where no `openlog` has been
-/// called, then [`syslog_str`].
+/// called, then [`syslog_str`]. The engine's `request::Syslog`, so
+/// `error_log=syslog` logs through it at its severity, on the
+/// connection a userland `openlog()` opened; `LOG_PERROR` copies each
+/// line to stderr, which a process of its own keeps apart.
+///
+/// ```php
+/// openlog('php-witness-1364', LOG_PERROR, LOG_USER);
+/// ini_set('log_errors', 1); ini_set('display_errors', 0); ini_set('error_log', 'syslog');
+/// echo $undefined;
+/// error_log("two\nlines\ttab");
+/// trigger_error('gone', E_USER_DEPRECATED);
+/// closelog();
+/// ```
+/// ```expect process
+/// ```
+/// ```stderr
+/// %s php-witness-1364[%d] <Warning>: PHP Warning:  Undefined variable $undefined in %s on line 4
+/// %s php-witness-1364[%d] <Notice>: two
+/// %s php-witness-1364[%d] <Notice>: lines\x09tab
+/// %s php-witness-1364[%d] <Info>: PHP Deprecated:  gone in %s on line 6
+/// ```
 pub(super) fn php_syslog(req: &mut Request, priority: i32, message: &[u8]) {
     if !req.state::<State>().syslog.opened {
         let ident = req.ini_get(b"syslog.ident").unwrap_or(b"php").to_vec();
