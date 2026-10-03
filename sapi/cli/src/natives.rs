@@ -119,12 +119,13 @@ const COLOR: &str = "cli_server.color";
 /// server writes no `Version` row.
 ///
 /// ```php
-/// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+/// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
 /// mkdir($dir);
 /// file_put_contents("$dir/index.php", '<?php ini_set("cli_server.color", "0"); (new ReflectionExtension("cli_server"))->info();');
-/// $port = 18000 + random_int(0, 999);
-/// $p = proc_open([PHP_BINARY, '-n', '-d', 'cli_server.color=1', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
-/// usleep(300000);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'cli_server.color=1', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $ready = [$pipes[2]]; $none = null;
+/// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+/// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
 /// echo file_get_contents("http://127.0.0.1:$port/");
 /// proc_terminate($p); proc_close($p);
 /// unlink("$dir/index.php"); rmdir($dir);

@@ -578,12 +578,13 @@ impl OutputSink for WireSink {
     /// that ignores the abort sees `connection_aborted()`.
     ///
     /// ```php
-    /// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+    /// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
     /// mkdir($dir);
     /// file_put_contents("$dir/index.php", '<?php ignore_user_abort(true); for ($i = 0; $i < 50 && !connection_aborted(); $i++) { echo str_repeat("x", 65536); flush(); usleep(20000); } file_put_contents(__DIR__ . "/log", connection_aborted() . connection_status() . ($i < 50 ? " early" : " late"));');
-    /// $port = 18000 + random_int(0, 999);
-    /// $p = proc_open([PHP_BINARY, '-n', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
-    /// usleep(300000);
+    /// $p = proc_open([PHP_BINARY, '-n', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
     /// $c = stream_socket_client("tcp://127.0.0.1:$port");
     /// fwrite($c, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
     /// fread($c, 1000);

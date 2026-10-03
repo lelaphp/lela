@@ -374,15 +374,16 @@ pub fn info(engine: &Engine) -> i32 {
 /// leaves no server.
 ///
 /// ```php
-/// $dir = sys_get_temp_dir() . '/' . uniqid('srv');
+/// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
 /// mkdir($dir);
 /// file_put_contents("$dir/index.php", '<?php echo "body\n";');
-/// $port = 18000 + random_int(0, 999);
-/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-d', 'disable_functions=exit', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
-/// usleep(300000);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-d', 'disable_functions=exit', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $ready = [$pipes[2]]; $none = null;
+/// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+/// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
 /// echo file_get_contents("http://127.0.0.1:$port/"), file_get_contents("http://127.0.0.1:$port/");
 /// proc_terminate($p); proc_close($p);
-/// $p = proc_open([PHP_BINARY, '-n', '-d', 'magic_quotes_gpc=1', '-S', "127.0.0.1:$port", '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'magic_quotes_gpc=1', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
 /// unlink("$dir/index.php"); rmdir($dir);
 /// ```
