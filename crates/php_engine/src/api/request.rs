@@ -3781,6 +3781,10 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
+        if self.pending().is_some() {
+            return Ok(Value::null());
+        }
         // `zend_call_function`: the deprecation before the arguments
         // are placed, and no call where a handler threw.
         if self.function_flags(function).deprecated {
