@@ -1868,42 +1868,79 @@ fn ini_quantity(value: &[u8]) -> i64 {
     crate::ini_quantity::parse(value).0
 }
 
-/// The end of `php_module_startup`'s check for deprecated directives
-/// (`Z/main/main.c:2393`), raised at the request's first moment where
-/// this engine has a request to raise it on: `allow_url_include` set to
-/// a number other than zero is `Directive 'allow_url_include' is
-/// deprecated` at `Unknown` line 0, `cfg_get_long` reading the value as
-/// `ZEND_STRTOL` does, so `On` is zero.
+/// `php_module_startup`'s check for deprecated directives
+/// (`Z/main/main.c:2393-2450`), its last step: each name of the
+/// configuration table `cfg_get_long` reads as a number other than zero,
+/// `zval_get_long` over the string or the array, raised at `Unknown`
+/// line 0. `allow_url_include` is deprecated; each name of the second
+/// half is `E_CORE_ERROR`, the first ending the startup, so no request
+/// runs ([`Engine::begin`]).
 ///
 /// ```php
-/// var_dump(ini_get('allow_url_fopen'), ini_get('allow_url_include'), ini_set('allow_url_include', '1'));
+/// foreach ([['allow_url_include=1', 'magic_quotes_gpc=1', 'track_errors=1'], ['register_globals=0.9e1'], ['safe_mode=0.5', 'allow_url_include=On']] as $set) {
+///     $args = [PHP_BINARY, '-n'];
+///     foreach ($set as $d) { array_push($args, '-d', $d); }
+///     $p = proc_open([...$args, '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]); var_dump(proc_close($p));
+/// }
 /// ```
-/// ```expect
-/// string(1) "1"
-/// string(1) "0"
-/// bool(false)
+/// ```expect process
+/// Deprecated: Directive 'allow_url_include' is deprecated in Unknown on line 0
+///
+/// Fatal error: Directive 'magic_quotes_gpc' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+/// int(1)
+///
+/// Fatal error: Directive 'register_globals' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+/// int(1)
+///
+/// Deprecated: Directive 'allow_url_include' is deprecated in Unknown on line 0
+/// ran
+/// int(0)
 /// ```
-fn deprecated_directives(req: &mut Request) {
-    let set = req.ini_get(b"allow_url_include").is_some_and(|value| {
-        let digits = value.trim_ascii_start();
-        let digits = digits
-            .strip_prefix(b"-")
-            .or_else(|| digits.strip_prefix(b"+"))
-            .unwrap_or(digits);
-        digits.first().is_some_and(u8::is_ascii_digit)
-            && digits
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .any(|b| *b != b'0')
-    });
-    if set {
-        crate::api::raising::raise_at(
-            req,
-            crate::api::raising::Level::Deprecated,
-            "Directive 'allow_url_include' is deprecated",
-            b"Unknown",
-            0,
-        );
+fn startup_directives(req: &mut Request, shared: &Shared) {
+    const REMOVED: [&str; 18] = [
+        "allow_call_time_pass_reference",
+        "asp_tags",
+        "define_syslog_variables",
+        "highlight.bg",
+        "magic_quotes_gpc",
+        "magic_quotes_runtime",
+        "magic_quotes_sybase",
+        "register_globals",
+        "register_long_arrays",
+        "safe_mode",
+        "safe_mode_gid",
+        "safe_mode_include_dir",
+        "safe_mode_exec_dir",
+        "safe_mode_allowed_env_vars",
+        "safe_mode_protected_env_vars",
+        "zend.ze1_compatibility_mode",
+        "track_errors",
+        "disable_classes",
+    ];
+    let set = |name: &str| {
+        shared
+            .configured(name.as_bytes())
+            .is_some_and(|entry| match entry {
+                Configured::Str(text) => match php_heap::numeric_prefix(text) {
+                    Some((php_heap::Number::Long(n), _)) => n != 0,
+                    Some((php_heap::Number::Double(d), _)) => d.is_finite() && d.abs() >= 1.0,
+                    None => false,
+                },
+                Configured::Array(rows) => !rows.is_empty(),
+            })
+    };
+    if set("allow_url_include") {
+        let message = "Directive 'allow_url_include' is deprecated";
+        crate::api::raising::raise_at(req, Level::Deprecated, message, b"Unknown", 0);
+    }
+    if let Some(name) = REMOVED.into_iter().find(|name| set(name)) {
+        let message = format!("Directive '{name}' is no longer available in PHP");
+        crate::api::raising::raise_at(req, Level::CoreError, &message, b"Unknown", 0);
     }
 }
 
@@ -2817,6 +2854,7 @@ impl Engine {
             taken.push((b"zend.script_encoding".to_vec(), None));
         }
         disable_warnings(&mut req);
+        startup_directives(&mut req, &self.shared);
         let raised = req.end_startup();
         let written = req.startup_stderr();
         drop(req);
@@ -3231,11 +3269,20 @@ impl Engine {
         for (level, message) in &self.shared.startup_raised {
             req.note_startup_error(*level, message);
         }
+        // An `E_CORE_ERROR` bailed out of `php_module_startup`, which
+        // failed, and the host ends with status 1 before any request.
+        if (self.shared.startup_raised.iter()).any(|(level, _)| *level == Level::CoreError) {
+            crate::preload::hand_over(&mut req, sink);
+            return Err(Observables {
+                exit_code: 1,
+                headers_sent: true,
+                ..Observables::default()
+            });
+        }
         // `accel_activate`: a reset a request asked for empties the unit
         // cache at the next request's start.
         self.shared.units.restart_if_pending();
         serve_rinits(&mut req, &self.shared.extensions);
-        deprecated_directives(&mut req);
         self.arm_preloaded(&mut req);
         if req.web().is_some_and(|web| web.no_headers) {
             req.output_mut().quiet();
