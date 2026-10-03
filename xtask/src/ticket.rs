@@ -297,7 +297,13 @@ impl Successors {
         {
             bail!("opens no ticket and asserts nothing; `--opens <n>` or `--opens-nothing`");
         }
-        let held_to = (!tracks.contains(&MAIN)).then_some(tracks);
+        // A close of one of `main`'s tickets asks nothing of a successor's
+        // labels; any other is held to share one of the closed ticket's
+        // tracks, and the edit named adds the first.
+        let first = match tracks {
+            [first, ..] if !tracks.contains(&MAIN) => Some(*first),
+            _ => None,
+        };
         for &successor in self.tickets() {
             let issue = gh
                 .view(root, successor)
@@ -305,14 +311,17 @@ impl Successors {
             if issue.state == State::Closed {
                 bail!("opens {successor}, which is closed; a successor is an open ticket");
             }
-            if let Some(tracks) = held_to
-                && let carried = tracks_of(issue.labels.iter().map(|l| l.name.as_str()))
-                && !carried.iter().any(|track| tracks.contains(track))
-            {
-                let track = tracks[0];
-                let label = format!("{TRACK_LABEL}{track}");
+            let Some(first) = first else { continue };
+            let its = tracks_of(issue.labels.iter().map(|l| l.name.as_str()));
+            if !its.iter().any(|track| tracks.contains(track)) {
+                let wanted = tracks
+                    .iter()
+                    .map(|track| format!("`{TRACK_LABEL}{track}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
                 bail!(
-                    "opens {successor}, which carries no `{label}` label; what a {track} ticket opens is that track's, and a ticket with no `{TRACK_LABEL}` label is {MAIN}'s: `gh issue edit {} --add-label {label}`",
+                    "opens {successor}, which carries no {wanted} label; what a {} ticket opens is that track's, and a ticket with no `{TRACK_LABEL}` label is {MAIN}'s: `gh issue edit {} --add-label {TRACK_LABEL}{first}`",
+                    tracks.join(" and "),
                     successor.number()
                 );
             }

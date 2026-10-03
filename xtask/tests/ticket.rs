@@ -568,6 +568,55 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert_eq!(recorded.calls().len(), 2, "{:?}", recorded.calls());
 
+    // A ticket on two tracks holds a successor to share either of them.
+    let recorded = Recorded::lay("labelled-two");
+    recorded.labelled(
+        8,
+        "OPEN",
+        TICKED,
+        &["track:parity-hosts", "track:parity-streams"],
+    );
+    recorded.labelled(9, "OPEN", "no criteria yet", &["track:parity-streams"]);
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    let recorded = Recorded::lay("labelled-two-none");
+    recorded.labelled(
+        8,
+        "OPEN",
+        TICKED,
+        &["track:parity-hosts", "track:parity-streams"],
+    );
+    recorded.labelled(9, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("which carries no `track:parity-hosts` or `track:parity-streams` label")
+            && reading
+                .message
+                .contains("`gh issue edit 9 --add-label track:parity-hosts`"),
+        "{}",
+        reading.message
+    );
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+
     let recorded = Recorded::lay("labelled-main");
     recorded.labelled(8, "OPEN", TICKED, &["track:main"]);
     recorded.labelled(9, "OPEN", "no criteria yet", &["track:parity-hosts"]);
