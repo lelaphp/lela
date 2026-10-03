@@ -16,8 +16,8 @@ use crate::datetime::restore_properties;
 use crate::ffi::{Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
 use crate::obj::{
-    TIMEZONE, TzKind, TzObj, class_id, new_timezone, rows_array, set_str, set_string, std_rows,
-    time_of, tz_fields, tz_of,
+    TIMEZONE, TzKind, TzObj, class_id, new_timezone, rows_array, set_str, set_string, set_tz,
+    std_rows, time_of, tz_fields, tz_of,
 };
 
 /// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
@@ -53,10 +53,8 @@ pub(super) fn initialize(text: &[u8]) -> Result<TzKind, String> {
 }
 
 /// The zone of a new object of the class's.
-fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) {
-    if let Some(payload) = object.native_mut::<TzObj>(req) {
-        payload.tz = Some(kind);
-    }
+fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) -> Result<(), Thrown> {
+    set_tz(req, object, Some(kind))
 }
 
 /// `timezone_open(string $timezone): DateTimeZone|false`: php's warning
@@ -542,12 +540,26 @@ impl DateTimeZone {
     ///   string(3) "zzz"
     /// }
     /// ```
+    ///
+    /// An abbreviation zone holds the copy of its abbreviation on the
+    /// request's heap, as `timelib_strdup` makes it; an identifier or an
+    /// offset holds none there.
+    ///
+    /// ```php
+    /// foreach (['EST', 'CEST', 'Europe/Amsterdam', '+01:00'] as $n) { $z = new DateTimeZone($n); $c = clone $z; unset($z, $c); }
+    /// foreach (['EST', 'CEST', 'Europe/Amsterdam', '+01:00'] as $n) { $m = memory_get_usage(); $z = new DateTimeZone($n); $c = clone $z; echo $n, ' ', memory_get_usage() - $m, "\n"; unset($z, $c); }
+    /// $d = new DateTime('2020-01-01 PST'); $m = memory_get_usage(); $z = $d->getTimezone(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// EST 224
+    /// CEST 192
+    /// Europe/Amsterdam 160
+    /// +01:00 160
+    /// 96
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
         match initialize(timezone.0.as_bytes()) {
-            Ok(kind) => {
-                set_zone(req, this.object(), kind);
-                Ok(())
-            }
+            Ok(kind) => set_zone(req, this.object(), kind),
             Err(message) => Err(throw(
                 req,
                 "DateInvalidTimeZoneException",
@@ -682,7 +694,7 @@ impl DateTimeZone {
                 "Invalid serialization data for DateTimeZone object",
             ));
         };
-        set_zone(req, object, kind);
+        set_zone(req, object, kind)?;
         restore_properties(req, object, hash, &[b"timezone_type", b"timezone"])
     }
 
@@ -713,10 +725,7 @@ impl DateTimeZone {
         let kind = from_hash(hash);
         req.release(Value::array(hash));
         match kind {
-            Some(kind) => {
-                set_zone(req, object, kind);
-                Ok(())
-            }
+            Some(kind) => set_zone(req, object, kind),
             None => Err(throw_error(
                 req,
                 "Error",
@@ -759,7 +768,7 @@ impl DateTimeZone {
                 "Invalid serialization data for DateTimeZone object",
             ));
         };
-        set_zone(req, object, kind);
+        set_zone(req, object, kind)?;
         Ok(Instance::of(object))
     }
 }

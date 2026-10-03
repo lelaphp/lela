@@ -14,8 +14,8 @@ use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time};
 use crate::interval::DateInterval;
 use crate::obj::{
-    DateObj, IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval,
-    parent_of, period_fields, rows_array, std_rows, uninitialized,
+    DateObj, IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, class_id, hold_period, new_date,
+    new_interval, parent_of, period_fields, rows_array, std_rows, uninitialized,
 };
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
@@ -109,11 +109,13 @@ fn finish(
     Ok(())
 }
 
-/// The period's payload set.
-fn store(req: &mut Request, object: PhpObject, period: PeriodObj) {
+/// The period's payload set, with what its structs hold on the
+/// request's heap. The `Err` is the memory limit.
+fn store(req: &mut Request, object: PhpObject, period: PeriodObj) -> Result<(), Thrown> {
     if let Some(payload) = object.native_mut::<PeriodObj>(req) {
         payload.replace(period);
     }
+    hold_period(req, object)
 }
 
 /// The period's state as it stands, to be changed and stored back.
@@ -288,10 +290,13 @@ pub(super) fn iterator_element(
         }
     }
     period.cursor = Some(index);
-    if !has_more(period, index) {
+    let more = has_more(period, index);
+    let current = period.current.clone();
+    hold_period(req, object)?;
+    if !more {
         return Ok(None);
     }
-    let (Some(current), Some(base)) = (period.current.clone(), base) else {
+    let (Some(current), Some(base)) = (current, base) else {
         return Ok(None);
     };
     let date = new_date(req, base, current)?;
@@ -455,8 +460,7 @@ impl DatePeriod {
             period.end = iso.end;
             period.interval = iso.interval;
             finish(req, func, &mut period, options, iso.recurrences)?;
-            store(req, object, period);
-            Ok(())
+            store(req, object, period)
         })();
         match built {
             Ok(()) => Ok(Static(object)),
@@ -497,6 +501,24 @@ impl DatePeriod {
     /// DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments
     /// 1
     /// DateMalformedPeriodStringException: DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483640
+    /// ```
+    ///
+    /// A period holds copies of its start and end, each a `timelib_time`
+    /// with its abbreviation, and of its interval, a `timelib_rel_time`,
+    /// on the request's heap, as php's timelib clones them; a walk adds
+    /// its `current`.
+    ///
+    /// ```php
+    /// $s = new DateTime('2020-01-01'); $i = new DateInterval('P1D'); $e = new DateTime('2020-01-03');
+    /// $p = new DatePeriod($s, $i, 3); unset($p);
+    /// $m = memory_get_usage(); $p = new DatePeriod($s, $i, 3); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $q = new DatePeriod($s, $i, $e); $c = clone $q; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($p, $q, $c); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 480
+    /// 1504
+    /// -1984
     /// ```
     #[php(arity = manual)]
     fn __construct(
@@ -571,8 +593,7 @@ impl DatePeriod {
             ));
         };
         finish(req, func, &mut period, options, recurrences)?;
-        store(req, object, period);
-        Ok(())
+        store(req, object, period)
     }
 
     /// `DatePeriod::getStartDate(): DateTimeInterface`.
@@ -776,7 +797,7 @@ impl DatePeriod {
         let object = this.object();
         let mut period = copied(req, object);
         let taken = from_hash(req, data, &mut period);
-        store(req, object, period);
+        store(req, object, period)?;
         if !taken? {
             return Err(invalid(req));
         }
@@ -806,7 +827,7 @@ impl DatePeriod {
         let mut period = copied(req, object);
         let taken = from_hash(req, hash, &mut period);
         req.release(Value::array(hash));
-        store(req, object, period);
+        store(req, object, period)?;
         if !taken? {
             return Err(invalid(req));
         }
@@ -832,7 +853,7 @@ impl DatePeriod {
         let mut period = PeriodObj::default();
         match from_hash(req, array, &mut period) {
             Ok(true) => {
-                store(req, object, period);
+                store(req, object, period)?;
                 Ok(Instance::of(object))
             }
             Ok(false) => {
