@@ -834,6 +834,43 @@ fn ipcs_readable() -> Option<&'static str> {
         .then_some("ipcs prints no table with a `T` header here, which is all the sweep reads")
 }
 
+/// Why the machine's System V tables have no room for what the System V
+/// test makes (#1508), none where they have: three queues, two segments
+/// and a set among the test's program and `perl`, against each table's
+/// limit as `ipcs -Q`, `-M` and `-S` print it and the objects `ipcs -a`
+/// lists. A table full of other programs' objects fails `msg_get_queue`
+/// or `shmop_open` with "No space left on device", which says nothing of
+/// the sweep. A limit `ipcs` does not print is not held.
+fn no_room() -> Option<String> {
+    let stood = ipcs();
+    let needs = [
+        ("q", "-Q", "msgmni", 3),
+        ("m", "-M", "shmmni", 2),
+        ("s", "-S", "semmni", 1),
+    ];
+    for (kind, flag, limit, need) in needs {
+        let Ok(info) = Command::new("ipcs").arg(flag).output() else {
+            continue;
+        };
+        let most = String::from_utf8_lossy(&info.stdout)
+            .lines()
+            .find_map(|line| {
+                let rest = line.trim().strip_prefix(limit)?.strip_prefix(':')?;
+                rest.split_whitespace().next()?.parse::<usize>().ok()
+            });
+        let Some(most) = most else {
+            continue;
+        };
+        let standing = stood.iter().filter(|o| o.kind == kind).count();
+        if standing + need > most {
+            return Some(format!(
+                "the machine's {limit} is {most} and {standing} stand, no room for the {need} the test makes"
+            ));
+        }
+    }
+    None
+}
+
 /// What the test's program made, read off the machine while it stands,
 /// and what `perl` made beside it.
 struct Made {
@@ -921,12 +958,20 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
 /// those gone; the reading's count is at
 /// least the three that name the test's process, which no other run's
 /// sweep can take.
+///
+/// A machine whose tables have no room for what the test makes skips it
+/// and says so (#1508); a miss names what the program printed in the
+/// run's `fail` line, which the failure prints.
 #[test]
 fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     if oracle().is_none() {
         return;
     }
     if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    if let Some(why) = no_room() {
         eprintln!("skipped: {why}");
         return;
     }
