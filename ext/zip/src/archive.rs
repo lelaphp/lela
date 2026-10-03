@@ -357,6 +357,16 @@ pub(crate) struct Data {
     pub(crate) stdio: Option<Stdio>,
 }
 
+impl Data {
+    /// `op` on that `FILE`, or on a fresh one while it is lent out.
+    pub(crate) fn through<T>(&mut self, op: impl FnOnce(&mut Stdio) -> T) -> Option<T> {
+        match &mut self.stdio {
+            Some(f) => Some(op(f)),
+            None => self.file.try_clone().ok().map(|f| op(&mut Stdio::new(f))),
+        }
+    }
+}
+
 /// `zip_t`.
 pub(crate) struct Archive {
     pub(crate) path: PathBuf,
@@ -1143,25 +1153,27 @@ impl Archive {
     }
 
     /// The local header of entry `idx`: where its data starts, and its
-    /// extra fields with libzip's own taken out.
+    /// extra fields with libzip's own taken out, read through the
+    /// archive's `FILE`.
     pub(crate) fn local_header(&mut self, idx: usize) -> Result<(u64, Vec<u8>), ()> {
         let offset = self.entries[idx].orig.as_ref().ok_or(())?.offset;
         let data = self.data.as_mut().ok_or(())?;
-        let mut head = [0u8; 30];
-        data.file.seek(SeekFrom::Start(offset)).map_err(|_| ())?;
-        data.file.read_exact(&mut head).map_err(|_| ())?;
-        if head[..4] != *b"PK\x03\x04" {
-            return Err(());
-        }
-        let nlen = u64::from(u16::from_le_bytes([head[26], head[27]]));
-        let elen = usize::from(u16::from_le_bytes([head[28], head[29]]));
-        let mut extra = vec![0u8; elen];
-        data.file
-            .seek(SeekFrom::Current(i64::try_from(nlen).unwrap_or(0)))
-            .map_err(|_| ())?;
-        data.file.read_exact(&mut extra).map_err(|_| ())?;
-        let elen = elen as u64;
-        Ok((offset + 30 + nlen + elen, strip_internal(&extra)))
+        data.through(|f| {
+            let mut head = [0u8; 30];
+            f.seek(offset);
+            if f.read(&mut head).ok() != Some(30) || head[..4] != *b"PK\x03\x04" {
+                return Err(());
+            }
+            let nlen = u64::from(u16::from_le_bytes([head[26], head[27]]));
+            let elen = usize::from(u16::from_le_bytes([head[28], head[29]]));
+            let mut extra = vec![0u8; elen];
+            f.seek(offset + 30 + nlen);
+            if f.read(&mut extra).ok() != Some(elen) {
+                return Err(());
+            }
+            Ok((offset + 30 + nlen + elen as u64, strip_internal(&extra)))
+        })
+        .ok_or(())?
     }
 
     /// `_zip_read_local_ef`.
@@ -1187,27 +1199,50 @@ impl Archive {
         Ok(())
     }
 
-    /// The raw data of an unchanged entry, as stored.
+    /// The raw data of an unchanged entry, as stored: `copy_data`'s
+    /// reads through the archive's `FILE`, 8192 bytes at a time, each
+    /// short one `ZIP_ER_EOF`.
+    ///
+    /// What the `FILE` held at the open is copied after the file is cut:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('copy-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 3000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->addFromString('b', 'bee'); $z->close();
+    /// $z->open('copy-witness.zip'); $h = fopen('copy-witness.zip', 'r+'); ftruncate($h, 60); fclose($h);
+    /// $z->renameName('a', 'A'); var_dump($z->close(), $z->open('copy-witness.zip'), strlen($z->getFromName('A')), $z->getFromName('b'));
+    /// $z->close(); $z->open('copy-witness.zip'); $h = fopen('copy-witness.zip', 'r+'); ftruncate($h, 100); fclose($h);
+    /// $z->renameName('A', 'a'); var_dump(@$z->close(), $z->getStatusString()); unlink('copy-witness.zip');
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// int(3000)
+    /// string(3) "bee"
+    /// bool(true)
+    /// string(8) "No error"
+    /// ```
     pub(crate) fn raw_data(&mut self, idx: usize) -> Result<Vec<u8>, Status> {
         let size = self.entries[idx].orig.as_ref().map_or(0, |o| o.comp_size);
         let (start, _) = self
             .local_header(idx)
             .map_err(|()| Status::of(Er::Incons, 0))?;
         let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
-        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
-        data.file
-            .seek(SeekFrom::Start(start))
-            .map_err(|e| Status::of(Er::Seek, sys(&e)))?;
-        let mut out = Vec::new();
-        data.file
-            .by_ref()
-            .take(size)
-            .read_to_end(&mut out)
-            .map_err(|e| Status::of(Er::Read, sys(&e)))?;
-        if (out.len() as u64) < size {
-            return Err(Status::of(Er::Eof, 0));
-        }
-        Ok(out)
+        data.through(|f| {
+            f.seek(start);
+            let mut out = Vec::new();
+            while (out.len() as u64) < size {
+                let at = out.len();
+                let n = usize::try_from(size - at as u64).map_or(8192, |n| n.min(8192));
+                out.resize(at + n, 0);
+                match f.read(&mut out[at..]) {
+                    Ok(k) if k == n => {}
+                    Ok(_) => return Err(Status::of(Er::Eof, 0)),
+                    Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
+                }
+            }
+            Ok(out)
+        })
+        .unwrap_or(Err(Status::of(Er::Open, 0)))
     }
 
     /// The window on the archive's file that entry `idx`'s data is, past
@@ -1305,7 +1340,10 @@ impl Archive {
             return Err(Status::of(Er::Nopasswd, 0));
         }
         let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false)?;
-        Ok(reader.read_to_end())
+        Ok(match &mut self.data {
+            Some(d) => reader.read_to_end(&mut d.stdio),
+            None => reader.read_to_end(&mut None),
+        })
     }
 
     /// `file` swapped with the archive's `FILE`: lent to it, and taken

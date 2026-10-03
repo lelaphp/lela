@@ -415,12 +415,14 @@ impl Archive {
         };
         let mut end = start + orig.comp_size;
         if orig.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
-            let mut magic = [0u8; 4];
-            if let Some(d) = &mut self.data
-                && d.file.seek(SeekFrom::Start(end)).is_ok()
-                && d.file.read_exact(&mut magic).is_ok()
-                && magic == *b"PK\x07\x08"
-            {
+            let magic = self.data.as_mut().and_then(|d| {
+                d.through(|f| {
+                    let mut magic = [0u8; 4];
+                    f.seek(end);
+                    f.read(&mut magic).ok() == Some(4) && magic == *b"PK\x07\x08"
+                })
+            });
+            if magic == Some(true) {
                 end += 4;
             }
             end += if needs_zip64(&orig, false) { 20 } else { 12 };
@@ -503,6 +505,9 @@ impl Archive {
                 .take(unchanged)
                 .read_to_end(&mut prefix)
                 .map_err(sys)?;
+            // The clone of a file cut short is extended with zeros
+            // (`create_temp_output_cloning`'s `ftruncate`).
+            prefix.resize(usize::try_from(unchanged).unwrap_or(prefix.len()), 0);
             out.write(&prefix)?;
         }
         if progress.start() {
