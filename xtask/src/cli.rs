@@ -534,9 +534,9 @@ pub(crate) enum TrackCommand {
     /// laid down on `t<n>` off `main`, a headless session in it on
     /// `--model`, and when the session ends with the ticket closed, the
     /// worktree retired and the branch left for /specs to merge; `main`
-    /// is never moved or pushed. A session that ends with the ticket open
-    /// leaves the worktree standing for a person and the run goes on; a failure
-    /// of the harness itself stops it, named. With `--fill`, "none" from
+    /// is never moved or pushed. A session that ends with the ticket
+    /// open leaves the worktree standing for a person and the run goes
+    /// on; a failure of the harness itself stops it, named. With `--fill`, "none" from
     /// `next` starts a `/frontier` session in the checkout and the run
     /// goes on with what it filed; a frontier still empty after it ends
     /// the run listing the track's open `for-a-person` tickets.

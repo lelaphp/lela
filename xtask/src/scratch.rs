@@ -144,8 +144,9 @@ impl Tree {
 ///
 /// `worktree add` ends in `cargo build -p xtask` in the checkout it lays
 /// down, and a scratch clone has no `target/` for that build to start
-/// from: every test through it compiled the harness and all its dependencies cold, two
-/// minutes apiece on CI's runner and most of the harness's test time.
+/// from: every test through it compiled the harness and all its
+/// dependencies cold, two minutes apiece on CI's runner and most of the
+/// harness's test time.
 /// What those tests hold is the command around the build, so the
 /// stand-in answers `build -p xtask` by laying down `target/debug/xtask`
 /// in its working directory as a shell file that runs `xtask`, the binary

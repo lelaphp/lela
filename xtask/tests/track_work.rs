@@ -224,6 +224,14 @@ impl Scratch {
         .unwrap();
     }
 
+    /// The ticket `number` closed at the tracker by a person, as `issue
+    /// view <n>` answers for it.
+    fn closed_by_hand(&self, number: u64) {
+        let view = self.dir.join(format!("view.{number}.json"));
+        let text = fs::read_to_string(&view).unwrap();
+        fs::write(&view, text.replace("\"OPEN\"", "\"CLOSED\"")).unwrap();
+    }
+
     /// What the session does when started, for every ticket.
     fn act(&self, act: &str) {
         fs::write(self.dir.join("act"), act).unwrap();
@@ -464,16 +472,8 @@ fn a_standing_worktree_whose_ticket_a_person_closes_later_is_left_as_it_stands()
     let standing = rev(&scratch.root, "t20");
 
     // A person closes #20; #21 is the frontier now.
-    let view = scratch.dir.join("view.20.json");
-    let closed = fs::read_to_string(&view)
-        .unwrap()
-        .replace("\"OPEN\"", "\"CLOSED\"");
-    fs::write(&view, closed).unwrap();
-    fs::write(
-        scratch.dir.join("list.json"),
-        listed(&[(21, &["ready-for-agent"])]),
-    )
-    .unwrap();
+    scratch.closed_by_hand(20);
+    scratch.tracker(&[21], 21);
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("#21 closed at"), "{out}");

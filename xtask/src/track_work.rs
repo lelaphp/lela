@@ -18,10 +18,9 @@
 //! something outside the ticket blocks that close, files the blocker as
 //! a ticket and names it in its reply, so the contract travels with the
 //! job rather than resting on a skill file elsewhere in the filesystem.
-//! The hooks that already exist
-//! police the session: `permit` judges each call and the Stop hook holds
-//! the turn until `done` is green and the ticket's boxes are ticked, so
-//! nothing here judges the work. When the session ends with the ticket
+//! The hooks that already exist police the session: `permit` judges each
+//! call and the Stop hook holds the turn until `done` is green and the
+//! ticket's boxes are ticked, so nothing here judges the work. When the session ends with the ticket
 //! closed at the tracker, the worktree is retired, which appends its
 //! readings into the checkout's store, and the branch `t<n>` is left
 //! with its record for the /specs coordinator to merge through its merge
@@ -39,13 +38,12 @@
 //! Without `--one` the step repeats while `track next` names a ticket
 //! (#78): a ticket the session left open is the session's failure and
 //! does not stop the run, since its branch records it and the frontier
-//! names it no more,
-//! and the run ends at "none" with one line per ticket and, once any was
-//! worked, a closing line naming each with its outcome. A failure of the
-//! harness itself stops the run and is named: a
-//! tracker that does not answer, a build that does not stand, a session
-//! program that does not start, a retire that will not;
-//! what was worked before it is named the same way in the error. `--one` runs the step once and
+//! names it no more, and the run ends at "none" with one line per ticket
+//! and, once any was worked, a closing line naming each with its outcome.
+//! A failure of the harness itself stops the run and is named: a tracker
+//! that does not answer, a build that does not stand, a session program
+//! that does not start, a retire that will not; what was worked before it
+//! is named the same way in the error. `--one` runs the step once and
 //! exits 1 when the ticket is left to a person.
 //!
 //! With `--fill` the run fills its own frontier (#85): when `next`
