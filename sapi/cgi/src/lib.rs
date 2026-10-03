@@ -46,8 +46,8 @@ use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
-    Aborted, Engine, IniFiles, Observables, OutputSink, RequestDescription, ResponseHead,
-    WebRequest,
+    Aborted, Engine, IniFiles, IniOrigin, Observables, OutputSink, RequestDescription,
+    ResponseHead, WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -470,7 +470,8 @@ consult the installation file that came with this distribution, or visit \n\
 /// the exit php's 255. Where the request has a path translated,
 /// `sapi_cgi_activate` sets the php.ini's `[HOST=]` table of its
 /// `SERVER_NAME` and its `[PATH=]` tables along the path's directory
-/// ([`Engine::activated_ini`]).
+/// ([`Engine::activated_ini`]), then each `.user.ini` from
+/// `DOCUMENT_ROOT` down to it ([`php_sapi::cgi::user_ini`]).
 fn describe(
     engine: &Engine,
     invocation: &Invocation,
@@ -495,9 +496,14 @@ fn describe(
     } else {
         from_shell(engine, invocation, &info)
     };
-    let activated = path.as_deref().map_or_else(Vec::new, |path| {
+    let mut activated = path.as_deref().map_or_else(Vec::new, |path| {
         engine.activated_ini(env.get(b"SERVER_NAME"), path)
     });
+    if let (Some(path), Some(doc_root)) = (path.as_deref(), env.get(b"DOCUMENT_ROOT")) {
+        let dir = php_sapi::cgi::user_ini_dir(path);
+        let user = php_sapi::cgi::user_ini(engine, &dir, doc_root);
+        activated.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
+    }
     let program = Program::of(path.as_deref(), invocation.origin);
     let process_cwd = std::env::current_dir().unwrap_or_default();
     let cwd = match (&program, invocation.no_chdir) {
