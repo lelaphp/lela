@@ -34,6 +34,13 @@ bindings = 32000                           # design §4.1: `ext/*/src/ffi/**` po
 [telemetry]
 silent_days = 14                           # harness §7: readings and no failure this long is a candidate for silent; `status --section permits`
 
+[parity]
+# Suites php builds and parity does not count, each with the ruling that put it there.
+out = [
+  { suites = ["ext/pgsql", "ext/pdo_pgsql", "ext/ldap", "ext/snmp",
+              "ext/odbc", "ext/pdo_odbc", "ext/pdo_dblib"], ruling = 1167 },
+]
+
 # ---------------------------------------------------------------- crates/
 [[crate]]
 name = "php_syntax"

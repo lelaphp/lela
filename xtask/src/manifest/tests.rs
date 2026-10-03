@@ -1,4 +1,7 @@
-use super::Manifest;
+use std::path::PathBuf;
+
+use super::{Manifest, RuledOut};
+use crate::track::Ticket;
 
 const MINIMAL: &str = r#"
 [oracle]
@@ -56,4 +59,27 @@ fn a_ruled_out_suite_a_crate_owns_is_refused_naming_both() {
             assert!(refused.contains(named), "{suite}: {named} in {refused}");
         }
     }
+}
+
+/// The tracked manifest's `[parity] out` is the seven server-bound suites
+/// under the ruling that put them there, read as typed data (#1739, #1759).
+#[test]
+fn the_tracked_parity_table_is_the_seven_suites_under_1167() {
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let suites = [
+        "ext/pgsql",
+        "ext/pdo_pgsql",
+        "ext/ldap",
+        "ext/snmp",
+        "ext/odbc",
+        "ext/pdo_odbc",
+        "ext/pdo_dblib",
+    ];
+    assert_eq!(
+        manifest.parity.out,
+        [RuledOut {
+            suites: suites.iter().map(PathBuf::from).collect(),
+            ruling: Ticket::new(1167),
+        }]
+    );
 }
