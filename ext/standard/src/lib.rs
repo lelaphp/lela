@@ -786,7 +786,8 @@ pub fn extension() -> Extension {
         .ini(file::ini())
         .dependencies(dependencies())
         .ini(assert::ini())
-        .ini(url_scanner::ini());
+        .ini(url_scanner::ini())
+        .register(php_ext::request::Syslog(syslog::php_syslog));
     ini_handlers()
         .into_iter()
         .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
