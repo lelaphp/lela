@@ -407,6 +407,47 @@ fn a_branch_on_no_track_is_judged_since_main_so_commits_on_it_count() {
     assert!(out.contains("1 changed file since"), "{out}");
 }
 
+/// A reading is keyed on its crate and the crates it is built from
+/// (#1318): over `xtask/fixtures/closure`, a pass over `ext/reflection`
+/// taken after its own change stands, and a change to `php_engine`, which
+/// it is built from through `php_ext`, reports it stale and names both.
+#[test]
+fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
+    let root = Tree::new("done-closure").unwrap();
+    xtask::scratch::repository(&fixtures().join("closure"), &root).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
+        std::fs::copy(workspace().join(file), root.join(file)).unwrap();
+    }
+    write(&root, ".gitignore", "target/\n");
+    commit(&root, "the harness's own files");
+    let stale = "witness: the reading for ext/reflection is stale";
+
+    write(
+        &root,
+        "ext/reflection/src/lib.rs",
+        "pub fn reflection() { }\n",
+    );
+    let store = Store::of_workspace(&root);
+    store
+        .record(&[fresh(&root, "witness", "ext/reflection")])
+        .unwrap();
+    let verdict = judge(&root);
+    assert!(
+        verdict.unmet.iter().all(|u| !u.starts_with(stale)),
+        "{verdict:#?}"
+    );
+
+    write(
+        &root,
+        "crates/php_engine/src/lib.rs",
+        "pub fn execute() { }\n",
+    );
+    let verdict = judge(&root);
+    let named = format!("{stale}; ext/reflection or php_engine changed since it was taken");
+    assert!(verdict.unmet.contains(&named), "{verdict:#?}");
+}
+
 // ------------------------------------------- the base is the track
 
 /// A scratch repository on `t-opus-5/witness`, one commit past the track

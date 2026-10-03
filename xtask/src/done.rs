@@ -108,6 +108,7 @@ use crate::carried::Carried;
 use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
+use crate::key;
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
 use crate::port_map;
@@ -318,9 +319,9 @@ pub fn judge(
     let carried = Carried::binary(root)?;
     for krate in &crates {
         fresh_readings(
-            root,
             store,
             krate,
+            &KeyNow::of(root, krate, &crates)?,
             lock_home.as_deref(),
             &carried,
             manifest.pin.digest(),
@@ -370,7 +371,8 @@ fn boxes(
         unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
         return Ok(());
     };
-    if !reading.fresh_for(&git::tree_hash(root, Path::new(ticket::STAMPED_OVER))?, pin) {
+    let tree = key::of(root, Path::new(ticket::STAMPED_OVER), key::Content::Disk)?;
+    if !reading.fresh_for(&tree, pin) {
         unmet.push(format!(
             "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
         ));
@@ -512,17 +514,49 @@ fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bo
         || porting_meter(krate, instrument)
 }
 
-/// Conditions 1 and 2 for one touched crate.
+/// A touched crate's key now ([`key::of`], its tree and its dependency
+/// closure's), and what a reading taken over another key names as changed
+/// since: the crate and each other touched crate in that closure, the
+/// crates whose change moves the key, `a or b` where there are several
+/// (#1318).
+struct KeyNow {
+    tree: String,
+    changed: String,
+}
+
+impl KeyNow {
+    fn of(root: &Path, krate: &Crate, touched: &[&Crate]) -> Result<KeyNow> {
+        let closure = key::Graph::of(root)?.paths(&krate.path());
+        let mut names = vec![krate.name.as_str()];
+        names.extend(
+            touched
+                .iter()
+                .filter(|t| t.name != krate.name && closure.contains(&t.path()))
+                .map(|t| t.name.as_str()),
+        );
+        let changed = match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+            _ => krate.name.clone(),
+        };
+        Ok(KeyNow {
+            tree: key::of(root, &krate.path(), key::Content::Disk)?,
+            changed,
+        })
+    }
+}
+
+/// Conditions 1 and 2 for one touched crate, held to its key now, so a
+/// reading taken before a crate it is built from changed is stale.
 fn fresh_readings(
-    root: &Path,
     store: &Store,
     krate: &Crate,
+    now: &KeyNow,
     lock_home: Option<&str>,
     carried: &Carried,
     pin: &str,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
-    let tree = git::tree_hash(root, &krate.path())?;
+    let tree = &now.tree;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
     // commit's can be, taken over another tree; where it is, the latest
@@ -538,7 +572,7 @@ fn fresh_readings(
     }
     let stale: Vec<(String, String, String)> = read
         .iter()
-        .filter(|(_, reading)| !reading.fresh_for(&tree, pin))
+        .filter(|(_, reading)| !reading.fresh_for(tree, pin))
         .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), tree.clone()))
         .collect();
     read.extend(store.latest_over_each(&stale, pin)?);
@@ -548,12 +582,12 @@ fn fresh_readings(
                 unmet.push(format!("{instrument}: no reading for {scope}"));
                 continue;
             };
-            if !reading.fresh_for(&tree, pin) {
+            if !reading.fresh_for(tree, pin) {
                 // Over the tree now, a reading is stale for its recipe alone.
                 let changed = if reading.tree() == tree {
-                    "oracle.toml"
+                    "oracle.toml".to_owned()
                 } else {
-                    name
+                    now.changed.clone()
                 };
                 unmet.push(format!(
                     "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
@@ -631,7 +665,8 @@ fn locks(
             }
             continue;
         };
-        let fresh = reading.fresh_for(&git::tree_hash(root, &dir)?, manifest.pin.digest());
+        let tree = key::of(root, &dir, key::Content::Disk)?;
+        let fresh = reading.fresh_for(&tree, manifest.pin.digest());
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",

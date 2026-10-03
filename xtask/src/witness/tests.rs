@@ -752,7 +752,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
     let entry = fs::read_to_string(workspace.join("fixtures/witness/recipe-env/env.toml")).unwrap();
     let changed = tracked.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
     assert_ne!(changed, tracked, "the pin has a [recipe.env]");
-    let tree = crate::git::tree_hash(&dir, &krate.path()).unwrap();
+    let tree = crate::key::of(&dir, &krate.path(), crate::key::Content::Disk).unwrap();
     manifest.pin = Pin::parse(&changed).unwrap();
     assert!(reading.fresh_for(&tree, reading.recipe.as_deref().unwrap()));
     assert!(
@@ -891,4 +891,55 @@ fn a_fence_naming_a_locale_the_host_knows_runs_and_is_held() {
         &registry(""),
     );
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+/// A pass over `ext/reflection` taken before a change to `php_engine`,
+/// a crate it is built from, does not stand after it: `--unmeasured` runs
+/// it again with every crate above `php_engine`, as cargo's fingerprint
+/// rebuilds them. A change to `ext/ctype` alone runs `ext/ctype` alone
+/// (#1318, `xtask/fixtures/closure`).
+#[test]
+fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
+    use crate::reading::{Reading, Status, Store};
+    let dir = crate::key::fixture("witness-unmeasured");
+    let manifest = manifest();
+    let store = Store::at(dir.join("target/harness"));
+    let crates = ["php_engine", "php_ext", "ext/reflection", "ext/ctype"];
+    let pass_all = || {
+        for name in crates {
+            let krate = manifest.crate_named(name).unwrap();
+            let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+            reading.status = Status::Pass;
+            store.record(&[reading.under(&manifest.pin)]).unwrap();
+        }
+    };
+    pass_all();
+    assert!(
+        super::unmeasured(&dir, &manifest, &store)
+            .unwrap()
+            .is_empty()
+    );
+
+    fs::write(
+        dir.join("crates/php_engine/src/lib.rs"),
+        "pub fn execute() { }\n",
+    )
+    .unwrap();
+    let mut left = super::unmeasured(&dir, &manifest, &store).unwrap();
+    left.sort();
+    assert_eq!(
+        left,
+        ["ext/ctype", "ext/reflection", "php_engine", "php_ext"]
+    );
+
+    pass_all();
+    fs::write(
+        dir.join("ext/ctype/src/lib.rs"),
+        "pub fn ctype_digit() {}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        super::unmeasured(&dir, &manifest, &store).unwrap(),
+        ["ext/ctype"]
+    );
 }

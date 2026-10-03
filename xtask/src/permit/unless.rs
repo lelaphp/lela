@@ -99,7 +99,7 @@ pub(super) fn captured(
     };
     let fresh = match (
         Store::of_workspace(root).read(instrument, &krate.name),
-        git::tree_hash(root, &krate.path()),
+        crate::key::of(root, &krate.path(), crate::key::Content::Disk),
     ) {
         (Ok(Some(reading)), Ok(tree)) => !reading.tree().is_empty() && reading.tree() == tree,
         _ => false,
@@ -148,7 +148,7 @@ fn carried(
     if wanted.is_empty() {
         return false;
     }
-    let (Some(under), Some(file)) = (under.to_str(), path.to_str()) else {
+    let Some(file) = path.to_str() else {
         return false;
     };
     let count = COMMITS.to_string();
@@ -161,7 +161,7 @@ fn carried(
     };
     let mut commits = Vec::new();
     for commit in log.lines().filter(|c| !c.is_empty()) {
-        let Ok(tree) = git::tracked_hash(root, &[under], Some(commit)) else {
+        let Ok(tree) = crate::key::of(root, under, crate::key::Content::Commit(commit)) else {
             return false;
         };
         commits.push((commit, tree));
