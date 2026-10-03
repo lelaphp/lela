@@ -630,7 +630,7 @@ pub(crate) struct Shared {
     /// their ini entries ([`Engine::register_ini`]), which php shows once
     /// `php_module_startup` is done and before any request's `RINIT`,
     /// once: the first request raises it first, at no file and no line.
-    startup_raised: Vec<(Level, String)>,
+    startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
     /// `configuration_hash`: what the host's ini text set, before any
@@ -2022,36 +2022,68 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// ```
 fn register_extensions(req: &mut Request, loads: &Loads) -> String {
     const NO_LOADER: &str = "dynamic modules are not supported";
+    // php's messages are bytes throughout: a directory or a name that is
+    // not UTF-8 is written as it was set.
     let dir = req.ini_get(b"extension_dir").unwrap_or_default().to_vec();
-    let dir = String::from_utf8_lossy(&dir);
-    let sep = if dir.ends_with('/') { "" } else { "/" };
-    let so = crate::constants::SHLIB_SUFFIX;
+    let sep: &[u8] = if dir.ends_with(b"/") { b"" } else { b"/" };
+    let so = crate::constants::SHLIB_SUFFIX.as_bytes();
+    let no = NO_LOADER.as_bytes();
+    let tried = |first: &[u8], sep: &[u8], name: &[u8]| {
+        [
+            &b"' (tried: "[..],
+            first,
+            b" (",
+            no,
+            b"), ",
+            &dir,
+            sep,
+            name,
+            b".",
+            so,
+            b" (",
+            no,
+            b"))",
+        ]
+        .concat()
+    };
     let mut stderr = String::new();
     for name in &loads.engine {
-        let name = String::from_utf8_lossy(name);
-        if name.starts_with('/') {
+        if name.starts_with(b"/") {
+            let name = String::from_utf8_lossy(name);
             let _ = writeln!(stderr, "Failed loading {name}:  {NO_LOADER}");
             continue;
         }
-        let message = format!(
-            "Failed loading Zend extension '{name}' (tried: {dir}{sep}{name} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
-        );
-        crate::api::raising::raise_at(req, Level::CoreWarning, &message, b"Unknown", 0);
+        let first = [&dir, sep, name].concat();
+        let message = [
+            &b"Failed loading Zend extension '"[..],
+            name,
+            &tried(&first, sep, name),
+        ]
+        .concat();
+        if let Ok(string) = crate::api::raising::strpprintf(req, &message) {
+            req.note_error_string(Level::CoreWarning, string);
+            req.release(Value::string(string));
+        }
     }
     for name in &loads.functions {
-        let name = String::from_utf8_lossy(name);
-        let first = if name.contains('/') {
-            name.to_string()
+        let slash = name.contains(&b'/');
+        let first = if slash {
+            name.clone()
         } else if dir.is_empty() {
             continue;
         } else {
-            format!("{dir}{sep}{name}")
+            [&dir, sep, name].concat()
         };
-        let sep = if name.contains('/') { "/" } else { sep };
-        let message = format!(
-            "Unable to load dynamic library '{name}' (tried: {first} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
-        );
-        crate::api::raising::docref(req, Level::CoreWarning, &message);
+        let sep: &[u8] = if slash { b"/" } else { sep };
+        let message = [
+            &b"Unable to load dynamic library '"[..],
+            name,
+            &tried(&first, sep, name),
+        ]
+        .concat();
+        // `php_error_docref`'s origin while modules start.
+        let origin = crate::api::raising::Origin::Phase("PHP Startup");
+        crate::api::raising::verror(req, Level::CoreWarning, origin, b"", &message);
     }
     stderr
 }
@@ -2436,7 +2468,11 @@ impl EngineBuilder {
             // configuration table, where `get_cfg_var()` finds it, as
             // `zend_register_ini_entries_ex` reads that table by the
             // names it registers and by no other.
-            if !ini.iter().any(|(n, _)| *n == name) {
+            // `zend_register_ini_entries_ex` takes the value only where
+            // the entry's `on_modify` does, and the default stays.
+            if !ini.iter().any(|(n, _)| *n == name)
+                || Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected
+            {
                 continue;
             }
             ini.retain(|(n, _)| *n != name);
@@ -4294,6 +4330,22 @@ mod tests {
         );
         assert_eq!(serve("output_buffering", "4096"), "xy");
         assert_eq!(serve("output_handler", ""), "xy");
+    }
+
+    /// A startup diagnostic is its message's bytes: `extension_dir` set to
+    /// `a/<0xE4>/w`, which a host's ini text can carry and `-d` does not
+    /// yet (#1686), is written as php writes it,
+    /// `php -n -d extension_dir=a/$'\xe4'/w -d extension=x -r ''` with
+    /// the `dlopen` parentheses the engine cannot make.
+    #[test]
+    fn a_startup_diagnostic_writes_its_bytes() {
+        let mut builder = Engine::builder();
+        builder.ini_entries = b"extension_dir=\"a/\xe4/w\"\nextension=x\n".to_vec();
+        let out = builder
+            .build()
+            .serve_capture("", crate::test::Capture::default());
+        let expected: &[u8] = b"\nWarning: PHP Startup: Unable to load dynamic library 'x' (tried: a/\xe4/w/x (dynamic modules are not supported), a/\xe4/w/x.so (dynamic modules are not supported)) in Unknown on line 0\n";
+        assert_eq!(out.stdout, expected);
     }
 
     /// `sapi_module.treat_data` replaced, as mbstring replaces it: the
