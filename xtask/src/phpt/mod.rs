@@ -145,6 +145,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
+pub(crate) mod row;
 pub(crate) mod server;
 mod sysv;
 pub(crate) mod target;
@@ -194,7 +195,8 @@ pub(crate) const CORPUS: &str = "php-src";
 /// The compiled tier's lane (jit-design.md §7): the engine runs with the
 /// `jit.mode` directive set and the corpus's expectations must hold
 /// unchanged under it, which is G5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Lane {
     /// Every eligible root is compiled at its first execution.
     Force,

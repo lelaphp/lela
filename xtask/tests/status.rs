@@ -853,6 +853,96 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
     );
 }
 
+/// `--every --log` renders every phpt reading of a log it is handed, one
+/// versioned line each, in the log's order (harness-design.md §4.6,
+/// #1745): a whole line with a field this build does not know, a lean row
+/// of the published history, a torn line counted on stderr and skipped, a
+/// scope outside the grammar, and the other instruments' lines left out.
+#[test]
+fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
+    let root = scratch("every-log");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status-phpt");
+    let log = fixture.join("log.jsonl");
+    let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
+    let every = ["--section", "phpt", "--format", "jsonl", "--every", "--log"];
+
+    let (ok, lines, err) = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
+    assert!(ok, "{err}");
+    assert_eq!(lines, expected);
+    assert!(err.contains("1 line unreadable at 4"), "{err}");
+    for line in lines.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(row["v"], 1, "{line}");
+    }
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let (ok, piped, err) = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
+    assert!(ok, "{err}");
+    assert_eq!(piped, expected, "the standard input reads as the file does");
+
+    let (ok, _, err) = status(&root, &[&every[..], &["no-such-log.jsonl"]].concat());
+    assert!(!ok && err.contains("no-such-log.jsonl"), "{err}");
+}
+
+/// Without `--log`, `--every` renders the store's own log, every reading
+/// and none picked, where the section without it renders the one that
+/// stands, as it did; and each flag is refused where it means nothing.
+#[test]
+fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
+    let root = scratch("every-store");
+    let store = Store::of_workspace(&root);
+    let phpt = |commit: &str, at: &str, passed: i64| {
+        let mut r = Reading::new("phpt", "ext/date");
+        r.status = Status::Pass;
+        r.commit = commit.into();
+        r.at = at.parse().unwrap();
+        r.numbers.insert("passed".into(), passed.into());
+        r.numbers.insert("tests".into(), passed.into());
+        r.numbers.insert("run".into(), passed.into());
+        r
+    };
+    store
+        .record(&[
+            phpt("", "2026-09-24T16:44:00Z", 400),
+            phpt("", "2026-09-24T16:50:00Z", 613),
+        ])
+        .unwrap();
+
+    let (ok, lines, err) = status(
+        &root,
+        &["--section", "phpt", "--format", "jsonl", "--every"],
+    );
+    assert!(ok, "{err}");
+    let passed: Vec<i64> = lines
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["p"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(passed, [400, 613], "{lines}");
+
+    let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(rows[0]["reading"]["numbers"]["passed"], 613, "{json}");
+
+    for (args, says) in [
+        (&["--section", "phpt", "--format", "jsonl"][..], "--every"),
+        (&["--section", "phpt", "--every"][..], "--format jsonl"),
+        (
+            &["--section", "budget", "--format", "jsonl", "--every"][..],
+            "budget",
+        ),
+        (&["--section", "phpt", "--log", "-"][..], "--every"),
+    ] {
+        let (ok, _, err) = status(&root, args);
+        assert!(!ok && err.contains(says), "{args:?}: {err}");
+    }
+}
+
 /// `--session` is the map plus the local facts in one block, for the
 /// session-start hook; the local file is laid down from its template when
 /// the clone has none, and an unrendered region is said to be one.

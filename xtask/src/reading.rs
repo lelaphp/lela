@@ -231,6 +231,105 @@ impl Reading {
     }
 }
 
+/// A line of a log handed in, in either shape the published history has
+/// kept a reading in (harness-design.md §4.6).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Kept {
+    /// A reading whole, as `log.jsonl` writes it; a field this build does
+    /// not know is ignored, so a newer harness's line still reads.
+    Whole {
+        instrument: String,
+        scope: String,
+        status: Status,
+        at: String,
+        #[serde(default)]
+        rule: String,
+        #[serde(default)]
+        numbers: BTreeMap<String, Number>,
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        adr: String,
+        #[serde(default)]
+        tree: String,
+        #[serde(default)]
+        commit: String,
+        #[serde(default)]
+        session: String,
+        #[serde(default)]
+        groups: BTreeMap<String, Number>,
+        #[serde(default)]
+        recipe: Option<String>,
+    },
+    /// The lean row the history kept before it kept readings whole
+    /// (#1747): instrument, scope, status, at, commit and numbers.
+    Lean {
+        i: String,
+        s: String,
+        t: Status,
+        a: String,
+        #[serde(default)]
+        c: String,
+        #[serde(default)]
+        n: BTreeMap<String, Number>,
+    },
+}
+
+impl Reading {
+    /// One line of a log handed in back into a reading, whichever shape
+    /// the history kept it in; the fields a lean row has not are left as
+    /// [`Reading::new`] leaves them.
+    fn from_kept(line: &str) -> Result<Reading> {
+        let kept: Kept = serde_json::from_str(line).context("a line that is no reading")?;
+        let (mut reading, at) = match kept {
+            Kept::Whole {
+                instrument,
+                scope,
+                status,
+                at,
+                rule,
+                numbers,
+                message,
+                adr,
+                tree,
+                commit,
+                session,
+                groups,
+                recipe,
+            } => (
+                Reading {
+                    rule,
+                    status,
+                    numbers,
+                    message,
+                    adr,
+                    tree,
+                    commit,
+                    session,
+                    groups,
+                    recipe,
+                    ..Reading::new(&instrument, &scope)
+                },
+                at,
+            ),
+            Kept::Lean { i, s, t, a, c, n } => (
+                Reading {
+                    status: t,
+                    numbers: n,
+                    commit: c,
+                    ..Reading::new(&i, &s)
+                },
+                a,
+            ),
+        };
+        reading.at = at
+            .parse()
+            .with_context(|| format!("a line whose time {at:?} is not a datetime"))?;
+        Ok(reading)
+    }
+}
+
 const EPOCH: &str = "1970-01-01T00:00:00Z";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,17 +689,7 @@ impl Store {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let mut log = Log::default();
-        for (i, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match Reading::from_json(line) {
-                Ok(reading) => log.readings.push(reading),
-                Err(_) => log.unreadable.push(i + 1),
-            }
-        }
-        Ok(log)
+        Ok(Log::of(&text, Reading::from_json))
     }
 
     /// Every reading in the store, in path order, and every file of the
@@ -718,11 +807,42 @@ pub struct Log {
 }
 
 impl Log {
+    /// The log `text` is, each line read by `read`: a blank line is
+    /// skipped, and one `read` refuses is counted by its number.
+    fn of(text: &str, read: impl Fn(&str) -> Result<Reading>) -> Log {
+        let mut log = Log::default();
+        for (i, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match read(line) {
+                Ok(reading) => log.readings.push(reading),
+                Err(_) => log.unreadable.push(i + 1),
+            }
+        }
+        log
+    }
+
+    /// A log handed to a rendering rather than read off its store
+    /// (harness-design.md §4.6): another store's `log.jsonl`, or the
+    /// published history, whose older rows are lean (#1747). Any line
+    /// shaped as a reading reads, a whole line with the fields this build
+    /// does not know ignored or a lean row `{i,s,t,a,c,n}`; any other is
+    /// counted by its number, as a torn line of the store's own is.
+    pub(crate) fn handed(text: &str) -> Log {
+        Log::of(text, Reading::from_kept)
+    }
+
     /// What a rendering says about the lines it could not read, `log.jsonl:
     /// 1 line unreadable at 10019.`, at most five named and the rest
     /// counted; none when every line read. One string, so every section
     /// says it the same way.
     pub fn unreadable_note(&self) -> Option<String> {
+        self.unreadable_note_of(LOG)
+    }
+
+    /// The same note for the log `name` names, a log handed in by its path.
+    pub(crate) fn unreadable_note_of(&self, name: &str) -> Option<String> {
         if self.unreadable.is_empty() {
             return None;
         }
@@ -734,7 +854,7 @@ impl Log {
             "lines"
         };
         Some(format!(
-            "{LOG}: {} {noun} unreadable at {}.",
+            "{name}: {} {noun} unreadable at {}.",
             self.unreadable.len(),
             listed(&names)
         ))
