@@ -1,10 +1,10 @@
 //! `xtask track work`, one ticket from start to retire without a person
 //! (#77) and the frontier until it empties (#78): held against a scratch
-//! repository shaped as a track's clone,
-//! detached at `origin/t-x` with the track and its model recorded, a bare
-//! `origin` beside it, a tracker that is a shell file answering `issue
-//! list` and `issue view` from recorded transcripts, as the `track_next`
-//! tests do, and a session that is a shell file recording what it was
+//! repository shaped as main's checkout, on `main` with no record of a
+//! track or a model (ADR-0009), a bare `origin` beside it, a tracker that
+//! is a shell file answering `issue list` and `issue view` from recorded
+//! transcripts, as the `track_next` tests do, and a session that is a
+//! shell file named `claude` first on `PATH`, recording what it was
 //! started with, committing on the branch and closing the ticket or not,
 //! as the act the test wrote down says, for every ticket or for one.
 
@@ -41,14 +41,6 @@ fn rev(root: &Path, name: &str) -> String {
     sh(root, &["git", "rev-parse", name]).trim().to_owned()
 }
 
-/// Whether `commit` is in the history of `tip`: what a merge back and a
-/// catch-up both leave behind, where neither ref is the other's tip.
-fn holds(root: &Path, tip: &str, commit: &str) -> bool {
-    sh(root, &["git", "rev-list", tip])
-        .lines()
-        .any(|line| line == commit)
-}
-
 fn has_ref(root: &Path, name: &str) -> bool {
     Command::new("git")
         .args([
@@ -65,7 +57,7 @@ fn has_ref(root: &Path, name: &str) -> bool {
         .success()
 }
 
-/// The scratch: the track's clone at `repo`, its bare `origin.git`, the
+/// The scratch: main's checkout at `repo`, its bare `origin.git`, the
 /// two stand-ins under `bin`, the tracker's transcripts and what the
 /// session wrote down.
 struct Scratch {
@@ -75,10 +67,8 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// A track's clone of this working tree's files: one commit on
-    /// `main`, pushed to `origin` as `main` and as `t-x`, the clone
-    /// detached at `origin/t-x` recording `track.name` and the model per
-    /// role, and the session program recorded as the stand-in.
+    /// Main's checkout of this working tree's files: one commit on
+    /// `main`, pushed to `origin`, and the checkout on `main`.
     fn lay(name: &str) -> Scratch {
         let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
@@ -134,18 +124,7 @@ impl Scratch {
                 "-q",
                 "origin",
                 "main",
-                "main:refs/heads/t-x",
             ],
-        );
-        sh(&root, &["git", "checkout", "-q", "--detach", "origin/t-x"]);
-        sh(&root, &["git", "config", "track.name", "t-x"]);
-        sh(
-            &root,
-            &["git", "config", "track.model.session", "claude-opus-5"],
-        );
-        sh(
-            &root,
-            &["git", "config", "track.model.subagent", "claude-sonnet-5"],
         );
         let scratch = Scratch { dir, root, origin };
         scratch.stand_ins();
@@ -155,8 +134,8 @@ impl Scratch {
     /// The tracker, `bin/gh`: `issue list` answers with `list.json`,
     /// `issue view <n>` with `view.<n>.json` where the test wrote one and
     /// `view.json` otherwise, and every other call is written to `calls`.
-    /// The build, `bin/cargo`: [`scratch::cargo`], so the sync and
-    /// the worktree each lay down a harness without compiling one.
+    /// The build, `bin/cargo`: [`scratch::cargo`], so the worktree is
+    /// laid down with a harness it did not compile.
     /// The session, `bin/claude`: appends its arguments, its directory
     /// and the subagents' model to what earlier sessions wrote, then does
     /// what `act.<n>` says, or `act` where the test wrote none for the
@@ -186,15 +165,6 @@ impl Scratch {
             fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         }
         scratch::cargo(&self.dir.join("bin"), Path::new(xtask)).unwrap();
-        sh(
-            &self.root,
-            &[
-                "git",
-                "config",
-                "track.session.program",
-                self.dir.join("bin/claude").to_str().unwrap(),
-            ],
-        );
     }
 
     /// The open tickets, each `ready-for-agent` and unblocked, and the
@@ -253,17 +223,6 @@ impl Scratch {
         .unwrap();
     }
 
-    /// The ticket `issue view <n>` answers with for `number`, closed:
-    /// what the tracker has once a person closed a ticket whose session
-    /// had ended with it open (#116).
-    fn closes(&self, number: u64) {
-        let file = self.dir.join(format!("view.{number}.json"));
-        let text = fs::read_to_string(&file)
-            .unwrap()
-            .replace("\"OPEN\"", "\"CLOSED\"");
-        fs::write(&file, text).unwrap();
-    }
-
     /// What the session does when started, for every ticket.
     fn act(&self, act: &str) {
         fs::write(self.dir.join("act"), act).unwrap();
@@ -299,9 +258,21 @@ impl Scratch {
         fs::write(&file, format!("{body}{line}\nexit 0\n{end}")).unwrap();
     }
 
-    /// The command, this crate's own binary, run against the clone with
-    /// the stand-in tracker first on `PATH`, `args` after `track work`.
+    /// `track work` on the model and the subagents' model every test
+    /// but the one that names its own runs on, `args` after them.
     fn work(&self, args: &[&str]) -> (i32, String) {
+        let models = [
+            "--model",
+            "claude-opus-5",
+            "--subagent-model",
+            "claude-sonnet-5",
+        ];
+        self.run(&[models.as_slice(), args].concat())
+    }
+
+    /// The command, this crate's own binary, run against the checkout
+    /// with the stand-ins first on `PATH`, `args` after `track work`.
+    fn run(&self, args: &[&str]) -> (i32, String) {
         let path = format!(
             "{}:{}",
             self.dir.join("bin").display(),
@@ -331,59 +302,7 @@ impl Scratch {
         (out.status.code().unwrap_or(-1), text)
     }
 
-    /// One commit on origin's `branch` writing `content` to `file`, made
-    /// from a branch of the clone that is deleted after; the clone is
-    /// left where it was, or detached at the commit when the branch is
-    /// the track's, since a track's clone sits at its track's tip.
-    fn land(&self, branch: &str, file: &str, content: &str) -> String {
-        let head = rev(&self.root, "HEAD");
-        sh(
-            &self.root,
-            &[
-                "git",
-                "checkout",
-                "-q",
-                "-b",
-                "landing",
-                &format!("origin/{branch}"),
-            ],
-        );
-        fs::write(self.root.join(file), content).unwrap();
-        sh(&self.root, &["git", "add", "--", file]);
-        sh(
-            &self.root,
-            &[
-                "git",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-                "commit",
-                "-q",
-                "-m",
-                "landed",
-            ],
-        );
-        let landed = rev(&self.root, "HEAD");
-        sh(
-            &self.root,
-            &[
-                "git",
-                "-c",
-                "core.hooksPath=/var/empty",
-                "push",
-                "-q",
-                "origin",
-                &format!("landing:refs/heads/{branch}"),
-            ],
-        );
-        let back = if branch == "t-x" { &landed } else { &head };
-        sh(&self.root, &["git", "checkout", "-q", "--detach", back]);
-        sh(&self.root, &["git", "branch", "-q", "-D", "landing"]);
-        landed
-    }
-
-    /// One section of `xtask status` over the clone's store, as Markdown:
+    /// One section of `xtask status` over the checkout's store, as Markdown:
     /// what a person reads the run back from (#117).
     fn section(&self, name: &str) -> String {
         let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
@@ -410,7 +329,7 @@ impl Scratch {
             .to_owned()
     }
 
-    /// Where the worktree for `branch` is laid down: beside the clone,
+    /// Where the worktree for `branch` is laid down: beside the checkout,
     /// in `repo-worktrees`, inside the scratch (revision 56).
     fn worktree(&self, branch: &str) -> PathBuf {
         self.dir.join("repo-worktrees").join(branch)
@@ -442,46 +361,38 @@ fn listed(issues: &[(u64, &[&str])]) -> String {
     serde_json::Value::Array(issues).to_string()
 }
 
-/// The whole path, `--one`: the next ticket, its worktree on `<track>/t<n>`, the
-/// session started as `claude -p --model <session>` with the subagents'
-/// model in its environment and the constants for the mode and the
-/// effort, in the worktree, with the prompt running `/build <n>`;
-/// the ticket closed, so the track's branch is fast-forwarded to the
-/// tip, pushed to `origin`, the worktree retired, the branch and its
-/// record kept, HEAD following the track; one line naming the ticket,
-/// the commit and the outcome; no trust line.
+/// The whole path, `--one`: the next ticket, its worktree on `t<n>` off
+/// `main`, the session started as `claude -p --model <model>` with the
+/// subagents' model in its environment and the defaults for the mode
+/// and the effort, in the worktree, with the prompt running `/build
+/// <n>`; the ticket closed, so `main` is fast-forwarded to the tip,
+/// pushed to `origin`, the worktree retired, the branch and its record
+/// kept; one line naming the ticket, the commit and the outcome; no
+/// trust line waited on.
 #[test]
 fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     let scratch = Scratch::lay("closed");
     scratch.tracker(&[20, 21], 20);
     scratch.act("commit close");
-    let before = rev(&scratch.root, "origin/t-x");
+    let before = rev(&scratch.root, "main");
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
 
-    let tip = rev(&scratch.root, "t-x/t20");
+    let tip = rev(&scratch.root, "t20");
     assert_ne!(tip, before, "the session committed: {out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), tip, "pushed to origin: {out}");
-    assert_eq!(rev(&scratch.root, "origin/t-x"), tip, "{out}");
-    assert_eq!(
-        rev(&scratch.root, "HEAD"),
-        tip,
-        "HEAD follows the track: {out}"
-    );
-    assert!(
-        !has_ref(&scratch.root, "refs/heads/t-x"),
-        "the track stays origin's branch: {out}"
-    );
+    assert_eq!(rev(&scratch.root, "t20^"), before, "cut from main: {out}");
+    assert_eq!(rev(&scratch.origin, "main"), tip, "pushed to origin: {out}");
+    assert_eq!(rev(&scratch.root, "main"), tip, "{out}");
     assert!(
         out.lines().any(|line| line
             == format!(
-                "track work: #20 closed at {}; t-x fast-forwarded to it and pushed to origin, t-x/t20 retired",
+                "track work: #20 closed at {}; main fast-forwarded to it and pushed to origin, t20 retired",
                 &tip[..7]
             )),
         "{out}"
     );
 
-    // The session was started as decided (#75), in the worktree.
+    // The session was started as the flags say, in the worktree.
     assert_eq!(
         scratch.wrote("session.args"),
         "-p --model claude-opus-5 --permission-mode auto --effort high /build 20"
@@ -499,14 +410,14 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert_eq!(
         scratch.wrote("session.cwd"),
-        scratch.worktree("t-x/t20").to_str().unwrap()
+        scratch.worktree("t20").to_str().unwrap()
     );
 
     // Retired: the worktree gone, the branch and its record kept.
-    assert!(!scratch.worktree("t-x/t20").exists(), "{out}");
+    assert!(!scratch.worktree("t20").exists(), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert_eq!(
-        sh(&scratch.root, &["git", "config", "branch.t-x/t20.ticket"]).trim(),
+        sh(&scratch.root, &["git", "config", "branch.t20.ticket"]).trim(),
         "20"
     );
 
@@ -524,40 +435,78 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     assert_eq!(scratch.wrote("calls"), "", "{out}");
 }
 
-/// A session that ends with the ticket open, `--one`: the worktree stands, the
-/// track's branch and `origin` are where they were, nothing is retired,
-/// the record is kept and the exit is 1 with the reason; and the clone's
-/// `track.permission-mode` and `track.effort` override the constants.
+/// `--track` names the label track whose frontier is worked and
+/// `--model` the model, the subagents running on it when nothing else is
+/// named (ADR-0009): of three tickets, the one labelled
+/// `track:parity-hosts` is the one laid down, on `t<n>` off `main`,
+/// whatever number the others carry.
+#[test]
+fn a_run_on_a_label_track_names_its_ticket_and_lays_its_branch_off_main() {
+    let scratch = Scratch::lay("label");
+    fs::write(
+        scratch.dir.join("list.json"),
+        listed(&[
+            (19, &["ready-for-agent", "track:main"]),
+            (21, &["ready-for-agent", "track:parity-hosts"]),
+            (22, &["ready-for-agent", "track:parity-compiler"]),
+        ]),
+    )
+    .unwrap();
+    scratch.viewed(21);
+    scratch.act("commit");
+    let main = rev(&scratch.root, "main");
+    let (code, out) = scratch.run(&[
+        "--one",
+        "--track",
+        "parity-hosts",
+        "--model",
+        "claude-fable-5",
+    ]);
+    assert_eq!(code, 1, "the ticket is left open: {out}");
+    assert!(out.contains("track work: #21 ticket 21: on t21"), "{out}");
+    assert_eq!(rev(&scratch.root, "t21^"), main, "cut from main: {out}");
+    assert_eq!(
+        sh(&scratch.root, &["git", "config", "branch.t21.ticket"]).trim(),
+        "21"
+    );
+    assert!(!has_ref(&scratch.root, "refs/heads/t19"), "{out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t22"), "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-fable-5 --permission-mode auto --effort high /build 21"
+    );
+    assert_eq!(scratch.wrote("session.subagent"), "claude-fable-5");
+    assert_eq!(rev(&scratch.root, "main"), main, "{out}");
+}
+
+/// A session that ends with the ticket open, `--one`: the worktree stands,
+/// `main` and `origin` are where they were, nothing is retired, the
+/// record is kept and the exit is 1 with the reason; and
+/// `--permission-mode` and `--effort` override the defaults.
 #[test]
 fn a_ticket_left_open_leaves_the_worktree_standing() {
     let scratch = Scratch::lay("open");
     scratch.tracker(&[20], 20);
     scratch.act("commit");
-    sh(
-        &scratch.root,
-        &["git", "config", "track.permission-mode", "acceptEdits"],
-    );
-    sh(&scratch.root, &["git", "config", "track.effort", "max"]);
-    let before = rev(&scratch.root, "origin/t-x");
-    let (code, out) = scratch.work(&["--one"]);
+    let before = rev(&scratch.root, "main");
+    let (code, out) = scratch.work(&[
+        "--one",
+        "--permission-mode",
+        "acceptEdits",
+        "--effort",
+        "max",
+    ]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("#20 is open"), "{out}");
     assert!(
-        out.contains(&format!(
-            "stands at {}",
-            scratch.worktree("t-x/t20").display()
-        )),
+        out.contains(&format!("stands at {}", scratch.worktree("t20").display())),
         "{out}"
     );
-    assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
+    assert!(scratch.worktree("t20").is_dir(), "{out}");
     assert_eq!(scratch.worktrees().len(), 2, "{out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
+    assert_eq!(rev(&scratch.origin, "main"), before, "{out}");
     assert_eq!(rev(&scratch.root, "HEAD"), before, "{out}");
-    assert_ne!(
-        rev(&scratch.root, "t-x/t20"),
-        before,
-        "the work stands: {out}"
-    );
+    assert_ne!(rev(&scratch.root, "t20"), before, "the work stands: {out}");
     assert_eq!(
         scratch.wrote("session.args"),
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
@@ -565,63 +514,53 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
     assert_eq!(out.matches("computed trust").count(), 1, "{out}");
 }
 
-/// A ticket closed with the branch at the track's own commit is not a
-/// fast-forward: the track does not move, the worktree stands, and that
-/// is the session's failure, so the run goes on to "none" and names the
+/// A ticket closed with the branch at `main`'s own commit is not a
+/// fast-forward: `main` does not move, the worktree stands, and that is
+/// the session's failure, so the run goes on to "none" and names the
 /// ticket as standing.
 #[test]
-fn a_tip_not_ahead_of_the_track_stands() {
+fn a_tip_not_ahead_of_main_stands() {
     let scratch = Scratch::lay("behind");
     scratch.tracker(&[20], 20);
     scratch.act("close");
-    let before = rev(&scratch.root, "origin/t-x");
+    let before = rev(&scratch.root, "main");
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 0, "{out}");
     assert!(
-        out.contains("#20 closed, but the branch is not ahead of the track: the branch is the track's own commit"),
+        out.contains(
+            "#20 closed, but the branch is not ahead of main: the branch is the track's own commit"
+        ),
         "{out}"
     );
     assert!(
-        out.contains("track work: the frontier of t-x is empty after 1 ticket: #20 standing"),
+        out.contains("track work: the frontier of main is empty after 1 ticket: #20 standing"),
         "{out}"
     );
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
-    assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
+    assert_eq!(rev(&scratch.origin, "main"), before, "{out}");
+    assert!(scratch.worktree("t20").is_dir(), "{out}");
 }
 
-/// A clone with no model record refuses before any worktree is laid
-/// down, and an empty frontier lays none down and is not an error: with
-/// no `track.frontier` record the run ends at "none" and starts no
-/// `/frontier` session, though the stand-in would file a ticket (#85).
+/// A run with no `--model` refuses before any worktree is laid down, and
+/// an empty frontier lays none down and is not an error: without
+/// `--fill` the run ends at "none" and starts no `/frontier` session,
+/// though the stand-in would file a ticket (#85).
 #[test]
 fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     let scratch = Scratch::lay("refuse");
     scratch.tracker(&[20], 20);
     scratch.act("commit close");
     scratch.frontier_files(&[(21, &["ready-for-agent"])]);
-    sh(
-        &scratch.root,
-        &["git", "config", "--unset", "track.model.subagent"],
-    );
-    sh(
-        &scratch.root,
-        &["git", "config", "--unset", "track.model.session"],
-    );
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 1, "{out}");
-    assert!(out.contains("records no model"), "{out}");
+    let (code, out) = scratch.run(&["--one"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("--model <NAME>"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
-    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
 
-    sh(
-        &scratch.root,
-        &["git", "config", "track.model.session", "claude-opus-5"],
-    );
     scratch.tracker(&[], 20);
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
+    assert!(out.contains("none: the frontier of main is empty"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
     assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
@@ -638,7 +577,7 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
 /// a fail, each with its commit and its reason, and the run's own closing
 /// one, which is what `status --section track` renders the run from.
 /// What each session spent rides on its step (#210): the first's usage
-/// reading reached the track's store by the retire, the second's is
+/// reading reached the checkout's store by the retire, the second's is
 /// still the standing worktree's, and each step carries its own, the run
 /// the total.
 #[test]
@@ -649,26 +588,26 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     scratch.viewed(21);
     scratch.act_on(20, "commit close spend 1.25");
     scratch.act_on(21, "commit spend 2.5");
-    let before = rev(&scratch.root, "origin/t-x");
+    let before = rev(&scratch.root, "main");
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 0, "{out}");
 
-    let first = rev(&scratch.root, "t-x/t20");
-    let second = rev(&scratch.root, "t-x/t21");
+    let first = rev(&scratch.root, "t20");
+    let second = rev(&scratch.root, "t21");
     assert_ne!(first, before, "{out}");
     assert_eq!(
-        rev(&scratch.origin, "t-x"),
+        rev(&scratch.origin, "main"),
         first,
         "pushed to origin: {out}"
     );
     assert_eq!(rev(&scratch.root, "HEAD"), first, "HEAD follows: {out}");
-    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
-    assert!(scratch.worktree("t-x/t21").is_dir(), "stands: {out}");
+    assert!(!scratch.worktree("t20").exists(), "retired: {out}");
+    assert!(scratch.worktree("t21").is_dir(), "stands: {out}");
     assert_eq!(scratch.worktrees().len(), 2, "{out}");
     assert_eq!(
-        sh(&scratch.root, &["git", "merge-base", "t-x/t21", "t-x/t20"]).trim(),
+        sh(&scratch.root, &["git", "merge-base", "t21", "t20"]).trim(),
         first,
-        "the second was laid down on the moved track: {out}"
+        "the second was laid down on the moved main: {out}"
     );
 
     // Both sessions started, each in its own worktree.
@@ -680,8 +619,8 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
         scratch.wrote("session.cwd"),
         format!(
             "{}\n{}",
-            scratch.worktree("t-x/t20").display(),
-            scratch.worktree("t-x/t21").display()
+            scratch.worktree("t20").display(),
+            scratch.worktree("t21").display()
         )
     );
 
@@ -689,7 +628,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     let lines: Vec<&str> = out.lines().collect();
     assert!(
         lines.contains(&format!(
-            "track work: #20 closed at {}; t-x fast-forwarded to it and pushed to origin, t-x/t20 retired",
+            "track work: #20 closed at {}; main fast-forwarded to it and pushed to origin, t20 retired",
             &first[..7]
         ).as_str()),
         "{out}"
@@ -698,13 +637,13 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
         lines.contains(&format!(
             "track work: #21 is open after the session (exit status: 0), the branch at {}; the worktree stands at {} for a person, nothing retired",
             &second[..7],
-            scratch.worktree("t-x/t21").display()
+            scratch.worktree("t21").display()
         ).as_str()),
         "{out}"
     );
     assert!(
         lines.contains(
-            &"track work: the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"
+            &"track work: the frontier of main is empty after 2 tickets: #20 closed, #21 standing"
         ),
         "{out}"
     );
@@ -719,10 +658,10 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
             "| 20 | pass | 1.25 | 152000 | 3 |  | {} | ",
             &first[..7]
         )),
-        "the retired worktree's usage, read from the track's log: {section}"
+        "the retired worktree's usage, read from the checkout's log: {section}"
     );
     assert!(
-        rows[0].contains("#20 closed at") && rows[0].contains("t-x/t20 retired"),
+        rows[0].contains("#20 closed at") && rows[0].contains("t20 retired"),
         "{section}"
     );
     assert!(
@@ -745,7 +684,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
         "how many it worked and how many landed: {section}"
     );
     assert!(
-        rows[2].contains("the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"),
+        rows[2].contains("the frontier of main is empty after 2 tickets: #20 closed, #21 standing"),
         "how it ended: {section}"
     );
 }
@@ -767,8 +706,8 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
     ));
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 1, "{out}");
-    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
-    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t21"), "{out}");
+    assert!(!scratch.worktree("t20").exists(), "retired: {out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t21"), "{out}");
     assert!(
         out.contains("the open tickets could not be listed from the tracker"),
         "{out}"
@@ -779,82 +718,10 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
     );
 }
 
-/// The track is caught up with main before the ticket (#80): main moved
-/// under the track, so the run's first act fast-forwards the track to
-/// main's tip, pushes it, follows it with HEAD and builds `xtask`, and
-/// the ticket's worktree is laid down off that tip; the sync's line is
-/// printed before the ticket's.
-#[test]
-fn the_track_is_caught_up_with_main_before_the_ticket() {
-    let scratch = Scratch::lay("sync");
-    scratch.tracker(&[20], 20);
-    scratch.act("commit close");
-    let before = rev(&scratch.root, "origin/t-x");
-    let main = scratch.land("main", "landed.txt", "on main\n");
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    let tip = rev(&scratch.root, "t-x/t20");
-    assert_eq!(
-        sh(&scratch.root, &["git", "rev-parse", "t-x/t20^"]).trim(),
-        main,
-        "the worktree was laid down off main's tip: {out}"
-    );
-    assert_eq!(rev(&scratch.origin, "t-x"), tip, "{out}");
-    assert_eq!(rev(&scratch.root, "HEAD"), tip, "{out}");
-    let lines: Vec<&str> = out.lines().collect();
-    let synced = lines
-        .iter()
-        .position(|line| line.starts_with("track sync: t-x caught up with main"))
-        .unwrap_or_else(|| panic!("{out}"));
-    let worked = lines
-        .iter()
-        .position(|line| line.starts_with("track work: #20 closed at"))
-        .unwrap_or_else(|| panic!("{out}"));
-    assert!(synced < worked, "{out}");
-    assert!(
-        lines.contains(
-            &format!(
-                "track sync: t-x caught up with main ({}): fast-forwarded {} to {}; pushed to origin, HEAD follows, xtask built",
-                &main[..7],
-                &before[..7],
-                &main[..7]
-            )
-            .as_str()
-        ),
-        "{out}"
-    );
-}
-
-/// A sync that refuses stops the run as a failure of the harness, named:
-/// main and the track conflict, so no worktree is laid down, no session
-/// starts, and the exit names the conflict.
-#[test]
-fn a_sync_that_refuses_stops_the_run_named() {
-    let scratch = Scratch::lay("conflict");
-    scratch.tracker(&[20], 20);
-    scratch.act("commit close");
-    let track = scratch.land("t-x", "README.md", "the track's\n");
-    scratch.land("main", "README.md", "main's\n");
-    let (code, out) = scratch.work(&[]);
-    assert_eq!(code, 1, "{out}");
-    assert!(
-        out.contains("main does not merge into t-x: conflicts in README.md"),
-        "{out}"
-    );
-    assert!(
-        out.contains("stopped by the harness after no ticket"),
-        "{out}"
-    );
-    assert_eq!(rev(&scratch.origin, "t-x"), track, "{out}");
-    assert_eq!(scratch.worktrees().len(), 1, "no worktree laid down: {out}");
-    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
-    assert_eq!(scratch.wrote("session.args"), "", "no session started");
-}
-
 /// A ticket labelled `frontier:research` starts the session on
 /// `/research <n>` (#81): the skill's line is the one thing that
-/// changes, the model, the mode and the effort as #75 set them, and the
-/// path from the close to the retire is the same.
+/// changes, the model, the mode and the effort as the flags set them,
+/// and the path from the close to the retire is the same.
 #[test]
 fn a_research_ticket_starts_the_session_on_research() {
     let scratch = Scratch::lay("research");
@@ -869,7 +736,7 @@ fn a_research_ticket_starts_the_session_on_research() {
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert!(out.contains("#20 closed at"), "{out}");
-    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
+    assert!(!scratch.worktree("t20").exists(), "retired: {out}");
 }
 
 /// A ticket labelled `frontier:decision` starts the session on
@@ -906,20 +773,20 @@ fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     assert!(out.contains("frontier:decision"), "{out}");
     assert!(out.contains("nothing is laid down"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
-    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
 }
 
-/// With `track.frontier=auto` the run fills its own frontier (#85): the
-/// one ticket closed, `next` answers "none", so a `/frontier` session is
-/// started in the clone itself, on the same model, mode and effort, and
-/// the run goes on with the ticket it filed; that one closed, the
-/// frontier is still empty after the second `/frontier` session, which
-/// ends the run listing the track's open `for-a-person` tickets, those
-/// of another track left out.
+/// With `--fill` the run fills its own frontier (#85): the one ticket
+/// closed, `next` answers "none", so a `/frontier` session is started in
+/// the checkout itself, on the same model, mode and effort, and the run
+/// goes on with the ticket it filed; that one closed, the frontier is
+/// still empty after the second `/frontier` session, which ends the run
+/// listing the track's open `for-a-person` tickets, those of another
+/// track left out.
 #[test]
 fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
-    let scratch = Scratch::lay("auto");
+    let scratch = Scratch::lay("fill");
     scratch.tracker(&[20], 20);
     scratch.viewed(20);
     scratch.viewed(21);
@@ -927,27 +794,26 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
     scratch.act_on(21, "commit close");
     scratch.frontier_files(&[
         (21, &["ready-for-agent"]),
-        (30, &["for-a-person", "track:t-x"]),
-        (31, &["for-a-person", "track:main"]),
+        (30, &["for-a-person", "track:main"]),
+        (31, &["for-a-person", "track:parity-hosts"]),
         (32, &["for-a-person"]),
     ]);
-    sh(&scratch.root, &["git", "config", "track.frontier", "auto"]);
-    let (code, out) = scratch.work(&[]);
+    let (code, out) = scratch.work(&["--fill"]);
     assert_eq!(code, 0, "{out}");
 
-    let first = rev(&scratch.root, "t-x/t20");
-    let second = rev(&scratch.root, "t-x/t21");
-    assert_eq!(rev(&scratch.origin, "t-x"), second, "{out}");
+    let first = rev(&scratch.root, "t20");
+    let second = rev(&scratch.root, "t21");
+    assert_eq!(rev(&scratch.origin, "main"), second, "{out}");
     assert_eq!(
-        sh(&scratch.root, &["git", "rev-parse", "t-x/t21^"]).trim(),
+        sh(&scratch.root, &["git", "rev-parse", "t21^"]).trim(),
         first,
-        "the filed ticket was laid down off the moved track: {out}"
+        "the filed ticket was laid down off the moved main: {out}"
     );
-    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
-    assert!(!scratch.worktree("t-x/t21").exists(), "retired: {out}");
+    assert!(!scratch.worktree("t20").exists(), "retired: {out}");
+    assert!(!scratch.worktree("t21").exists(), "retired: {out}");
 
-    // Four sessions: the ticket, the planner in the clone, the ticket it
-    // filed, the planner again.
+    // Four sessions: the ticket, the planner in the checkout, the ticket
+    // it filed, the planner again.
     let session = "-p --model claude-opus-5 --permission-mode auto --effort high";
     assert_eq!(
         scratch.wrote("session.args"),
@@ -959,9 +825,9 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
         scratch.wrote("session.cwd"),
         format!(
             "{}\n{}\n{}\n{}",
-            scratch.worktree("t-x/t20").display(),
+            scratch.worktree("t20").display(),
             scratch.root.display(),
-            scratch.worktree("t-x/t21").display(),
+            scratch.worktree("t21").display(),
             scratch.root.display()
         )
     );
@@ -973,7 +839,7 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
     let lines: Vec<&str> = out.lines().collect();
     assert!(
         lines.contains(
-            &"track work: none: the frontier of t-x is still empty after the /frontier session; nothing laid down; the track waits on 2 for-a-person tickets:"
+            &"track work: none: the frontier of main is still empty after the /frontier session; nothing laid down; the track waits on 2 for-a-person tickets:"
         ),
         "{out}"
     );
@@ -982,23 +848,21 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
     assert!(!out.contains("#31"), "another track's: {out}");
     assert!(
         lines.contains(
-            &"track work: the frontier of t-x is empty after 2 tickets: #20 closed, #21 closed"
+            &"track work: the frontier of main is empty after 2 tickets: #20 closed, #21 closed"
         ),
         "{out}"
     );
 }
 
-/// With the record, `--one` on an empty frontier starts the planner
-/// once; a frontier still empty with no `for-a-person` ticket says so in
-/// the line, exit 0; and a record that is not `auto` refuses, named,
-/// before any session.
+/// Under `--fill`, `--one` on an empty frontier starts the planner once,
+/// and a frontier still empty with no `for-a-person` ticket says so in
+/// the line, exit 0.
 #[test]
-fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
+fn a_frontier_that_stays_empty_after_the_planner_ends_the_run() {
     let scratch = Scratch::lay("still");
     scratch.tracker(&[], 20);
     scratch.frontier_files(&[]);
-    sh(&scratch.root, &["git", "config", "track.frontier", "auto"]);
-    let (code, out) = scratch.work(&["--one"]);
+    let (code, out) = scratch.work(&["--one", "--fill"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
@@ -1006,227 +870,9 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
     );
     assert!(
         out.contains(
-            "track work: none: the frontier of t-x is still empty after the /frontier session; nothing laid down; the track waits on no for-a-person ticket"
+            "track work: none: the frontier of main is still empty after the /frontier session; nothing laid down; the track waits on no for-a-person ticket"
         ),
         "{out}"
     );
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
-
-    sh(&scratch.root, &["git", "config", "track.frontier", "yes"]);
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 1, "{out}");
-    assert!(out.contains("track.frontier is \"yes\""), "{out}");
-    assert_eq!(
-        scratch.wrote("session.args").lines().count(),
-        1,
-        "no second session: {out}"
-    );
-}
-
-/// A worktree left standing by an earlier run, whose ticket a person
-/// closed afterwards and whose branch is ahead, is swept before the
-/// frontier is consulted (#116): the track is fast-forwarded to its tip,
-/// pushed to `origin` and the worktree retired, one line naming the
-/// ticket and the commit. The sweep is idempotent: the run that left it
-/// standing said nothing of a sweep, and the run after the sweep says
-/// nothing either and moves no ref.
-#[test]
-fn a_standing_worktree_whose_ticket_closed_is_swept_before_the_frontier() {
-    let scratch = Scratch::lay("sweep-ahead");
-    scratch.tracker(&[20], 20);
-    scratch.viewed(20);
-    scratch.act_on(20, "commit");
-    let before = rev(&scratch.root, "origin/t-x");
-
-    // The first run leaves #20 standing, and sweeps nothing.
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 1, "{out}");
-    assert!(!out.contains("swept"), "nothing to sweep: {out}");
-    assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
-    let tip = rev(&scratch.root, "t-x/t20");
-    assert_ne!(tip, before, "the session committed: {out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
-
-    // A person closes it, and main moved under the track meanwhile. The
-    // sweep is the run's first act, before the catch-up, so the branch
-    // is still a fast-forward of the track when it is judged; catch the
-    // track up first and the merge would make it none, forever.
-    scratch.closes(20);
-    let main = scratch.land("main", "landed.txt", "on main\n");
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(
-        out.lines().any(|line| line
-            == format!(
-                "track work: swept #20, closed since its session at {}; t-x fast-forwarded to it and pushed to origin, t-x/t20 retired",
-                &tip[..7]
-            )),
-        "{out}"
-    );
-    let lines: Vec<&str> = out.lines().collect();
-    let swept = lines
-        .iter()
-        .position(|line| line.starts_with("track work: swept #20"))
-        .unwrap_or_else(|| panic!("{out}"));
-    let synced = lines
-        .iter()
-        .position(|line| line.starts_with("track sync: t-x caught up with main"))
-        .unwrap_or_else(|| panic!("{out}"));
-    assert!(swept < synced, "the sweep is the run's first act: {out}");
-    let now = rev(&scratch.root, "origin/t-x");
-    assert!(holds(&scratch.root, &now, &tip), "the work landed: {out}");
-    assert!(holds(&scratch.root, &now, &main), "main landed: {out}");
-    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
-    assert_eq!(scratch.worktrees().len(), 1, "{out}");
-    assert_eq!(
-        sh(&scratch.root, &["git", "config", "branch.t-x/t20.ticket"]).trim(),
-        "20",
-        "the branch and its record are kept: {out}"
-    );
-    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
-
-    // Nothing left to sweep: no line about it, and no ref moves.
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(!out.contains("swept"), "{out}");
-    assert!(!out.contains("#20"), "{out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), now, "{out}");
-    assert_eq!(rev(&scratch.root, "HEAD"), now, "{out}");
-}
-
-/// A worktree of another track is none of this track's business: the
-/// sweep leaves it standing whatever its ticket says, and moves no ref
-/// of it (#116).
-#[test]
-fn a_worktree_of_another_track_is_not_swept() {
-    let scratch = Scratch::lay("sweep-other");
-    scratch.tracker(&[], 30);
-    scratch.viewed(30);
-    scratch.closes(30);
-    let before = rev(&scratch.root, "origin/t-x");
-    sh(
-        &scratch.root,
-        &[
-            "git",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "push",
-            "-q",
-            "origin",
-            "HEAD:refs/heads/t-y",
-        ],
-    );
-    let dir = scratch.worktree("t-y/t30");
-    sh(
-        &scratch.root,
-        &[
-            "git",
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "t-y/t30",
-            dir.to_str().unwrap(),
-            "origin/t-y",
-        ],
-    );
-    sh(
-        &scratch.root,
-        &["git", "config", "branch.t-y/t30.ticket", "30"],
-    );
-    fs::write(dir.join("other.txt"), "the other track's\n").unwrap();
-    sh(&dir, &["git", "add", "--", "other.txt"]);
-    sh(
-        &dir,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "commit",
-            "-q",
-            "-m",
-            "the other track's work",
-        ],
-    );
-    let other = rev(&scratch.root, "t-y/t30");
-
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(!out.contains("#30"), "another track's: {out}");
-    assert!(!out.contains("swept"), "{out}");
-    assert!(dir.is_dir(), "stands: {out}");
-    assert_eq!(rev(&scratch.root, "t-y/t30"), other, "{out}");
-    assert_eq!(rev(&scratch.origin, "t-y"), before, "no ref moved: {out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
-}
-
-/// A standing worktree whose ticket closed with the branch not ahead of
-/// the track is left standing and named, and the run goes on to the
-/// frontier (#116): the session committed nothing, so its branch is the
-/// track's own commit, and no ref moves.
-#[test]
-fn a_standing_worktree_closed_but_not_ahead_is_named_and_stands() {
-    let scratch = Scratch::lay("sweep-behind");
-    scratch.tracker(&[20], 20);
-    scratch.viewed(20);
-    scratch.act_on(20, "");
-    let before = rev(&scratch.root, "origin/t-x");
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 1, "{out}");
-    assert_eq!(rev(&scratch.root, "t-x/t20"), before, "{out}");
-
-    scratch.closes(20);
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(
-        out.lines().any(|line| line
-            == format!(
-                "track work: #20 closed, but the branch is not ahead of the track: the branch is the track's own commit, {}, the branch at {}; the worktree stands at {} for a person, nothing retired",
-                &before[..7],
-                &before[..7],
-                scratch.worktree("t-x/t20").display()
-            )),
-        "{out}"
-    );
-    assert!(!out.contains("swept"), "nothing merged back: {out}");
-    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
-    assert_eq!(scratch.worktrees().len(), 2, "{out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
-    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
-}
-
-/// A standing worktree whose ticket is still open is left standing and
-/// named, and the run goes on (#116): the work is the session's to
-/// finish, so nothing is merged back and no ref moves, however far ahead
-/// the branch is.
-#[test]
-fn a_standing_worktree_whose_ticket_is_open_is_named_and_stands() {
-    let scratch = Scratch::lay("sweep-open");
-    scratch.tracker(&[20], 20);
-    scratch.viewed(20);
-    scratch.act_on(20, "commit");
-    let before = rev(&scratch.root, "origin/t-x");
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 1, "{out}");
-
-    let tip = rev(&scratch.root, "t-x/t20");
-    let (code, out) = scratch.work(&["--one"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(
-        out.lines().any(|line| line
-            == format!(
-                "track work: #20 is still open at the tracker, the branch at {}; the worktree stands at {} for a person, nothing retired",
-                &tip[..7],
-                scratch.worktree("t-x/t20").display()
-            )),
-        "{out}"
-    );
-    assert!(!out.contains("swept"), "nothing merged back: {out}");
-    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
-    assert_eq!(scratch.worktrees().len(), 2, "{out}");
-    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
-    assert_eq!(rev(&scratch.root, "t-x/t20"), tip, "{out}");
-    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
 }

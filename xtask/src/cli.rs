@@ -127,8 +127,8 @@ pub(crate) enum Command {
     /// branch of this clone; `chains` prints every open ticket of the
     /// track under the one that blocks it. `sync` catches the track up
     /// with main.
-    /// `work` takes that ticket from start to retire without a person,
-    /// syncing before each.
+    /// `work --model <name>` takes that ticket from start to retire
+    /// without a person.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
@@ -538,30 +538,47 @@ pub(crate) enum TrackCommand {
     /// conflict, and changes neither the branch nor the clone. Writes
     /// no reading.
     Sync,
-    /// The frontier until it empties, without a person: for each ticket
-    /// `next` names, the track caught up with main first, its worktree
-    /// laid down on `<track>/t<n>`, a headless session in it on the model
-    /// the clone records, and when the session ends with the ticket
-    /// closed, the track's branch fast-forwarded to the worktree's tip,
+    /// The frontier until it empties, without a person, from main's
+    /// checkout: for each ticket `next` names on `--track`, its worktree
+    /// laid down on `t<n>` off `main`, a headless session in it on
+    /// `--model`, and when the session ends with the ticket closed, the
+    /// branch it was taken off fast-forwarded to the worktree's tip,
     /// pushed to origin and the worktree retired. A session that ends
-    /// with the ticket open, or closed with the branch not ahead of the
-    /// track, leaves the worktree standing for a person and the run goes
-    /// on; a failure of the harness itself, a sync that refuses included,
-    /// stops it, named. With `track.frontier=auto` recorded on the clone,
-    /// "none" from `next` starts a `/frontier` session in the clone and
-    /// the run goes on with what it filed; a frontier still empty after
-    /// it ends the run listing the track's open `for-a-person` tickets.
+    /// with the ticket open, or closed with the branch not ahead, leaves
+    /// the worktree standing for a person and the run goes on; a failure
+    /// of the harness itself stops it, named. With `--fill`, "none" from
+    /// `next` starts a `/frontier` session in the checkout and the run
+    /// goes on with what it filed; a frontier still empty after it ends
+    /// the run listing the track's open `for-a-person` tickets.
     /// Prints one line per ticket naming the ticket, the
     /// commit and the outcome, then a closing line once any was worked.
     /// Writes one reading per step, scoped to the ticket, and one for the
     /// run; `xtask status --section track` renders the last run.
     Work {
-        /// One step alone, a `/frontier` session before it when the clone
-        /// records `track.frontier=auto` and the frontier is empty: the
-        /// line printed, and exit 1 with the reason when the session
-        /// leaves the ticket to a person.
+        /// One step alone, a `/frontier` session before it under `--fill`
+        /// when the frontier is empty: the line printed, and exit 1 with
+        /// the reason when the session leaves the ticket to a person.
         #[arg(long)]
         one: bool,
+        /// The track whose frontier is worked, by its `track:` label.
+        #[arg(long, value_name = "NAME", default_value = crate::track::MAIN)]
+        track: String,
+        /// The model the sessions run on.
+        #[arg(long, value_name = "NAME")]
+        model: String,
+        /// The model the sessions' subagents run on; the session's when
+        /// not given.
+        #[arg(long, value_name = "NAME")]
+        subagent_model: Option<String>,
+        /// Start a `/frontier` session when the frontier is empty.
+        #[arg(long)]
+        fill: bool,
+        /// The sessions' permission mode.
+        #[arg(long, value_name = "MODE", default_value = crate::track_work::PERMISSION_MODE)]
+        permission_mode: String,
+        /// The sessions' effort.
+        #[arg(long, value_name = "LEVEL", default_value = crate::track_work::EFFORT)]
+        effort: String,
     },
 }
 
