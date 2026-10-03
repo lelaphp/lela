@@ -1479,18 +1479,21 @@ type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
 /// map holds its room under the engine's cap with every row at "no
 /// reading" (harness-design.md §4.6, #1772).
 const RULES: Columns = (&["rule", "adr", "predicate", "reading"], |r| {
-    vec![r.fact("id"), r.fact("adr"), r.fact("predicate"), r.status()]
+    rule_cells(r, false)
 });
 
 const RULES_UNCUT: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
-    vec![
-        r.fact("id"),
-        r.fact("adr"),
-        r.fact("predicate"),
-        r.status(),
-        r.fact("text"),
-    ]
+    rule_cells(r, true)
 });
+
+/// One rule's cells, its text last when `text` asks for it.
+fn rule_cells(r: &Row, text: bool) -> Vec<String> {
+    let mut cells = vec![r.fact("id"), r.fact("adr"), r.fact("predicate"), r.status()];
+    if text {
+        cells.push(r.fact("text"));
+    }
+    cells
+}
 
 const LOCKS: Columns = (&["seam", "lock", "items", "ceiling", "reading"], |r| {
     vec![
