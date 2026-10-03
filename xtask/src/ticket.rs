@@ -62,7 +62,12 @@
 //! the clause, "a `[regime.dump]` added to `oracle.toml`". A clause that
 //! names the file as where something is read stays clean, "the ceiling in
 //! `seams.toml`", which is what the open tickets this was measured over
-//! mostly say.
+//! mostly say. A clause that lands its text somewhere other than the path
+//! asks for no write either (#1672): a verb of drafting, proposing or
+//! quoting with a comment, the ticket or the commit message as its place,
+//! #1516's "the `.claude/settings.json` `PostToolUse` entry is drafted in a
+//! comment on the person's ticket", asks for a comment an agent posts. A
+//! verb of writing in the same clause still asks for the write.
 //!
 //! Ticked boxes are not enough (#29): work that found a thing it did not
 //! do has three homes, a ticket of its own, a divergence row, or a rule
@@ -493,6 +498,12 @@ pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec
     for criterion in criteria.ticked.iter().chain(&criteria.unticked) {
         let clause = object(criterion);
         let writing = words(clause).any(|word| WRITING.contains(&word.as_str()));
+        // A clause that lands its text elsewhere, drafted in a comment or
+        // proposed on the ticket, asks for no write into the path it is
+        // about (#1672).
+        if !writing && elsewhere(clause) {
+            continue;
+        }
         // The path is the thing asked for while the clause is about it.
         let asked = paths(clause)
             .into_iter()
@@ -548,6 +559,52 @@ const WRITING: [&str; 15] = [
     "add", "adds", "added", "gain", "gains", "gained", "write", "writes", "written", "edit",
     "edits", "edited", "bump", "bumps", "bumped",
 ];
+
+/// The verbs that say a text is set down somewhere for a reader rather
+/// than into the file it is about: drafted, proposed, quoted.
+const LANDING: [&str; 15] = [
+    "draft",
+    "drafts",
+    "drafted",
+    "propose",
+    "proposes",
+    "proposed",
+    "quote",
+    "quotes",
+    "quoted",
+    "post",
+    "posts",
+    "posted",
+    "suggest",
+    "suggests",
+    "suggested",
+];
+
+/// The places such a text lands in that are not a file of the checkout:
+/// a comment, the ticket, the commit message.
+const PLACES: [&str; 7] = [
+    "comment", "comments", "ticket", "issue", "message", "thread", "reply",
+];
+
+/// Whether a clause lands its text somewhere other than the path it names
+/// (#1672): a verb of [`LANDING`] stands in it, and `in` or `on` opens a
+/// phrase one of [`PLACES`] stands in within the five words after it, as #1516's
+/// "the `.claude/settings.json` `PostToolUse` entry is drafted in a comment on
+/// the person's ticket" does. A verb of writing in the same clause wins,
+/// and the caller reads it first.
+fn elsewhere(clause: &str) -> bool {
+    let words: Vec<String> = words(clause).collect();
+    let landing = words.iter().any(|word| LANDING.contains(&word.as_str()));
+    let placed = words.iter().enumerate().any(|(i, word)| {
+        (word == "in" || word == "on")
+            && words
+                .iter()
+                .skip(i + 1)
+                .take(5)
+                .any(|next| PLACES.contains(&next.as_str()))
+    });
+    landing && placed
+}
 
 /// Whether a path is a path character: what a token naming one is made of.
 fn of_a_path(c: char) -> bool {
@@ -1195,6 +1252,54 @@ mod tests {
                 "It totals what the copy would spend against the crate's 26000-line ceiling in `seams.toml`, and names what the design drops"
             )
             .is_empty()
+        );
+    }
+
+    /// A criterion whose path is the subject of a text drafted in a comment
+    /// asks for a comment and not for a write (#1672), and one that writes
+    /// the path stays a write whatever else it names.
+    #[test]
+    fn a_criterion_drafting_a_denied_path_in_a_comment_asks_for_no_write() {
+        assert!(
+            read(
+                "ready-for-agent",
+                "The `.claude/settings.json` PostToolUse entry is drafted in a comment on the person's ticket"
+            )
+            .is_empty()
+        );
+        assert!(
+            read(
+                "ready-for-agent",
+                "`oracle.toml`'s `[regime.dump]` block is proposed in the commit message"
+            )
+            .is_empty()
+        );
+        // The fixture's write stands, and a verb of writing beside a draft
+        // is still the write.
+        assert_eq!(
+            read(
+                "ready-for-agent",
+                "`.claude/settings.json` gains the hook the lane runs under"
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            read(
+                "ready-for-agent",
+                "`.claude/settings.json` gains the hook drafted in a comment on the ticket"
+            )
+            .len(),
+            1
+        );
+        // A place without a verb that sets the text down there is not one.
+        assert_eq!(
+            read(
+                "ready-for-agent",
+                "`.claude/settings.json` carries the hook named in the ticket"
+            )
+            .len(),
+            1
         );
     }
 
