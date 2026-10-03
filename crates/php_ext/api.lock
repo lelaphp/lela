@@ -184,6 +184,7 @@ abi::Passed
 abi::Path
 abi::Pool
 abi::Pool::give
+abi::Pool::idle_len
 abi::Pool::new
 abi::Pool::take
 abi::PostStartup
@@ -703,6 +704,7 @@ request::Stream::crypto
 request::Stream::crypto_enable
 request::Stream::crypto_setup
 request::Stream::ctx
+request::Stream::dup_fd
 request::Stream::eof
 request::Stream::flock
 request::Stream::flush

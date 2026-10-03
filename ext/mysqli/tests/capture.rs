@@ -12,3 +12,35 @@ fn the_extension_is_loaded() {
     let served = engine.serve_capture("<?php var_dump(extension_loaded('mysqli'));", sink);
     assert_eq!(served.stdout, b"bool(true)\n");
 }
+
+/// A `p:` link the first request leaves open is given back to the engine's
+/// pool at its end and lent to the next request asking its `hash_key`,
+/// taken up with `COM_CHANGE_USER`, so the server's thread id carries over,
+/// and `mysqli_get_links_stats()` counts it cached between the two, as a
+/// php-fpm worker's does. Against the server of `ci/mysql/compose.yaml`;
+/// with none listening there is nothing to connect to, and the test says
+/// so and passes.
+#[test]
+fn a_persistent_link_serves_the_next_request() {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .build();
+    let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
+    let first = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
+    let served = engine.serve_capture(&first, Capture::default());
+    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    assert!(thread.parse::<u64>().is_ok(), "{thread}");
+    let stats = "foreach (mysqli_get_links_stats() as $k => $n) echo \"$k=$n \";";
+    let second = format!("<?php {stats} $l = {connect}; echo mysqli_thread_id($l), ' '; {stats}");
+    let served = engine.serve_capture(&second, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        format!(
+            "total=0 active_plinks=0 cached_plinks=1 {thread} total=1 active_plinks=1 cached_plinks=0 "
+        )
+    );
+}
