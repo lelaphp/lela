@@ -31,13 +31,6 @@ pub const CLIENT_VERSION: u64 = 80509;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mysqlnd(Handle);
 
-/// A persistent connection between requests, what `mysqli_plist_entry`'s
-/// `free_links` holds of a `MYSQLND`: its data and nothing of a request's,
-/// its socket kept in the persistent streams under the vio's `%p`, as
-/// `mysqlnd_vio::open_tcp_or_unix` opens it. A pool of the engine's keeps
-/// it; [`Mysqlnd::take_up`] lends it to the next request.
-pub struct Kept(Box<ConnData>);
-
 /// `enum mysqlnd_connection_close_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseType {
@@ -164,21 +157,22 @@ impl Mysqlnd {
         Mysqlnd(Handle::alloc(req, persistent))
     }
 
-    /// A persistent connection given back past `mysqlnd_end_psession`,
-    /// taken out of the request for a pool to keep; `None` where the number
-    /// names none.
-    pub fn keep(self, req: &mut Request) -> Option<Kept> {
-        self.0.take(req).map(Kept)
+    /// A persistent connection given back as the request that holds it
+    /// ends: taken out of the request's table, this owner gone, and kept
+    /// by the engine with its socket under the key answered, which the
+    /// owner's pool entry holds in place of the connection php's holds;
+    /// `None` where it is no persistent connection that connected.
+    pub fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
+        self.0.give_back(req)
     }
 
-    /// A kept connection taken up by this request, one owner counted, its
-    /// stream found again: alive, or failing its first read, which has the
-    /// caller close it and connect anew, as `mysqli_change_user_silent`
-    /// failing does.
-    pub fn take_up(req: &mut Request, kept: Kept) -> Result<Mysqlnd, Thrown> {
-        let Kept(mut conn) = kept;
-        conn.net.take_up(req)?;
-        Ok(Mysqlnd(Handle::hold(req, conn)))
+    /// The persistent connection kept under `key` taken up by the request,
+    /// one owner counted: `None` where the engine keeps none under it.
+    /// Its socket is the one kept under the key where that one is alive;
+    /// otherwise every command over it fails as one over a dead link
+    /// does, as the `mysqlnd_ping` its owner sends first finds.
+    pub fn take_up(req: &mut Request, key: &[u8]) -> Result<Option<Mysqlnd>, Thrown> {
+        Ok(Handle::take_up(req, key)?.map(Mysqlnd))
     }
 
     /// `get_reference`: one more owner, for a statement or a set of rows

@@ -39,8 +39,9 @@ mod result;
 mod stats;
 mod wire;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Pool};
 use php_ext::decl::{IniDecl, Name};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 
 use crate::conn::ConnData;
@@ -133,7 +134,7 @@ pub fn extension() -> Extension {
                 .collect(),
         )
         .request_state::<State>()
-        .rshutdown(rshutdown)
+        .engine_state(|_| Idle(Pool::new(IDLE)))
         .info(mysqlnd_info)
         .version(VERSION)
         .build("mysqlnd")
@@ -204,23 +205,6 @@ fn mysqlnd_info(req: &mut Request) {
     ]);
 }
 
-/// mysqlnd's `RSHUTDOWN` in this engine: a connection over a persistent
-/// stream that no pool kept is closed, as php's free of the link that
-/// owns it closes the stream with `PHP_STREAM_FREE_CLOSE_PERSISTENT`, so
-/// the socket does not outlive the request in the persistent streams.
-fn rshutdown(req: &mut Request) {
-    let held: Vec<Box<ConnData>> = req
-        .state::<State>()
-        .conns
-        .iter_mut()
-        .filter(|slot| slot.conn.as_ref().is_some_and(|conn| conn.net.persistent()))
-        .filter_map(|slot| slot.conn.take())
-        .collect();
-    for mut conn in held {
-        let _ = conn.send_close(req);
-    }
-}
-
 /// The table's number for one connection: its slot and the generation it
 /// was made in, so a number outliving its connection names nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,7 +222,7 @@ impl Handle {
     }
 
     /// `conn` held in the table, one owner counted.
-    pub(crate) fn hold(req: &mut Request, conn: Box<ConnData>) -> Handle {
+    fn hold(req: &mut Request, conn: Box<ConnData>) -> Handle {
         let state = req.state::<State>();
         let at = if let Some(at) = state
             .conns
@@ -283,15 +267,6 @@ impl Handle {
         Some(answered)
     }
 
-    /// The connection taken out of the table, what it counted added to the
-    /// request's statistics, its owners left with a number that names
-    /// none; `None` where it names none or it is lent.
-    pub(crate) fn take(self, req: &mut Request) -> Option<Box<ConnData>> {
-        let mut conn = slot_of(req.state::<State>(), self)?.conn.take()?;
-        flush(req, &mut conn);
-        Some(conn)
-    }
-
     /// `get_reference`: one more owner of the connection.
     pub(crate) fn acquire(self, req: &mut Request) {
         if let Some(slot) = slot_of(req.state::<State>(), self) {
@@ -317,6 +292,45 @@ impl Handle {
             let _ = conn.send_close(req);
             flush(req, &mut conn);
         }
+    }
+}
+
+/// The persistent connections no request holds, each under the
+/// `persistent_id` its socket is kept by: what php's persistent `MYSQLND`
+/// is between the requests its owner's `EG(persistent_list)` entry serves.
+struct Idle(Pool<Vec<u8>, Box<ConnData>>);
+
+/// The idle connections the pool keeps, the engine's own streams' bound.
+const IDLE: usize = 1024;
+
+impl Handle {
+    /// The connection taken out of the table and kept by the engine under
+    /// its `persistent_id`, this owner gone: its key, `None` where the
+    /// number names none or the connection is not a persistent one that
+    /// connected.
+    pub(crate) fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
+        let slot = slot_of(req.state::<State>(), self)?;
+        let key = slot.conn.as_ref()?.net.persistent_id.clone()?;
+        let mut conn = slot.conn.take()?;
+        slot.refs -= 1;
+        conn.net.give_back();
+        let Idle(pool) = req.engine::<Idle>()?;
+        drop(pool.give(key.clone(), conn));
+        Some(key)
+    }
+
+    /// The connection kept under `key` held in the table again, one owner
+    /// counted, over the socket kept under the same key.
+    pub(crate) fn take_up(req: &mut Request, key: &[u8]) -> Result<Option<Handle>, Thrown> {
+        let Some(mut conn) = req
+            .engine::<Idle>()
+            .and_then(|Idle(pool)| pool.take(&key.to_vec()))
+        else {
+            return Ok(None);
+        };
+        let scheme = conn.scheme.clone().unwrap_or_default();
+        conn.net.take_up(req, &scheme)?;
+        Ok(Some(Handle::hold(req, conn)))
     }
 }
 

@@ -90,18 +90,13 @@ pub(crate) struct Net {
     pub(crate) cmd_buffer: usize,
     /// `pfc->data->sha256_server_public_key`.
     pub(crate) sha256_server_public_key: Option<Vec<u8>>,
-    /// A persistent connection's `hashed_details`, the `%p` of its vio
-    /// the stream is kept under in the persistent streams, with the
-    /// scheme it was opened for.
-    persistent: Option<(Vec<u8>, Vec<u8>)>,
+    /// The `persistent_id` a persistent connection's stream is opened
+    /// under, php's `"%p"` of the `MYSQLND_VIO`: the key the engine keeps
+    /// the socket by between the requests that take the connection up.
+    pub(crate) persistent_id: Option<Vec<u8>>,
 }
 
 impl Net {
-    /// Whether the stream is a persistent one, kept under its vio's `%p`.
-    pub(crate) fn persistent(&self) -> bool {
-        self.persistent.is_some()
-    }
-
     /// Whether a stream is open, `has_valid_stream`.
     pub(crate) fn open(&self) -> bool {
         self.stream.is_some()
@@ -141,12 +136,9 @@ impl Net {
         &mut self,
         req: &mut Request,
         scheme: &[u8],
-        persistent: bool,
         error: &mut ErrorInfo,
     ) -> Result<bool, Thrown> {
         self.close(req);
-        let key = persistent.then(|| format!("{:p}", std::ptr::from_ref(self)).into_bytes());
-        self.persistent = key.clone().map(|key| (key, scheme.to_vec()));
         let tcp = scheme.starts_with(b"tcp://") && scheme.len() > 6;
         let unix = scheme.starts_with(b"unix://") && scheme.len() > 7;
         if !tcp && !unix {
@@ -160,7 +152,7 @@ impl Net {
             Xport::Client {
                 timeout,
                 connect: true,
-                persistent: key,
+                persistent: self.persistent_id.clone(),
                 // `post_connect_set_opt`'s `mysqlnd_set_sock_no_delay`
                 // on a TCP stream, set as the socket connects.
                 socket: SocketOptions {
@@ -184,38 +176,43 @@ impl Net {
         };
         self.stream = Some(stream);
         self.unix = unix;
-        self.post_connect_set_opt(req, stream);
+        self.post_connect(req, stream);
         Ok(true)
     }
 
-    /// A kept persistent connection's stream found again under its key, as
-    /// php's `MYSQLND` holds its `php_stream` across requests: the socket
-    /// the persistent streams kept, alive, or one holding no socket, whose
-    /// first read fails and has the caller connect anew.
-    pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
+    /// The stream of a persistent connection taken up by a request: the
+    /// socket the engine kept under the connection's `persistent_id`, a
+    /// live one, with the options `post_connect_set_opt` gave it; a stream
+    /// holding no socket where none was kept, over which every command
+    /// fails as one over a dead link does.
+    pub(crate) fn take_up(&mut self, req: &mut Request, scheme: &[u8]) -> Result<(), Thrown> {
         self.stream = None;
-        let Some((key, scheme)) = self.persistent.clone() else {
-            return Ok(());
-        };
         let made = req.xport_create(
-            &scheme,
+            scheme,
             Xport::Client {
                 timeout: None,
                 connect: false,
-                persistent: Some(key),
+                persistent: self.persistent_id.clone(),
                 socket: SocketOptions::default(),
                 context: None,
             },
         )?;
         if let Ok(stream) = made {
             self.stream = Some(stream);
-            self.post_connect_set_opt(req, stream);
+            self.post_connect(req, stream);
         }
         Ok(())
     }
 
-    /// `post_connect_set_opt`.
-    fn post_connect_set_opt(&self, req: &mut Request, stream: Stream) {
+    /// The stream of a persistent connection let go as the request gives
+    /// the connection back: the request's end keeps its socket under the
+    /// connection's `persistent_id`, and nothing of the request's is left.
+    pub(crate) fn give_back(&mut self) {
+        self.stream = None;
+    }
+
+    /// `post_connect_set_opt` and the error suppression php sets beside it.
+    fn post_connect(&self, req: &mut Request, stream: Stream) {
         if self.options.timeout_read > 0 {
             let wait = Duration::from_secs(u64::from(self.options.timeout_read));
             stream.set_option(req, StreamOption::ReadTimeout(wait));

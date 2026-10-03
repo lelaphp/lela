@@ -523,6 +523,15 @@ pub trait Connection: Any + Send {
     fn persistent_shutdown(&mut self, req: &mut Request) {
         let _ = req;
     }
+
+    /// A persistent connection given back to the engine's pool as the
+    /// request ends, after `persistent_shutdown`: what it holds in the
+    /// request's tables moved out of them, for the next request to take
+    /// up. php's `pdo_dbh_t` stands in `EG(persistent_list)` as it is,
+    /// which this default answers.
+    fn give_back(&mut self, req: &mut Request) {
+        let _ = req;
+    }
 }
 
 /// `pdo_stmt_methods`: a prepared statement.
