@@ -2316,6 +2316,10 @@ pub struct Request {
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
+    /// The unit opcache last served, `zend_accel_load_script`'s: one it
+    /// held or keeps in its file cache, compiled with
+    /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::declare_classes`]).
+    accel_loaded: Option<Arc<Unit>>,
     /// The name `setlocale()` last answered for each category it moved,
     /// by `<locale.h>` value, and php's `BG(ctype_string)`: the
     /// `LC_CTYPE` name while it is not `C` (revision 56).
@@ -2862,6 +2866,7 @@ impl Request {
             static_vars: HashMap::new(),
             beside: HashMap::new(),
             preloading: None,
+            accel_loaded: None,
             locale_names: Vec::new(),
             ctype_locale: None,
             #[cfg(debug_assertions)]
@@ -15961,21 +15966,45 @@ impl Request {
     /// P C Q
     /// ```
     ///
-    /// Under opcache they are tried once the unit's other classes are
-    /// declared, as `zend_accel_load_script` copies the cached file's class
-    /// table before the delayed early binding, so a parent written below
-    /// its child is there by then; what the link refuses names the
-    /// child's line, the one `zend_try_early_bind` compiles at
-    /// (GH-16508). Without it each is tried in its place, as php's own
-    /// compiler early binds:
+    /// A unit opcache served, held or kept in its file cache, tries them
+    /// once its other classes are declared, as `zend_accel_load_script`
+    /// copies the cached file's classes before the delayed early binding,
+    /// so a parent written below its child is there by then; what the
+    /// link refuses names the child's line, the one `zend_try_early_bind`
+    /// compiles at (GH-16508). Any other unit tries each in its place, as
+    /// php's own compiler early binds. Served by the binary, whose
+    /// program is a file opcache holds:
     ///
     /// ```php
     /// echo "never\n";
     /// class Test2 extends Test {}
     /// abstract class Test { abstract function foo(); }
     /// ```
-    /// ```expect exit=255 regime=jit-off
+    /// ```expect exit=255 regime=jit-off process
     /// Fatal error: Class Test2 contains 1 abstract method and must therefore be declared abstract or implement the remaining method (Test::foo) in %s on line 3
+    /// ```
+    ///
+    /// That is a file opcache compiles with `ZEND_COMPILE_DELAYED_BINDING`
+    /// and keeps: not one it keeps out, by `opcache.blacklist_filename` or
+    /// `opcache.max_file_size`, nor one written within
+    /// `opcache.file_update_protection`, which `accelerator_orig_compile_file`
+    /// compiles as php without opcache does. Served by the binary, since
+    /// the blacklist is read at startup:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/delayed' . getmypid(); @mkdir($dir);
+    /// file_put_contents("$dir/c.php", '<?php var_dump(class_exists("C", false)); class C extends P {} class P {}');
+    /// touch("$dir/c.php", time() - 10);
+    /// file_put_contents("$dir/list", "$dir/c.php\n");
+    /// foreach (["-d opcache.blacklist_filename=$dir/list", '', '-d opcache.file_update_protection=60'] as $ini) {
+    ///     echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 -d opcache.jit=off $ini $dir/c.php");
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
     /// ```
     ///
     /// A file compiled while the request already holds a class of its
@@ -16010,7 +16039,8 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let accelerated = self.accelerated();
+        let accelerated = self.preloading.is_some()
+            || (self.accel_loaded.take()).is_some_and(|loaded| Arc::ptr_eq(&loaded, unit));
         let mut tried = Vec::new();
         for (at, decl) in unit.classes.iter().enumerate() {
             // A saved script of the preload, whose classes the preload
@@ -16033,7 +16063,7 @@ impl Request {
                 }
                 if delayed.iter().any(|delayed| **delayed == *key.0) {
                     if accelerated {
-                        tried.push(at);
+                        tried.push((at, decl));
                     } else if !self.bind_at_load(unit, at, decl) {
                         return false;
                     }
@@ -16053,17 +16083,7 @@ impl Request {
         }
         tried
             .into_iter()
-            .filter_map(|at| Some((at, unit.classes.get(at)?)))
             .all(|(at, decl)| self.bind_at_load(unit, at, decl))
-    }
-
-    /// Whether opcache compiles this request's files, whose
-    /// `ZEND_COMPILE_DELAYED_BINDING` leaves a class to the load:
-    /// `accel_startup` on, `opcache.enable_cli` too on the command line.
-    fn accelerated(&self) -> bool {
-        self.ini_flag(b"opcache.enable")
-            && (!matches!(self.sapi_name(), "cli" | "phpdbg")
-                || self.ini_flag(b"opcache.enable_cli"))
     }
 
     /// One entry of `zend_accel_do_delayed_early_binding`: the class at
