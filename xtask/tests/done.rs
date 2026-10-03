@@ -1342,6 +1342,10 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         Some("branches: [main]"),
         "a push to main alone: {branches}"
     );
+    assert!(
+        on.lines().any(|l| l.trim() == "pull_request:"),
+        "a ticket's branch reaches CI as a pull request: {on}"
+    );
     let step = &text[text.find("- name: done").unwrap()..];
     let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
     assert!(
