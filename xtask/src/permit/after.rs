@@ -1,0 +1,523 @@
+//! The sensor over `harness.self`'s own files, beside the judge of the
+//! call's words (#625, #1516). `permit` reads a `Bash` call by its argv,
+//! and a write a program makes from inside an interpreter or a built
+//! binary never puts its path on the command line. So before an agent's
+//! `Bash` call `permit` takes the git blob id of every tracked file the
+//! rule scopes, in each checkout the call can reach, the hook's own and the
+//! one the call stands in, and keeps them in the store under the session
+//! and the hook's tool-use id ([`before`]). After the call `permit --after`
+//! takes the ids again ([`after`]): a file whose blob moved is put back
+//! from the blob kept before, and the call is a `harness.self` denial with
+//! the rule's text and the path, a permit reading like any other, and the
+//! `PostToolUse` hook's block, which the model reads.
+//!
+//! What it leaves alone, on purpose:
+//!
+//! - A call with no record of its own: no tool-use id, a record a build
+//!   older than this one never wrote, a record already taken. Nothing is
+//!   put back without the blob it was before, and stderr says so.
+//! - What the call wrote: it goes into the object database before the file
+//!   is put back, and the denial names its blob, so a person's edit made
+//!   in an editor while a long call ran is a `git cat-file` away, not gone.
+//!   A blob that cannot be kept leaves the file as the call left it.
+//! - An untracked file: `.claude/` holds Claude Code's own state beside
+//!   the tracked files (`scheduled_tasks.lock`, an approval written to
+//!   `settings.local.json`), written between the two hooks on a person's
+//!   act, and putting those back would undo the person.
+//! - What `steer` wrote: a call whose words run `xtask steer` is the
+//!   sanctioned writer, and a file it moved stands where steer's own
+//!   reading of that call says it wrote exactly that ([`steered`]).
+//!
+//! Each session keeps its records in a directory of its own, a file per
+//! call, so two sessions in one checkout, or two calls of one session side
+//! by side, never take each other's.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use super::INSTRUMENT;
+use super::argv;
+use super::call::Call;
+use crate::reading::{self, Number, Reading, Status, Store};
+use crate::{git, manifest, steer};
+
+/// The rule the sensor holds, whose scope and text it reads.
+const RULE: &str = "harness.self";
+
+/// How long a record no `--after` took is kept: the one a denied call
+/// leaves, since a call that never ran has no `PostToolUse`. No call runs
+/// this long; the `Bash` timeout's ceiling is two hours.
+const KEPT: Duration = Duration::from_hours(24);
+
+/// What one call's `before` took.
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    /// When, in seconds since 1970: steer's reading of the call is one
+    /// taken at or after it.
+    at: i64,
+    /// The call's command, whose words say whether it runs steer.
+    command: String,
+    checkouts: Vec<Guarded>,
+}
+
+/// One checkout's files under the rule, as the call found them.
+#[derive(Debug, Serialize, Deserialize)]
+struct Guarded {
+    checkout: PathBuf,
+    /// The rule's text in this checkout's manifest.
+    text: String,
+    /// Each tracked file in scope by its path, and its blob id on disk;
+    /// `None` for a tracked file that was not on disk.
+    blobs: BTreeMap<String, Option<String>>,
+}
+
+/// One file the call moved and the sensor put back.
+struct Denial {
+    checkout: PathBuf,
+    path: String,
+    said: String,
+}
+
+/// Before a `Bash` call: the blob id of every tracked file `harness.self`
+/// scopes, in each checkout the call reaches, kept under the session and
+/// the tool-use id. A call that carries neither is not recorded, and one
+/// already recorded keeps its first record, which both adapters take
+/// before the call runs.
+pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
+    if call.tool_name != "Bash" {
+        return Ok(());
+    }
+    let Some(file) = record_path(root, call) else {
+        return Ok(());
+    };
+    if file.exists() {
+        return Ok(());
+    }
+    prune(&records(root));
+    let mut checkouts = Vec::new();
+    for checkout in reached(root, call) {
+        if let Some(guarded) = guard(&checkout)? {
+            checkouts.push(guarded);
+        }
+    }
+    if checkouts.is_empty() {
+        return Ok(());
+    }
+    let record = Record {
+        at: reading::epoch_seconds(&reading::now()?)?,
+        command: call.command().unwrap_or_default().to_owned(),
+        checkouts,
+    };
+    let text = serde_json::to_string(&record).context("rendering the record")?;
+    reading::replace(&file, text.as_bytes())
+}
+
+/// `permit --after`, the `PostToolUse` hook's call: the call on stdin (or
+/// in `json`), its record taken again, each file whose blob moved put
+/// back and denied, the denials printed as the hook's block and recorded.
+/// The exit is 0 whatever it found; a call it cannot pair with a record
+/// is left as it stands, said on stderr.
+pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
+    let text = if let Some(json) = json {
+        json.to_owned()
+    } else {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .context("reading the tool call from stdin")?;
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let call = match Call::parse(&text) {
+        Ok(call) => call,
+        Err(err) => {
+            eprintln!("xtask permit --after: {err:#}; nothing is put back");
+            return Ok(());
+        }
+    };
+    if call.tool_name != "Bash" {
+        return Ok(());
+    }
+    let Some(file) = record_path(root, &call) else {
+        eprintln!(
+            "xtask permit --after: the call carries no session or tool-use id to pair it with \
+             what was taken before it, so nothing is put back"
+        );
+        return Ok(());
+    };
+    let Ok(kept) = fs::read_to_string(&file) else {
+        eprintln!(
+            "xtask permit --after: nothing was taken before this call ({}), so nothing is put back",
+            file.display()
+        );
+        return Ok(());
+    };
+    // The record is this call's alone and is spent whatever follows.
+    fs::remove_file(&file).ok();
+    let record: Record = serde_json::from_str(&kept)
+        .with_context(|| format!("reading the record at {}", file.display()))?;
+    let denials = put_back(&record);
+    if denials.is_empty() {
+        return Ok(());
+    }
+    let reason = denials
+        .iter()
+        .map(|d| format!("{RULE}: {}", d.said))
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!(
+        "{}",
+        serde_json::json!({
+            "decision": "block",
+            "reason": reason,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": reason},
+        })
+    );
+    if let Err(err) = record_denials(root, &call, &denials) {
+        eprintln!("xtask permit --after: the denial stands but was not recorded: {err:#}");
+    }
+    Ok(())
+}
+
+/// Every file of the record whose blob moved, put back unless steer wrote
+/// it, as the denials to say.
+fn put_back(record: &Record) -> Vec<Denial> {
+    let steering = runs_steer(&record.command);
+    let mut denials = Vec::new();
+    for guarded in &record.checkouts {
+        for (path, was) in &guarded.blobs {
+            let now = on_disk(&guarded.checkout.join(path));
+            if now == *was {
+                continue;
+            }
+            if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
+                continue;
+            }
+            let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
+            denials.push(Denial {
+                checkout: guarded.checkout.clone(),
+                path: path.clone(),
+                said: format!("{} {path}: {what}", guarded.text),
+            });
+        }
+    }
+    denials
+}
+
+/// One reading per denial, in the store of the checkout the file is in,
+/// stamped over the file as it was put back.
+fn record_denials(root: &Path, call: &Call, denials: &[Denial]) -> Result<()> {
+    for denial in denials {
+        let mut reading =
+            Reading::stamped_over(INSTRUMENT, RULE, &denial.checkout, Path::new(&denial.path))?;
+        RULE.clone_into(&mut reading.rule);
+        reading.status = Status::Fail;
+        reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), denial.said);
+        reading.session.clone_from(&call.session_id);
+        Store::of_workspace(&denial.checkout).record(&[reading])?;
+    }
+    Ok(())
+}
+
+/// Put `path` back as it was before the call, keeping what the call left
+/// first; what was done, in words for the denial.
+fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) -> String {
+    let target = checkout.join(path);
+    let kept = match now {
+        Some(_) => match hash_objects(checkout, &[path]) {
+            Ok(ids) => ids.into_iter().next(),
+            Err(err) => {
+                return format!(
+                    "the call changed it, and what it wrote could not be kept ({err:#}), so it \
+                     stands as the call left it; put it back by hand"
+                );
+            }
+        },
+        None => None,
+    };
+    let done = match was {
+        Some(id) => cat_blob(checkout, id).and_then(|bytes| {
+            let mode = fs::metadata(&target).map(|m| m.permissions()).ok();
+            reading::replace(&target, &bytes)?;
+            if let Some(mode) = mode {
+                fs::set_permissions(&target, mode)
+                    .with_context(|| format!("restoring the mode of {}", target.display()))?;
+            }
+            Ok(format!("put back as it stood before the call, blob {id}"))
+        }),
+        None => fs::remove_file(&target)
+            .with_context(|| format!("removing {}", target.display()))
+            .map(|()| "it was not on disk before the call and is removed again".to_owned()),
+    };
+    let done = done.unwrap_or_else(|err| format!("it could not be put back: {err:#}"));
+    match kept {
+        Some(id) => format!(
+            "the call wrote it, and it is {done}; what the call wrote is blob {id} \
+             (`git cat-file -p {id}`)"
+        ),
+        None => format!("the call removed it, and it is {done}"),
+    }
+}
+
+/// Whether the file stands as steer wrote it in this call: the call runs
+/// steer (asked by the caller), the file is one steer writes, and steer's
+/// reading of the file was taken since the record, passed, wrote, is
+/// stamped over the file as it stands now, and names the additions the
+/// file now carries over the content the record kept, every one. A write
+/// after steer's moves the stamp; a value written before it is an addition
+/// the reading does not name, or a change that is none, and the file is
+/// put back. What neither can see is a comment written before steer in the
+/// same call, which binds nothing.
+fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
+    let Some(was) = was else {
+        return false;
+    };
+    if !steer::STEERABLE.contains(&path) {
+        return false;
+    }
+    let Ok(Some(reading)) = Store::of_workspace(checkout).read(steer::INSTRUMENT, path) else {
+        return false;
+    };
+    let taken_since = reading::epoch_seconds(&reading.at).is_ok_and(|at| at >= since);
+    if reading.status != Status::Pass
+        || !taken_since
+        || reading.message.contains("dry run")
+        || on_disk(&checkout.join(path))
+            .is_none_or(|now| reading.tree() != git::file_hash(path, &now))
+    {
+        return false;
+    }
+    let Ok(before) = cat_blob(checkout, was).map(|b| String::from_utf8_lossy(&b).into_owned())
+    else {
+        return false;
+    };
+    let Ok(now) = fs::read_to_string(checkout.join(path)) else {
+        return false;
+    };
+    match steer::judge(&before, &now) {
+        Ok(steer::Verdict::Additive(added)) => {
+            !added.is_empty()
+                && reading.numbers.get("added") == Some(&Number::count(added.len()))
+                && reading.message.ends_with(&added.join(", "))
+        }
+        _ => false,
+    }
+}
+
+/// Whether one of the command's simple commands runs `xtask steer`:
+/// `cargo xtask steer`, a built `xtask` by path, `cargo run -p xtask --
+/// steer`.
+fn runs_steer(command: &str) -> bool {
+    argv::commands(command).iter().any(|argv| {
+        let words = argv.words();
+        words.iter().position(|w| w == "steer").is_some_and(|at| {
+            words[..at]
+                .iter()
+                .any(|w| w == "xtask" || w.ends_with("/xtask"))
+        })
+    })
+}
+
+/// The checkouts a call reaches: the hook's own and the one the call
+/// stands in, once each.
+fn reached(root: &Path, call: &Call) -> Vec<PathBuf> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut checkouts = vec![root.clone()];
+    let stands = call.checkout(&root);
+    if stands != root {
+        checkouts.push(stands);
+    }
+    checkouts
+}
+
+/// The rule's text and the blob of every tracked file it scopes in
+/// `checkout`; `None` where the manifest carries no such rule. A file
+/// whose blob the object database may not hold, one edited and not
+/// staged, is written into it, so the record can always put it back.
+fn guard(checkout: &Path) -> Result<Option<Guarded>> {
+    let Some((text, scope)) = rule_of(checkout)? else {
+        return Ok(None);
+    };
+    let mut args = vec!["ls-files".to_owned(), "-s".to_owned(), "-z".to_owned()];
+    args.push("--".to_owned());
+    args.extend(scope.iter().map(|s| format!(":(glob){s}")));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listing = git::git(checkout, &args, None)?;
+    let mut blobs = BTreeMap::new();
+    let mut unstaged = Vec::new();
+    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+        let (head, path) = entry
+            .split_once('\t')
+            .with_context(|| format!("git ls-files wrote {entry:?}"))?;
+        let [mode, staged, "0"] = head.split(' ').collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        if mode == "160000" {
+            continue;
+        }
+        let blob = on_disk(&checkout.join(path));
+        if blob.as_deref().is_some_and(|id| id != staged) {
+            unstaged.push(path.to_owned());
+        }
+        blobs.insert(path.to_owned(), blob);
+    }
+    if !unstaged.is_empty() {
+        let paths: Vec<&str> = unstaged.iter().map(String::as_str).collect();
+        hash_objects(checkout, &paths)?;
+    }
+    Ok(Some(Guarded {
+        checkout: checkout.to_path_buf(),
+        text,
+        blobs,
+    }))
+}
+
+/// `harness.self`'s text and scope in the manifest at `checkout`, read as
+/// plain TOML so a build older or newer than the manifest still finds them.
+fn rule_of(checkout: &Path) -> Result<Option<(String, Vec<String>)>> {
+    let path = checkout.join(manifest::FILE);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let table: toml::Table =
+        toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+    let rule = table
+        .get("rule")
+        .and_then(toml::Value::as_array)
+        .and_then(|rules| {
+            rules
+                .iter()
+                .find(|r| r.get("id").and_then(toml::Value::as_str) == Some(RULE))
+        });
+    let Some(rule) = rule else {
+        return Ok(None);
+    };
+    let scope: Vec<String> = match rule.get("scope") {
+        Some(toml::Value::String(one)) => vec![one.clone()],
+        Some(toml::Value::Array(many)) => many
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let text = rule
+        .get("text")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok((!scope.is_empty()).then_some((text, scope)))
+}
+
+/// The blob id of the file at `path` as it is on disk, `None` where there
+/// is no file.
+fn on_disk(path: &Path) -> Option<String> {
+    fs::read(path).ok().map(|bytes| git::blob_id(&bytes))
+}
+
+/// Where the records are kept, under the store of `root`.
+fn records(root: &Path) -> PathBuf {
+    Store::of_workspace(root)
+        .root()
+        .join("permit")
+        .join("before")
+}
+
+/// The record of one call: under its session, named by its tool-use id.
+/// `None` for a call without both, or with one that is not a plain name.
+fn record_path(root: &Path, call: &Call) -> Option<PathBuf> {
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    (plain(&call.session_id) && plain(&call.tool_use_id)).then(|| {
+        records(root)
+            .join(&call.session_id)
+            .join(format!("{}.json", call.tool_use_id))
+    })
+}
+
+/// Records older than [`KEPT`] removed, and a session's directory left
+/// empty; best effort, since a record left is one more file and no harm.
+fn prune(dir: &Path) {
+    let Ok(sessions) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for session in sessions.flatten() {
+        let Ok(calls) = fs::read_dir(session.path()) else {
+            continue;
+        };
+        for call in calls.flatten() {
+            let old = call
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|at| now.duration_since(at).ok())
+                .is_some_and(|age| age > KEPT);
+            if old {
+                fs::remove_file(call.path()).ok();
+            }
+        }
+        // Removes only a directory that is empty.
+        fs::remove_dir(session.path()).ok();
+    }
+}
+
+/// `git hash-object -w` over `paths` as they are on disk, unfiltered, so
+/// the ids are the ones [`git::blob_id`] takes and the objects are in the
+/// database; the ids, in order.
+fn hash_objects(checkout: &Path, paths: &[&str]) -> Result<Vec<String>> {
+    let mut stdin = paths.join("\n");
+    stdin.push('\n');
+    let ids = git::git(
+        checkout,
+        &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+        Some(&stdin),
+    )?;
+    Ok(ids.lines().map(str::to_owned).collect())
+}
+
+/// The bytes of the blob `id`, which need not be text.
+fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["cat-file", "blob", id])
+        .stdin(Stdio::null())
+        .output()
+        .context("running git cat-file")?;
+    if !out.status.success() {
+        bail!(
+            "git cat-file blob {id}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runs_steer;
+
+    #[test]
+    fn steer_is_read_from_the_argv_and_not_from_the_text() {
+        assert!(runs_steer("cargo xtask steer seams.toml --from p.toml"));
+        assert!(runs_steer(
+            "cd x && target/debug/xtask steer oracle.toml --from p"
+        ));
+        assert!(runs_steer(
+            "cargo run -q -p xtask -- steer seams.toml --from p"
+        ));
+        assert!(!runs_steer("echo 'cargo xtask steer' > seams.toml"));
+        assert!(!runs_steer("python3 steer.py"));
+        assert!(!runs_steer("grep steer xtask/src/steer.rs"));
+    }
+}

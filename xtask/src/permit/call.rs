@@ -24,6 +24,10 @@ pub struct Call {
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: String,
+    /// The hook's id for this one call, the same before it and after it:
+    /// what pairs `permit --after` with what `permit` took before the call.
+    #[serde(default)]
+    pub tool_use_id: String,
     /// What the call displaces, where the caller knows it and the file at
     /// the path is not it: the diff judge's, the tracked content at the
     /// base it measures since ([`Call::diff_of`]). The hook's JSON never
@@ -62,6 +66,7 @@ impl Call {
             },
             cwd: None,
             session_id: String::new(),
+            tool_use_id: String::new(),
             displaced: None,
         }
     }

@@ -138,6 +138,13 @@ pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
     Ok(listing_id(&listing))
 }
 
+/// [`tree_hash`] of a scope that is the one file `path`, from its blob id
+/// alone: what a reading stamped over that file carries, for content that
+/// is no longer on disk.
+pub(crate) fn file_hash(path: &str, blob: &str) -> String {
+    listing_id(&[(path.to_owned(), blob.to_owned())])
+}
+
 /// The index as a commit takes it (#1143): each tracked file's staged
 /// blob id by path, read once from `ls-files --stage`, under the
 /// `GIT_INDEX_FILE` git hands a hook when it keeps one of its own.

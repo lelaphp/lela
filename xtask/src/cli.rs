@@ -78,6 +78,11 @@ pub(crate) enum Command {
         /// records the notes, so a note is one reading and not two.
         #[arg(long, conflicts_with_all = ["bench", "diff"])]
         above_the_command_hook: bool,
+        /// The `PostToolUse` hook's call: hold the `Bash` call on stdin to
+        /// what was taken before it, put back each of `harness.self`'s files
+        /// it moved, other than what `steer` wrote, and deny it there.
+        #[arg(long, conflicts_with_all = ["bench", "diff", "above_the_command_hook"])]
+        after: bool,
         /// Judge the staged diff, each file as the `Write` of its staged
         /// content (pre-commit); exit 1 while any is denied.
         #[arg(long, conflicts_with = "bench")]

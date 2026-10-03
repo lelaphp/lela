@@ -110,6 +110,13 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             return Ok(());
         }
     };
+    // The blobs of harness.self's files before a Bash call, for the
+    // PostToolUse hook's `--after` to hold the call to. Taken before any
+    // build decides whether it judges, since the call may run whoever
+    // judges it; one that fails leaves the call to the judge alone.
+    if let Err(err) = super::after::before(root, &call) {
+        eprintln!("xtask permit: harness.self's files were not recorded before this call: {err:#}");
+    }
     // The workspace whose manifest judges the call, and the checkout it is
     // in, whose store takes the readings and whose manifest this build is
     // held to: the two differ for a fixture workspace, whose manifest no
