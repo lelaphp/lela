@@ -18,7 +18,7 @@
 //! **What a request holds.** `MyG(...)` is the request's [`State`]: the
 //! `report_mode`, the last connect error, the link
 //! counts, and the `p:` links it took out of the engine's pool or opened,
-//! held under php's `hash_key` until `rshutdown` gives them back. php
+//! held under php's `hash_key` until `deactivate` gives them back. php
 //! keeps them in `EG(persistent_list)`, one list per php-fpm process; here
 //! the list is a pool of the engine's (design §4.10, revision 55), lent to
 //! one request at a time, and the inactive links php counts per process
@@ -110,7 +110,7 @@ pub(crate) struct State {
     /// opened, open on a link or free for the next connect.
     pub(crate) plinks: Lent<Vec<u8>, link::Plinks>,
     /// The links `mysqli_init` made that connected without `p:`: their
-    /// stream is persistent as php opens it, so `rshutdown` frees them.
+    /// stream is persistent as php opens it, so `deactivate` frees them.
     pub(crate) unkeyed: Vec<PhpObject>,
 }
 
@@ -336,7 +336,7 @@ pub fn extension() -> Extension {
         })
         .request_state::<State>()
         .engine_state(|_| Pooled(Pool::new(POOLED)))
-        .rshutdown(link::rshutdown)
+        .deactivate(link::deactivate)
         .info(mysqli_info)
         .build("mysqli")
 }
