@@ -58,7 +58,21 @@ fn join(a: &[u8], b: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `php_zip_extract_file`.
+/// `php_zip_extract_file`: true past the read whatever it met, as php
+/// answers `n < 0` over `zip_fclose`'s `ZIP_ER_*` code, which is never
+/// negative.
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('extract-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+/// $z->addFromString('a', str_repeat('x', 195000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->addFromString('b', 'bee'); $z->close();
+/// $z->open('extract-witness.zip'); $h = fopen('extract-witness.zip', 'r+'); ftruncate($h, 5000); fclose($h);
+/// @mkdir('extract-witness'); var_dump(@$z->extractTo('extract-witness', 'a')); echo filesize('extract-witness/a'), "\n";
+/// unlink('extract-witness/a'); rmdir('extract-witness'); $z->close(); unlink('extract-witness.zip');
+/// ```
+/// ```expect
+/// bool(true)
+/// 4969
+/// ```
 fn extract_file(
     req: &mut Request,
     object: PhpObject,
@@ -161,7 +175,7 @@ fn extract_file(
     }
     req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))))?;
     stream.free(req);
-    Ok(zf.ok())
+    Ok(true)
 }
 
 /// `ZipArchive::extractTo`'s body past `ZIP_FROM_OBJECT`.

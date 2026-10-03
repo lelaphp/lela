@@ -1559,11 +1559,6 @@ impl Reader {
             .map_or(0, |(at, _)| i64::try_from(at).unwrap_or(i64::MAX))
     }
 
-    /// `zip_fclose`'s answer: whether no read failed.
-    pub(crate) fn ok(&self) -> bool {
-        self.error.is_none()
-    }
-
     /// Every byte to the end, and the error that stopped it short.
     pub(crate) fn read_to_end(&mut self) -> (Vec<u8>, Option<Status>) {
         let mut out = Vec::new();
