@@ -295,3 +295,12 @@ pub fn last_error(req: &Request) -> Option<(Vec<u8>, Vec<u8>, u32)> {
 pub fn set_argv(req: &mut Request, argv: Vec<Vec<u8>>) {
     let _ = req.build_argv(argv);
 }
+
+/// `stdin` the program's stdin in the request standing, `STDIN`,
+/// `STDOUT` and `STDERR` registered again over it, as phpdbg's `run
+/// <file` does before it executes (`phpdbg_register_file_handles`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:790-796`); a host that asked for no
+/// handles has nothing replaced.
+pub fn set_stdin(req: &mut Request, stdin: std::os::fd::OwnedFd) {
+    let _ = req.reregister_file_handles(stdin);
+}

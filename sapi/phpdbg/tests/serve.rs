@@ -1084,3 +1084,138 @@ fn a_yes_after_the_init_files_run_asks_again_only_where_nothing_followed_it() {
     );
     assert!(served.out.starts_with(&expected), "{}", served.out);
 }
+
+/// `run <file` in the init file opens the file as the program's stdin in
+/// the request the file runs in, `STDIN` registered again over it, and
+/// runs the program there, as php's `run` does with its `stdin_file`;
+/// under `-r` the startup run asks after it (the first two cycles of the
+/// pinned phpdbg's bytes for `phpdbg -qb -n` and `-qrb -n`).
+#[test]
+fn run_with_a_stdin_file_in_the_init_file_runs_inline() {
+    let program = "<?php\necho \"got \", fgets(STDIN);\n";
+    let looping = Setup {
+        files: &[("data.txt", "line one\nline two\n")],
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let init = Some("run <data.txt\nev 3\n");
+    let served = under_phpdbg_with(
+        "init-run-stdin",
+        &["-qb", "-n"],
+        init,
+        program,
+        "q\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!("{compiled}got line one\n");
+    let expected =
+        format!("{ran}{compiled}[Script ended normally]\n{ran}[Script ended normally]\n");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+    let served = under_phpdbg_with(
+        "init-run-stdin-r",
+        &["-qrb", "-n"],
+        init,
+        program,
+        "y\nq\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!("{compiled}got line one\n");
+    let ask = "Do you really want to restart execution? (type y or n): ";
+    let expected =
+        format!("{ran}{ask}{ran}[Script ended normally]\n{ran}[Script ended normally]\n");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}
+
+/// A yes to a `run` the init file reads after its run has php count a
+/// startup run and read on, so the startup run asks again after the
+/// file, where the last cycle kept no line to resubmit; where it kept
+/// one, the startup run resubmits it and asks nothing (the first two
+/// cycles of the pinned phpdbg's bytes for `phpdbg -qb -n` and `-qrb -n`).
+#[test]
+fn a_yes_to_a_second_run_in_the_init_file_reads_on() {
+    let program = "<?php\necho \"prog \", $argv[1] ?? \"none\", \"\\n\";\n";
+    let looping = Setup {
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let init = Some("run x\nprint exec\nrun y\n");
+    let ask = "Do you really want to restart execution? (type y or n): ";
+    for flags in [["-qb", "-n"], ["-qrb", "-n"]] {
+        let served = under_phpdbg_with("init-run-twice", &flags, init, program, "y\nq\n", &looping);
+        let compiled = format!("[Successful compilation of {}]\n", served.file);
+        let ran = format!(
+            "{compiled}prog x\n{compiled}[Context {} (7 ops)]\n{ask}",
+            served.file
+        );
+        let expected = format!("{ran}{ask}Please enter either y (yes) or n (no): {ran}");
+        assert!(served.out.starts_with(&expected), "{}", served.out);
+    }
+    let served = under_phpdbg_with(
+        "init-run-kept",
+        &["-qb", "-n"],
+        init,
+        program,
+        "n\ny\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!(
+        "{compiled}prog x\n{compiled}[Context {} (7 ops)]\n{ask}",
+        served.file
+    );
+    let ended = "[Script ended normally]\n";
+    let expected = format!("{ran}{compiled}{ended}{ran}{ended}");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}
+
+/// After `clean` over a context that does not compile, php's next cycle
+/// compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its
+/// log stands at a prompt that writes nothing: `ev`'s value is written,
+/// its newline not; nothing is logged there; a refusal there bails out
+/// of it, and so does `c` (the pinned phpdbg's bytes for `phpdbg -qb -n`
+/// and `-qrb -n`, past the counts `clean` writes).
+#[test]
+fn after_clean_the_refused_context_stands_at_an_invisible_prompt() {
+    let source = "<?php\nfunction (\n";
+    let ended = "[Script ended normally]\n";
+    for flags in [["-qb", "-n"], ["-qrb", "-n"]] {
+        for (name, stdin, after) in [
+            ("clean-ev", "clean\nev 1\nq\n", String::from("1")),
+            (
+                "clean-print",
+                "clean\nprint exec\nprint exec\nq\n",
+                String::from("prompt> prompt> "),
+            ),
+            (
+                "clean-c",
+                "clean\nev $x\nc\nev $x\nprint exec\nq\n",
+                String::new(),
+            ),
+        ] {
+            let served = under_phpdbg(name, &flags, None, source, stdin);
+            let log = format!(
+                "[PHP Parse error:  Unclosed '(' on line 2 in {} on line 3]\n\
+                 [Could not find information about included file...]\n",
+                served.file
+            );
+            let after = if after.is_empty() {
+                format!(
+                    "prompt> [PHP Warning:  Undefined variable $x in eval()'d code on line 1]\n\
+                     \nprompt> {log}prompt> "
+                )
+            } else {
+                after
+            };
+            let start = format!("{log}prompt> Cleaning Execution Environment\n");
+            assert!(served.out.starts_with(&start), "{}", served.out);
+            assert!(
+                served.out.ends_with(&format!("{ended}{after}")),
+                "{}",
+                served.out
+            );
+            assert_eq!(served.status, Some(255));
+        }
+    }
+}

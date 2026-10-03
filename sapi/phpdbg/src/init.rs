@@ -110,7 +110,8 @@ pub fn run(s: &mut Session, here: &mut Here<'_>) {
     }
     s.initializing = true;
     s.init_compiled = false;
-    s.read_after_run = false;
+    s.resubmit = std::mem::take(&mut s.read_after_run);
+    s.startup_run = false;
     let started = std::mem::replace(&mut s.started, s.init_ran);
     s.init_ran = true;
     let files = s.init_files.read();

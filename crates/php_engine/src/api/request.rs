@@ -19386,6 +19386,29 @@ impl Request {
         self.description.file_handles.is_some()
     }
 
+    /// `phpdbg_register_file_handles` once `run <file` has opened its
+    /// `stdin_file` (`Z/sapi/phpdbg/phpdbg.c:879-924`, `:1097`): the
+    /// host's fd 0 is `stdin` from here, and the three constants are
+    /// deleted, their streams with them, and registered again on streams
+    /// opened anew.
+    pub(crate) fn reregister_file_handles(
+        &mut self,
+        stdin: std::os::fd::OwnedFd,
+    ) -> Result<(), Thrown> {
+        let Some(handles) = &mut self.description.file_handles else {
+            return Ok(());
+        };
+        handles.set_stdin(stdin);
+        self.standard_closed[0] = false;
+        for name in [&b"STDIN"[..], b"STDOUT", b"STDERR"] {
+            if let Some(at) = self.constants.iter().position(|row| row.name == name) {
+                let row = self.constants.remove(at);
+                self.release(row.value);
+            }
+        }
+        self.register_file_handles()
+    }
+
     /// `fclose()` reaching one of the constants' streams: what is under
     /// it closed ([`crate::engine::FileHandles`]).
     pub(crate) fn close_standard(&mut self, closed: Resource) {
