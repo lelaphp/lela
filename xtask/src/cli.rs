@@ -743,8 +743,9 @@ pub enum Section {
     Oracle,
     /// The corpus CI checks out at the pin: the tag, the commit, the
     /// `.phpt` files the pin counts, the sparse patterns the subsets need
-    /// and the cache key they make. CI reads them here and writes no
-    /// directory of the corpus (#1713).
+    /// and the cache key they make, and where the targets under the pin
+    /// are kept. CI reads them here and writes no directory of the corpus
+    /// (#1713, #1733).
     Corpus,
 }
 

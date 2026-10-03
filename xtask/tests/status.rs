@@ -516,8 +516,9 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 
 /// The corpus CI checks out (#1713): the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
-/// key of the commit and a digest of the patterns, the same on every call;
-/// the Markdown carries the same facts, and nothing is written.
+/// key of the commit and a digest of the patterns, the same on every call,
+/// and where the targets under the pin are kept (#1733); the Markdown
+/// carries the same facts, and nothing is written.
 #[test]
 fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let root = scratch("corpus");
@@ -544,6 +545,12 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     assert!(
         digest.len() == 12 && digest.chars().all(|c| c.is_ascii_hexdigit()),
         "{key}"
+    );
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    assert_eq!(
+        corpus["targets"],
+        format!("target/phpt-runs/pin-{}-{}", pin.source.tag, pin.oracle.md5),
+        "the targets are kept under the pin's tag and the oracle's digest"
     );
     let (_, again, _) = status(&root, &["--section", "corpus", "--format", "json"]);
     assert_eq!(again, json, "the key is the patterns', not the call's");

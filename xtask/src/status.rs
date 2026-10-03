@@ -1379,6 +1379,9 @@ fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
 /// checkout holding fewer has narrowed, git's sparse patterns for the
 /// roots, and the cache key, the commit and a digest of the patterns, so a
 /// change to the roots never restores a checkout made by the old ones.
+/// Beside the checkout, `targets`: where a workspace keeps the targets
+/// under the pin, relative to its root, which CI keeps between runs so an
+/// engine's reading is held to its subset's target (#1733).
 fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
     let source = &pin.source;
     let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
@@ -1386,6 +1389,7 @@ fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
     digest.update(patterns.join("\n").as_bytes());
     let digest = digest.digest().to_string();
     let key = format!("php-src-{}-{}", source.commit, &digest[..12]);
+    let targets = phpt::target::kept_under(pin).display().to_string();
     Ok(match format {
         Format::Json => serde_json::to_string_pretty(&json!({
             "tag": source.tag,
@@ -1393,6 +1397,7 @@ fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
             "phpt_files": source.phpt_files,
             "patterns": patterns,
             "key": key,
+            "targets": targets,
         }))?,
         Format::Md => {
             let mut out = String::new();
@@ -1403,6 +1408,7 @@ fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
             let _ = writeln!(out, "| phpt_files | {} |", source.phpt_files);
             let _ = writeln!(out, "| patterns | {} |", cell(&patterns.join(" ")));
             let _ = writeln!(out, "| key | {key} |");
+            let _ = writeln!(out, "| targets | {} |", cell(&targets));
             out
         }
     })
