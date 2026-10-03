@@ -330,12 +330,12 @@ mod tests {
             ticket(5, "ext/json: e", &["ready-for-agent"], &[]),
             ticket(7, "php_heap: f", &["ready-for-agent", "track:other"], &[]),
         ];
-        let chains = Chains::of(open, "t-x", None, |number| {
-            (number == 5).then(|| "t-x/t5".to_owned())
+        let chains = Chains::of(open, "main", None, |number| {
+            (number == 5).then(|| "t5".to_owned())
         });
         assert_eq!(
             chains.render(),
-            "t-x: 5 open, 2 no open ticket blocks, 3 waiting on an open ticket, 1 a person's\n\
+            "main: 5 open, 2 no open ticket blocks, 3 waiting on an open ticket, 1 a person's\n\
              \n\
              #1 php_engine: a [ready]\n\
              \x20 #2 php_compile: b [ready, waits on #1]\n\
@@ -344,7 +344,7 @@ mod tests {
              \n\
              2 on their own: no open ticket shown blocks them and they block nothing shown\n\
              #4 xtask: d [no label, waits on #7]\n\
-             #5 ext/json: e [ready, on t-x/t5]\n"
+             #5 ext/json: e [ready, on t5]\n"
         );
     }
 

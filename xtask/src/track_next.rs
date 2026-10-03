@@ -1,19 +1,19 @@
-//! The ticket a track works next (#73; harness-design.md §4.5 item 7;
-//! CONTEXT.md, Track, Ticket): `xtask track next` answers it from the
-//! tracker's open tickets and the clone's branch records, as text or as
-//! one JSON object, and writes no reading. The frontier is the open
-//! tickets labelled `ready-for-agent` that no open ticket blocks, that
-//! carry no `track:<name>` label naming another track, and that no branch
-//! of this clone records; the next is the oldest of them, by number,
-//! which is the tracker's order of filing. An empty frontier is stated,
-//! "none", and is not an error, since a track with nothing to work has
-//! not failed.
+//! The ticket a track works next (#73; harness-design.md §5, A track's
+//! plan; CONTEXT.md, Track, Frontier, Ticket): `xtask track next` answers
+//! it from the tracker's open tickets and the repository's branch
+//! records, as text or as one JSON object, and writes no reading. The
+//! frontier is the open tickets labelled `ready-for-agent` that no open
+//! ticket blocks, that are the track's, and that no branch of the
+//! repository records; the next is the widest of them by the census, the
+//! number breaking a tie (#618). An empty frontier is stated, "none", and
+//! is not an error, since a track with nothing to work has not failed.
 //!
-//! A `track:<name>` label says only that track works the ticket: harness
-//! tickets carry `track:main`, and a ticket with no `track:` label is
-//! every track's. Both tracks work the same tickets independently, so
-//! "no branch yet" is the clone's own record, `branch.<name>.ticket`, the
-//! one [`track::branch_of_ticket`] reads, and never a look across tracks.
+//! A track is the tickets that carry its `track:<name>` label, and a
+//! ticket with no `track:` label is `main`'s alone (ADR-0009), so every
+//! ticket is some track's and two runs on different tracks never compete
+//! for an unlabelled one; [`tracks_of`] is the one statement of that.
+//! "No branch yet" is the repository's own record, `branch.<name>.ticket`,
+//! the one [`track::branch_of_ticket`] reads.
 //! The tracker is reached through [`Gh::open`], the ticket module's one
 //! list, and through nothing else here. The same list answers what the
 //! track waits on (#85): its open tickets labelled `for-a-person`, which
@@ -182,25 +182,23 @@ fn frontier<'a>(
         })
 }
 
-/// Whether `track` works the ticket: it carries no `track:` label, or one
-/// of the labels it carries names this track. `track chains` keeps the
-/// same tickets.
+/// Whether `track` works the ticket: it is one of the ticket's
+/// [`tracks_of`]. `track chains` and [`for_a_person`] keep the same
+/// tickets.
 pub(crate) fn is_tracks(ticket: &Open, track: &str) -> bool {
-    let mut named = ticket
-        .label_names()
-        .filter_map(|name| name.strip_prefix(TRACK_LABEL))
-        .peekable();
-    named.peek().is_none() || named.any(|name| name == track)
+    tracks_of(ticket.label_names()).contains(&track)
 }
 
-/// The track a ticket's labels put it on: the name of its `track:`
-/// label, the first where it carries several, and [`MAIN`] where it
-/// carries none (ADR-0009). A close holds a successor to it.
-pub(crate) fn track_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> &'a str {
-    labels
+/// The tracks a ticket's labels put it on: the name of each `track:`
+/// label it carries, and [`MAIN`] alone where it carries none (ADR-0009),
+/// so every ticket is some track's. The frontier, the chains, what a
+/// track waits on and a close's successors all read the rule here.
+pub(crate) fn tracks_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let named: Vec<&str> = labels
         .into_iter()
-        .find_map(|name| name.strip_prefix(TRACK_LABEL))
-        .unwrap_or(MAIN)
+        .filter_map(|name| name.strip_prefix(TRACK_LABEL))
+        .collect();
+    if named.is_empty() { vec![MAIN] } else { named }
 }
 
 /// `xtask track next`: the track named and the answer printed; no
@@ -223,8 +221,8 @@ mod tests {
     use super::{Weights, frontier, is_tracks};
     use crate::ticket::{BlockedBy, Label, Open};
 
-    /// An open, unblocked, ready ticket of every track, by number and
-    /// title: what the frontier orders.
+    /// An open, unblocked, ready ticket with no `track:` label, `main`'s,
+    /// by number and title: what the frontier orders.
     fn ready(number: u64, title: &str) -> Open {
         Open {
             number,
@@ -282,25 +280,25 @@ mod tests {
                 "php_compile: the global statement, BIND_GLOBAL binding a CV",
             ),
         ];
-        let found = frontier(&open, "t-x", &weights, |_| false).expect("a frontier");
+        let found = frontier(&open, "main", &weights, |_| false).expect("a frontier");
         assert_eq!(found.number, 3, "the widest, not the oldest");
 
         // With the widest already on a branch, the next widest follows.
         let found =
-            frontier(&open, "t-x", &weights, |ticket| ticket.number() == 3).expect("a frontier");
+            frontier(&open, "main", &weights, |ticket| ticket.number() == 3).expect("a frontier");
         assert_eq!(found.number, 4);
 
         // Weighed at nothing, the order is the filing order it always was.
-        let found = frontier(&open, "t-x", &Weights::default(), |_| false).expect("a frontier");
+        let found = frontier(&open, "main", &Weights::default(), |_| false).expect("a frontier");
         assert_eq!(found.number, 1);
     }
 
-    /// No `track:` label is every track's; one names its track alone; two
-    /// name two.
+    /// No `track:` label is `main`'s alone (ADR-0009, #1836); one names
+    /// its track alone; two name two.
     #[test]
     fn a_track_label_names_the_one_track_working_the_ticket() {
         assert!(is_tracks(&labelled(&["ready-for-agent"]), "main"));
-        assert!(is_tracks(&labelled(&["ready-for-agent"]), "t-x"));
+        assert!(!is_tracks(&labelled(&["ready-for-agent"]), "parity-hosts"));
         assert!(is_tracks(&labelled(&["track:main"]), "main"));
         assert!(!is_tracks(&labelled(&["track:main"]), "t-x"));
         assert!(is_tracks(&labelled(&["track:main", "track:t-x"]), "t-x"));

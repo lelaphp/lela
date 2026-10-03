@@ -177,7 +177,7 @@ use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
 use crate::track::{MAIN, Ticket, Track};
-use crate::track_next::{READY, TRACK_LABEL, track_of};
+use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -288,16 +288,16 @@ impl Successors {
         }
     }
 
-    /// Each successor exists at the tracker, is open, and carries the
-    /// label of `track`, the closed ticket's, where that is not `main`;
-    /// the first that is not is the refusal.
-    fn held(&self, gh: &Gh, root: &Path, track: &str) -> Result<()> {
+    /// Each successor exists at the tracker, is open, and shares one of
+    /// `tracks`, the closed ticket's, where those are not `main`'s; the
+    /// first that is not is the refusal.
+    fn held(&self, gh: &Gh, root: &Path, tracks: &[&str]) -> Result<()> {
         if let Successors::Tickets(tickets) = self
             && tickets.is_empty()
         {
             bail!("opens no ticket and asserts nothing; `--opens <n>` or `--opens-nothing`");
         }
-        let label = (track != MAIN).then(|| format!("{TRACK_LABEL}{track}"));
+        let held_to = (!tracks.contains(&MAIN)).then_some(tracks);
         for &successor in self.tickets() {
             let issue = gh
                 .view(root, successor)
@@ -305,9 +305,12 @@ impl Successors {
             if issue.state == State::Closed {
                 bail!("opens {successor}, which is closed; a successor is an open ticket");
             }
-            if let Some(label) = &label
-                && !issue.labels.iter().any(|carried| &carried.name == label)
+            if let Some(tracks) = held_to
+                && let carried = tracks_of(issue.labels.iter().map(|l| l.name.as_str()))
+                && !carried.iter().any(|track| tracks.contains(track))
             {
+                let track = tracks[0];
+                let label = format!("{TRACK_LABEL}{track}");
                 bail!(
                     "opens {successor}, which carries no `{label}` label; what a {track} ticket opens is that track's, and a ticket with no `{TRACK_LABEL}` label is {MAIN}'s: `gh issue edit {} --add-label {label}`",
                     successor.number()
@@ -1081,7 +1084,7 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// reading; its status is the exit.
 ///
 /// A close holds each successor to the closed ticket's own track, read
-/// from its `track:` label ([`track_of`]).
+/// from its `track:` labels ([`tracks_of`]).
 pub fn run(
     root: &Path,
     manifest: &Manifest,
@@ -1221,7 +1224,7 @@ fn close(
         .held(
             gh,
             root,
-            track_of(issue.labels.iter().map(|l| l.name.as_str())),
+            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
         )
         .and_then(|()| gh.blocking(root, ticket, &missing))
         .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))?;

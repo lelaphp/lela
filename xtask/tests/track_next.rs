@@ -111,8 +111,8 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
         (11, READY, &[12]),
         (10, READY, &[]),
     ]);
-    recorded.records("t-y/ten", 10);
-    let found = next(&recorded.repo(), &recorded.gh(), "t-y").unwrap();
+    recorded.records("t10", 10);
+    let found = next(&recorded.repo(), &recorded.gh(), "main").unwrap();
     assert_eq!(
         found,
         Some(Next {
@@ -122,7 +122,7 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
             labels: vec!["ready-for-agent".to_owned()],
             weight: 0,
         }),
-        "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no label, 14 is t-x's, 30 is main's; no census weighs any of them, so the order is the number's"
+        "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no ready label, 14 is t-x's; 20 and 30 are main's, and no census weighs any of them, so the order is the number's"
     );
     assert!(
         recorded.calls().is_empty(),
@@ -130,18 +130,17 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
         recorded.calls()
     );
 
-    let main = next(&recorded.repo(), &recorded.gh(), "main").unwrap();
+    let t_y = next(&recorded.repo(), &recorded.gh(), "t-y").unwrap();
     assert_eq!(
-        main.map(|n| n.number),
-        Some(20),
-        "an unlabelled ticket is main's too, and 20 is older than 30"
+        t_y, None,
+        "an unlabelled ticket is main's alone, and no ticket is t-y's"
     );
 
     let t_x = next(&recorded.repo(), &recorded.gh(), "t-x").unwrap();
     assert_eq!(
         t_x.map(|n| n.number),
         Some(14),
-        "t-x's own ticket is the oldest it may work"
+        "t-x's own ticket is the one it may work"
     );
 }
 
@@ -160,8 +159,40 @@ fn a_blocker_that_is_closed_does_not_block() {
         .to_string(),
     )
     .unwrap();
-    let found = next(&recorded.repo(), &recorded.gh(), "t-y").unwrap();
+    let found = next(&recorded.repo(), &recorded.gh(), "main").unwrap();
     assert_eq!(found.map(|n| n.number), Some(5));
+}
+
+/// A ticket with no `track:` label is `main`'s alone (ADR-0009, #1836):
+/// `track next --track parity-hosts` passes over the lower-numbered
+/// unlabelled ticket to name the one labelled `track:parity-hosts`, and
+/// `main`'s run names the unlabelled one, so the two never compete for it.
+#[test]
+fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
+    let recorded = Recorded::lay("unlabelled");
+    recorded.open(&[
+        (21, &["ready-for-agent", "track:parity-hosts"], &[]),
+        (20, READY, &[]),
+    ]);
+    let run = |track: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(recorded.repo())
+            .args(["track", "next", "--track", track])
+            .env("PATH", format!("{}:/usr/bin:/bin", recorded.dir.display()))
+            .env_remove("CARGO")
+            .env_remove("CARGO_MANIFEST_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(run("parity-hosts"), "#21 ticket 21\n");
+    assert_eq!(run("main"), "#20 ticket 20\n");
 }
 
 #[test]
