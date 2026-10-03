@@ -13,7 +13,9 @@ use php_ext::call::{
     autoload, call_array, internal_iterator, known_method, lookup_class, new_object,
 };
 use php_ext::decl::{Name, Type};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error, while_pending,
+};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
@@ -264,6 +266,19 @@ pub(crate) fn fetch_object(
 /// Cannot assign string to property D::$a of type int
 /// ```
 ///
+/// A later typed column that fails while that throwable is pending is
+/// left unwritten and raises nothing, as `zend_verify_property_type_error`
+/// returns under `EG(exception)`:
+///
+/// ```php
+/// class E { public int $a; public int $b; }
+/// $m = new mysqli('127.0.0.1', 'root', '', '', 3306);
+/// try { $m->query("SELECT 'x' AS a, 'y' AS b")->fetch_object('E'); } catch (TypeError $e) { echo $e->getMessage(), "|", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect mysql
+/// Cannot assign string to property E::$a of type int|
+/// ```
+///
 /// ```php
 /// class B { private $v = 'b'; }
 /// #[AllowDynamicProperties] class D extends B {}
@@ -292,7 +307,14 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
             table.set(req, Key::Str(name), value)?;
         } else {
             let scope = PropertyScope::Of(ClassRef(made.class()));
-            let Err(thrown) = made.write_prop_in(req, scope, name, value) else {
+            let wrote = match &pending {
+                Some(standing) => while_pending(req, standing, |req| {
+                    made.write_prop_in(req, scope, name, value)
+                })
+                .unwrap_or(Ok(())),
+                None => made.write_prop_in(req, scope, name, value),
+            };
+            let Err(thrown) = wrote else {
                 continue;
             };
             if thrown.exception().is_none() {
