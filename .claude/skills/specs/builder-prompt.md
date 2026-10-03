@@ -26,5 +26,5 @@ Standard: modern Rust and decisions that hold as the engine grows. State is a ty
 
 Leave pushing and merging to the coordinator. Close as the build skill closes, through `cargo xtask ticket close`, with what the spec didn't do filed. A `permit` denial is a `for-a-person` ticket, filed, and the work it stops waits on it.
 
-Spec: <anything the ticket doesn't say: its lane, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<lane>` label, as the build skill carries a ticket's label.
+Spec: <anything the ticket doesn't say: its track, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<track>` label, as the build skill carries a ticket's label.
 ```
