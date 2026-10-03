@@ -12,7 +12,7 @@
 //! the program runs at the interpreter's speed.
 
 use php_ext::abi::AfterLog;
-use php_sapi::tier::{self, Flow, FrameRef, Opcode, Request, Site, Stepped, Tier};
+use php_sapi::tier::{self, Flow, FrameRef, Hooked, Opcode, Request, Site, Stepped, Tier};
 
 use crate::bp::At;
 use crate::out;
@@ -24,6 +24,50 @@ use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind,
 pub struct Debugger;
 
 impl Tier for Debugger {
+    /// phpdbg's `zend_execute_ex = phpdbg_execute_ex`
+    /// (`Z/sapi/phpdbg/phpdbg.c:167`); `zend_execute_internal` it leaves
+    /// alone, so a native call is still `DO_ICALL` in its `print` and a
+    /// user call is `DO_FCALL`:
+    ///
+    /// ```php
+    /// function foo($b) { return strrev($b); }
+    /// foo('ab');
+    /// ```
+    /// ```request phpdbg
+    /// p foo
+    /// p e
+    /// q
+    /// ```
+    /// ```expect
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> [User Function foo (6 ops)]
+    /// prompt> [Context %SCRATCH%/witness.php (4 ops)]
+    /// prompt>
+    /// ```
+    /// ```stderr
+    /// foo:
+    ///      ; (lines=6, args=1, vars=1, tmps=1)
+    ///      ; %SCRATCH%/witness.php:2-2
+    /// L0002 0000 CV0($b) = RECV 1
+    /// L0002 0001 INIT_FCALL 1 96 string("strrev")
+    /// L0002 0002 SEND_VAR CV0($b) 1
+    /// L0002 0003 V1 = DO_ICALL
+    /// L0002 0004 RETURN V1
+    /// L0002 0005 RETURN null
+    ///
+    /// $_main:
+    ///      ; (lines=4, args=0, vars=0, tmps=1)
+    ///      ; %SCRATCH%/witness.php:1-3
+    /// L0003 0000 INIT_FCALL 1 112 string("foo")
+    /// L0003 0001 SEND_VAL string("ab") 1
+    /// L0003 0002 DO_FCALL
+    /// L0003 0003 RETURN int(1)
+    /// ```
+    const HOOKED: Hooked = Hooked {
+        user: true,
+        natives: false,
+    };
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         match site {
             Site::Entry => entered(req, frame),

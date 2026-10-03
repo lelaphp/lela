@@ -40,9 +40,17 @@ pub(crate) struct Kept {
 /// The build's identity, php's `zend_system_id`: the digest of the
 /// sources this engine was built from (`PHP_ENGINE_BUILD`, which
 /// `build.rs` makes), beside the name of every function and class the
-/// bundle declares, which a unit compiles against, in 32 hex digits.
-pub(crate) fn build_identity<'a>(names: impl Iterator<Item = &'a [u8]>) -> [u8; BUILD] {
-    let mut low = digest(env!("PHP_ENGINE_BUILD").as_bytes());
+/// bundle declares, which a unit compiles against, and the execution
+/// hooks the tier replaces, which pick its call opcodes, as
+/// `zend_finalize_system_id` digests `ZEND_HOOK_EXECUTE_EX` and
+/// `ZEND_HOOK_EXECUTE_INTERNAL` (`Z/Zend/zend_system_id.c:58-90`), so a
+/// file cache phpdbg wrote is never read by the CLI; in 32 hex digits.
+pub(crate) fn build_identity<'a>(
+    hooked: php_compile::Hooked,
+    names: impl Iterator<Item = &'a [u8]>,
+) -> [u8; BUILD] {
+    let hooks = u8::from(hooked.user) << 2 | u8::from(hooked.natives) << 3;
+    let mut low = mix(digest(env!("PHP_ENGINE_BUILD").as_bytes()), &[hooks]);
     let mut high = digest(b"php_engine");
     for name in names {
         low = mix(low, name);
@@ -240,5 +248,36 @@ mod tests {
             "a changed file is not read"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tier that replaces `zend_execute_ex`, as phpdbg's does.
+    struct Debugging;
+
+    impl crate::tier::Tier for Debugging {
+        fn safepoint(
+            _: &mut crate::tier::Request,
+            _: crate::tier::FrameRef,
+            _: crate::tier::Site,
+        ) -> crate::tier::Flow {
+            crate::tier::Flow::Continue
+        }
+
+        const HOOKED: php_compile::Hooked = php_compile::Hooked {
+            user: true,
+            natives: false,
+        };
+    }
+
+    /// #1709: the hooks a tier declares are part of the build's
+    /// identity, so phpdbg and the CLI never share a file cache's units.
+    #[test]
+    fn a_tier_that_replaces_a_hook_keeps_its_units_apart() {
+        let build = |engine: crate::Engine| engine.shared.units.build;
+        let hooked = build(crate::Engine::cli_builder().tier::<Debugging>().build());
+        assert_ne!(hooked, build(crate::Engine::cli_builder().build()));
+        assert_eq!(
+            hooked,
+            build(crate::Engine::cli_builder().tier::<Debugging>().build())
+        );
     }
 }

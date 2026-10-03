@@ -55,7 +55,7 @@ use php_heap::Zval;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::args::{Arg, Args, Callee, Plan};
-use super::{Emit, Where, used_stack};
+use super::{Emit, Fbc, Where, used_stack};
 use crate::CompileError;
 
 /// What `zend_compile_assert` makes of a call of `assert()`, by
@@ -134,7 +134,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.send_args(&plan, &arguments, Some(&callee))?;
-            self.call_op(Opcode::DoIcall, line, plan.extra_named)
+            self.call_op(self.get_call_op(Fbc::Native, false), line, plan.extra_named)
         } else {
             let pair = self.ns_func_name_literal(resolved)?;
             let plan = Plan::of(&arguments, None);
@@ -148,7 +148,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.send_args(&plan, &arguments, None)?;
-            self.call_op(Opcode::DoFcallByName, line, plan.extra_named)
+            self.call_op(self.get_call_op(Fbc::ByName, false), line, plan.extra_named)
         };
         let after = self.next();
         if let (Where::Returned(var), Some(opline)) = (served, self.oplines.get_mut(check as usize))

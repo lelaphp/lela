@@ -359,6 +359,17 @@ const ZVAL_SIZE: usize = 16;
 /// compiler never learns which (`Z/Zend/zend_compile.c`'s
 /// `zend_add_literal_string`, which calls `zend_new_interned_string`
 /// through whichever handler is installed).
+/// The callee `zend_get_call_op` is handed with its `init_op`
+/// ([`Emit::get_call_op`]): a native after `INIT_FCALL`, a user function
+/// or method the compiler knows, or none after `INIT_FCALL_BY_NAME` or
+/// `INIT_NS_FCALL_BY_NAME`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fbc {
+    Native,
+    User,
+    ByName,
+}
+
 pub(crate) struct Emit<'a> {
     /// The parse this compiles: the tree the walk reads (design §4.9),
     /// and the token stream and the source a name, a value and a doc
@@ -375,6 +386,8 @@ pub(crate) struct Emit<'a> {
     functions: &'a [FunctionDecl],
     /// The engine's classes, [`Options::classes`].
     known_classes: &'a [ClassDecl],
+    /// The hooks the host replaced, [`Options::hooked`].
+    hooked: crate::Hooked,
     /// The request's, [`Options::request_classes`].
     request_classes: crate::RequestClasses<'a>,
     /// `zend_flf_functions` over them, what a `FRAMELESS_ICALL_*`'s
@@ -1170,6 +1183,7 @@ pub(crate) fn unit(
         persistent: options.persistent,
         functions: options.functions,
         known_classes: options.classes,
+        hooked: options.hooked,
         request_classes: options.request_classes,
         frameless: frameless_table(options.functions),
         namespace: None,
@@ -15519,15 +15533,8 @@ impl Emit<'_> {
             op2: 1,
             ..Opline::default()
         });
-        Ok(self.call_op(
-            if known {
-                Opcode::DoIcall
-            } else {
-                Opcode::DoFcallByName
-            },
-            line,
-            false,
-        ))
+        let fbc = if known { Fbc::Native } else { Fbc::ByName };
+        Ok(self.call_op(self.get_call_op(fbc, false), line, false))
     }
 
     /// `zend_compile_call`: `CG(function_table)` read first
@@ -15598,11 +15605,7 @@ impl Emit<'_> {
                 let callee = Callee::of(parameters);
                 let plan = Plan::of(arguments, Some(&callee));
                 let stack = used_stack(plan.count, None);
-                let call_op = if flagged {
-                    Opcode::DoFcallByName
-                } else {
-                    Opcode::DoIcall
-                };
+                let call_op = self.get_call_op(Fbc::Native, flagged);
                 (callee, plan, stack, call_op)
             }
             None => match self.declared_function(&lowered) {
@@ -15610,11 +15613,8 @@ impl Emit<'_> {
                     let callee = Callee::of(&decl.parameters);
                     let plan = Plan::of(arguments, Some(&callee));
                     let stack = used_stack(plan.count, Some(body));
-                    let call_op = if attributes::deprecated_or_no_discard(&decl.attributes) {
-                        Opcode::DoFcallByName
-                    } else {
-                        Opcode::DoUcall
-                    };
+                    let flagged = attributes::deprecated_or_no_discard(&decl.attributes);
+                    let call_op = self.get_call_op(Fbc::User, flagged);
                     (callee, plan, stack, call_op)
                 }
                 None => return self.dynamic_call(&resolved, arguments),
@@ -15695,7 +15695,8 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.call_common(&plan, arguments, None, Opcode::DoFcallByName, line)
+        let call_op = self.get_call_op(Fbc::ByName, false);
+        self.call_common(&plan, arguments, None, call_op, line)
     }
 
     /// `zend_compile_dynamic_call` over a callee that is no constant
@@ -15944,8 +15945,9 @@ impl Emit<'_> {
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
         let (call_op, callee) = match known {
-            Some((Known::User { flagged: false }, callee)) => (Opcode::DoUcall, Some(callee)),
-            Some((Known::User { flagged: true }, callee)) => (Opcode::DoFcallByName, Some(callee)),
+            Some((Known::User { flagged }, callee)) => {
+                (self.get_call_op(Fbc::User, flagged), Some(callee))
+            }
             Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
             None => (Opcode::DoFcall, None),
         };
@@ -17271,7 +17273,7 @@ impl Emit<'_> {
     /// the count exactly; a call of more than three arguments has none.
     fn frameless_arity(&self, index: usize, count: usize) -> Option<u32> {
         let decl = self.functions.get(index)?;
-        if count > 3 {
+        if count > 3 || self.hooked.natives {
             return None;
         }
         let required = decl
@@ -17454,7 +17456,8 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        let returned = self.call_common(&plan, arguments, None, Opcode::DoFcallByName, line)?;
+        let call_op = self.get_call_op(Fbc::ByName, false);
+        let returned = self.call_common(&plan, arguments, None, call_op, line)?;
         if let Some((jmp_fl, index)) = branch
             && let Some(positional) = &positional
             && let Where::Returned(var) = returned
@@ -17570,6 +17573,23 @@ impl Emit<'_> {
         }
         self.send_args(plan, arguments, callee)?;
         Ok(self.call_op(opcode, line, plan.extra_named))
+    }
+
+    /// `zend_get_call_op` (`Z/Zend/zend_compile.c:3919-3949`): the
+    /// opcode that passes a hook by only where the hook it passes is
+    /// php's own ([`crate::Hooked`]), `DO_FCALL_BY_NAME` for a known
+    /// callee `flagged` `#[\Deprecated]` or `#[\NoDiscard]` where nothing
+    /// reads what it returns, and `DO_FCALL` for every other call.
+    pub(crate) fn get_call_op(&self, fbc: Fbc, flagged: bool) -> Opcode {
+        let hooked = self.hooked;
+        match fbc {
+            Fbc::Native if !hooked.natives && flagged => Opcode::DoFcallByName,
+            Fbc::Native if !hooked.natives => Opcode::DoIcall,
+            Fbc::User if !hooked.user && flagged => Opcode::DoFcallByName,
+            Fbc::User if !hooked.user => Opcode::DoUcall,
+            Fbc::ByName if hooked == crate::Hooked::NONE => Opcode::DoFcallByName,
+            Fbc::Native | Fbc::User | Fbc::ByName => Opcode::DoFcall,
+        }
     }
 
     /// The call op `zend_get_call_op` picked, with the `VAR` for what
@@ -18851,6 +18871,7 @@ mod tests {
             persistent: options.persistent,
             functions: options.functions,
             known_classes: options.classes,
+            hooked: options.hooked,
             request_classes: options.request_classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),

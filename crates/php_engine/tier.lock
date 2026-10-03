@@ -12,6 +12,7 @@ tier::Evaluated
 tier::Fatal
 tier::Flow
 tier::FrameRef
+tier::Hooked
 tier::Identity
 tier::Key
 tier::Named
