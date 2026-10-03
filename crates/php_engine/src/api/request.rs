@@ -1909,7 +1909,7 @@ pub struct Request {
     /// ini entries (`php_during_module_startup()`), held in the order
     /// raised rather than shown, on the one request the engine lays for
     /// that stage; every request it serves raises them again first.
-    startup: Option<Vec<(Level, String)>>,
+    startup: Option<Vec<(Level, Vec<u8>)>>,
     /// php's `EG(last_fatal_error_backtrace)`, rendered by
     /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
     /// fatal being raised under `fatal_error_backtraces`, cleared for
@@ -7212,12 +7212,16 @@ impl Request {
     /// are handed is one string of the request's, made once where the
     /// engine formatted the text, as `zend_error_va_list` makes it.
     fn note_message_in(&mut self, level: Level, raised: Message, file: &[u8], line: u32) -> bool {
-        let text = raised.text().into_owned();
-        let message = text.as_str();
         if let Some(held) = self.startup.as_mut() {
-            held.push((level, message.to_owned()));
+            let bytes = match raised {
+                Message::Text(text) => text.as_bytes().to_vec(),
+                Message::String(string) => string.as_bytes().to_vec(),
+            };
+            held.push((level, bytes));
             return false;
         }
+        let text = raised.text().into_owned();
+        let message = text.as_str();
         if self.recorded(level, message, file, line) {
             return false;
         }
@@ -7260,7 +7264,7 @@ impl Request {
             Message::String(string) => (string, false),
             // The memory limit refusing the message has rendered its
             // fatal, and the request is ending.
-            Message::Text(text) => match crate::api::raising::strpprintf(self, text) {
+            Message::Text(text) => match crate::api::raising::strpprintf(self, text.as_bytes()) {
                 Ok(string) => (string, true),
                 Err(_) => return false,
             },
@@ -7336,8 +7340,13 @@ impl Request {
         }
         let name = level_name(level);
         let trace = self.stack_trace_after_the_site();
+        // What is written is the message's string, its bytes as raised.
+        let said = |before: String, after: &str| -> Vec<u8> {
+            [before.as_bytes(), string.as_bytes(), after.as_bytes()].concat()
+        };
+        let site = format!(" in {named} on line {line}{trace}");
         if self.log_errors() {
-            let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
+            let text = said(format!("PHP {name}:  "), &site);
             // `spprintf(&log_buffer, …)`, freed once it is logged.
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
@@ -7353,7 +7362,7 @@ impl Request {
                 Level::Deprecated | Level::UserDeprecated => 6,
                 _ => 5,
             };
-            let logged = self.log_err(text.as_bytes(), priority);
+            let logged = self.log_err(&text, priority);
             self.heap.free_block(buffer);
             if logged && fatal_errors(level) {
                 // What follows a fatal in the host's log is still inside
@@ -7377,11 +7386,16 @@ impl Request {
             // `xmlrpc_error_number` as its code and the diagnostic as
             // its string, the message unescaped and no space after the
             // colon; neither string stands around it.
-            let text = format!(
-                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
-                self.xmlrpc_error_number()
+            let text = said(
+                format!(
+                    "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:",
+                    self.xmlrpc_error_number()
+                ),
+                &format!(
+                    "{site}</string></value></member></struct></value></fault></methodResponse>"
+                ),
             );
-            self.printed(text.as_bytes());
+            self.printed(&text);
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -7401,25 +7415,23 @@ impl Request {
                 self.printed(text.as_bytes());
                 self.heap.free_block(escaped);
             } else {
-                let text = format!(
-                    "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
+                let text = said(
+                    format!("{prepend}<br />\n<b>{name}</b>:  "),
+                    &format!(" in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"),
                 );
-                self.printed(text.as_bytes());
+                self.printed(&text);
             }
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
             // error stream and onto the body; and it carries neither
             // string around it.
-            let text = format!("{name}: {message} in {named} on line {line}{trace}\n");
-            self.write_stderr(text.as_bytes());
+            let text = said(format!("{name}: "), &format!("{site}\n"));
+            self.write_stderr(&text);
         } else {
-            let text = format!(
-                "{}\n{name}: {message} in {named} on line {line}{trace}\n{}",
-                self.ini_text(b"error_prepend_string"),
-                self.ini_text(b"error_append_string"),
-            );
-            self.printed(text.as_bytes());
+            let before = format!("{}\n{name}: ", self.ini_text(b"error_prepend_string"));
+            let after = format!("{site}\n{}", self.ini_text(b"error_append_string"));
+            self.printed(&said(before, &after));
         }
     }
 
@@ -7480,10 +7492,14 @@ impl Request {
     /// A diagnostic raised as the engine starts, at `Unknown` on line
     /// zero and displayed past the `php_output` layer
     /// ([`crate::api::raising::startup`]).
-    pub(crate) fn note_startup_error(&mut self, level: Level, message: &str) {
+    pub(crate) fn note_startup_error(&mut self, level: Level, message: &[u8]) {
+        let Ok(string) = crate::api::raising::strpprintf(self, message) else {
+            return;
+        };
         self.display_direct = true;
-        self.note_error_in(level, message, b"Unknown", 0);
+        self.note_message_in(level, Message::String(string), b"Unknown", 0);
         self.display_direct = false;
+        self.release(Value::string(string));
     }
 
     /// What `php_error_cb` writes after `on line N` for the fatal's trace:
@@ -15167,7 +15183,7 @@ impl Request {
     }
 
     /// Leave the startup: what was raised during it, in order.
-    pub(crate) fn end_startup(&mut self) -> Vec<(Level, String)> {
+    pub(crate) fn end_startup(&mut self) -> Vec<(Level, Vec<u8>)> {
         self.ini_stage = IniStage::Runtime;
         self.startup.take().unwrap_or_default()
     }
@@ -21418,12 +21434,42 @@ impl Request {
     /// string(1) "&"
     /// string(1) "&"
     /// ```
+    ///
+    /// `OnUpdateStringUnempty`'s entries (`Z/main/main.c:829-851`)
+    /// refuse the empty value too, at startup as at `ini_set`, and keep
+    /// what they held: `-d extension_dir=` leaves `PHP_EXTENSION_DIR`,
+    /// where an `extension=` line looks.
+    ///
+    /// ```php
+    /// var_dump(ini_set('include_path', ''), ini_get('include_path') !== '');
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=', '-d', 'variables_order=', '-d', 'extension=x', '-r', 'var_dump(ini_get("extension_dir") === PHP_EXTENSION_DIR, ini_get("variables_order"));'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// preg_match('/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m', $out, $m);
+    /// echo str_replace(PHP_EXTENSION_DIR, 'DIR', "$m[1]: $m[2], $m[3]\n"), substr($out, strpos($out, 'bool'));
+    /// ```
+    /// ```expect process
+    /// bool(false)
+    /// bool(true)
+    /// 0
+    /// PHP Startup: Unable to load dynamic library 'x': DIR/x, DIR/x.so
+    /// bool(true)
+    /// string(5) "EGPCS"
+    /// ```
     pub(crate) fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
         match name {
             // `OnSetPrecision` and `OnSetSerializePrecision`
             // (`Z/main/main.c:120-141`): nothing below -1.
             b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
-            b"arg_separator.output" | b"arg_separator.input" if value.is_empty() => {
+            b"arg_separator.output"
+            | b"arg_separator.input"
+            | b"extension_dir"
+            | b"include_path"
+            | b"variables_order"
+            | b"doc_root"
+            | b"sys_temp_dir"
+            | b"upload_tmp_dir"
+                if value.is_empty() =>
+            {
                 IniVerdict::Rejected
             }
             b"zend.exception_string_param_max_len"

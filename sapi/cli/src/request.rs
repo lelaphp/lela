@@ -364,7 +364,7 @@ pub fn info(engine: &Engine) -> i32 {
     0
 }
 
-/// `php_module_startup` as `main` runs it before `-v` and `-S`
+/// `php_module_startup` as `main` runs it before `-v`, `-m` and `-S`
 /// (`php_cli.c:1341`), which php serves with no request: what the
 /// startup raised is displayed at a request's first moment here, so an
 /// empty one under the host's `name` is served first, on `stdout`, and
