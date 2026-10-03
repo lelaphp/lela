@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::layout;
 use crate::oracle::Pin;
 use crate::phpt::Scope;
+use crate::track::Ticket;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -54,6 +55,10 @@ pub struct Manifest {
     /// and the file still lives somewhere; this table says where.
     #[serde(rename = "lock_home", default)]
     pub lock_homes: BTreeMap<String, String>,
+    /// `[parity]`: the suites parity does not count, each under the ruling
+    /// that put it there; empty where the file has no table.
+    #[serde(default)]
+    pub(crate) parity: Parity,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is.
     #[serde(skip)]
@@ -73,6 +78,56 @@ pub struct Telemetry {
     /// An instrument with readings and no failure this many days is a
     /// candidate for silent.
     pub silent_days: u64,
+}
+
+/// `[parity]`: the suites php builds that parity does not count (design
+/// §3, §12), each with the ruling that put it there; the reason is §12's
+/// prose, which names this table (#1739).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Parity {
+    #[serde(default)]
+    pub out: Vec<RuledOut>,
+}
+
+/// One entry of `[parity] out`: suites of the pinned corpus, relative to
+/// it, and the ticket whose ruling took them out, an issue's number and
+/// never its prose.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuledOut {
+    pub suites: Vec<PathBuf>,
+    pub ruling: Ticket,
+}
+
+impl Parity {
+    /// Refuse a suite ruled out that a `[[crate]]` row's subsets own,
+    /// naming both: a suite is measured or ruled out, never both. A suite
+    /// inside a row's subset is the row's, and so is a subset inside a
+    /// suite.
+    fn hold(&self, crates: &[Crate]) -> Result<()> {
+        for ruled in &self.out {
+            for suite in &ruled.suites {
+                let owned = crates.iter().find_map(|krate| {
+                    krate
+                        .subsets()
+                        .into_iter()
+                        .find(|subset| suite.starts_with(subset) || subset.starts_with(suite))
+                        .map(|subset| (krate, subset))
+                });
+                if let Some((krate, subset)) = owned {
+                    bail!(
+                        "[parity] out rules {} out under {}, and the [[crate]] row {} owns {} among its subsets; a suite parity does not count is no row's to measure",
+                        suite.display(),
+                        ruled.ruling,
+                        krate.name,
+                        subset.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
@@ -778,6 +833,7 @@ impl Manifest {
             rules: Vec::new(),
             weeks: Vec::new(),
             lock_homes: BTreeMap::new(),
+            parity: Parity::default(),
             pin: Pin::default(),
             root: PathBuf::new(),
         }
@@ -885,6 +941,7 @@ impl Manifest {
                 );
             }
         }
+        manifest.parity.hold(&manifest.crates)?;
         Ok(manifest)
     }
 
@@ -1041,3 +1098,6 @@ impl Manifest {
         None
     }
 }
+
+#[cfg(test)]
+mod tests;
