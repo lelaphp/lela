@@ -437,6 +437,10 @@ fn phpt_files_under(dir: &Path) -> u64 {
 #[test]
 fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
     if std::env::var_os(TREE_VARIABLE).is_none_or(|value| value.is_empty()) {
+        assert!(
+            !Promised::load().unwrap().holds(Promise::Tree),
+            "{PROMISE_VARIABLE} promised the tree and {TREE_VARIABLE} is unset"
+        );
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
@@ -508,8 +512,8 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
                 checks_out = true;
                 checked_out += 1;
                 assert!(
-                    line.contains("--stdin"),
-                    "{name}:{}: the patterns are read on stdin off the section: {line}",
+                    line.contains("--stdin") && line.contains(".patterns[]"),
+                    "{name}:{}: the patterns are the section's `.patterns[]`, read on stdin: {line}",
                     n + 1
                 );
             }

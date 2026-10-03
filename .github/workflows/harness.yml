@@ -109,10 +109,9 @@ jobs:
       # `[source].phpt_files` counts, so a checkout narrower than the
       # corpus names both numbers; the one step running both fails the
       # job there, before the suite, and the suite reads the same tree.
-      # The promise
-      # (#38): `oracle::PROMISE_VARIABLE`, read off the same section and
-      # set beside the tree's variable, lists what of the pin this
-      # runner has, so a test
+      # The promise (#38): `oracle::PROMISE_VARIABLE`, read off the same
+      # section and set beside the tree's variable, lists what of the pin
+      # this runner has, so a test
       # that would skip for an absent tree fails instead naming both
       # places it looked; a provisioning step that breaks turns the job
       # red rather than measuring less in silence. The tree alone is
@@ -125,9 +124,9 @@ jobs:
       # clone 9.6 s and the sparse checkout 2.4 s, 132 MB in the tree and
       # 31 MB under `.git`, 21414 `.phpt` files; with `--filter=blob:none`
       # the clone is 1.0 s and the checkout 13.3 s, so the plain shallow
-      # clone is the one taken. Every `ext/<name>` whole holds 21655, the
-      # pin's count; the runner's figures for it, cold and from cache, are
-      # read off the first two runs.
+      # clone is the one taken. The roots `xtask status --section corpus`
+      # names hold every `.phpt` the pin counts; the runner's figures for
+      # them, cold and from cache, are read off the first two runs.
       - name: the corpus the subsets need, named by the harness
         id: pin
         run: |
