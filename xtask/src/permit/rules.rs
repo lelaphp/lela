@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 use serde_json::{Value, json};
 
-use super::argv::commands;
+use super::argv::Line;
 use super::call::Call;
 use super::label;
 use super::region::region_body;
@@ -130,22 +130,27 @@ pub fn judged_at_the_call(rule: &Rule) -> bool {
 /// order.
 pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement> {
     let path = call.path(root);
+    let line = call.command().map(Line::read);
     let mut findings = Vec::new();
     if let Some(path) = &path {
         findings.extend(region_body(root, path, call));
     }
     for rule in &manifest.rules {
-        findings.extend(evaluate(manifest, root, rule, call, path.as_deref())?);
+        let finding = evaluate(manifest, root, rule, call, path.as_deref(), line.as_ref())?;
+        findings.extend(finding);
     }
     Ok(Judgement { findings })
 }
 
+/// One rule over the call, with the file it touches and the shell line it
+/// runs, each read once for every rule.
 fn evaluate(
     manifest: &Manifest,
     root: &Path,
     rule: &Rule,
     call: &Call,
     path: Option<&Path>,
+    line: Option<&Line>,
 ) -> Result<Option<Finding>> {
     if !rule.tool.is_empty() && !rule.tool.iter().any(|t| t == call.tool_name) {
         return Ok(None);
@@ -167,11 +172,9 @@ fn evaluate(
     let fired = if !p.describes_a_call() {
         return Ok(None);
     } else if let Some(denied) = &p.deny_argv {
-        call.command()
-            .is_some_and(|c| commands(c).iter().any(|a| a.denies(denied, &p.with)))
+        line.is_some_and(|l| l.commands().iter().any(|a| a.denies(denied, &p.with)))
     } else if let Some(separator) = &p.require_argv {
-        call.command()
-            .is_some_and(|c| commands(c).iter().any(|a| a.unbounded(separator, &p.with)))
+        line.is_some_and(|l| l.commands().iter().any(|a| a.unbounded(separator, &p.with)))
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
@@ -197,13 +200,15 @@ fn evaluate(
                 unless::captured(manifest, root, unless, &regex, subject, path)
             })
         };
-        // A shell line is the whole of what it would do, so the pattern is
-        // asked of it as it stands. A write is a change to a file, so the
-        // pattern is asked of what the change adds and not of what the
-        // file already carries (#510): a write that leaves every hit where
-        // it stood adds none and fires on nothing.
-        match call.command() {
-            Some(command) => unexcused(command) && !excused(command),
+        // A shell line is what it would run, so the pattern is asked of
+        // its text less the heredoc bodies it carries as text: what a
+        // command quotes is not what it runs (#1771, #1832). A write is a
+        // change to a file, so the pattern is asked of what the change
+        // adds and not of what the file already carries (#510): a write
+        // that leaves every hit where it stood adds none and fires on
+        // nothing.
+        match line {
+            Some(line) => unexcused(line.text()) && !excused(line.text()),
             // Text the call writes with no hit in it adds none whatever
             // the file holds, so the file is read only where there is a
             // hit to place.
@@ -234,14 +239,14 @@ fn evaluate(
     // `exempt_label` labels is one the rule does not judge ([`label`]).
     if fired
         && !rule.exempt_label.is_empty()
-        && let Some(line) = call.command()
-        && label::exempted(root, rule, &commands(line))
+        && let Some(line) = line
+        && label::exempted(root, rule, line.commands())
     {
         return Ok(None);
     }
     // A rule scoped by `where` judges a call only in the checkout it
     // names: the call's, moved by a leading `cd` ([`runs_in`]).
-    if fired && !rule.within.holds_in(&runs_in(root, call)) {
+    if fired && !rule.within.holds_in(&runs_in(root, line)) {
         return Ok(None);
     }
     Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
@@ -261,11 +266,9 @@ fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
 /// The directory a call runs in: its workspace, or the directory a shell
 /// line's leading `cd` moves to, which is how a session whose shell stands
 /// in one checkout runs a command in another.
-fn runs_in(root: &Path, call: &Call) -> std::path::PathBuf {
-    let first = call
-        .command()
-        .and_then(|line| commands(line).into_iter().next());
-    match first.as_ref().map(super::argv::Argv::words) {
+fn runs_in(root: &Path, line: Option<&Line>) -> std::path::PathBuf {
+    let first = line.and_then(|line| line.commands().first());
+    match first.map(super::argv::Argv::words) {
         Some([cd, dir]) if cd == "cd" => root.join(dir),
         _ => root.to_path_buf(),
     }

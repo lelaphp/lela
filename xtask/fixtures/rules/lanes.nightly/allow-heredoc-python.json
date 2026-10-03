@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('.github/workflows/dashboard.yml')\nt = p.read_text().replace('run: cargo xtask phpt --full || true', 'run: cargo xtask phpt --full')\np.write_text(t)\nEOF","description":"Rewrite the workflow's nightly line with a script on python's stdin"}}

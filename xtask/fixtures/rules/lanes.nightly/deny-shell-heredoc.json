@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"bash <<'EOF'\ncd xtask\ncargo xtask phpt --full || true\nEOF","description":"Run the whole corpus from a script on a shell's stdin"}}

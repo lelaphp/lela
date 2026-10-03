@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"bash <<'EOF'\ngit add -- xtask\ngit commit -n -m msg\nEOF","description":"Commit with -n from a script on a shell's stdin"}}

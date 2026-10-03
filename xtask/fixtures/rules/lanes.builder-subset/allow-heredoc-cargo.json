@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -F - -- xtask/src/phpt/mod.rs <<'EOF'\nxtask phpt: the census names its subset\n\nA builder runs its subset; the merge check runs\n    cargo xtask phpt --census\nover main.\nEOF","description":"Commit with a message whose body cites the merge check's command"}}
