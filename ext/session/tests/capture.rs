@@ -24,6 +24,7 @@ fn the_extension_is_loaded() {
 fn a_startup_deprecation_sends_no_header() {
     let engine = Engine::builder()
         .extensions(&[php_ext_session::extension()])
+        .ini("html_errors", "0")
         .ini("session.use_trans_sid", "1")
         .build();
     let served = engine.serve_capture(
@@ -45,6 +46,7 @@ fn a_startup_deprecation_sends_no_header() {
 fn the_startup_rules_meet_the_values_in_declaration_order() {
     let engine = Engine::builder()
         .extensions(&[php_ext_session::extension()])
+        .ini("html_errors", "0")
         .ini("session.sid_length", "40")
         .ini("session.use_trans_sid", "1")
         .ini("session.use_only_cookies", "0")
@@ -68,6 +70,7 @@ fn a_startup_upload_progress_freq_out_of_range_keeps_the_default() {
     ] {
         let engine = Engine::builder()
             .extensions(&[php_ext_session::extension()])
+            .ini("html_errors", "0")
             .ini("session.upload_progress.freq", value)
             .build();
         let served = engine.serve_capture(

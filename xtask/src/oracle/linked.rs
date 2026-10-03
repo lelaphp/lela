@@ -51,6 +51,16 @@ use php_bundle::test::{Capture, Entered};
 
 use super::{Observation, Program, Recipe, Regime, Scratch};
 
+/// The `php` binary's own layer under the line's entries: the CLI's
+/// `ini_defaults` and its `HARDCODED_INI`, which with no php.ini read
+/// between them come to what php's CLI reads before its `-d`s.
+pub(crate) fn cli_layer<'a>() -> impl Iterator<Item = (&'a str, &'a str)> {
+    let layer = php_sapi::ini::CLI_DEFAULTS
+        .iter()
+        .chain(&php_sapi::ini::CLI_HARDCODED);
+    layer.map(|&(name, value)| (name, value))
+}
+
 /// One snippet through the linked engine under `recipe`, and under
 /// `regime`'s ini after it where a run names one, answered as the
 /// fresh-process adapter answers it: the program written where that
@@ -84,14 +94,17 @@ fn run(
 ) -> Result<(Observation, Vec<Entered>)> {
     let source = format!("{}{snippet}", recipe.preamble);
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
-    // The recipe's entries first and the regime's after them, so an entry
-    // both name is the regime's, as the later `-d` is under the
-    // fresh-process adapter.
-    let ini: Vec<(&str, &str)> = recipe
-        .ini
-        .iter()
-        .chain(regime.into_iter().flat_map(|r| &r.ini))
-        .filter_map(|entry| entry.split_once('='))
+    // The CLI's layer first, the recipe's entries after it and the
+    // regime's last, so an entry both name is the regime's, as the later
+    // `-d` is under the fresh-process adapter.
+    let ini: Vec<(&str, &str)> = cli_layer()
+        .chain(
+            recipe
+                .ini
+                .iter()
+                .chain(regime.into_iter().flat_map(|r| &r.ini))
+                .filter_map(|entry| entry.split_once('=')),
+        )
         .collect();
     let started = Instant::now();
     // A fresh engine per snippet, which is the isolation a process gave

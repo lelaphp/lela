@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt, os};
-use php_sapi::ini::define;
+use php_sapi::ini::{Search, define};
 
 /// The program one request serves, as `do_cli` settles it: a file named
 /// on the line or after `-f`, the code after `-r`, served as
@@ -133,9 +133,8 @@ pub type HasShell = dyn Fn(&[(String, String)]) -> bool;
 /// The command line, read: the engine's switches and what is asked of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// `-n`: `php.ini` is not looked for. The engine reads no file yet, so
-    /// the switch is taken and changes nothing (design §11, row 15–21).
-    pub ini_ignore: bool,
+    /// `-c` and `-n`, which steer the search for php.ini.
+    pub ini_search: Search,
     /// Each `-d name=value` split at its first `=`, in the order given;
     /// a `-d name` is `name=1`, as `php_ini_builder_define` writes it.
     /// The value is the text the engine's builder writes as the define's
@@ -255,7 +254,7 @@ impl Options {
             .map(|word| word.as_encoded_bytes().to_vec())
             .collect();
         let mut options = Options {
-            ini_ignore: false,
+            ini_search: Search::default(),
             ini: Vec::new(),
             repeat: 1,
             interactive: false,
@@ -374,7 +373,11 @@ impl Options {
                 }
                 Ok(Taken::Switch(code, value)) => match code {
                     b'n' => {
-                        self.ini_ignore = true;
+                        self.ini_search.ignore = true;
+                        continue;
+                    }
+                    b'c' => {
+                        self.ini_search.path = value;
                         continue;
                     }
                     b'd' => {
@@ -727,7 +730,10 @@ mod tests {
         assert_eq!(
             options,
             Ok(Options {
-                ini_ignore: true,
+                ini_search: Search {
+                    path: None,
+                    ignore: true,
+                },
                 repeat: 1,
                 interactive: false,
                 ini: vec![

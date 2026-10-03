@@ -375,7 +375,7 @@ pub(crate) fn init(
     fpm: &mut Fpm,
     pool: usize,
     slot: usize,
-    ini: &[(String, String)],
+    ini: (&[(String, String)], &php_sapi::IniFiles),
     started: &str,
 ) -> Worker {
     let failed = |name: &str| -> ! {
@@ -476,8 +476,12 @@ fn truth(value: &[u8]) -> bool {
 /// The child's engine: the bundle, `-d`'s entries, and the pool's
 /// `php_value`s and `php_admin_value`s as `fpm_php_apply_defines` sets
 /// them, each one php does not know logged.
-fn build(ini: &[(String, String)], config: &PoolConfig, started: &str) -> Engine {
-    let mut builder = php_sapi::prepare(crate::builder(), ini);
+fn build(
+    (ini, files): (&[(String, String)], &php_sapi::IniFiles),
+    config: &PoolConfig,
+    started: &str,
+) -> Engine {
+    let mut builder = php_sapi::prepare(crate::builder(files), ini);
     for (name, value) in &config.php_values {
         builder = builder.host_ini(name, value, IniOrigin::Value);
     }
@@ -1108,7 +1112,11 @@ impl Worker {
         entries
     }
 
-    /// The request description of a request of the web.
+    /// The request description of a request of the web: its entries the
+    /// `PHP_VALUE`s kept, then the php.ini's `[HOST=]` table of its
+    /// `SERVER_NAME` and `[PATH=]` tables along its directory, which
+    /// `sapi_cgi_activate` sets ([`Engine::activated_ini`]), then its
+    /// `.user.ini` lines.
     fn describe(
         &mut self,
         env: &Environment,
@@ -1118,6 +1126,7 @@ impl Worker {
     ) -> RequestDescription {
         let mut ini = self.sticky.clone();
         if let Some(path) = &info.path_translated {
+            ini.extend(self.engine.activated_ini(env.get(b"SERVER_NAME"), path));
             ini.extend(
                 self.user_ini(path, env)
                     .into_iter()

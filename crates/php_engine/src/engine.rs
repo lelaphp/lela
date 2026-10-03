@@ -637,6 +637,10 @@ pub(crate) struct Shared {
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
+    /// Whether it holds a `[PATH=]` table and a `[HOST=]` table.
+    sections: [bool; 2],
+    /// The php.ini files read into it ([`EngineBuilder::ini_files`]).
+    pub(crate) ini_files: crate::api::request::IniFiles,
     /// Where every request of this engine appends the natives it
     /// entered, one line each, where a host asked for it
     /// ([`EngineBuilder::trace_natives_to`]).
@@ -1363,10 +1367,8 @@ impl Shared {
 /// the two the stack limit reads (`Shared::stack_limit`),
 /// `zend.enable_gc`, which turns the cycle collector on, and
 /// `fatal_error_backtraces`, php 8.5's, `On` by default
-/// (`Z/Zend/zend.c:263`), which a fatal's trace reads,
-/// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
-/// which is what the oracle answers with no `php.ini`. `max_execution_time`
-/// and `html_errors` are the two the CLI moves, from `30` and `1`.
+/// (`Z/Zend/zend.c:263`), which a fatal's trace reads; the CLI's
+/// `HARDCODED_INI` is its host's first `ini_entries`, not these.
 /// An entry php registers with no value, `NULL`, has `None`: `ini_get()`
 /// reads it as the empty string, while its `on_modify` is handed it
 /// apart from one set empty. `error_prepend_string` and
@@ -1406,7 +1408,7 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     // appends to and the permissions it creates one with.
     ("error_log", None),
     ("error_log_mode", Some("0644")),
-    ("html_errors", Some("0")),
+    ("html_errors", Some("1")),
     // `docref_root` and `docref_ext`, `PHP_INI_ALL`: where a function's
     // diagnostic under `html_errors` links to (`raising::origin`).
     ("docref_root", Some("")),
@@ -1424,7 +1426,7 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     ("max_memory_limit", Some("-1")),
     ("memory_limit", Some("128M")),
     ("report_memleaks", Some("1")),
-    ("max_execution_time", Some("0")),
+    ("max_execution_time", Some("30")),
     // `hard_timeout`, `PHP_INI_SYSTEM` (`Z/main/main.c:885`): the seconds
     // past a timeout the execution timer waits for the loop to take it
     // before it ends the process ([`crate::interrupt::Timer`]).
@@ -1509,10 +1511,7 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
     ("ignore_user_abort", Some("0")),
-    // `implicit_flush`, `Off` in `main.c` and `On` among the CLI's
-    // hardcoded entries (`Z/sapi/cli/php_cli.c:118`), which the web's
-    // hosts lay back.
-    ("implicit_flush", Some("1")),
+    ("implicit_flush", Some("0")),
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
     ("realpath_cache_size", Some("4096K")),
@@ -1585,16 +1584,19 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
     entries.push(b'\n');
 }
 
-/// `php_init_config` over the host's `ini_entries`
-/// (`Z/main/php_ini.c:718-722`): the text read by the one INI grammar
-/// ([`crate::ini_syntax`]) in the normal scanner, each entry into the
-/// configuration table by `php_ini_parser_cb`, in the order first set and
-/// the last value of a name winning. A syntax error stops the parse with
-/// the entries before it kept, and `ini_error` writes its line to the
-/// process's `stderr`, the string's file named `Unknown`.
+/// `php_init_config` (`Z/main/php_ini.c:409-723`): the host's
+/// `ini_defaults`, then the php.ini it found, its path set as
+/// `cfg_file_path`, then each scanned file, a file whose parse failed
+/// dropped from the list, then its `ini_entries`, each text read by the
+/// one INI grammar ([`crate::ini_syntax`]) in the normal scanner into the
+/// configuration table by `php_ini_parser_cb`, the last value of a name
+/// winning. A syntax error stops that text's parse with the entries
+/// before it kept, and `ini_error` writes its line to the process's
+/// `stderr`, naming the file, or `Unknown` for the entries.
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+    sections: [bool; 2],
     loads: Loads,
 }
 
@@ -1609,12 +1611,13 @@ struct Loads {
 
 /// One row of php's `configuration_hash`, what `cfg_get_entry` finds
 /// and `get_cfg_var()` answers: a string `name=value` set, or the array
-/// `name[]=value` and `name[offset]=value` lines built, whose values
-/// are strings (`php_ini_parser_cb`, `Z/main/php_ini.c:199-258`).
+/// `name[]=value` and `name[offset]=value` lines built, or a `[PATH=]`
+/// or `[HOST=]` section's table, which holds either in turn
+/// (`php_ini_parser_cb`, `Z/main/php_ini.c:199-305`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Configured {
     Str(Vec<u8>),
-    Array(Vec<(ConfiguredKey, Vec<u8>)>),
+    Array(Vec<(ConfiguredKey, Configured)>),
 }
 
 /// A key of such an array, as `zend_symtable_update` makes it: an
@@ -1637,22 +1640,40 @@ impl Configured {
 }
 
 impl Configuration {
-    fn read(entries: &[u8], constants: &[ConstDecl]) -> Configuration {
+    fn read(
+        defaults: &[(Vec<u8>, Vec<u8>)],
+        files: &mut crate::api::request::IniFiles,
+        entries: &[u8],
+        constants: &[ConstDecl],
+    ) -> Configuration {
+        let table = defaults
+            .iter()
+            .map(|(name, value)| (name.clone(), Configured::Str(value.clone())))
+            .collect();
         let mut startup = Startup {
             constants,
-            table: Vec::new(),
+            table,
             special: false,
-            diverted: false,
+            section: None,
+            stderr: String::new(),
+            sections: [false; 2],
             loads: Loads::default(),
         };
-        let stderr = match crate::ini_syntax::parse(entries, IniScanner::Normal, &mut startup) {
-            Ok(Ok(())) => String::new(),
-            Ok(Err((message, line))) => format!("PHP:  {message} in Unknown on line {line}\n"),
-            Err(never) => match never {},
-        };
+        if let Some(file) = &mut files.loaded {
+            startup.read(&std::mem::take(&mut file.bytes), &file.path);
+            startup.set(
+                b"cfg_file_path".to_vec(),
+                Configured::Str(file.path.clone()),
+            );
+        }
+        files
+            .scanned
+            .retain_mut(|file| startup.read(&std::mem::take(&mut file.bytes), &file.path));
+        startup.read(entries, b"Unknown");
         Configuration {
             table: startup.table,
-            stderr,
+            stderr: startup.stderr,
+            sections: startup.sections,
             loads: startup.loads,
         }
     }
@@ -1675,9 +1696,13 @@ struct Startup<'c> {
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
     special: bool,
-    /// `active_ini_hash` is such a section's array, which a CLI never
-    /// reads, so the entries after it reach no directive.
-    diverted: bool,
+    /// `active_ini_hash`: the key of the `[PATH=]` or `[HOST=]` table the
+    /// entries go to, which a CGI applies per request and a CLI never.
+    section: Option<Vec<u8>>,
+    /// What `ini_error` wrote.
+    stderr: String,
+    /// `has_per_dir_config` and `has_per_host_config`.
+    sections: [bool; 2],
     loads: Loads,
 }
 
@@ -1763,6 +1788,29 @@ impl crate::ini_syntax::Host for Startup<'_> {
 }
 
 impl Startup<'_> {
+    /// `zend_parse_ini_file` or `zend_parse_ini_string` over one text,
+    /// after `RESET_ACTIVE_INI_HASH`: whether it parsed.
+    fn read(&mut self, text: &[u8], file: &[u8]) -> bool {
+        (self.special, self.section) = (false, None);
+        match crate::ini_syntax::parse(text, IniScanner::Normal, self) {
+            Ok(Ok(())) => true,
+            Ok(Err((message, line))) => {
+                let file = String::from_utf8_lossy(file);
+                let _ = writeln!(self.stderr, "PHP:  {message} in {file} on line {line}");
+                false
+            }
+            Err(never) => match never {},
+        }
+    }
+
+    /// `zend_hash_update` of the table.
+    fn set(&mut self, name: Vec<u8>, value: Configured) {
+        match self.table.iter_mut().find(|(n, _)| *n == name) {
+            Some(entry) => entry.1 = value,
+            None => self.table.push((name, value)),
+        }
+    }
+
     /// `php_ini_parser_cb` over one statement of the startup entries.
     fn entry(&mut self, event: IniEvent) {
         match event {
@@ -1773,8 +1821,28 @@ impl Startup<'_> {
                     .find(|prefix| name.len() >= 4 && name[..4].eq_ignore_ascii_case(prefix))
                     .map(|_| &name[4..]);
                 self.special = key.is_some();
-                if key.is_some_and(|key| !key.is_empty()) {
-                    self.diverted = true;
+                if key.is_some() {
+                    self.sections[usize::from(name[..4].eq_ignore_ascii_case(b"HOST"))] = true;
+                }
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    let mut key = key.to_vec();
+                    if name[..4].eq_ignore_ascii_case(b"HOST") {
+                        key.make_ascii_lowercase();
+                    }
+                    while key.last().is_some_and(|b| matches!(b, b'/' | b'\\')) {
+                        key.pop();
+                    }
+                    let lead = key.iter().take_while(|b| matches!(b, b'=' | b' ' | b'\t'));
+                    let key = key[lead.count()..].to_vec();
+                    match self.table.iter().find(|(n, _)| *n == key) {
+                        Some((_, Configured::Array(_))) => self.section = Some(key),
+                        Some(_) => {}
+                        None => {
+                            self.table
+                                .push((key.clone(), Configured::Array(Vec::new())));
+                            self.section = Some(key);
+                        }
+                    }
                 }
             }
             IniEvent::Entry(label, Some(value)) => {
@@ -1789,38 +1857,27 @@ impl Startup<'_> {
                     };
                     return list.push(ini_text(&value));
                 }
-                if self.diverted {
+                let value = ini_text(&value);
+                if let Some(rows) = self.section_rows() {
+                    let key = configured_key(&label);
+                    match rows.iter_mut().find(|(k, _)| *k == key) {
+                        Some(row) => row.1 = Configured::Str(value),
+                        None => rows.push((key, Configured::Str(value))),
+                    }
                     return;
                 }
-                let value = Configured::Str(ini_text(&value));
-                match self.table.iter_mut().find(|(n, _)| *n == label) {
-                    Some(entry) => entry.1 = value,
-                    None => self.table.push((label, value)),
-                }
+                self.set(label, Configured::Str(value));
             }
-            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label,
-            // made where the label holds none, the value placed at the
-            // offset or appended where the offset is empty.
+            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label in
+            // the active table, a section's where one is active, made where
+            // the label holds none, the value placed at the offset or
+            // appended where the offset is empty.
             IniEvent::PopEntry(label, value, offset) => {
-                if self.diverted {
-                    return;
-                }
                 let label = ini_text(&label);
                 let (value, offset) = (ini_text(&value), ini_text(&offset));
-                let at = self
-                    .table
-                    .iter()
-                    .position(|(n, _)| *n == label)
-                    .unwrap_or_else(|| {
-                        self.table.push((label, Configured::Array(Vec::new())));
-                        self.table.len() - 1
-                    });
-                let entry = &mut self.table[at].1;
-                if !matches!(entry, Configured::Array(_)) {
-                    *entry = Configured::Array(Vec::new());
-                }
-                if let Configured::Array(rows) = entry {
-                    configured_insert(rows, &offset, value);
+                match self.section_rows() {
+                    Some(rows) => popped(rows, configured_key(&label), &offset, value),
+                    None => popped(&mut self.table, label, &offset, value),
                 }
             }
             // A bare label sets nothing.
@@ -1829,9 +1886,46 @@ impl Startup<'_> {
     }
 }
 
+impl Startup<'_> {
+    /// The rows of the `[PATH=]` or `[HOST=]` table that is active.
+    fn section_rows(&mut self) -> Option<&mut Vec<(ConfiguredKey, Configured)>> {
+        let section = self.section.as_ref()?;
+        match self.table.iter_mut().find(|(n, _)| n == section) {
+            Some((_, Configured::Array(rows))) => Some(rows),
+            _ => None,
+        }
+    }
+}
+
+/// The array under `label` in `table`, made where it holds none, and
+/// `value` inserted into it at `offset`.
+fn popped<K: PartialEq>(table: &mut Vec<(K, Configured)>, label: K, offset: &[u8], value: Vec<u8>) {
+    let at = table.iter().position(|(n, _)| *n == label);
+    let at = at.unwrap_or(table.len());
+    if at == table.len() {
+        table.push((label, Configured::Array(Vec::new())));
+    }
+    let entry = &mut table[at].1;
+    if !matches!(entry, Configured::Array(_)) {
+        *entry = Configured::Array(Vec::new());
+    }
+    if let Configured::Array(rows) = entry {
+        configured_insert(rows, offset, value);
+    }
+}
+
+/// A key as `zend_symtable_update` makes it.
+fn configured_key(offset: &[u8]) -> ConfiguredKey {
+    match canonical_integer(offset) {
+        Some(n) => ConfiguredKey::Index(n),
+        None => ConfiguredKey::Name(offset.to_vec()),
+    }
+}
+
 /// `zend_symtable_update` for a non-empty offset, else
 /// `zend_hash_next_index_insert`, over one array of the table.
-fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], value: Vec<u8>) {
+fn configured_insert(rows: &mut Vec<(ConfiguredKey, Configured)>, offset: &[u8], value: Vec<u8>) {
+    let value = Configured::Str(value);
     let key = if offset.is_empty() {
         let next = rows
             .iter()
@@ -1844,10 +1938,7 @@ fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], va
             .max(0);
         ConfiguredKey::Index(next)
     } else {
-        match canonical_integer(offset) {
-            Some(n) => ConfiguredKey::Index(n),
-            None => ConfiguredKey::Name(offset.to_vec()),
-        }
+        configured_key(offset)
     };
     match rows.iter_mut().find(|(k, _)| *k == key) {
         Some(row) => row.1 = value,
@@ -2250,6 +2341,8 @@ fn intercept(
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
+    ini_defaults: Vec<(Vec<u8>, Vec<u8>)>,
+    ini_files: crate::api::request::IniFiles,
     ini_entries: Vec<u8>,
     entry: Loop,
     reenter: Loop,
@@ -2260,6 +2353,7 @@ pub struct EngineBuilder {
     additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
+    shebang_while: Option<&'static str>,
     cli_shell: bool,
     configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
@@ -2327,6 +2421,24 @@ impl EngineBuilder {
         self
     }
 
+    /// One of `sapi_module.ini_defaults`, set in the configuration table
+    /// before any php.ini is read, so a file's value of `name` wins over it.
+    #[must_use]
+    pub fn ini_default(mut self, name: &str, value: &str) -> EngineBuilder {
+        let row = (name.as_bytes().to_vec(), value.as_bytes().to_vec());
+        self.ini_defaults.push(row);
+        self
+    }
+
+    /// The php.ini files a host's search found, read after the defaults
+    /// and before the `ini_entries` as `php_init_config` reads them; a
+    /// builder handed none reads no file, as under `-n`.
+    #[must_use]
+    pub fn ini_files(mut self, files: crate::api::request::IniFiles) -> EngineBuilder {
+        self.ini_files = files;
+        self
+    }
+
     /// `sapi_module.name` as `php_module_startup` finds it: the name the
     /// request laid for startup carries, which an entry's `on_modify`
     /// reads as opcache's does; empty until a host names it.
@@ -2380,6 +2492,16 @@ impl EngineBuilder {
     #[must_use]
     pub fn skip_shebang(mut self) -> EngineBuilder {
         self.shebang = php_compile::Shebang::Skipped;
+        self
+    }
+
+    /// [`EngineBuilder::skip_shebang`] where the entry `name` reads on once
+    /// startup has read the ini, as php-cgi sets `CG(skip_shebang)` from
+    /// `cgi.check_shebang_line` after `php_module_startup`
+    /// (`Z/sapi/cgi/cgi_main.c:2523`).
+    #[must_use]
+    pub fn skip_shebang_while(mut self, name: &'static str) -> EngineBuilder {
+        self.shebang_while = Some(name);
         self
     }
 
@@ -2455,7 +2577,13 @@ impl EngineBuilder {
             }
         }
         let core = crate::core::extension();
-        let configuration = Configuration::read(&self.ini_entries, &core.constants);
+        let mut ini_files = self.ini_files;
+        let configuration = Configuration::read(
+            &self.ini_defaults,
+            &mut ini_files,
+            &self.ini_entries,
+            &core.constants,
+        );
         // An entry with an `on_modify` keeps its default until the
         // handler has taken the value the host set ([`Engine::register_ini`]).
         let mut held = Vec::new();
@@ -2479,6 +2607,16 @@ impl EngineBuilder {
             ini.push((name, Some(value)));
         }
         let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
+        let on = |name: &str| {
+            ini.iter()
+                .find(|(n, _)| n.as_slice() == name.as_bytes())
+                .and_then(|(_, value)| value.as_deref())
+                .is_some_and(Request::ini_parse_bool)
+        };
+        let shebang = match self.shebang_while {
+            Some(name) if on(name) => php_compile::Shebang::Skipped,
+            _ => self.shebang,
+        };
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
             function_table(&core, &extensions, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
@@ -2547,12 +2685,14 @@ impl EngineBuilder {
                 constant_values,
                 sapi_names,
                 build_defs: BuildDefs::of(self.configure),
-                shebang: self.shebang,
+                shebang,
                 shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
                 configuration: configuration.table,
+                sections: configuration.sections,
+                ini_files,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
                 entry: self.entry,
@@ -2868,11 +3008,31 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// A builder under the CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`),
+    /// for the tests that hold what php's CLI writes.
+    #[cfg(test)]
+    pub(crate) fn cli_builder() -> EngineBuilder {
+        let hardcoded = [
+            ("html_errors", "0"),
+            ("implicit_flush", "1"),
+            ("output_buffering", "0"),
+            ("max_execution_time", "0"),
+            ("max_input_time", "-1"),
+        ];
+        hardcoded
+            .into_iter()
+            .fold(Engine::builder(), |builder, (name, value)| {
+                builder.ini(name, value)
+            })
+    }
+
     /// A builder with no extensions, `Nop` as the tier and the core ini.
     #[must_use]
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             extensions: Vec::new(),
+            ini_defaults: Vec::new(),
+            ini_files: crate::api::request::IniFiles::default(),
             ini_entries: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,
@@ -2883,6 +3043,7 @@ impl Engine {
             additional_functions: Vec::new(),
             host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
+            shebang_while: None,
             cli_shell: false,
             configure: &[],
             #[cfg(feature = "witness-trace")]
@@ -3032,6 +3193,62 @@ impl Engine {
     #[must_use]
     pub fn has_shell(&self) -> bool {
         self.shared.shell.is_some()
+    }
+
+    /// `php_ini_activate_per_host_config` for `host`, lowered as a CGI's
+    /// `SERVER_NAME` is, then `php_ini_activate_per_dir_config` along each
+    /// directory prefix of `path_translated`'s directory
+    /// (`Z/main/php_ini.c:815-875`): each `[HOST=]` and `[PATH=]` table's
+    /// strings, which `php_ini_activate_config` sets under `PHP_INI_SYSTEM`
+    /// at `PHP_INI_STAGE_ACTIVATE` and so locks as an admin value is
+    /// locked. A `name[]=` array in such a table, which php hands
+    /// `zend_alter_ini_entry_ex` as the string it is not, is passed over.
+    #[must_use]
+    pub fn activated_ini(
+        &self,
+        host: Option<&[u8]>,
+        path_translated: &[u8],
+    ) -> Vec<(Vec<u8>, Vec<u8>, IniOrigin)> {
+        let [per_dir, per_host] = self.shared.sections;
+        let mut tables = Vec::new();
+        if let Some(host) = host.filter(|host| per_host && !host.is_empty()) {
+            tables.push(host.to_ascii_lowercase());
+        }
+        // `zend_dirname`, and the slash `sapi_cgi_activate` puts after it.
+        let mut dir = path_translated;
+        while dir.len() > 1 && dir.ends_with(b"/") {
+            dir = &dir[..dir.len() - 1];
+        }
+        dir = match dir.iter().rposition(|b| *b == b'/') {
+            Some(at) => match dir[..at].iter().rposition(|b| *b != b'/') {
+                Some(end) => &dir[..=end],
+                None => b"/",
+            },
+            None => b".",
+        };
+        let path = [dir, b"/"].concat();
+        if per_dir && path.len() <= crate::virtual_cwd::MAXPATHLEN {
+            for (at, byte) in path.iter().enumerate().skip(1) {
+                if *byte == b'/' {
+                    tables.push(path[..at].to_vec());
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        for table in tables {
+            if let Some(Configured::Array(rows)) = self.shared.configured(&table) {
+                for (key, value) in rows {
+                    let name = match key {
+                        ConfiguredKey::Name(name) => name.clone(),
+                        ConfiguredKey::Index(n) => n.to_string().into_bytes(),
+                    };
+                    if let Configured::Str(value) = value {
+                        entries.push((name, value.clone(), IniOrigin::Admin));
+                    }
+                }
+            }
+        }
+        entries
     }
 
     /// `ini_get()` outside any request: the value each request starts
@@ -4240,7 +4457,7 @@ mod tests {
     /// the line is freed (#289).
     #[test]
     fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut web = crate::test::Capture::default();
         engine.serve(
             RequestDescription {
@@ -4271,7 +4488,7 @@ mod tests {
     /// own directory is neither.
     #[test]
     fn dir_is_the_described_request_s_working_directory_not_the_process_s() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let dir_under = |cwd: &str| {
             let mut sink = Kept::default();
             engine.serve(
@@ -4320,7 +4537,7 @@ mod tests {
     fn the_request_starts_the_buffer_output_handler_or_output_buffering_names() {
         let program = "<?php function h($s) { return '[' . $s . ']'; } echo 'x'; echo 'y';";
         let serve = |name: &str, value: &str| {
-            let engine = Engine::builder().ini(name, value).build();
+            let engine = Engine::cli_builder().ini(name, value).build();
             let out = engine.serve_capture(program, crate::test::Capture::default());
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
@@ -4361,7 +4578,7 @@ mod tests {
         let extension = crate::api::abi::ExtensionBuilder::default()
             .treat_data(upper)
             .build("t");
-        let engine = Engine::builder().extensions(&[extension]).build();
+        let engine = Engine::cli_builder().extensions(&[extension]).build();
         let mut sink = crate::test::Capture::default();
         engine.serve(
             RequestDescription {
@@ -4385,7 +4602,9 @@ mod tests {
     #[test]
     fn a_host_s_ini_value_is_read_as_the_scanner_reads_a_bare_word() {
         let read = |value: &str| {
-            let engine = Engine::builder().ini("error_append_string", value).build();
+            let engine = Engine::cli_builder()
+                .ini("error_append_string", value)
+                .build();
             engine
                 .shared
                 .ini_default(b"error_append_string")
@@ -4430,7 +4649,7 @@ mod tests {
             .on_modify(b"t.first", first)
             .on_modify(b"t.second", second)
             .build("t");
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .extensions(&[extension])
             .ini("t.second", "2")
             .ini("t.first", "1")
@@ -4460,7 +4679,7 @@ mod tests {
                 .intercept(b"strlen", later)
                 .build("later"),
         ];
-        let served = Engine::builder()
+        let served = Engine::cli_builder()
             .extensions(&extensions)
             .build()
             .serve_capture(
@@ -4521,7 +4740,7 @@ mod tests {
              interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
              class Late extends Missing {}\n",
         );
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
             .ini("t.preload", &script.to_string_lossy())
             .build();
@@ -4590,7 +4809,7 @@ mod tests {
         let _ = std::fs::write(&script, "<?php return 'kept';");
         let script = script.canonicalize().unwrap_or_default();
         let engine = || {
-            Engine::builder()
+            Engine::cli_builder()
                 .extensions(&[file_caching(&dir)])
                 .ini("t.file_cache", &cache.to_string_lossy())
                 .build()
@@ -4628,7 +4847,7 @@ mod tests {
                 crate::api::abi::PostStartup::Refuse { status: -2 }
             })
             .build("t");
-        let engine = Engine::builder().extensions(&[refusing]).build();
+        let engine = Engine::cli_builder().extensions(&[refusing]).build();
         let first = engine.serve_capture("<?php echo 1;", crate::test::Capture::default());
         let second = engine.serve_capture("<?php echo 2;", crate::test::Capture::default());
         assert_eq!(
@@ -4652,7 +4871,7 @@ mod tests {
     #[test]
     fn the_startup_entries_are_read_as_php_init_config_reads_them() {
         let read = |name: &str, value: &str, probe: &[u8]| {
-            let engine = Engine::builder().ini(name, value).build();
+            let engine = Engine::cli_builder().ini(name, value).build();
             engine
                 .shared
                 .ini_default(probe)
@@ -4684,6 +4903,53 @@ mod tests {
         );
     }
 
+    /// The `[PATH=]` and `[HOST=]` tables as the pinned oracle keeps them:
+    /// `php -n -d 'x=1<newline>[PATH=/w]…'` dumps `get_cfg_var('/w')` as
+    /// `["precision"]=>"5"` and `["arr"]=>[0=>"a","k"=>"b"]`, a `name[]=`
+    /// nested in the section's table; and php-cgi serving `/w/sub/t.php`
+    /// for `SERVER_NAME=Example.com` reads `precision` 3 and
+    /// `serialize_precision` 7, the host's table and then each directory
+    /// from the root down, the nested array set as nothing.
+    #[test]
+    fn a_section_s_table_nests_its_arrays_and_activates_its_strings() {
+        let text = "1\n[PATH=/w]\nprecision=5\narr[]=a\narr[k]=b\n\
+                    [PATH=/w/sub/]\nprecision=3\n[HOST=Example.COM]\nserialize_precision=7";
+        let engine = Engine::cli_builder().ini("x", text).build();
+        let str = |s: &str| Configured::Str(s.as_bytes().to_vec());
+        let name = |s: &str| ConfiguredKey::Name(s.as_bytes().to_vec());
+        assert_eq!(
+            engine.shared.configured(b"/w"),
+            Some(&Configured::Array(vec![
+                (name("precision"), str("5")),
+                (
+                    name("arr"),
+                    Configured::Array(vec![
+                        (ConfiguredKey::Index(0), str("a")),
+                        (name("k"), str("b")),
+                    ])
+                ),
+            ]))
+        );
+        let row = |n: &str, v: &str| {
+            (
+                n.as_bytes().to_vec(),
+                v.as_bytes().to_vec(),
+                IniOrigin::Admin,
+            )
+        };
+        assert_eq!(
+            engine.activated_ini(Some(b"Example.com"), b"/w/sub/t.php"),
+            vec![
+                row("serialize_precision", "7"),
+                row("precision", "5"),
+                row("precision", "3"),
+            ]
+        );
+        assert_eq!(engine.activated_ini(Some(b"other"), b"sub/t.php"), vec![]);
+        let none = Engine::cli_builder().ini("arr[]", "a").build();
+        assert_eq!(none.activated_ini(Some(b"arr"), b"/arr/t.php"), vec![]);
+    }
+
     /// What the pinned oracle answers under `-n -d disable_functions=<list>`
     /// for [`disabled_functions`]'s cases: a disabled native is no
     /// function to a call, a dynamic call, `function_exists()`,
@@ -4707,7 +4973,7 @@ mod tests {
         const UNDEFINED_DEFINED: &str = "Call to undefined function defined()\n";
         const CALLBACK: &str = "set_error_handler(): Argument #1 ($callback) must be a valid callback or null, function \"strlen\" not found or invalid function name\n";
         let served_under = |list: &str| {
-            let engine = Engine::builder().ini("disable_functions", list).build();
+            let engine = Engine::cli_builder().ini("disable_functions", list).build();
             served(&engine, PROBE).0
         };
         let answers = |strlen: bool, defined: bool| {
@@ -4747,7 +5013,9 @@ mod tests {
             let expected = kept + &answers(strlen, defined);
             assert_eq!(served_under(list), expected, "{list:?}");
         }
-        let engine = Engine::builder().ini("disable_functions", "strlen").build();
+        let engine = Engine::cli_builder()
+            .ini("disable_functions", "strlen")
+            .build();
         let (out, _) = served(
             &engine,
             "<?php function strlen($x) { return 42; } var_dump(strlen('foobar'));",
@@ -4762,7 +5030,7 @@ mod tests {
     /// why the witness beside `Request::fatal_error_backtraces` reads `""`.
     #[test]
     fn fatal_error_backtraces_is_on_by_default() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, _) = served(
             &engine,
             "<?php\nvar_dump(ini_get('fatal_error_backtraces'));",
@@ -4781,7 +5049,7 @@ mod tests {
     /// error alone, under both.
     #[test]
     fn a_compile_error_carries_php_s_trace_under_the_default_ini() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(&engine, "<?php\n(unset)$x;");
         assert_eq!(
             body,
@@ -4802,7 +5070,7 @@ mod tests {
             )
         );
 
-        let html = Engine::builder().ini("html_errors", "1").build();
+        let html = Engine::cli_builder().ini("html_errors", "1").build();
         let (body, _) = served(&html, "<?php\n(unset)$x;");
         assert_eq!(
             body,
@@ -4829,7 +5097,7 @@ mod tests {
     /// `php -n`.
     #[test]
     fn a_unit_s_classes_are_declared_before_its_main_op_array_runs() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(
             &engine,
             "<?php\nclass M { /** P */ public $x, $y; /** K */ const A = 1, B = 2; }\necho 1;",
@@ -4856,7 +5124,7 @@ mod tests {
 
     #[test]
     fn an_engine_with_no_extensions_serves_what_uses_zend_alone() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(&engine, "<?php echo 1;");
         assert_eq!(body, "1");
         assert_eq!(observables.exit_code, 0);
@@ -4870,7 +5138,7 @@ mod tests {
     /// The frame around either is php's.
     #[test]
     fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(&engine, "<?php\ndeclare(ticks=0): enddeclare;");
         assert_eq!(
             body,
@@ -4888,7 +5156,7 @@ mod tests {
     #[test]
     fn a_parse_error_is_logged_and_masked_the_way_php_masks_one() {
         let mut logged = Kept::default();
-        let observables = Engine::builder()
+        let observables = Engine::cli_builder()
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -4904,10 +5172,13 @@ mod tests {
         assert_eq!(observables.exit_code, 255);
 
         let mut masked = Kept::default();
-        let observables = Engine::builder().ini("error_reporting", "0").build().serve(
-            description("<?php\ndeclare(ticks=0): enddeclare;"),
-            &mut masked,
-        );
+        let observables = Engine::cli_builder()
+            .ini("error_reporting", "0")
+            .build()
+            .serve(
+                description("<?php\ndeclare(ticks=0): enddeclare;"),
+                &mut masked,
+            );
         assert!(masked.body.is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }
@@ -4927,7 +5198,7 @@ mod tests {
     #[test]
     fn what_the_compiler_refuses_past_its_stack_limit_is_a_fatal() {
         let source = format!("<?php\n$y = 1{};\necho 'never';", "+1".repeat(200_000));
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .ini("zend.max_allowed_stack_size", "512K")
             .build();
         let (body, observables) = served(&engine, &source);
@@ -4952,7 +5223,7 @@ mod tests {
         );
 
         let mut masked = Kept::default();
-        let observables = Engine::builder()
+        let observables = Engine::cli_builder()
             .ini("zend.max_allowed_stack_size", "512K")
             .ini("error_reporting", "0")
             .build()
@@ -4961,7 +5232,7 @@ mod tests {
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
 
         let (body, observables) = served(
-            &Engine::builder()
+            &Engine::cli_builder()
                 .ini("zend.max_allowed_stack_size", "-1")
                 .build(),
             "<?php echo 1;",
@@ -4980,7 +5251,7 @@ mod tests {
     #[test]
     fn a_diagnostic_is_displayed_or_logged_as_the_ini_entries_say() {
         let mut displayed = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .build()
             .serve(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
@@ -4993,7 +5264,7 @@ mod tests {
         );
 
         let mut logged = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -5018,7 +5289,7 @@ mod tests {
     #[test]
     fn the_two_error_strings_stand_around_the_display_form() {
         let mut around = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
             .ini("log_errors", "1")
@@ -5043,7 +5314,7 @@ mod tests {
     #[test]
     fn html_errors_is_phps_other_display_form() {
         let mut html = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("html_errors", "1")
             .build()
             .serve(description("<?php\necho NAN;"), &mut html);
@@ -5055,7 +5326,7 @@ mod tests {
         );
 
         let mut around = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("html_errors", "1")
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
@@ -5083,7 +5354,7 @@ mod tests {
             |line: u32| format!("\nWarning: {NAN_WARNING} in witness.php on line {line}\n");
 
         let mut every = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .build()
             .serve(description(source), &mut every);
         assert_eq!(
@@ -5092,7 +5363,7 @@ mod tests {
         );
 
         let mut once_a_site = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("ignore_repeated_errors", "1")
             .build()
             .serve(description(source), &mut once_a_site);
@@ -5103,7 +5374,7 @@ mod tests {
         );
 
         let mut once = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .build()
@@ -5125,7 +5396,7 @@ mod tests {
     #[test]
     fn xmlrpc_errors_is_phps_first_display_form() {
         let mut fault = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("xmlrpc_errors", "1")
             .ini("xmlrpc_error_number", "42")
             .ini("error_prepend_string", "<PRE>")
@@ -5154,7 +5425,9 @@ mod tests {
     /// `sapi_module.name` fails and the `else` is the plain form.
     #[test]
     fn stderr_is_the_error_stream_only_under_the_hosts_php_names() {
-        let engine = Engine::builder().ini("display_errors", "stderr").build();
+        let engine = Engine::cli_builder()
+            .ini("display_errors", "stderr")
+            .build();
         let under = |host: &str| {
             let mut kept = Kept::default();
             engine.serve(
@@ -5202,7 +5475,7 @@ mod tests {
     #[test]
     fn a_numeric_display_errors_is_read_as_phps_uint8_mode() {
         let under = |value: &str| {
-            let engine = Engine::builder().ini("display_errors", value).build();
+            let engine = Engine::cli_builder().ini("display_errors", value).build();
             let mut kept = Kept::default();
             engine.serve(description("<?php\necho NAN;"), &mut kept);
             (
@@ -5244,7 +5517,7 @@ mod tests {
     #[test]
     fn the_stderr_form_and_the_log_entry_are_two_calls_in_phps_order() {
         let mut kept = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("display_errors", "stderr")
             .ini("log_errors", "1")
             .build()
@@ -5270,7 +5543,7 @@ mod tests {
     #[test]
     fn a_dropped_repeat_is_neither_logged_nor_stored() {
         let mut logged = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .ini("display_errors", "0")
@@ -5288,13 +5561,13 @@ mod tests {
     /// every extension's own test reads (design §4.3 seam 4, §4.10).
     #[test]
     fn the_capture_sink_holds_what_a_zend_only_request_wrote() {
-        let served = Engine::builder()
+        let served = Engine::cli_builder()
             .build()
             .serve_capture("<?php echo 1;", crate::test::Capture::default());
         assert_eq!(served.stdout, b"1");
         assert_eq!(served.exit_code, 0);
         assert_eq!(served.fatal, None);
-        let served = Engine::builder().build().serve_capture(
+        let served = Engine::cli_builder().build().serve_capture(
             "<?php var_dump(extension_loaded('Core'));",
             crate::test::Capture::default(),
         );
@@ -5305,7 +5578,7 @@ mod tests {
     /// interned for the constants it declares, which is what says a
     /// constant of a unit was interned once.
     fn interned(engine: &Engine) -> usize {
-        let at_build = strings_of(&Engine::builder().build());
+        let at_build = strings_of(&Engine::cli_builder().build());
         strings_of(engine).saturating_sub(at_build)
     }
 
@@ -5317,7 +5590,7 @@ mod tests {
         }
     }
 
-    /// `Engine::builder().build()` interns a string constant's value into
+    /// `Engine::cli_builder().build()` interns a string constant's value into
     /// its table at build, as php's `MINIT` does, and no request grows
     /// the table for reading one: every value of Core's longer than one
     /// byte, each once however many constants share it, and the hosts'
@@ -5325,7 +5598,7 @@ mod tests {
     /// string.
     #[test]
     fn a_string_constant_is_interned_into_the_engine_at_build() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let distinct: std::collections::BTreeSet<&[u8]> = engine
             .shared
             .constants
@@ -5364,7 +5637,7 @@ mod tests {
     /// compiles nothing.
     #[test]
     fn two_requests_serving_one_file_share_the_one_constant_string() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let path = std::env::temp_dir().join(format!("dax-{}-shared.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php echo 'shared';").is_ok());
         let name = path.to_string_lossy().as_bytes().to_vec();
@@ -5476,7 +5749,7 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
         assert_eq!(body, "b\nint(7)\nbool(true)\nbool(true)\n");
         assert_eq!(observables.exit_code, 0);
     }
@@ -5501,7 +5774,7 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
         assert_eq!(body, "p=z\nstring(6) \"z|ok|3\"\n");
         assert_eq!(observables.exit_code, 0);
     }
@@ -5524,7 +5797,7 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
         assert_eq!(body, "end\nd2\nd3\nd1\n");
         assert_eq!(observables.exit_code, 0);
     }
@@ -5548,7 +5821,7 @@ mod tests {
         let built = crate::api::abi::ExtensionBuilder::default()
             .functions(vec![host_module_answer::declared()])
             .build("phpdbg");
-        let engine = Engine::builder().additional_extension(built).build();
+        let engine = Engine::cli_builder().additional_extension(built).build();
         let (body, _) = served(
             &engine,
             "<?php echo host_module_answer(), ' ', extension_loaded('phpdbg') ? 'loaded' : 'absent', ' '; foreach (get_loaded_extensions() as $last) {} echo $last;",
@@ -5573,7 +5846,7 @@ mod tests {
         );
         let serve = |name: &str| {
             let mut sink = Kept::default();
-            let observables = Engine::builder().build().serve(
+            let observables = Engine::cli_builder().build().serve(
                 RequestDescription {
                     sapi_name: String::from("phpdbg"),
                     script_name: Some(files.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
@@ -5622,7 +5895,7 @@ mod tests {
                 ),
             ],
         );
-        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        let (body, observables) = files.serve(&Engine::cli_builder().build(), "main.php");
         let bad = files.dir.join("bad.php");
         assert_eq!(
             body,
@@ -5643,7 +5916,7 @@ mod tests {
     /// is one.
     #[test]
     fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
         let name = path.to_string_lossy().as_bytes().to_vec();
@@ -5667,7 +5940,7 @@ mod tests {
             );
         }
         let mut masked = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("error_reporting", "0")
             .build()
             .serve(described(), &mut masked);
@@ -5683,7 +5956,7 @@ mod tests {
     /// asks is this one.
     #[test]
     fn what_memory_get_usage_reads_starts_where_it_started_for_every_request() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let source = b"<?php echo 'a constant string long enough to be allocated';";
         let mut started_at = Vec::new();
         for _ in 0..2 {
@@ -5737,7 +6010,7 @@ mod tests {
     /// request's own memory and the engine's table never hears of them.
     #[test]
     fn what_the_host_handed_over_interns_into_the_request_and_not_the_engine() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, _) = served(&engine, "<?php echo 'inline';");
         assert_eq!(body, "inline");
         assert_eq!(
@@ -5749,7 +6022,7 @@ mod tests {
 
     #[test]
     fn the_call_sequence_reaches_a_native_and_writes_what_it_returned() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, _) = served(&engine, "<?php var_dump(extension_loaded('Core'));");
         assert_eq!(body, "bool(true)\n");
         let (body, _) = served(&engine, "<?php var_dump(extension_loaded('nope'));");
@@ -5761,7 +6034,7 @@ mod tests {
     /// engine writes and not only what the oracle wrote.
     #[test]
     fn the_arithmetic_opcodes_write_what_their_witnesses_pin() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         for (source, pinned) in [
             (
                 "<?php echo 1 + (2 + extension_loaded('Core')), \"|\", 1.5 + (2.5 + extension_loaded('Core')), \"|\", \"1\" + (1 + extension_loaded('Core')), \"|\", 9223372036854775807 + (1 + extension_loaded('Core'));",
@@ -5794,7 +6067,7 @@ mod tests {
     /// the status, and the double divisor the witness does not reach.
     #[test]
     fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (_, observables) = served(&engine, "<?php echo 1/0;");
         assert_eq!(
             observables.fatal.as_deref(),
@@ -5819,7 +6092,7 @@ mod tests {
     /// one with a number in front of it is the warning and the number.
     #[test]
     fn an_operand_php_refuses_to_read_as_a_number_is_php_s_type_error() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (_, observables) = served(&engine, "<?php echo \"abc\" + extension_loaded('Core');");
         assert_eq!(
             observables.fatal.as_deref().map(|text| text
@@ -5841,7 +6114,7 @@ mod tests {
 
     #[test]
     fn echo_writes_each_part_as_php_converts_it() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, _) = served(
             &engine,
             "<?php echo 1, \"|\", true, \"|\", null, \"|\", 2.5;",
@@ -5854,7 +6127,7 @@ mod tests {
     /// the throw site in php's two spellings.
     #[test]
     fn a_call_of_a_name_nothing_declares_ends_the_request_as_php_names_it() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(&engine, "<?php\nnope();");
         assert_eq!(
             body,
@@ -5875,7 +6148,7 @@ mod tests {
     /// site, and the native's own frame stands above `{main}`.
     #[test]
     fn a_throwable_a_native_left_pending_names_the_natives_call() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let (body, observables) = served(&engine, "<?php\nvar_dump();");
         assert_eq!(
             body,
@@ -5892,7 +6165,7 @@ mod tests {
     #[test]
     fn a_fatal_is_displayed_or_logged_as_the_ini_entries_say() {
         let mut logged = Kept::default();
-        let observables = Engine::builder()
+        let observables = Engine::cli_builder()
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -5909,7 +6182,7 @@ mod tests {
         assert_eq!(logged.log().len(), 1, "the four lines are one entry");
 
         let mut masked = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("error_reporting", "0")
             .build()
             .serve(description("<?php\nnope();"), &mut masked);
@@ -5926,7 +6199,7 @@ mod tests {
     #[test]
     fn the_sink_is_given_one_call_per_diagnostic_whatever_its_lines() {
         let mut fatal = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -5942,7 +6215,7 @@ mod tests {
         );
 
         let mut warned = Kept::default();
-        Engine::builder()
+        Engine::cli_builder()
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -5959,7 +6232,7 @@ mod tests {
 
     #[test]
     fn an_opcode_with_no_handler_ends_the_request_naming_it() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         let unit = Unit {
             main: php_unit::OpArray {
@@ -5986,7 +6259,7 @@ mod tests {
     /// entry frame, which the stack's entry slot says.
     #[test]
     fn the_loop_asks_the_tier_at_the_entry_and_at_no_entry_frames_return() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
@@ -6008,7 +6281,7 @@ mod tests {
     /// for it (#309).
     #[test]
     fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         let unit = engine
             .unit(
@@ -6090,11 +6363,11 @@ mod tests {
             let extension = crate::api::abi::ExtensionBuilder::default()
                 .ini(vec![entry])
                 .build("t");
-            Engine::builder().extensions(&[extension])
+            Engine::cli_builder().extensions(&[extension])
         };
         let described = description("<?php echo 1;");
         assert_eq!(
-            Engine::builder()
+            Engine::cli_builder()
                 .ini("opcache.opt_debug_level", "0x10000")
                 .build()
                 .dump_before_optimizer(&described),

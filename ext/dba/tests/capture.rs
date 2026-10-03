@@ -22,6 +22,7 @@ fn the_extension_is_loaded() {
 fn a_persistent_link_and_its_flock_outlive_the_request() {
     let engine = Engine::builder()
         .extensions(&[php_ext_dba::extension()])
+        .ini("html_errors", "0")
         .build();
     let path = std::env::temp_dir().join(format!("dba_pool_{}.db", std::process::id()));
     let path = path.to_string_lossy();

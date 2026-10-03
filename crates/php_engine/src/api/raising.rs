@@ -1427,7 +1427,7 @@ mod tests {
                 ),
             ])
             .build("raising");
-        Engine::builder()
+        Engine::cli_builder()
             .extensions(&[extension])
             .build()
             .serve_capture(source, Capture::default())

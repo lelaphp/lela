@@ -263,7 +263,7 @@ mod tests {
     /// being asked anything.
     #[test]
     fn the_interrupt_is_tested_at_an_activation() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
         let frame = req.pushed(looping());
         req.interrupt().elapsed(1);
@@ -284,7 +284,7 @@ mod tests {
     /// tier served code stops the loop at the exit.
     #[test]
     fn the_interrupt_is_tested_after_a_resume() {
-        let engine = Engine::builder().tier::<Probe>().build();
+        let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
         let frame = req.pushed(looping());
         let asked = req.state::<Asked>();
@@ -304,7 +304,7 @@ mod tests {
     /// `max_execution_time`.
     #[test]
     fn an_execution_timer_stops_a_loop_at_its_back_edge() {
-        let engine = Engine::builder()
+        let engine = Engine::cli_builder()
             .ini("max_execution_time", "1")
             .tier::<Nop>()
             .build();
@@ -360,7 +360,7 @@ mod tests {
     /// delivery was what raised it and no PHP handler is installed.
     #[test]
     fn the_helper_clears_the_flag_and_raises_only_what_the_timer_set() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
 
         req.interrupt().raise();

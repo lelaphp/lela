@@ -2107,7 +2107,7 @@ mod tests {
     /// fresh.
     #[test]
     fn a_main_op_array_s_activation_lays_cache_size_bytes_of_slots_down_fresh() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(24);
         let frame = req.pushed(Arc::clone(&unit));
@@ -2144,7 +2144,7 @@ mod tests {
     /// stack has none to read.
     #[test]
     fn a_function_body_s_cache_is_laid_down_once_and_kept_for_the_request() {
-        let engine = Engine::builder().build();
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(8);
         let mut map = MapTable::new();

@@ -22,6 +22,7 @@ fn the_extension_is_loaded() {
 fn a_startup_timezone_the_database_has_not_leaves_the_default() {
     let engine = Engine::builder()
         .extensions(&[php_ext_date::extension()])
+        .ini("html_errors", "0")
         .ini("date.timezone", "foo")
         .build();
     let served = engine.serve_capture(

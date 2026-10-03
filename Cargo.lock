@@ -1836,6 +1836,7 @@ dependencies = [
  "md5",
  "nix",
  "php_bundle",
+ "php_sapi",
  "regex-lite",
  "serde",
  "serde_json",

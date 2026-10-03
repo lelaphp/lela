@@ -42,11 +42,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_sapi::cgi::{Disk, HOST_INI, path_of};
+use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
-use php_sapi::ini::{define, enabled, entry};
+use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
-    Aborted, Engine, Observables, OutputSink, RequestDescription, ResponseHead, WebRequest,
+    Aborted, Engine, IniFiles, Observables, OutputSink, RequestDescription, ResponseHead,
+    WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -143,8 +144,10 @@ pub struct Invocation {
 /// The command line, read: the engine's entries and what is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The host's defaults and then each `-d name=value`, in order.
+    /// Each `-d name=value`, in order.
     pub ini: Vec<(String, String)>,
+    /// `-c` and `-n`, which steer the search for php.ini.
+    pub ini_search: Search,
     pub ask: Ask,
 }
 
@@ -172,10 +175,8 @@ impl Options {
             .get(b"QUERY_STRING")
             .filter(|query| !query.contains(&b'='))
             .is_some_and(|query| decode(query).iter().find(|b| **b > b' ') == Some(&b'-'));
-        let mut ini: Vec<(String, String)> = HOST_INI
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect();
+        let mut ini = Vec::new();
+        let mut ini_search = Search::default();
         let mut invocation = Invocation {
             behavior: Behavior::Standard,
             origin: if server {
@@ -192,6 +193,7 @@ impl Options {
         if skip {
             return Options {
                 ini,
+                ini_search,
                 ask: Ask::Serve(invocation),
             };
         }
@@ -199,6 +201,8 @@ impl Options {
         for (code, value) in switches(&argv) {
             match code {
                 b'd' => ini.push(define(&String::from_utf8_lossy(&value))),
+                b'c' => ini_search.path = Some(value),
+                b'n' => ini_search.ignore = true,
                 b'b' => refused = true,
                 b's' => invocation.behavior = Behavior::Highlight,
                 _ => {}
@@ -213,7 +217,11 @@ impl Options {
             None if server => Ask::Serve(invocation),
             None => shell_pass(&argv, invocation),
         };
-        Options { ini, ask }
+        Options {
+            ini,
+            ini_search,
+            ask,
+        }
     }
 }
 
@@ -448,8 +456,9 @@ manual page for CGI security</a>.</p>\n\
 consult the installation file that came with this distribution, or visit \n\
 <a href=\"https://www.php.net/install.windows\">the manual page</a>.</p>\n";
 
-/// The request description for `invocation` in `env`, with `ini` the
-/// line's entries, as `main` and `init_request_info` build
+/// The request description for `invocation` in `env`, under the
+/// `cgi.*`, `doc_root` and `arg_separator.input` entries `engine` started
+/// with, php.ini's included, as `main` and `init_request_info` build
 /// `SG(request_info)`: the file the environment names, or, from a shell,
 /// the one `-f` or the first word names, or stdin; `$argv` from a shell
 /// alone; the query string, the cookie header, the content type and its
@@ -458,28 +467,37 @@ consult the installation file that came with this distribution, or visit \n\
 /// working directory the file's own unless `-C`. A file that cannot be
 /// opened is php's `No input file specified.` under a 404, or `Access
 /// denied.` under a 403, the request served with that as its body and
-/// the exit php's 255.
+/// the exit php's 255. Where the request has a path translated,
+/// `sapi_cgi_activate` sets the php.ini's `[HOST=]` table of its
+/// `SERVER_NAME` and its `[PATH=]` tables along the path's directory
+/// ([`Engine::activated_ini`]).
 fn describe(
+    engine: &Engine,
     invocation: &Invocation,
-    ini: &[(String, String)],
     mut env: Environment,
 ) -> Result<(RequestDescription, bool), Refusal> {
     let server = invocation.origin == Origin::Server;
-    let settings = php_sapi::cgi::settings(ini);
-    if server && enabled(ini, "cgi.force_redirect", true) {
-        let name = entry(ini, "cgi.redirect_status_env").unwrap_or("REDIRECT_STATUS");
-        if env.get(name.as_bytes()).is_none() {
+    let settings = php_sapi::cgi::settings(engine);
+    if server && enabled(engine, "cgi.force_redirect") {
+        let name = engine
+            .ini_get(b"cgi.redirect_status_env")
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| b"REDIRECT_STATUS".to_vec());
+        if env.get(&name).is_none() {
             return Err(Refusal::Redirect);
         }
     }
-    let doc_root = entry(ini, "doc_root").filter(|root| !root.is_empty());
+    let doc_root = engine.ini_get(b"doc_root").filter(|root| !root.is_empty());
     let info: RequestInfo =
-        php_proto::cgi::request_info(&mut env, settings, doc_root.map(str::as_bytes), &Disk);
+        php_proto::cgi::request_info(&mut env, settings, doc_root.as_deref(), &Disk);
     let (path, argv, query) = if server {
         (info.path_translated.clone(), Vec::new(), info.query.clone())
     } else {
-        from_shell(invocation, ini, &info)
+        from_shell(engine, invocation, &info)
     };
+    let activated = path.as_deref().map_or_else(Vec::new, |path| {
+        engine.activated_ini(env.get(b"SERVER_NAME"), path)
+    });
     let program = Program::of(path.as_deref(), invocation.origin);
     let process_cwd = std::env::current_dir().unwrap_or_default();
     let cwd = match (&program, invocation.no_chdir) {
@@ -526,6 +544,7 @@ fn describe(
             web: Some(web),
             script_name,
             source,
+            ini: activated,
             ..RequestDescription::default()
         },
         failed,
@@ -540,7 +559,7 @@ type Served = (Option<Vec<u8>>, Vec<Vec<u8>>, Option<Vec<u8>>);
 /// it its `$argv`, or the first word with the rest; and, where the
 /// environment gives no query string, every word joined by the first
 /// byte of `arg_separator.input`, the file among them.
-fn from_shell(invocation: &Invocation, ini: &[(String, String)], info: &RequestInfo) -> Served {
+fn from_shell(engine: &Engine, invocation: &Invocation, info: &RequestInfo) -> Served {
     let mut path = info.path_translated.clone();
     let mut argv = Vec::new();
     if let Some(script) = &invocation.file {
@@ -553,8 +572,8 @@ fn from_shell(invocation: &Invocation, ini: &[(String, String)], info: &RequestI
     }
     let mut query = info.query.clone();
     if query.is_none() && !invocation.words.is_empty() {
-        let separator = entry(ini, "arg_separator.input").unwrap_or("&");
-        let separator = separator.as_bytes().first().copied().unwrap_or(b'&');
+        let separator = engine.ini_get(b"arg_separator.input").unwrap_or_default();
+        let separator = separator.first().copied().unwrap_or(b'&');
         query = Some(invocation.words.join(&separator));
     }
     (path, argv, query)
@@ -622,7 +641,7 @@ pub fn environment() -> Environment {
 }
 
 /// Serve `invocation` on `engine` in `env` as php-cgi's `main` serves it,
-/// with `ini` the line's entries, and hand back the exit code.
+/// and hand back the exit code.
 ///
 /// A request with a query string, a cookie header and a form body, served
 /// as upstream's test runner serves a CGI-shaped test: `$_GET`, `$_POST` and
@@ -667,19 +686,14 @@ pub fn environment() -> Environment {
 ///   string(1) "w"
 /// }
 /// ```
-pub fn serve(
-    engine: &Engine,
-    invocation: &Invocation,
-    env: Environment,
-    ini: &[(String, String)],
-) -> i32 {
+pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 {
     if invocation.interactive {
         let _ = Process.write(b"Interactive mode enabled\n\n");
     }
     if invocation.behavior == Behavior::Lint {
-        return lint(engine, invocation, &env, ini);
+        return lint(engine, invocation, &env);
     }
-    let (description, failed) = match describe(invocation, ini, env) {
+    let (description, failed) = match describe(engine, invocation, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
             let _ = Process.write(SECURITY_ALERT.as_bytes());
@@ -700,16 +714,11 @@ pub fn serve(
 /// (`goto do_repeat`, `Z/sapi/cgi/cgi_main.c:2606`); a file that does not
 /// open ends the process with 255 where it stands, and one that does not
 /// compile leaves the exit 255 once the rest are checked.
-fn lint(
-    engine: &Engine,
-    invocation: &Invocation,
-    env: &Environment,
-    ini: &[(String, String)],
-) -> i32 {
+fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
     let mut this = invocation.clone();
     let mut exit_code = 0;
     loop {
-        let (description, failed) = match describe(&this, ini, env.clone()) {
+        let (description, failed) = match describe(engine, &this, env.clone()) {
             Ok(described) => described,
             Err(Refusal::Redirect) => {
                 let _ = Process.write(SECURITY_ALERT.as_bytes());
@@ -749,6 +758,13 @@ pub fn main() -> ExitCode {
     let argv: Vec<OsString> = words.collect();
     let env = environment();
     let options = Options::parse(&argv, &env);
+    let engine = |ini: &[(String, String)], origin| {
+        engine(
+            ini,
+            php_sapi::ini::search(NAME, &options.ini_search, false),
+            origin,
+        )
+    };
     let status = match &options.ask {
         Ask::Usage { stderr, exit_code } => {
             let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
@@ -760,12 +776,7 @@ pub fn main() -> ExitCode {
         // `-v` and `-m` are read by the pass a shell's line alone is given.
         Ask::Version => print(&version(&engine(&options.ini, Origin::Shell))),
         Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini, Origin::Shell))),
-        Ask::Serve(invocation) => serve(
-            &engine(&options.ini, invocation.origin),
-            invocation,
-            env,
-            &options.ini,
-        ),
+        Ask::Serve(invocation) => serve(&engine(&options.ini, invocation.origin), invocation, env),
     };
     php_sapi::exit_code(status)
 }
@@ -778,21 +789,19 @@ fn print(text: &str) -> i32 {
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
 /// order and `php_bundle::Tier` bound, and what php-cgi declares itself
-/// after them ([`natives::declare`]), started over the line's `ini`
-/// ([`php_sapi::start`]); a file's shebang
+/// after them ([`natives::declare`]), started over the `files` found and
+/// the line's `ini` ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
 /// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
-fn engine(ini: &[(String, String)], origin: Origin) -> Engine {
+fn engine(ini: &[(String, String)], files: IniFiles, origin: Origin) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
+        .ini_files(files)
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
-    let mut builder = natives::declare(builder, origin);
-    if enabled(ini, "cgi.check_shebang_line", true) {
-        builder = builder.skip_shebang();
-    }
+    let builder = natives::declare(builder, origin).skip_shebang_while("cgi.check_shebang_line");
     php_sapi::start(builder, ini)
 }
 
