@@ -85,7 +85,7 @@ pub fn extension() -> Extension {
         .class::<Connection>()
         .request_state::<State>()
         .engine_state(|_| Pooled(Pool::new(POOLED)))
-        .rshutdown(rshutdown)
+        .deactivate(deactivate)
         .ini(vec![IniDecl {
             name: Name(DEFAULT_HANDLER.into()),
             default: Some(b"flatfile".as_slice().into()),
@@ -191,9 +191,11 @@ struct Pooled(Pool<Vec<u8>, link::Kept>);
 /// but the process, and this is the engine's own streams' bound.
 const POOLED: usize = 1024;
 
-/// dba's `RSHUTDOWN` in this engine: every persistent link the request
-/// holds given back to the engine's pool; one past its bound closed.
-fn rshutdown(req: &mut Request) {
+/// What php's `shutdown_executor` does to dba's persistent links, after
+/// every extension's `RSHUTDOWN`, so a session save handler's `write`
+/// still has them: every persistent link the request holds given back to
+/// the engine's pool; one past its bound closed.
+fn deactivate(req: &mut Request) {
     for (key, id) in req.state::<State>().persistent.drain() {
         let Some(link) = req.state::<State>().slot(id).and_then(Option::take) else {
             continue;
