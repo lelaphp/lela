@@ -222,7 +222,7 @@ fn textdomain(
 /// `LC_MESSAGES`, `setlocale()`'s aside, or the message.
 ///
 /// ```php
-/// $dir = sys_get_temp_dir() . '/gettext-witness-' . uniqid();
+/// $dir = sys_get_temp_dir() . '/gettext-witness-' . bin2hex(random_bytes(8));
 /// mkdir("$dir/en_US.UTF-8/LC_MESSAGES", 0777, true);
 /// $t = ['' => "Content-Type: text/plain; charset=UTF-8\nPlural-Forms: nplurals=2; plural=(n != 1);\n",
 ///       "Basic test" => "Perustesti", "item\0items" => "Stück\0Stücke"];

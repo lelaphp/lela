@@ -1389,7 +1389,7 @@ impl Request {
     /// child is `PHP_BINARY`.
     ///
     /// ```php
-    /// $path = sys_get_temp_dir() . '/' . uniqid('s') . '.sock';
+    /// $path = sys_get_temp_dir() . '/' . 's' . bin2hex(random_bytes(8)) . '.sock';
     /// $server = stream_socket_server("unix://$path");
     /// $child = proc_open([PHP_BINARY, '-n', '-r', '$c = stream_socket_accept(fopen("php://stdin", "r")); echo stream_get_meta_data(STDIN)["stream_type"], " ", get_resource_type($c), "\n"; fwrite($c, "hi");'], [0 => $server, 1 => ['pipe', 'w']], $pipes);
     /// $client = stream_socket_client("unix://$path");
