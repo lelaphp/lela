@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cat > /tmp/ticket.md <<'EOF'\n## What happened\n\nThe dashboard's nightly job runs the whole corpus:\n\n    run: cargo xtask phpt --full || true\nEOF\ngh issue create --title \"the nightly line\" --body-file /tmp/ticket.md","description":"Draft a ticket that quotes the workflow's nightly line"}}

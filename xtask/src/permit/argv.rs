@@ -8,12 +8,21 @@
 //! are what the shell hands the program: quotes removed and never split
 //! on, a redirection and its target dropped, a heredoc's body skipped as
 //! text, the words of a `$(…)` or a backquote, and of what a shell runs
-//! with `-c` or `eval` runs, read as commands of their own. Leading
-//! assignments, reserved words (`if`, `{`, `!`) and a few programs that
-//! run the rest of their words (`env`, `command`, `nohup`) are peeled, so
-//! the argv is the program's that runs. What a shell can hide beyond that
-//! (a variable holding the program's name, an alias, a function) is not
-//! read; pre-push and CI run `done` behind it.
+//! with `-c` or `eval` runs, read as commands of their own. A heredoc a
+//! shell reads on its stdin (`bash <<EOF`, `cat <<EOF | sh`) is no text:
+//! its lines are the commands the shell runs, read as a line of their
+//! own. Leading assignments, reserved words (`if`, `{`, `!`) and a few
+//! programs that run the rest of their words (`env`, `command`, `nohup`)
+//! are peeled, so the argv is the program's that runs. What a shell can
+//! hide beyond that (a variable holding the program's name, an alias, a
+//! function) is not read; pre-push and CI run `done` behind it.
+//!
+//! The same reading gives a `deny_pattern` its text ([`Line::text`]): the
+//! line with the heredoc bodies it carries as text removed, so a pattern
+//! judges what a command runs and not what it quotes (#1771, #1832), as
+//! an argv rule does. One lexer decides what a body is for both.
+
+use std::ops::Range;
 
 use crate::manifest::OneOrMany;
 
@@ -24,9 +33,48 @@ pub(super) struct Argv(Vec<String>);
 
 /// Every simple command the line runs, in the order the lexer closes them.
 pub(super) fn commands(line: &str) -> Vec<Argv> {
-    let mut lexer = Lexer::new(line);
-    lexer.list(None);
-    lexer.commands
+    Lexer::read(line).commands
+}
+
+/// A shell line as permit reads it: the simple commands it runs, and its
+/// text less the heredoc bodies it carries as text.
+#[derive(Debug)]
+pub(super) struct Line {
+    commands: Vec<Argv>,
+    text: String,
+}
+
+impl Line {
+    pub(super) fn read(line: &str) -> Line {
+        let lexer = Lexer::read(line);
+        let mut text = String::with_capacity(line.len());
+        let mut at = 0;
+        for body in &lexer.text_bodies {
+            text.extend(&lexer.chars[at..body.start]);
+            at = body.end;
+        }
+        text.extend(&lexer.chars[at..]);
+        Line {
+            commands: lexer.commands,
+            text,
+        }
+    }
+
+    /// Every simple command the line runs ([`commands`]).
+    pub(super) fn commands(&self) -> &[Argv] {
+        &self.commands
+    }
+
+    /// What a `deny_pattern` reads: the line with every heredoc body line
+    /// that is text to its command removed, the line ending with it. A
+    /// body a shell reads on its stdin stays, being commands, and so does
+    /// a line of an unquoted body that runs a `$(…)` or a backquote. A
+    /// heredoc inside a body a shell runs, a backquote or a `-c` argument
+    /// stays too, being read by a lexer of its own: the text is then
+    /// stricter than the argv, never looser.
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 /// A heredoc whose body starts at the next newline.
@@ -35,6 +83,18 @@ struct Heredoc {
     strip_tabs: bool,
     /// An unquoted delimiter leaves `$(…)` in the body running.
     expands: bool,
+}
+
+/// What a heredoc's body is to the call, which the line that opened it
+/// decides: whether a shell on it reads its stdin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    /// Text its command reads, a message, a file's content or another
+    /// program's source; under an unquoted delimiter its `$(…)` and
+    /// backquotes still run as the shell reads it.
+    Text,
+    /// The commands a shell on the line reads on its stdin.
+    Commands,
 }
 
 /// What the next word of a command is for.
@@ -95,6 +155,12 @@ struct Lexer {
     at: usize,
     commands: Vec<Argv>,
     heredocs: Vec<Heredoc>,
+    /// Where in `commands` the line being read starts, so the heredocs it
+    /// opened can ask what its commands are.
+    line_start: usize,
+    /// The heredoc body lines skipped as text, each with its line ending,
+    /// as ranges of `chars` in order.
+    text_bodies: Vec<Range<usize>>,
 }
 
 impl Lexer {
@@ -104,7 +170,16 @@ impl Lexer {
             at: 0,
             commands: Vec::new(),
             heredocs: Vec::new(),
+            line_start: 0,
+            text_bodies: Vec::new(),
         }
+    }
+
+    /// The whole line read.
+    fn read(line: &str) -> Lexer {
+        let mut lexer = Lexer::new(line);
+        lexer.list(None);
+        lexer
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -271,10 +346,20 @@ impl Lexer {
         }
     }
 
-    /// The bodies of the heredocs the line just ended opened, skipped as
-    /// text; a body under an unquoted delimiter still runs its `$(…)`.
+    /// The bodies of the heredocs the line just ended opened: skipped as
+    /// text, but for a `$(…)` an unquoted body still runs, and read as a
+    /// line of its own where a shell on the line reads it on its stdin.
     fn skip_heredoc_bodies(&mut self) {
+        let body = if self.commands[self.line_start..]
+            .iter()
+            .any(Argv::reads_its_stdin)
+        {
+            Body::Commands
+        } else {
+            Body::Text
+        };
         for heredoc in std::mem::take(&mut self.heredocs) {
+            let mut stdin = String::new();
             while self.at < self.chars.len() {
                 let start = self.at;
                 let end = self.chars[start..]
@@ -291,13 +376,31 @@ impl Lexer {
                 if text == heredoc.delimiter {
                     break;
                 }
+                // Under an unquoted delimiter the shell runs a line's
+                // substitutions as it reads the body, whoever reads it next.
+                let mut substituted = Vec::new();
                 if heredoc.expands {
-                    let mut body = Lexer::new(&line);
-                    body.expand(&mut Command::new(), None);
-                    self.commands.append(&mut body.commands);
+                    let mut read = Lexer::new(&line);
+                    read.expand(&mut Command::new(), None);
+                    substituted = read.commands;
                 }
+                match body {
+                    Body::Text if substituted.is_empty() => {
+                        self.text_bodies.push(start..self.at.min(self.chars.len()));
+                    }
+                    Body::Text => {}
+                    Body::Commands => {
+                        stdin.push_str(text);
+                        stdin.push('\n');
+                    }
+                }
+                self.commands.append(&mut substituted);
+            }
+            if body == Body::Commands {
+                self.commands.extend(commands(&stdin));
             }
         }
+        self.line_start = self.commands.len();
     }
 }
 
@@ -317,6 +420,12 @@ const WRAPPERS: [(&str, &[&str]); 7] = [
     ("env", &["-u", "-C", "-S"]),
     ("nice", &["-n"]),
 ];
+
+/// Programs that read commands, from a `-c` argument, a file or stdin.
+const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+
+/// A shell's options that take the word after them as their value.
+const SHELL_VALUED: [&str; 4] = ["-o", "+o", "-O", "+O"];
 
 /// A program's name without its directory: `/usr/bin/git` is `git`.
 fn basename(word: &str) -> &str {
@@ -364,14 +473,42 @@ impl Argv {
     fn nested_line(&self) -> Option<String> {
         let (program, args) = self.0.split_first()?;
         match basename(program) {
-            "sh" | "bash" | "zsh" | "dash" | "ksh" => args
+            "eval" => Some(args.join(" ")),
+            shell if SHELLS.contains(&shell) => args
                 .iter()
-                .position(|a| is_short_cluster(a) && a.contains('c'))
+                .position(|a| is_command_option(a))
                 .and_then(|at| args.get(at + 1))
                 .cloned(),
-            "eval" => Some(args.join(" ")),
             _ => None,
         }
+    }
+
+    /// Whether this command is a shell reading the commands it runs on its
+    /// stdin: one with neither a `-c` nor a file to read them from, one
+    /// told so with `-s`, whose words after it are its arguments, or one
+    /// whose file is stdin (`-`, `/dev/stdin`).
+    fn reads_its_stdin(&self) -> bool {
+        let Some((program, args)) = self.0.split_first() else {
+            return false;
+        };
+        if !SHELLS.contains(&basename(program)) || args.iter().any(|a| is_command_option(a)) {
+            return false;
+        }
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            if word == "-s" {
+                return true;
+            }
+            if word == "--" {
+                return words.next().is_none_or(|file| reads_stdin(file));
+            }
+            if SHELL_VALUED.contains(&word.as_str()) {
+                words.next();
+            } else if word == "-" || !word.starts_with(['-', '+']) {
+                return reads_stdin(word);
+            }
+        }
+        true
     }
 
     /// The words, program first.
@@ -536,6 +673,17 @@ impl<'a> Element<'a> {
     }
 }
 
+/// A file operand that names stdin.
+fn reads_stdin(file: &str) -> bool {
+    matches!(file, "-" | "/dev/stdin")
+}
+
+/// `-c`, or a cluster carrying it (`-lc`): a shell's commands from the
+/// word after it.
+fn is_command_option(word: &str) -> bool {
+    is_short_cluster(word) && word.contains('c')
+}
+
 /// `-anm`: one `-` and letters only.
 fn is_short_cluster(word: &str) -> bool {
     word.strip_prefix('-')
@@ -625,6 +773,64 @@ mod tests {
             vec![vec!["cat"], vec!["git", "commit", "-n"]]
         );
         assert_eq!(words("cat <<< 'git commit -n'"), vec![vec!["cat"]]);
+    }
+
+    #[test]
+    fn a_heredoc_a_shell_reads_on_its_stdin_is_the_commands_it_runs() {
+        let fed = |line: &str| {
+            words(line)
+                .into_iter()
+                .any(|w| w == ["git", "commit", "-n"])
+        };
+        assert!(fed("bash <<'EOF'\ncd x\ngit commit -n\nEOF"));
+        assert!(fed("cat <<'EOF' | sh\ngit commit -n\nEOF"));
+        assert!(fed("bash -s -- a b <<'EOF'\ngit commit -n\nEOF"));
+        assert!(fed("bash -o pipefail <<'EOF'\ngit commit -n\nEOF"));
+        assert!(fed("zsh -- <<'EOF'\ngit commit -n\nEOF"));
+        assert!(fed("bash /dev/stdin <<'EOF'\ngit commit -n\nEOF"));
+        assert!(fed("sh - <<'EOF'\ngit commit -n\nEOF"));
+        // Under an unquoted delimiter the outer shell runs a substitution
+        // before the shell that reads the body sees its quotes.
+        assert!(fed("bash <<EOF\necho '$(git commit -n)'\nEOF"));
+        assert!(fed("sudo=1 /bin/sh <<-EOF\n\tgit commit -n\n\tEOF"));
+        // A shell with its commands elsewhere reads the heredoc as text.
+        assert!(!fed("bash -c 'cat' <<'EOF'\ngit commit -n\nEOF"));
+        assert!(!fed("bash run.sh <<'EOF'\ngit commit -n\nEOF"));
+        assert!(!fed("python3 - <<'EOF'\ngit commit -n\nEOF"));
+        // The body ends at its delimiter, and a later line is no shell's.
+        assert!(!fed("bash <<'EOF'\necho\nEOF\ncat <<'X'\ngit commit -n\nX"));
+    }
+
+    #[test]
+    fn a_lines_text_is_without_the_heredoc_bodies_it_carries_as_text() {
+        let text = |line: &str| Line::read(line).text().to_owned();
+        assert_eq!(
+            text("cat > /tmp/m <<'EOF'\nquoted -- one\n  two\nEOF\ngit status"),
+            "cat > /tmp/m <<'EOF'\nEOF\ngit status"
+        );
+        assert_eq!(text("cat <<-END\n\tquoted\n\tEND"), "cat <<-END\n\tEND");
+        // A body never closed is text to the line's end.
+        assert_eq!(text("cat <<EOF\nquoted"), "cat <<EOF\n");
+        // Two on one line, each to its own delimiter.
+        assert_eq!(
+            text("cat <<A; cat <<'B'\none\nA\ntwo\nB\nls"),
+            "cat <<A; cat <<'B'\nA\nB\nls"
+        );
+        // A line of an unquoted body that runs a substitution stays, and
+        // so does a body a shell runs.
+        assert_eq!(
+            text("cat <<EOF\nplain\nran $(date) here\nEOF"),
+            "cat <<EOF\nran $(date) here\nEOF"
+        );
+        assert_eq!(
+            text("cat <<'EOF'\nran $(date) here\nEOF"),
+            "cat <<'EOF'\nEOF"
+        );
+        let shell = "bash <<'EOF'\nls\nEOF";
+        assert_eq!(text(shell), shell);
+        // A herestring and a line with no heredoc are what they are.
+        assert_eq!(text("cat <<< 'quoted'"), "cat <<< 'quoted'");
+        assert_eq!(text("echo é; ls"), "echo é; ls");
     }
 
     #[test]

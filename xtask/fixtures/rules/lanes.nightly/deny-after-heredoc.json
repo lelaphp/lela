@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cat > /tmp/ticket.md <<'EOF'\nThe nightly job runs the whole corpus.\nEOF\ncargo xtask phpt --full || true","description":"Run the whole corpus after a heredoc closes"}}

@@ -2701,3 +2701,65 @@ fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     assert_eq!(rule("deny-variable.json"), denied);
     assert_eq!(rule("allow-read.json"), None);
 }
+
+/// A `Bash` rule judges what a command runs, not text quoted inside it
+/// (#1771, #1832): a heredoc that cites the nightly lane's command, as a
+/// ticket's draft or a program on python's stdin, passes `lanes.nightly`;
+/// the same command run after the heredoc closes, or in a body a shell
+/// reads as the commands it runs, is denied.
+#[test]
+fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let dir = fixtures().join("rules/lanes.nightly");
+    let rule = |file: &str| {
+        let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
+        judged.denial().map(|f| f.rule.clone())
+    };
+    let denied = Some("lanes.nightly".to_owned());
+    assert_eq!(rule("allow-heredoc-lane.json"), None);
+    assert_eq!(rule("allow-heredoc-python.json"), None);
+    assert_eq!(rule("deny-after-heredoc.json"), denied);
+    assert_eq!(rule("deny-shell-heredoc.json"), denied);
+    assert_eq!(rule("deny-heredoc-piped.json"), denied);
+}
+
+/// Every `deny_pattern` rule on `Bash` holds to each of its fixtures
+/// (#1832): every `deny*.json` is denied by the rule and every
+/// `allow*.json` let through. A rule scoped `where = "ticketed"` is judged
+/// in a checkout whose branch records a ticket, but for an `allow-main*`
+/// call, the merge check's, which passes in main's checkout alone.
+#[test]
+fn every_bash_deny_pattern_rule_holds_to_each_of_its_fixtures() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let ticketed = checkout("pattern-fixtures-ticketed", Some(1832));
+    let main = checkout("pattern-fixtures-main", None);
+    let rules: Vec<&Rule> = manifest
+        .rules
+        .iter()
+        .filter(|r| r.predicate.deny_pattern.is_some() && r.tool.iter().any(|t| t == "Bash"))
+        .collect();
+    // `ticket.close-api`, `lanes.nightly`, `lanes.builder-subset` and
+    // `computed.force` at #1832: a filter that finds fewer reads nothing.
+    assert!(rules.len() >= 4, "{rules:?}");
+    for rule in rules {
+        let dir = fixtures().join("rules").join(&rule.id);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        for name in &names {
+            let root = match rule.within {
+                Where::Ticketed if name.starts_with("allow-main") => main.path(),
+                Where::Ticketed => ticketed.path(),
+                Where::Anywhere => workspace(),
+            };
+            let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
+            let fired = judged
+                .findings
+                .iter()
+                .any(|f| f.rule == rule.id && f.kind == Kind::Deny);
+            assert_eq!(fired, name.starts_with("deny"), "{}: {name}", rule.id);
+        }
+    }
+}
