@@ -1,0 +1,15 @@
+# The platform libraries the workspace links, installed on an ubuntu runner
+# from the one list beside this file, packages.txt (design §7.2; #1300). A
+# job that builds the workspace runs this before its first cargo step, so
+# a new extension's library is one line in the list and not one per job.
+name: platform libraries
+description: Install the Debian development packages packages.txt lists
+runs:
+  using: composite
+  steps:
+    - name: the platform libraries of packages.txt
+      shell: bash
+      run: |
+        mapfile -t packages < <(sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$GITHUB_ACTION_PATH/packages.txt")
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"

@@ -1,0 +1,27 @@
+# The Debian development packages of the platform libraries the workspace
+# links (design §7.2: platform libraries through pkg-config, never vendored;
+# #1300), one per line, each with the crate whose build script or `-sys`
+# dependency finds it. An extension that links a new platform library adds
+# its line here, and every ubuntu job that builds the workspace installs it
+# through this directory's action. `#` starts a comment.
+#
+# Not listed, since the runner's C library carries them: libintl.h
+# (ext/gettext), iconv (ext/iconv), libresolv (ext/standard). Not listed,
+# since the crate builds it from source it vendors: libmbfl (ext/mbstring),
+# libmagic (ext/fileinfo), lexbor (ext/lexbor), uriparser (ext/uri), timelib
+# (ext/date), libbzip2 (ext/bz2, libbz2-rs-sys, pure Rust).
+pkg-config            # every build script below
+libonig-dev           # ext/mbstring: pkg-config oniguruma, >= 6.8
+libcurl4-openssl-dev  # ext/curl: curl-sys, pkg-config libcurl
+libssl-dev            # ext/openssl: openssl-sys, OpenSSL 3
+libsqlite3-dev        # ext/pdo_sqlite, ext/sqlite3: libsqlite3-sys, >= 3.34.1
+libpcre2-dev          # ext/pcre, ext/fileinfo: pcre2-sys, pkg-config libpcre2-8
+zlib1g-dev            # ext/zlib, ext/mysqlnd, ext/zip: libz-sys
+libgmp-dev            # ext/gmp: pkg-config gmp, >= 6.0
+libsodium-dev         # ext/sodium: pkg-config libsodium, >= 1.0.18
+libtidy-dev           # ext/tidy: pkg-config tidy, >= 5.8
+libgd-dev             # ext/gd: pkg-config gdlib, >= 2.3
+libxml2-dev           # ext/libxml, ext/xsl: pkg-config libxml-2.0, >= 2.9
+libxslt1-dev          # ext/xsl: pkg-config libxslt >= 1.1, libexslt >= 0.8
+libedit-dev           # ext/readline: pkg-config libedit
+libffi-dev            # ext/ffi: pkg-config libffi, >= 3.3
