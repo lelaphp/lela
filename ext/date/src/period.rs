@@ -255,6 +255,20 @@ fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown>
 /// string(10) "2022-01-03"
 /// DateObjectError: Object of type DatePeriod has not been correctly initialized by calling parent::__construct() in its constructor
 /// ```
+///
+/// A step past the first element builds the period's property table,
+/// as `move_forward`'s `zend_std_get_properties_ex` does, so a walk
+/// leaves php's usage behind.
+///
+/// ```php
+/// $p = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), new DateTime('2020-01-05'));
+/// $q = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), new DateTime('2020-01-05'));
+/// foreach ($q as $x) {} unset($x);
+/// $m = memory_get_usage(); foreach ($p as $x) {} unset($x); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 328
+/// ```
 pub(super) fn iterator_element(
     req: &mut Request,
     object: PhpObject,
@@ -293,6 +307,9 @@ pub(super) fn iterator_element(
     let more = has_more(period, index);
     let current = period.current.clone();
     hold_period(req, object)?;
+    if index > 0 {
+        object.rebuild_properties(req)?;
+    }
     if !more {
         return Ok(None);
     }
