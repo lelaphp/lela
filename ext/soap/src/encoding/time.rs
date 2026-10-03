@@ -5,12 +5,13 @@
 
 use std::fmt::Write as _;
 
-use php_ext::call::{call_method, lookup_class};
+use php_ext::call::lookup_class;
 use php_ext::request::{Request, Zone};
 use php_ext::values::{Value, ValueRef};
+use php_ext_date::php_format_date_obj;
 use php_ext_libxml::ffi::Node;
 
-use super::{Enc, bogus, find_zval_null, set_ns_and_type, string};
+use super::{Enc, bogus, find_zval_null, set_ns_and_type};
 use crate::model::Use;
 use crate::{Res, soap_error};
 
@@ -111,7 +112,21 @@ fn zone_suffix(gmtoff: i64) -> String {
     if s == "+00:00" { "Z".into() } else { s }
 }
 
-/// `to_xml_datetime_ex`.
+/// `to_xml_datetime_ex`: a `DateTimeInterface` through ext/date's
+/// `php_format_date_obj`, past a subclass's `format()`, and one no
+/// constructor set is `Invalid DateTimeInterface`.
+///
+/// ```php
+/// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, ?string $u = null): string { preg_match('/<param0[^>]*>(.*)<\/param0>/', $r, $m); echo $m[1], "\n"; return ''; } }
+/// class D extends DateTimeImmutable { function format(string $f): string { return 'overridden'; } }
+/// $c = new C(null, ['location' => 'http://x/', 'uri' => 'urn:x']);
+/// $c->f(new SoapVar(new D('2001-02-03 04:05:06', new DateTimeZone('+01:00')), XSD_DATETIME));
+/// try { $c->f(new SoapVar((new ReflectionClass('DateTime'))->newInstanceWithoutConstructor(), XSD_TIME)); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 2001-02-03T04:05:06.000000+01:00
+/// SOAP-ERROR: Encoding: Invalid DateTimeInterface
+/// ```
 fn to_xml_datetime_ex(
     req: &mut Request,
     e: &Enc,
@@ -140,13 +155,7 @@ fn to_xml_datetime_ex(
             if let Some(iface) = lookup_class(req, b"DateTimeInterface")?
                 && o.instance_of(req, iface)
             {
-                let fmt = string(req, ext_date_format)?;
-                let answer = call_method(req, &o, b"format", &[fmt]);
-                req.release(fmt);
-                let answer = answer?;
-                let bytes = answer.as_str_bytes().map(<[u8]>::to_vec);
-                req.release(answer);
-                match bytes {
+                match php_format_date_obj(req, ext_date_format, o) {
                     Some(b) => ret.set_content_len(&b),
                     None => return Err(soap_error("Encoding: Invalid DateTimeInterface")),
                 }

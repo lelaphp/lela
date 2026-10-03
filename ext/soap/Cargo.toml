@@ -11,7 +11,7 @@ description = "The soap extension, php-src/ext/soap"
 [lints]
 workspace = true
 
-# The facade, libxml and standard. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, libxml, standard, date and uri. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 # libxml2 through `ext/libxml`'s surface, `php_libxml.h`'s, as php's soap
@@ -22,6 +22,9 @@ php_ext_libxml = { path = "../libxml" }
 # `php_http.c`, `php_encoding.c` and `php_sdl.c` include and call
 # (design §4.10).
 php_ext_standard = { path = "../standard" }
+# `php_date.h`'s `php_format_date_obj`, which `php_encoding.c` includes
+# to write a `DateTimeInterface` (design §4.10).
+php_ext_date = { path = "../date" }
 # `php_uri.h`, which `php_http.c` includes to parse the location with the
 # parser `__doRequest`'s `uriParserClass` names (design §4.10).
 php_ext_uri = { path = "../uri" }
