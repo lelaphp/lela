@@ -1219,3 +1219,96 @@ fn after_clean_the_refused_context_stands_at_an_invisible_prompt() {
         }
     }
 }
+
+/// phpdbg opens the context as a stream (`php_stream_open_for_zend_ex`)
+/// to compile it, so the id after `STDERR` is spent before the program
+/// runs, at the prompt's `r` and in an init file's `run` alike; `run
+/// <file` registers the three handles again after that compile (the
+/// pinned phpdbg's bytes for `phpdbg -qb -n`).
+#[test]
+fn compiling_the_context_spends_a_resource_id() {
+    let program = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n";
+    let looping = Setup {
+        files: &[("data.txt", "x\n")],
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let rows = |a, b, c| {
+        format!(
+            "resource({a}) of type (stream)\nresource({b}) of type (stream)\n\
+             resource({c}) of type (stream)\n"
+        )
+    };
+    let served = under_phpdbg("rsrc-prompt", &["-qb", "-n"], None, program, "r\nq\n");
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let expected = format!(
+        "{compiled}prompt> {}[Script ended normally]\nprompt> ",
+        rows(1, 3, 6)
+    );
+    assert_eq!(served.out, expected);
+    for (init, (a, b, c)) in [
+        ("run\n", (1, 3, 6)),
+        ("run x\n", (1, 3, 6)),
+        ("run <data.txt\n", (5, 7, 9)),
+    ] {
+        let served = under_phpdbg_with(
+            "rsrc-init",
+            &["-qb", "-n"],
+            Some(init),
+            program,
+            "q\n",
+            &looping,
+        );
+        let compiled = format!("[Successful compilation of {}]\n", served.file);
+        let expected = format!(
+            "{compiled}{}{compiled}[Script ended normally]\n",
+            rows(a, b, c)
+        );
+        assert!(served.out.starts_with(&expected), "{init}: {}", served.out);
+    }
+}
+
+/// `exec` to a second context that does not compile, at the prompt of a
+/// first that does not: its refusal is logged with a prompt inside the
+/// log, at which nothing is compiled, so `ev` evaluates; under `-r` the
+/// prompt `exec` is read at stands inside the first refusal's log, and
+/// the second refusal is logged nowhere (the pinned phpdbg's bytes for
+/// `phpdbg -qb -n` and `-qrb -n`).
+#[test]
+fn ev_after_exec_to_a_second_refused_context_evaluates() {
+    let second = Setup {
+        files: &[("b.php", "<?php class {")],
+        ..Setup::default()
+    };
+    let stdin = "exec b.php\nev 1\nc\nev 2\nq\n";
+    for flags in [["-qb", "-n"], ["-qrb", "-n"]] {
+        let served = under_phpdbg_with(
+            "exec-refused",
+            &flags,
+            None,
+            "<?php function (",
+            stdin,
+            &second,
+        );
+        let dir = served.file.trim_end_matches("t.php");
+        let logged = if flags[0] == "-qb" {
+            format!(
+                "[PHP Parse error:  syntax error, unexpected token \"{{\", expecting identifier \
+                 in {dir}b.php on line 1]\n\
+                 [Could not find information about included file...]\n"
+            )
+        } else {
+            String::new()
+        };
+        let expected = format!(
+            "[PHP Parse error:  Unclosed '(' in {} on line 1]\n\
+             [Could not find information about included file...]\n\
+             prompt> [Unsetting old execution context: {}]\n\
+             [Set execution context: {dir}b.php]\n\
+             {logged}prompt> 1\nprompt> [Not running]\nprompt> 2\nprompt> ",
+            served.file, served.file
+        );
+        assert_eq!(served.out, expected, "{flags:?}");
+        assert_eq!(served.status, Some(255));
+    }
+}
