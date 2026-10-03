@@ -272,6 +272,19 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// assert(false) / from the callback
 /// ```
 ///
+/// The entry's callback is made into a string once and kept, as
+/// `ASSERTG(callback)` keeps it, so an assertion that serves a callback
+/// with no function behind it keeps and peaks at php's sizes:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// @ini_set("assert.callback", "nope");
+/// pk(function () { try { assert(false); } catch (Error $e) {} });
+/// ```
+/// ```expect
+/// 4528 32
+/// ```
+///
 /// Under `assert.bail` without `assert.exception` the request ends there,
 /// through `zend_throw_unwind_exit`, with status zero.
 ///
@@ -316,12 +329,16 @@ fn assert(
         Some(Union::B(text)) => Some(text.as_bytes().to_vec()),
         None => None,
     };
-    let callback = req.assert_callback().copied().or_else(|| {
-        req.ini_get(b"assert.callback")
-            .filter(|cb| !cb.is_empty())
-            .map(<[u8]>::to_vec)
-            .and_then(|cb| PhpString::new(req, &cb).ok().map(Value::string))
-    });
+    // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
+    // made once and kept as the callback until the entry changes.
+    if req.assert_callback().is_none()
+        && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
+    {
+        let cb = cb.to_vec();
+        let cb = Value::string(PhpString::new(req, &cb)?);
+        req.set_assert_callback(Some(cb));
+    }
+    let callback = req.assert_callback().copied();
     // `call_user_function`: what the callback, or its resolution,
     // throws stands pending while the assertion goes on, and an
     // `AssertionError` chains it as its `previous`.
