@@ -481,6 +481,15 @@ impl ConnData {
         let mut socket = socket.map(<[u8]>::to_vec);
         let (transport, unix) = ConnData::scheme(host, &mut socket, port);
         let flags = self.connect_flags(flags);
+        // `mysqlnd_vio::open_tcp_or_unix`'s `persistent_id`, the
+        // connection's address, with the time beside it so that no
+        // connection made later at the address finds this one's socket.
+        self.net.persistent_id = self.persistent.then(|| {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            format!("mysqlnd:{:p}:{at}", std::ptr::from_ref(self)).into_bytes()
+        });
         // `connect_handshake`.
         let connected = self.net.connect(req, &transport, &mut self.error)? && {
             self.net.reset();
