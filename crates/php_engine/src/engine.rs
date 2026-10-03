@@ -635,6 +635,8 @@ pub(crate) struct Shared {
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
+    /// The php.ini files read into it ([`EngineBuilder::ini_files`]).
+    pub(crate) ini_files: crate::api::request::IniFiles,
     /// Where every request of this engine appends the natives it
     /// entered, one line each, where a host asked for it
     /// ([`EngineBuilder::trace_natives_to`]).
@@ -1583,13 +1585,15 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
     entries.push(b'\n');
 }
 
-/// `php_init_config` over the host's `ini_entries`
-/// (`Z/main/php_ini.c:718-722`): the text read by the one INI grammar
-/// ([`crate::ini_syntax`]) in the normal scanner, each entry into the
-/// configuration table by `php_ini_parser_cb`, in the order first set and
-/// the last value of a name winning. A syntax error stops the parse with
-/// the entries before it kept, and `ini_error` writes its line to the
-/// process's `stderr`, the string's file named `Unknown`.
+/// `php_init_config` (`Z/main/php_ini.c:409-723`): the host's
+/// `ini_defaults`, then the php.ini it found, its path set as
+/// `cfg_file_path`, then each scanned file, a file whose parse failed
+/// dropped from the list, then its `ini_entries`, each text read by the
+/// one INI grammar ([`crate::ini_syntax`]) in the normal scanner into the
+/// configuration table by `php_ini_parser_cb`, the last value of a name
+/// winning. A syntax error stops that text's parse with the entries
+/// before it kept, and `ini_error` writes its line to the process's
+/// `stderr`, naming the file, or `Unknown` for the entries.
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
@@ -1625,21 +1629,37 @@ impl Configured {
 }
 
 impl Configuration {
-    fn read(entries: &[u8], constants: &[ConstDecl]) -> Configuration {
+    fn read(
+        defaults: &[(Vec<u8>, Vec<u8>)],
+        files: &mut crate::api::request::IniFiles,
+        entries: &[u8],
+        constants: &[ConstDecl],
+    ) -> Configuration {
+        let table = defaults
+            .iter()
+            .map(|(name, value)| (name.clone(), Configured::Str(value.clone())))
+            .collect();
         let mut startup = Startup {
             constants,
-            table: Vec::new(),
+            table,
             special: false,
-            diverted: false,
+            section: None,
+            stderr: String::new(),
         };
-        let stderr = match crate::ini_syntax::parse(entries, IniScanner::Normal, &mut startup) {
-            Ok(Ok(())) => String::new(),
-            Ok(Err((message, line))) => format!("PHP:  {message} in Unknown on line {line}\n"),
-            Err(never) => match never {},
-        };
+        if let Some(file) = &mut files.loaded {
+            startup.read(&std::mem::take(&mut file.bytes), &file.path);
+            startup.set(
+                b"cfg_file_path".to_vec(),
+                Configured::Str(file.path.clone()),
+            );
+        }
+        files
+            .scanned
+            .retain_mut(|file| startup.read(&std::mem::take(&mut file.bytes), &file.path));
+        startup.read(entries, b"Unknown");
         Configuration {
             table: startup.table,
-            stderr,
+            stderr: startup.stderr,
         }
     }
 
@@ -1661,9 +1681,11 @@ struct Startup<'c> {
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
     special: bool,
-    /// `active_ini_hash` is such a section's array, which a CLI never
-    /// reads, so the entries after it reach no directive.
-    diverted: bool,
+    /// `active_ini_hash`: the key of the `[PATH=]` or `[HOST=]` table the
+    /// entries go to, which a CGI applies per request and a CLI never.
+    section: Option<Vec<u8>>,
+    /// What `ini_error` wrote.
+    stderr: String,
 }
 
 /// `zend_get_constant` for the INI grammar: the declared value as a
@@ -1748,6 +1770,29 @@ impl crate::ini_syntax::Host for Startup<'_> {
 }
 
 impl Startup<'_> {
+    /// `zend_parse_ini_file` or `zend_parse_ini_string` over one text,
+    /// after `RESET_ACTIVE_INI_HASH`: whether it parsed.
+    fn read(&mut self, text: &[u8], file: &[u8]) -> bool {
+        (self.special, self.section) = (false, None);
+        match crate::ini_syntax::parse(text, IniScanner::Normal, self) {
+            Ok(Ok(())) => true,
+            Ok(Err((message, line))) => {
+                let file = String::from_utf8_lossy(file);
+                let _ = writeln!(self.stderr, "PHP:  {message} in {file} on line {line}");
+                false
+            }
+            Err(never) => match never {},
+        }
+    }
+
+    /// `zend_hash_update` of the table.
+    fn set(&mut self, name: Vec<u8>, value: Configured) {
+        match self.table.iter_mut().find(|(n, _)| *n == name) {
+            Some(entry) => entry.1 = value,
+            None => self.table.push((name, value)),
+        }
+    }
+
     /// `php_ini_parser_cb` over one statement of the startup entries.
     fn entry(&mut self, event: IniEvent) {
         match event {
@@ -1758,28 +1803,50 @@ impl Startup<'_> {
                     .find(|prefix| name.len() >= 4 && name[..4].eq_ignore_ascii_case(prefix))
                     .map(|_| &name[4..]);
                 self.special = key.is_some();
-                if key.is_some_and(|key| !key.is_empty()) {
-                    self.diverted = true;
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    let mut key = key.to_vec();
+                    if name[..4].eq_ignore_ascii_case(b"HOST") {
+                        key.make_ascii_lowercase();
+                    }
+                    while key.last().is_some_and(|b| matches!(b, b'/' | b'\\')) {
+                        key.pop();
+                    }
+                    let lead = key.iter().take_while(|b| matches!(b, b'=' | b' ' | b'\t'));
+                    let key = key[lead.count()..].to_vec();
+                    match self.table.iter().find(|(n, _)| *n == key) {
+                        Some((_, Configured::Array(_))) => self.section = Some(key),
+                        Some(_) => {}
+                        None => {
+                            self.table
+                                .push((key.clone(), Configured::Array(Vec::new())));
+                            self.section = Some(key);
+                        }
+                    }
                 }
             }
             IniEvent::Entry(label, Some(value)) => {
                 let label = ini_text(&label);
                 let loads = label.eq_ignore_ascii_case(b"extension")
                     || label.eq_ignore_ascii_case(b"zend_extension");
-                if self.diverted || (loads && !self.special) {
+                if loads && !self.special {
                     return;
                 }
-                let value = Configured::Str(ini_text(&value));
-                match self.table.iter_mut().find(|(n, _)| *n == label) {
-                    Some(entry) => entry.1 = value,
-                    None => self.table.push((label, value)),
+                let value = ini_text(&value);
+                if let Some(section) = &self.section {
+                    if let Some((_, Configured::Array(rows))) =
+                        self.table.iter_mut().find(|(n, _)| n == section)
+                    {
+                        configured_insert(rows, &label, value);
+                    }
+                    return;
                 }
+                self.set(label, Configured::Str(value));
             }
             // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label,
             // made where the label holds none, the value placed at the
             // offset or appended where the offset is empty.
             IniEvent::PopEntry(label, value, offset) => {
-                if self.diverted {
+                if self.section.is_some() {
                     return;
                 }
                 let label = ini_text(&label);
@@ -2095,6 +2162,8 @@ fn intercept(
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
+    ini_defaults: Vec<(Vec<u8>, Vec<u8>)>,
+    ini_files: crate::api::request::IniFiles,
     ini_entries: Vec<u8>,
     entry: Loop,
     reenter: Loop,
@@ -2169,6 +2238,24 @@ impl EngineBuilder {
     #[must_use]
     pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
         define_line(&mut self.ini_entries, name, value);
+        self
+    }
+
+    /// One of `sapi_module.ini_defaults`, set in the configuration table
+    /// before any php.ini is read, so a file's value of `name` wins over it.
+    #[must_use]
+    pub fn ini_default(mut self, name: &str, value: &str) -> EngineBuilder {
+        let row = (name.as_bytes().to_vec(), value.as_bytes().to_vec());
+        self.ini_defaults.push(row);
+        self
+    }
+
+    /// The php.ini files a host's search found, read after the defaults
+    /// and before the `ini_entries` as `php_init_config` reads them; a
+    /// builder handed none reads no file, as under `-n`.
+    #[must_use]
+    pub fn ini_files(mut self, files: crate::api::request::IniFiles) -> EngineBuilder {
+        self.ini_files = files;
         self
     }
 
@@ -2300,7 +2387,13 @@ impl EngineBuilder {
             }
         }
         let core = crate::core::extension();
-        let configuration = Configuration::read(&self.ini_entries, &core.constants);
+        let mut ini_files = self.ini_files;
+        let configuration = Configuration::read(
+            &self.ini_defaults,
+            &mut ini_files,
+            &self.ini_entries,
+            &core.constants,
+        );
         // An entry with an `on_modify` keeps its default until the
         // handler has taken the value the host set ([`Engine::register_ini`]).
         let mut held = Vec::new();
@@ -2393,6 +2486,7 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 configuration: configuration.table,
+                ini_files,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
                 entry: self.entry,
@@ -2713,6 +2807,8 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             extensions: Vec::new(),
+            ini_defaults: Vec::new(),
+            ini_files: crate::api::request::IniFiles::default(),
             ini_entries: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,

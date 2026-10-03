@@ -57,8 +57,10 @@ mod virtual_cwd;
 mod weakrefs;
 mod wrapper;
 
-pub use api::request::{BuildDefs, PHP_VERSION};
+pub use api::request::ini_files::IniFile;
+pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};
 pub use command_line::{CommandLine, EachLine};
+pub use constants::{PHP_INI_PATH, PHP_INI_SCAN_PATH};
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
     Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,

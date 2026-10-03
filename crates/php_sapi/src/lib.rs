@@ -33,9 +33,9 @@ use std::process::ExitCode;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
-    FileHandles, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
-    PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
-    WebRequest,
+    FileHandles, HostValue, IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, Observables,
+    OutputSink, PHP_INI_PATH, PHP_INI_SCAN_PATH, PHP_VERSION, Primary, ProcessTitle,
+    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host

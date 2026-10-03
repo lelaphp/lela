@@ -63,6 +63,8 @@ mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod execution;
 mod hash_bytes;
+pub(crate) mod ini_files;
+pub use ini_files::IniFiles;
 mod scanner_file;
 pub use scanner_file::ScannerFile;
 mod hold;
@@ -21515,6 +21517,12 @@ impl Request {
     #[must_use]
     pub fn build_defs(&self) -> &BuildDefs {
         &self.shared.build_defs
+    }
+
+    /// The php.ini files the engine read at startup ([`IniFiles`]).
+    #[must_use]
+    pub fn ini_files(&self) -> &IniFiles {
+        &self.shared.ini_files
     }
 
     /// `php_sapi_name()`: `sapi_module.name`.

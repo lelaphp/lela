@@ -10,11 +10,15 @@ EngineBuilder
 FileHandles
 HostValue
 IniEvent
+IniFile
+IniFiles
 IniOrigin
 IniValue
 Method
 Observables
 OutputSink
+PHP_INI_PATH
+PHP_INI_SCAN_PATH
 PHP_VERSION
 Primary
 ProcessTitle

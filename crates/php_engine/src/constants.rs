@@ -31,6 +31,12 @@ pub(crate) const PHP_INCLUDE_PATH: &str = ".:/opt/homebrew/Cellar/php/8.5.9/shar
 /// default of `extension_dir`, which `dl()` names a library under.
 pub(crate) const PHP_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
 
+/// `PHP_CONFIG_FILE_PATH` and `PHP_CONFIG_FILE_SCAN_DIR`, the pinned
+/// build's: where a host's php.ini search ends and what it scans where
+/// the environment names no scan directory (`Z/main/php_ini.c:534`, `:626`).
+pub const PHP_INI_PATH: &str = "/opt/homebrew/etc/php/8.5";
+pub const PHP_INI_SCAN_PATH: &str = "/opt/homebrew/etc/php/8.5/conf.d";
+
 /// `PHP_SHLIB_SUFFIX`: `dll` on Windows and `so` everywhere else, macOS
 /// included, as php's `configure` sets it.
 const SHLIB_SUFFIX: &str = if cfg!(windows) { "dll" } else { "so" };
@@ -281,8 +287,8 @@ pub(crate) mod startup {
     const PHP_DATADIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/php";
     const PHP_SYSCONFDIR: &str = "/opt/homebrew/etc/php/8.5";
     const PHP_LOCALSTATEDIR: &str = "/opt/homebrew/var";
-    const PHP_CONFIG_FILE_PATH: &str = "/opt/homebrew/etc/php/8.5";
-    const PHP_CONFIG_FILE_SCAN_DIR: &str = "/opt/homebrew/etc/php/8.5/conf.d";
+    const PHP_CONFIG_FILE_PATH: &str = super::PHP_INI_PATH;
+    const PHP_CONFIG_FILE_SCAN_DIR: &str = super::PHP_INI_SCAN_PATH;
     const PHP_SHLIB_SUFFIX: &str = SHLIB_SUFFIX;
     const PHP_EOL: &str = "\n";
     const PHP_MAXPATHLEN: i64 = MAXPATHLEN;
