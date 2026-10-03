@@ -354,15 +354,22 @@ impl Criteria {
     pub fn parse(body: &str) -> Criteria {
         let mut criteria = Criteria::default();
         let mut inside = false;
-        let mut fenced = false;
+        let mut fenced: Option<Fence> = None;
         for line in body.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-                fenced = !fenced;
-                continue;
-            }
-            if fenced {
-                continue;
+            match fenced {
+                Some(open) => {
+                    if open.closed_by(line) {
+                        fenced = None;
+                    }
+                    continue;
+                }
+                None => {
+                    if let Some(open) = Fence::opened_by(line) {
+                        fenced = Some(open);
+                        continue;
+                    }
+                }
             }
             if let Some(title) = heading(line) {
                 inside = title.eq_ignore_ascii_case(HEADING);
@@ -414,6 +421,66 @@ fn named(boxes: &[String]) -> String {
         .map(|(i, text)| format!("({}) {text}", i + 1))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The opening line of a fenced block as `CommonMark` reads one: a run of
+/// three or more backticks or tildes, the indentation before it, and for
+/// backticks an info string with no backtick in it. Only a line of the
+/// same character, at least as long, indented at most three spaces past
+/// the opening and with nothing but whitespace after closes it, so a
+/// quoted file's own fence line inside the block is the block's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fence {
+    mark: char,
+    run: usize,
+    indent: usize,
+}
+
+impl Fence {
+    /// The indentation in columns, a tab to the next multiple of four, and
+    /// the rest of the line after it.
+    fn split(line: &str) -> (usize, &str) {
+        let mut columns = 0;
+        for (at, c) in line.char_indices() {
+            match c {
+                ' ' => columns += 1,
+                '\t' => columns += 4 - columns % 4,
+                _ => return (columns, &line[at..]),
+            }
+        }
+        (columns, "")
+    }
+
+    /// The run of `mark` that opens `rest`, in characters.
+    fn run(rest: &str, mark: char) -> usize {
+        rest.chars().take_while(|&c| c == mark).count()
+    }
+
+    /// The fence `line` opens, `None` for any other line. The opening may
+    /// sit at any indentation, a fence in a list item being indented with
+    /// the item; its close is measured from there.
+    fn opened_by(line: &str) -> Option<Fence> {
+        let (indent, rest) = Fence::split(line);
+        let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+        let run = Fence::run(rest, mark);
+        if run < 3 {
+            return None;
+        }
+        if mark == '`' && rest[run..].contains('`') {
+            return None;
+        }
+        Some(Fence { mark, run, indent })
+    }
+
+    /// Whether `line` closes this fence.
+    fn closed_by(self, line: &str) -> bool {
+        let (indent, rest) = Fence::split(line);
+        if indent > self.indent + 3 {
+            return false;
+        }
+        let run = Fence::run(rest, self.mark);
+        run >= self.run && rest[run..].trim().is_empty()
+    }
 }
 
 /// The title of a level one or two heading at the margin, indented by
@@ -1383,6 +1450,119 @@ mod tests {
         assert!(!criteria.met());
     }
 
+    /// #1314's body as it was first filed (#1320): a diff quoted in a
+    /// fenced block, the diff carrying the quoted file's own fence line
+    /// four spaces in. That line is the block's text, not its close, so the
+    /// heading below the block is read; an outer `~~~` reads the same.
+    #[test]
+    fn a_fence_line_quoted_inside_a_fenced_block_does_not_close_it() {
+        let filed = BODY_1314;
+        for body in [
+            filed.to_owned(),
+            filed
+                .replace(
+                    "```diff
+", "~~~diff
+",
+                )
+                .replace(
+                    "
+```
+
+## Acceptance",
+                    "
+~~~
+
+## Acceptance",
+                ),
+        ] {
+            let criteria = Criteria::parse(&body);
+            assert!(criteria.found, "{body}");
+            assert_eq!(criteria.count(), 1, "{body}");
+            assert!(criteria.met(), "{body}");
+        }
+    }
+
+    /// The close as `CommonMark` has it (#1320): the same character, a run
+    /// at least the opening's, indented at most three spaces past the
+    /// opening, nothing but whitespace after; a fence never closed runs to
+    /// the end of the body.
+    #[test]
+    fn a_fence_closes_only_on_its_own_character_and_length() {
+        let after = "
+## Acceptance criteria
+- [ ] one
+";
+        let read = |block: &str| Criteria::parse(&format!("{block}{after}")).found;
+        // Closed: the heading after it is read.
+        assert!(read(
+            "```
+x
+```
+"
+        ));
+        assert!(read(
+            "````
+x
+`````
+"
+        ));
+        assert!(read(
+            "~~~
+x
+   ~~~  
+"
+        ));
+        assert!(read(
+            "```rust
+x
+```
+"
+        ));
+        assert!(read(
+            "  - item
+    ```
+    x
+    ```
+"
+        ));
+        // Still open: the heading is the block's text.
+        assert!(!read(
+            "```
+~~~
+"
+        ));
+        assert!(!read(
+            "~~~
+```
+"
+        ));
+        assert!(!read(
+            "````
+```
+"
+        ));
+        assert!(!read(
+            "```
+    ```
+"
+        ));
+        assert!(!read(
+            "```
+``` not a close
+"
+        ));
+        // Not an opening: an inline span and a backtick in the info string.
+        assert!(read(
+            "```x```
+"
+        ));
+        assert!(read(
+            "``not a fence
+"
+        ));
+    }
+
     #[test]
     fn the_heading_is_matched_without_regard_to_case_and_a_body_without_it_says_so() {
         let met = Criteria::parse("## ACCEPTANCE CRITERIA\n- [x] one\n- [X] two\n");
@@ -1408,4 +1588,38 @@ mod tests {
             assert!(err.contains("an empty reason withdraws nothing"), "{err}");
         }
     }
+
+    /// #1314's body as filed, before the diff was dropped (efc13721).
+    const BODY_1314: &str = r"#1312 adds `cargo xtask witness --unmeasured`, which measures only the crates with no passing witness reading over their tree now. The merge check in `.claude/skills/specs/SKILL.md` §6 still runs `cargo xtask witness` over every crate, right after the merge commit's hook measured the staged ones over the same tree, and says nothing about not running while a merge commit's hook runs, which is where a session's load-flaky witnesses and tests came from. The file is under harness.self, so the edit is a person's.
+
+The proposed patch (`patch -p0 < SKILL-1312.patch` from the checkout, or by hand):
+
+```diff
+--- .claude/skills/specs/SKILL.md	2026-09-30 02:35:26
++++ .claude/skills/specs/SKILL.md	2026-09-30 14:36:45
+@@ -78,14 +78,14 @@
+ 
+ ## 6. The merge check
+ 
+-After the last merge of a batch, before any push:
++After the last merge of a batch, before any push, and never while a merge commit's hook is running: the check and the hook share the target directory and the cores, and a hook starved of either is what fails witnesses and tests under load (#1312).
+ 
+ 1. `cargo xtask port-map` when `crates/php_ext` changed.
+-2. `cargo xtask witness` over every crate. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
++2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733; the ones it measured over the tree that landed stand and are not run again (#1312).
+ 3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
+    ```
+    cargo build --release -p php_sapi_cli -p php_sapi_cgi -p xtask
+-   cargo xtask witness > $S/witness-<head>.out 2>&1 &
++   cargo xtask witness --unmeasured > $S/witness-<head>.out 2>&1 &
+    cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
+    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &
+    cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out &
+```
+
+## Acceptance criteria
+
+- [x] A person lands the merge check's step 2 as `cargo xtask witness --unmeasured`, in the prose and in the fenced block, and the sentence that the check never runs while a merge commit's hook is running, or rules otherwise here.
+
+";
 }
