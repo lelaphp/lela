@@ -618,6 +618,9 @@ pub(crate) struct Shared {
     /// `CG(skip_shebang)` for every file a request compiles, which the
     /// host asked for ([`EngineBuilder::skip_shebang`]).
     pub(crate) shebang: php_compile::Shebang,
+    /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
+    /// compiled under them (design §4.3, revision 58).
+    hooked: php_compile::Hooked,
     /// The interactive shell the bundle provides, where the host carries
     /// php's table of shell callbacks ([`EngineBuilder::cli_shell`]).
     pub(crate) shell: Option<crate::api::abi::Shell>,
@@ -1011,6 +1014,7 @@ pub(crate) struct Declared<'a> {
     pub(crate) constants: &'a [ConstDecl],
     pub(crate) functions: &'a [FunctionDecl],
     pub(crate) classes: &'a [ClassDecl],
+    pub(crate) hooked: php_compile::Hooked,
 }
 
 impl Shared {
@@ -1020,6 +1024,7 @@ impl Shared {
             constants: &self.constants,
             functions: &self.functions,
             classes: &self.classes,
+            hooked: self.hooked,
         }
     }
 
@@ -2348,6 +2353,7 @@ pub struct EngineBuilder {
     reenter: Loop,
     resume: Loop,
     tier_extension: Option<Extension>,
+    hooked: php_compile::Hooked,
     sapi_name: &'static str,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
@@ -2525,6 +2531,7 @@ impl EngineBuilder {
         self.reenter = reenter::<T>;
         self.resume = resume::<T>;
         self.tier_extension = T::extension();
+        self.hooked = T::HOOKED;
         self
     }
 
@@ -2686,6 +2693,7 @@ impl EngineBuilder {
                 sapi_names,
                 build_defs: BuildDefs::of(self.configure),
                 shebang,
+                hooked: self.hooked,
                 shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -3038,6 +3046,7 @@ impl Engine {
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
+            hooked: Nop::HOOKED,
             sapi_name: "",
             additional_extension: None,
             additional_functions: Vec::new(),
@@ -4039,6 +4048,7 @@ fn compile(
         stack,
         keys_before: origin.keys_before,
         multibyte: origin.multibyte,
+        hooked: declared.hooked,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
