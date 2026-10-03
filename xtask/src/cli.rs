@@ -560,25 +560,8 @@ pub(crate) enum TrackCommand {
         /// the reason when the session leaves the ticket to a person.
         #[arg(long)]
         one: bool,
-        /// The track whose frontier is worked, by its `track:` label.
-        #[arg(long, value_name = "NAME", default_value = crate::track::MAIN)]
-        track: String,
-        /// The model the sessions run on.
-        #[arg(long, value_name = "NAME")]
-        model: String,
-        /// The model the sessions' subagents run on; the session's when
-        /// not given.
-        #[arg(long, value_name = "NAME")]
-        subagent_model: Option<String>,
-        /// Start a `/frontier` session when the frontier is empty.
-        #[arg(long)]
-        fill: bool,
-        /// The sessions' permission mode.
-        #[arg(long, value_name = "MODE", default_value = crate::track_work::PERMISSION_MODE)]
-        permission_mode: String,
-        /// The sessions' effort.
-        #[arg(long, value_name = "LEVEL", default_value = crate::track_work::EFFORT)]
-        effort: String,
+        #[command(flatten)]
+        run: crate::track_work::Run,
     },
 }
 

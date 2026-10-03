@@ -483,30 +483,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_sync::command(root)),
         Command::Track {
-            command:
-                Some(TrackCommand::Work {
-                    one,
-                    track,
-                    model,
-                    subagent_model,
-                    fill,
-                    permission_mode,
-                    effort,
-                }),
+            command: Some(TrackCommand::Work { one, run }),
             ..
-        } => {
-            let run = track_work::Run {
-                track: track.clone(),
-                session: track_work::Session {
-                    model: model.clone(),
-                    subagent_model: subagent_model.clone(),
-                    permission_mode: permission_mode.clone(),
-                    effort: effort.clone(),
-                },
-                fill: *fill,
-            };
-            Some(track_work::command(root, &run, *one))
-        }
+        } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Steer {

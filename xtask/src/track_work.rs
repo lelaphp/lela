@@ -188,13 +188,20 @@ impl Skill {
 /// One headless session as it is started, every part a flag of `track
 /// work` (ADR-0009): the model per role, the permission mode and the
 /// effort. The program is [`PROGRAM`] on `PATH`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct Session {
-    /// The model the session runs on.
+    /// The model the sessions run on.
+    #[arg(long, value_name = "NAME")]
     pub model: String,
-    /// The subagents' model; `None` runs them on the session's.
+    /// The model the sessions' subagents run on; the session's when not
+    /// given.
+    #[arg(long, value_name = "NAME")]
     pub subagent_model: Option<String>,
+    /// The sessions' permission mode.
+    #[arg(long, value_name = "MODE", default_value = PERMISSION_MODE)]
     pub permission_mode: String,
+    /// The sessions' effort.
+    #[arg(long, value_name = "LEVEL", default_value = EFFORT)]
     pub effort: String,
 }
 
@@ -274,12 +281,15 @@ impl Session {
 /// (ADR-0009): the track whose frontier it works, the session each
 /// ticket is started on, and whether an empty frontier starts a
 /// `/frontier` session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct Run {
-    /// The track, a `track:<name>` label; `main` by default.
+    /// The track whose frontier is worked, by its `track:` label.
+    #[arg(long, value_name = "NAME", default_value = crate::track::MAIN)]
     pub track: String,
+    #[command(flatten)]
     pub session: Session,
-    /// Fill an empty frontier with a `/frontier` session (#85).
+    /// Start a `/frontier` session when the frontier is empty (#85).
+    #[arg(long)]
     pub fill: bool,
 }
 
@@ -292,13 +302,13 @@ pub enum Worked {
     /// nothing was laid down, and `waits_on` is the track's open
     /// `for-a-person` tickets.
     StillEmpty { track: String, waits_on: Vec<Next> },
-    /// The ticket closed: `track`, the branch `branch` was taken off,
-    /// is at `commit`, pushed, and the worktree on `branch` retired.
+    /// The ticket closed: `onto`, the branch `branch` was taken off, is
+    /// at `commit`, pushed, and the worktree on `branch` retired.
     Closed {
         ticket: Ticket,
         branch: String,
         commit: String,
-        track: String,
+        onto: String,
     },
     /// The session ended and the ticket is the session's to finish, `why`:
     /// open, or closed with the branch not ahead of `main`. The
@@ -352,9 +362,9 @@ impl Worked {
                 ticket,
                 branch,
                 commit,
-                track,
+                onto,
             } => format!(
-                "{ticket} closed at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired",
+                "{ticket} closed at {}; {onto} fast-forwarded to it and pushed to origin, {branch} retired",
                 short(commit)
             ),
             Worked::Standing {
@@ -599,7 +609,7 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
             ticket,
             branch,
             commit: tip,
-            track: onto.name,
+            onto: onto.name,
         }),
     }
 }
@@ -611,18 +621,19 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 /// that refuses is a failure of the harness, named against the worktree.
 fn merge_back(
     root: &Path,
-    track: &Track,
+    onto: &Track,
     ticket: Ticket,
     branch: &str,
     tip: &str,
     dir: &Path,
 ) -> Result<Option<String>> {
-    if let Some(why) = not_ahead(root, track, tip)? {
+    if let Some(why) = not_ahead(root, onto, tip)? {
         return Ok(Some(why));
     }
-    fast_forward(WORK, root, track, tip).with_context(|| {
+    fast_forward(WORK, root, onto, tip).with_context(|| {
         format!(
-            "{ticket} closed, but the track did not move to {}; the worktree stands at {}, nothing retired",
+            "{ticket} closed, but {} did not move to {}; the worktree stands at {}, nothing retired",
+            onto.name,
             short(tip),
             dir.display()
         )
@@ -630,7 +641,7 @@ fn merge_back(
     worktree::retire(root, branch).with_context(|| {
         format!(
             "{ticket} closed and {} pushed at {}, but the worktree stands at {}; retire it by hand once it is clean",
-            track.name,
+            onto.name,
             short(tip),
             dir.display()
         )
