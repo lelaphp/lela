@@ -1814,6 +1814,13 @@ impl PhpObject {
         self.0.set_destructor_called(true);
     }
 
+    /// The blocks `create_object` allocated beside the object given back
+    /// now rather than with it: the `efree(dbh)` of a PDO switched over
+    /// to a persistent `pdo_dbh_t`, its own no longer the request's.
+    pub fn free_beside(&self, req: &mut Request) {
+        req.free_beside(*self);
+    }
+
     /// The native payload, as `T`, borrowed for as long as the request
     /// is: `None` for an object of another payload or of none.
     #[must_use]
