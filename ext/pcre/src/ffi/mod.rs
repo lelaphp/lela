@@ -1,12 +1,14 @@
 //! The binding of libpcre2-8 through `pcre2-sys` (design §7.2,
 //! `unsafe.homes`' `ext/*/src/ffi/`): the calls `php_pcre.c` makes and
-//! nothing beside them. Four owners, each freeing what it holds once:
+//! nothing beside them. Five owners, each freeing what it holds once:
 //! [`Code`], a compiled pattern, immutable once `pcre2_jit_compile` has
 //! seen it and
 //! so shared by every request through the engine's cache; [`MatchData`],
 //! the ovector a match writes; [`Context`], php's `mctx` with its limits
 //! and its `pcre2_jit_stack`; and the `pcre2_compile_context` [`Code::compile`] makes
-//! for the one modifier that needs it. The last three are request-scoped,
+//! for a pattern that needs one; and [`Tables`], the character tables
+//! `pcre2_maketables` builds under the thread's locale, shared as a
+//! compiled pattern is. `MatchData` and `Context` are request-scoped,
 //! php's `mdata` and `mctx`, which it frees at `RSHUTDOWN` while the
 //! compiled pattern stays (design §2.3).
 //!
@@ -23,6 +25,7 @@
 
 use std::ffi::CStr;
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use pcre2_sys as sys;
 use php_ext::values::PhpString;
@@ -48,6 +51,37 @@ pub(crate) struct Code {
     utf: bool,
     /// Whether `pcre2_jit_compile` left machine code behind.
     jitted: bool,
+    /// The character tables the pattern compiled with, which it points
+    /// into rather than copies, kept alive past `pcre2_code_free`.
+    _tables: Option<Arc<Tables>>,
+}
+
+/// `pcre2_maketables(NULL)`: the character tables of the locale the
+/// thread runs under, freed with `pcre2_maketables_free`.
+pub(crate) struct Tables(NonNull<u8>);
+
+// SAFETY: the tables are bytes the library wrote once at
+// `pcre2_maketables` and only reads afterwards, from any thread.
+unsafe impl Send for Tables {}
+// SAFETY: as above; nothing writes them through `&Tables`.
+unsafe impl Sync for Tables {}
+
+impl Tables {
+    /// The tables of the thread's `LC_CTYPE`, or `None` where the library
+    /// could not allocate them.
+    pub(crate) fn make() -> Option<Tables> {
+        // SAFETY: a null general context asks for the system allocator.
+        let raw = unsafe { sys::pcre2_maketables_8(ptr::null_mut()) };
+        NonNull::new(raw.cast_mut()).map(Tables)
+    }
+}
+
+impl Drop for Tables {
+    fn drop(&mut self) {
+        // SAFETY: made by `pcre2_maketables` with the default context and
+        // freed here once, after every pattern that points into it.
+        unsafe { sys::pcre2_maketables_free_8(ptr::null_mut(), self.0.as_ptr()) }
+    }
 }
 
 // SAFETY: pcre2api(3), "Multithreading": a compiled pattern, JIT code
@@ -85,9 +119,15 @@ impl Drop for CompileContext {
 
 impl Code {
     /// `pcre2_compile(pattern, len, options, ...)` with `extra` as the
-    /// `pcre2_set_compile_extra_options`.
-    pub(crate) fn compile(pattern: &[u8], options: u32, extra: u32) -> Result<Code, CompileError> {
-        let context = if extra == 0 {
+    /// `pcre2_set_compile_extra_options` and `tables` as the
+    /// `pcre2_set_character_tables`, the library's own where `None`.
+    pub(crate) fn compile(
+        pattern: &[u8],
+        options: u32,
+        extra: u32,
+        tables: Option<Arc<Tables>>,
+    ) -> Result<Code, CompileError> {
+        let context = if extra == 0 && tables.is_none() {
             None
         } else {
             // SAFETY: a null general context asks for the system allocator.
@@ -96,6 +136,13 @@ impl Code {
             if let Some(context) = &context {
                 // SAFETY: `context` is a live compile context.
                 unsafe { sys::pcre2_set_compile_extra_options_8(context.0.as_ptr(), extra) };
+                if let Some(tables) = &tables {
+                    // SAFETY: `context` is live and the tables outlive the
+                    // pattern, which keeps them.
+                    unsafe {
+                        sys::pcre2_set_character_tables_8(context.0.as_ptr(), tables.0.as_ptr())
+                    };
+                }
             }
             context
         };
@@ -131,6 +178,7 @@ impl Code {
             raw,
             utf: all & PCRE2_UTF != 0,
             jitted: false,
+            _tables: tables,
         })
     }
 
@@ -476,7 +524,7 @@ mod tests {
     /// pointer dangles, where php's `val` is always live.
     #[test]
     fn an_empty_subject_whose_slice_dangles_is_matched_as_a_live_one() -> Result<(), &'static str> {
-        let mut code = Code::compile(b"b", PCRE2_CASELESS, 0).map_err(|_| "`b` compiles")?;
+        let mut code = Code::compile(b"b", PCRE2_CASELESS, 0, None).map_err(|_| "`b` compiles")?;
         let jitted = code.jit().map_err(|_| "`b` compiles to machine code")?;
         let mut data = MatchData::with_pairs(1).ok_or("match data is allocated")?;
         let context = Context::new().ok_or("a match context is allocated")?;
