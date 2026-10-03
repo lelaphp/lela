@@ -171,6 +171,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     if cycle_ended {
         s.registered.clear();
         s.init_due = true;
+        out::unstick_log();
     }
     let execution = std::mem::replace(&mut s.execution, Execution::Not);
     if execution != Execution::Not {

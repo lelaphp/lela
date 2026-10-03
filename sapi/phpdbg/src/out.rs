@@ -129,6 +129,9 @@ thread_local! {
     /// `PG(in_error_log)`: a prompt inside `php_sapi_phpdbg_log_message`
     /// stands, [`in_log`].
     static IN_LOG: Cell<bool> = const { Cell::new(false) };
+    /// `PG(in_error_log)` left set by a bailout out of the log,
+    /// [`stick_log`].
+    static STUCK: Cell<bool> = const { Cell::new(false) };
 }
 
 /// `f` inside the host's log: `php_log_err` guards against itself, so
@@ -141,9 +144,23 @@ pub fn in_log<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Whether a prompt inside the host's log stands.
+/// Whether a prompt inside the host's log stands, or the log's guard
+/// was left set.
 pub fn logging() -> bool {
-    IN_LOG.get()
+    IN_LOG.get() || STUCK.get()
+}
+
+/// A refusal inside the log's prompt bails out of `php_log_err`, past
+/// the line that clears `PG(in_error_log)` (`Z/main/main.c:928-990`), so
+/// nothing is logged until the next cycle's `php_request_startup` clears
+/// it ([`unstick_log`]).
+pub fn stick_log() {
+    STUCK.set(true);
+}
+
+/// `php_request_startup`'s `PG(in_error_log) = 0`.
+pub fn unstick_log() {
+    STUCK.set(false);
 }
 
 /// `f` with `PHPDBG_DISCARD_OUTPUT` set: what phpdbg writes in it goes

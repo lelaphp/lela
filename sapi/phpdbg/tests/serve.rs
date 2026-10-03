@@ -942,3 +942,73 @@ fn the_default_init_files_are_read_where_php_reads_them() {
         )
     );
 }
+
+/// Under `-r` php's startup run compiles a context that does not compile
+/// once the session is fully started, so its log stands at a prompt, and
+/// nothing is logged from there: a `run` or a `print exec` refused again
+/// writes nothing, and `ev` no warning. Such a refusal bails out of the
+/// log past the line that clears its guard, so nothing is logged after it
+/// either, a `run` at the prompt included (the pinned phpdbg's bytes for
+/// `phpdbg -qrb -n` and `phpdbg -qb -n`).
+#[test]
+fn a_refusal_inside_the_log_leaves_its_guard_set() {
+    let source = "<?php\nfunction (\n";
+    let refused = |file: &str| {
+        format!(
+            "[PHP Parse error:  Unclosed '(' on line 2 in {file} on line 3]\n\
+             [Could not find information about included file...]\n"
+        )
+    };
+    let served = under_phpdbg(
+        "log-r",
+        &["-qrb", "-n"],
+        None,
+        source,
+        "ev 2\nr\nev $x\nprint exec\nr\nq\n",
+    );
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "{}prompt> 2\nprompt> prompt> \nprompt> prompt> prompt> ",
+                refused(&served.file)
+            )
+            .as_str(),
+            Some(255)
+        )
+    );
+    let served = under_phpdbg(
+        "log-print",
+        &["-qb", "-n"],
+        None,
+        source,
+        "print exec\nprint exec\nc\nprint exec\nq\n",
+    );
+    let log = refused(&served.file);
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!("{log}prompt> {log}prompt> prompt> [Not running]\nprompt> prompt> ").as_str(),
+            Some(255)
+        )
+    );
+    let served = under_phpdbg(
+        "log-run",
+        &["-qb", "-n"],
+        None,
+        source,
+        "r\nev 1\nc\nr\nev $x\nr\nq\n",
+    );
+    let log = refused(&served.file);
+    assert_eq!(
+        (served.out.as_str(), served.status),
+        (
+            format!(
+                "{log}prompt> {log}prompt> 1\nprompt> [Not running]\n\
+                 prompt> {log}prompt> \nprompt> prompt> "
+            )
+            .as_str(),
+            Some(255)
+        )
+    );
+}

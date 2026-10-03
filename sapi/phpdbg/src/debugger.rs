@@ -87,10 +87,9 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             };
             crate::init::run(&mut session, &mut Here::Idle { req });
             let quits = session.after_run == AfterRun::Quit;
+            let runs = std::mem::take(&mut session.init_runs);
             if session.stopped.is_some() {
-            } else if std::mem::take(&mut session.init_runs)
-                && session.execution == Execution::BailedOut
-            {
+            } else if runs && session.execution == Execution::BailedOut {
                 // The run they come before finds `in_execution` set, and
                 // asks before it compiles.
                 if prompt::restart_permitted(&mut session) && !quits {
@@ -104,6 +103,12 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 let _ = out::replay(&session.refused);
                 session.status = Some(255);
                 session.stopped = Some(session::Stop::Quit);
+            } else if runs {
+                // `-r`'s run compiles the context once the session is
+                // fully started, so its log stands at a prompt.
+                session.started = true;
+                prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                let _ = prompted(&mut session, req, |req| Here::Idle { req });
             } else {
                 refused(&mut session);
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });

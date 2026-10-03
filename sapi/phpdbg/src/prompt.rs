@@ -955,6 +955,12 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
         }
         return Ret::Success;
     }
+    // `phpdbg_compile` before anything of the run: the compiler refuses
+    // the context again, in its log, and bails out of the run.
+    if s.context == Context::Refused && !here.compiled() {
+        refused_again(s, Some(here));
+        return Ret::Success;
+    }
     // In the init files, php's `run` compiles the context and runs it
     // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
     // stopping but for a throwable nothing catches, and the reading goes
@@ -1368,7 +1374,8 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// the diagnostic, displayed or logged, and where it was logged, the
 /// listing where nothing executes and, once the session is fully started,
 /// a prompt inside the log, under which nothing more is logged; and the
-/// status 255. Inside the log already, nothing is written.
+/// status 255. Inside the log already, nothing is written, and the
+/// refusal bails out of the log with its guard left set.
 ///
 /// ```php
 /// $a = 1;
@@ -1396,6 +1403,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
     s.status = Some(255);
     if out::logging() {
+        out::stick_log();
         return;
     }
     // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
