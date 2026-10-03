@@ -133,7 +133,8 @@ use watch::{Journal, Watch};
 pub(crate) const INSTRUMENT: &str = "witness";
 
 /// The keys of a witness reading's counts beside the tally's `run`, named
-/// once for the lane that writes them and the rendering that reads them.
+/// once for the lane that writes them and the rendering that reads those it
+/// renders.
 pub(crate) mod numbers {
     /// Witnesses that met their pinned verdict.
     pub(crate) const PASSED: &str = "passed";

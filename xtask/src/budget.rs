@@ -25,7 +25,7 @@ use crate::sources::{self, Standing};
 pub(crate) const INSTRUMENT: &str = "budget";
 
 /// The scope of the reading of the whole workspace against `[budget]`.
-pub(crate) const WORKSPACE: &str = "workspace";
+const WORKSPACE: &str = "workspace";
 
 /// The keys of a budget reading's counts, named once for the instrument
 /// that writes them and the rendering that reads them.
@@ -40,6 +40,14 @@ pub(crate) mod numbers {
     pub(crate) const FILES: &str = "files";
     /// The workspace's every counted line, against `[budget] total`.
     pub(crate) const TOTAL: &str = "total";
+    /// `docs/**` and the living documents, against `[budget] docs`.
+    pub(crate) const DOCS: &str = "docs";
+    /// `.claude/**` and `harness-plugins/**`, against `[budget] harness`.
+    pub(crate) const HARNESS: &str = "harness";
+    /// Third-party `Cargo.lock` packages, against `[budget] lock_packages`.
+    pub(crate) const LOCK_PACKAGES: &str = "lock_packages";
+    /// `[budget] new`, stated and not measured.
+    pub(crate) const NEW_CEILING: &str = "new_ceiling";
 
     /// The key of the ceiling a workspace pool `name` is held to.
     pub(crate) fn ceiling_of(name: &str) -> String {
@@ -234,24 +242,24 @@ fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<R
         "ext/*/src/ffi/** lines",
     )?;
     ceiling(
-        "docs",
+        numbers::DOCS,
         docs(root)?,
         budget.docs,
         "docs/** and the living documents",
     )?;
     ceiling(
-        "harness",
+        numbers::HARNESS,
         harness(root)?,
         budget.harness,
         ".claude/** and harness-plugins/** hand-written lines",
     )?;
     ceiling(
-        "lock_packages",
+        numbers::LOCK_PACKAGES,
         u64::try_from(CargoLock::load(root)?.packages())?,
         budget.lock_packages,
         "third-party Cargo.lock packages",
     )?;
-    reading.count("new_ceiling", budget.new)?;
+    reading.count(numbers::NEW_CEILING, budget.new)?;
 
     for name in sources::undeclared(root, manifest) {
         failures.push(format!(

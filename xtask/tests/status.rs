@@ -884,8 +884,8 @@ fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
     assert!(!ok && err.contains("no-such-log.jsonl"), "{err}");
 }
 
-/// `--every --log` renders every budget, api-check (the locks section's)
-/// and witness reading of
+/// `--every --log` renders every budget, api-check (`locks` by its other
+/// name) and witness reading of
 /// a log it is handed as one versioned line each, in the log's order
 /// (#1763), as it does a phpt reading: a whole line, a lean row of the
 /// published history, a torn line counted on stderr and skipped, and the
@@ -896,7 +896,7 @@ fn every_budget_api_check_and_witness_reading_of_a_log_handed_in_is_one_versione
     let root = scratch("every-sections");
     for (section, instrument, torn) in [
         ("budget", "budget", 8),
-        ("locks", "api-check", 6),
+        ("api-check", "api-check", 6),
         ("witness", "witness", 5),
     ] {
         let fixture =

@@ -46,7 +46,6 @@ use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, extension_calls, uses};
 use lock::{Block, Diff, Lock, list};
-use numbers::{EDGES, EXTENSIONS, ITEMS, PRIVATE as PRIVATE_ITEMS};
 use workspace::{Crates, Present};
 
 pub(crate) const INSTRUMENT: &str = "api-check";
@@ -234,7 +233,7 @@ fn seam_reading(
     let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
     reading
         .numbers
-        .insert(ITEMS.to_owned(), count(generated.len()));
+        .insert(numbers::ITEMS.to_owned(), count(generated.len()));
     let subject = match kind {
         LockKind::Items => format!("public items of {home}"),
         LockKind::Imports => format!("imports from {}", seam.producer),
@@ -258,8 +257,8 @@ fn seam_reading(
             let private = generated.iter().filter(|line| private(line)).count();
             items -= private;
             beside = " beside __private's";
-            reading.numbers.insert(ITEMS.into(), count(items));
-            reading.numbers.insert(PRIVATE_ITEMS.into(), count(private));
+            reading.count(numbers::ITEMS, items as u64)?;
+            reading.count(numbers::PRIVATE, private as u64)?;
             if private as u64 > cap {
                 problems.push(format!(
                     "{shown} has {private} {PRIVATE} items; the ceiling is {cap} (api_private_items)"
@@ -501,7 +500,7 @@ fn crate_reading(
     reading.adr = adr.join(", ");
     reading
         .numbers
-        .insert(EDGES.to_owned(), count(krate.deps.len()));
+        .insert(numbers::EDGES.to_owned(), count(krate.deps.len()));
 
     let mut problems = Vec::new();
     let mut notes = Vec::new();
@@ -549,7 +548,7 @@ fn crate_reading(
             let listed = bundle_order(krate)?;
             reading
                 .numbers
-                .insert(EXTENSIONS.to_owned(), count(listed.len()));
+                .insert(numbers::EXTENSIONS.to_owned(), count(listed.len()));
             problems.extend(not_topological(crates, &listed));
         } else {
             problems.push(format!(

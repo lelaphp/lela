@@ -69,8 +69,8 @@ type Lines = fn(&Log) -> Result<String>;
 const ROWS: &[(Section, Lines)] = &[
     (Section::Phpt, lines::<phpt::row::Row>),
     (Section::Budget, lines::<budget::row::Row>),
-    // The locks section is the api-check readings': a seam's lock, and
-    // under `--every` each crate's edges beside it.
+    // `--section api-check` names it too: a seam's lock, and under
+    // `--every` each crate's edges beside it.
     (Section::Locks, lines::<api_check::row::Row>),
     (Section::Witness, lines::<witness::row::Row>),
 ];
@@ -118,6 +118,18 @@ impl Head {
 /// keeps none.
 pub(crate) fn count(reading: &Reading, key: &str) -> Option<u64> {
     reading.numbers.get(key).map(|n| whole(*n))
+}
+
+/// A reading of `instrument` of `scope` with the counts named, for a
+/// row's tests.
+#[cfg(test)]
+pub(crate) fn reading(instrument: &str, scope: &str, counts: &[(&str, i64)]) -> Reading {
+    let mut reading = Reading::new(instrument, scope);
+    reading.numbers = counts
+        .iter()
+        .map(|(key, n)| ((*key).to_owned(), Number::Int(*n)))
+        .collect();
+    reading
 }
 
 /// A count as a whole number: a negative one, which no instrument writes,

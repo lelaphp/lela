@@ -1,7 +1,7 @@
-//! One api-check reading as a row of `status --section locks --format jsonl
-//! --every` (harness-design.md §4.6, #1763), the section that renders the
-//! api-check readings: what the reading counted, under a shape `v`
-//! versions. A seam's reading counts its lock's items and a crate's its
+//! One api-check reading as a row of `status --section api-check --format
+//! jsonl --every` (harness-design.md §4.6, #1763), `locks` by its other
+//! name, the section that renders the api-check readings: what the reading
+//! counted, under a shape `v` versions. A seam's reading counts its lock's items and a crate's its
 //! edges; which scope is a seam is the manifest's at the ref a reader
 //! views, so a row says what one reading counted and leaves a count it does
 //! not keep null, never 0.
@@ -55,17 +55,12 @@ impl PerReading for Row {
 #[cfg(test)]
 mod tests {
     use super::Row;
-    use crate::reading::{Number, Reading};
-    use crate::status::PerReading;
+    use crate::reading::Reading;
+    use crate::status::{PerReading, every};
 
-    /// An api-check reading of `scope` with the counts named.
+    /// A reading of `scope` with the counts named.
     fn reading(scope: &str, counts: &[(&str, i64)]) -> Reading {
-        let mut reading = Reading::new(super::INSTRUMENT, scope);
-        reading.numbers = counts
-            .iter()
-            .map(|(key, n)| ((*key).to_owned(), Number::Int(*n)))
-            .collect();
-        reading
+        every::reading(super::INSTRUMENT, scope, counts)
     }
 
     /// A seam's reading counts its items and a crate's its edges; each
