@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=bf65f830bf32d7f84571985ec7a4909c5f37a77ef6154e64923e76921bed5e21 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=f3aa43e3be74effaf0628ed8ace4f6594f799433d79a7f72bd46290e4a8cafb4 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -98,8 +98,9 @@ third-engine-design.md
 - ADR-0006 (accepted, 2026-09-07): The compiled tier is a seam on `execute` with one engine-level word per safepoint, not a second executor with a per-request feedback table
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
+- ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 
-<!-- /computed in=655a09f7bfbd3dbc7dc1544a56c3c031bba71ef703990c5444a5f4f29f4d55b9 out=1decbce24eec1ffda97c6ed5a80344b357a1f522e076a6e51b3c2f6ddeff4868 -->
+<!-- /computed in=f8f6bf168e2a1a7bdef6fc589146f4c7ac811b83d2b6d32362d8921c3726c93f out=c60a7ddc7919c247348a721d7beb636ae2e857b348b7f756cfc87574ba269bd5 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
