@@ -8,7 +8,7 @@ use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Whenc
 
 use crate::archive::{Archive, CREATE};
 use crate::object::{basedir_refuses, expand};
-use crate::read::Reader;
+use crate::read::{Reader, Stdio};
 
 /// `struct php_zip_stream_data_t`: the opened entry, read as the
 /// stream is read, and the stat `php_zip_ops_stat` answers for a stream
@@ -18,6 +18,9 @@ struct ZipStream {
     stat: Option<(u64, i64, bool)>,
     /// The archive a `getStream` stream reads, by its number.
     archive: Option<u64>,
+    /// The `FILE` of the archive the wrapper opened, which the stream
+    /// keeps (`self->za`).
+    file: Option<Stdio>,
 }
 
 impl StreamOps for ZipStream {
@@ -70,7 +73,16 @@ impl StreamOps for ZipStream {
         {
             self.zf = Reader::closed();
         }
-        match self.zf.read(buf.len()) {
+        let mut file = match self.archive {
+            Some(id) => crate::object::file(req, id),
+            None => self.file.take(),
+        };
+        let got = self.zf.read_through(buf.len(), &mut file);
+        match self.archive {
+            Some(id) => crate::object::file_back(req, id, file),
+            None => self.file = file,
+        }
+        match got {
             Ok(data) => {
                 let n = data.len();
                 buf[..n].copy_from_slice(&data);
@@ -177,6 +189,7 @@ pub(crate) fn open_entry(
     orig: Option<(&[u8], u64)>,
     mode: &[u8],
     stat: Option<(u64, i64, bool)>,
+    file: Option<Stdio>,
 ) -> Result<Option<Stream>, Thrown> {
     if mode.first() != Some(&b'r') {
         return Ok(None);
@@ -185,6 +198,7 @@ pub(crate) fn open_entry(
         zf,
         stat,
         archive: orig.map(|(_, id)| id),
+        file,
     };
     let stream = req.new_stream(Box::new(kind), mode)?;
     if let Some((name, _)) = orig {
@@ -251,7 +265,8 @@ fn open(
         return Ok(None);
     };
     let dir = path.last() == Some(&b'/');
-    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)))
+    let file = archive.data.as_mut().and_then(|d| d.stdio.take());
+    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

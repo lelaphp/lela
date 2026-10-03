@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
 use crate::error::{Done, Er, Failed, Status};
-use crate::read::{Layers, Reader, Window};
+use crate::read::{Layers, Reader, Stdio, Window};
 use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
 
 // `zip_open` flags.
@@ -267,6 +267,7 @@ impl Source {
                     None => File::open(path),
                 }
                 .map_err(|e| Status::of(Er::Open, sys(&e)))?;
+                let f = Stdio::new(f);
                 Ok(Reader::window(Window::new(f, *start, *len, false), None))
             }
         }
@@ -351,6 +352,9 @@ pub(crate) struct Stat {
 pub(crate) struct Data {
     pub(crate) file: File,
     pub(crate) mode: u32,
+    /// The stdio `FILE` libzip reads it through, lent to the archive while
+    /// the archive's object lends it out to its entries' streams.
+    pub(crate) stdio: Option<Stdio>,
 }
 
 /// `zip_t`.
@@ -482,7 +486,11 @@ impl Archive {
         if self.open_flags & CHECKCONS != 0 {
             self.check_names()?;
         }
-        self.data = Some(Data { file, mode });
+        let stdio = file
+            .try_clone()
+            .map(|f| self.replay(Stdio::new(f), len, start, &cdir[..at]))
+            .ok();
+        self.data = Some(Data { file, mode, stdio });
         if self.open_flags & CHECKCONS != 0 {
             for i in 0..self.entries.len() {
                 self.local_header(i)
@@ -490,6 +498,58 @@ impl Archive {
             }
         }
         Ok(())
+    }
+
+    /// The reads `zip_open` makes through the archive's `FILE`, so its
+    /// buffer holds what php's does: the end of the file
+    /// (`_zip_find_central_dir`), the central directory where that did not
+    /// reach it, and under `ZIP_CHECKCONS` each local header.
+    ///
+    /// What the buffer held at the open is read after the file is cut:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('cut-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 1000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
+    /// $z->open('cut-witness.zip'); $h = fopen('cut-witness.zip', 'r+'); ftruncate($h, 10); fclose($h);
+    /// var_dump(strlen($z->getFromName('a')), $z->getStatusString()); $z->close(); unlink('cut-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(1000)
+    /// string(8) "No error"
+    /// ```
+    fn replay(&self, mut f: Stdio, len: u64, start: u64, cdir: &[u8]) -> Stdio {
+        let tail = len.min(65_577);
+        f.seek(len - tail);
+        let _ = f.read(&mut vec![0; usize::try_from(tail).unwrap_or(0)]);
+        if start < len - tail {
+            f.seek(start);
+            let mut at = 0;
+            while let Some(lens) = cdir.get(at + 28..at + 34) {
+                let mut piece = vec![0; 46];
+                let _ = f.read(&mut piece);
+                for k in 0..3 {
+                    piece.resize(
+                        usize::from(u16::from_le_bytes([lens[2 * k], lens[2 * k + 1]])),
+                        0,
+                    );
+                    let _ = f.read(&mut piece);
+                    at += piece.len();
+                }
+                at += 46;
+            }
+        }
+        if self.open_flags & CHECKCONS != 0 {
+            for e in self.entries.iter().filter_map(|e| e.orig.as_ref()) {
+                f.seek(e.offset);
+                let mut head = [0u8; 30];
+                if f.read(&mut head).is_ok_and(|n| n == 30) {
+                    let n = u16::from_le_bytes([head[26], head[27]]);
+                    let m = u16::from_le_bytes([head[28], head[29]]);
+                    let _ = f.read(&mut vec![0; usize::from(n) + usize::from(m)]);
+                }
+            }
+        }
+        f
     }
 
     /// `_zip_hash_add` under `ZIP_CHECKCONS`: a name twice is
@@ -1152,38 +1212,35 @@ impl Archive {
 
     /// The window on the archive's file that entry `idx`'s data is, past
     /// its local header (`_zip_file_get_offset`): the header's name and
-    /// extra field lengths are read and its signature is not, and a file
-    /// too short for them is `ZIP_ER_EOF`.
-    fn window(&self, idx: usize) -> Result<Window, Status> {
-        use std::os::unix::fs::FileExt;
+    /// extra field lengths are read through the archive's `FILE`, a seek to
+    /// the header and one past its signature, and a file too short for
+    /// them is `ZIP_ER_EOF`.
+    fn window(&mut self, idx: usize) -> Result<Window, Status> {
         let orig = self.entries[idx]
             .orig
             .as_ref()
             .ok_or(Status::of(Er::Internal, 0))?;
         let (offset, size) = (orig.offset, orig.comp_size);
-        let data = self.data.as_ref().ok_or(Status::of(Er::Internal, 0))?;
+        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        let mut own = data
+            .file
+            .try_clone()
+            .map(Stdio::new)
+            .map_err(|e| Status::of(Er::Open, e.raw_os_error().unwrap_or(0)))?;
+        let f = data.stdio.as_mut().unwrap_or(&mut own);
         let mut lens = [0u8; 4];
-        let mut got = 0;
-        while got < 4 {
-            match data
-                .file
-                .read_at(&mut lens[got..], offset + 26 + got as u64)
-            {
-                Ok(0) => return Err(Status::of(Er::Eof, 0)),
-                Ok(n) => got += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
-            }
+        f.seek(offset);
+        f.seek(offset + 26);
+        match f.read(&mut lens) {
+            Ok(4) => {}
+            Ok(_) => return Err(Status::of(Er::Eof, 0)),
+            Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
         }
         let start = offset
             + 30
             + u64::from(u16::from_le_bytes([lens[0], lens[1]]))
             + u64::from(u16::from_le_bytes([lens[2], lens[3]]));
-        let file = data
-            .file
-            .try_clone()
-            .map_err(|e| Status::of(Er::Open, e.raw_os_error().unwrap_or(0)))?;
-        Ok(Window::new(file, start, size, true))
+        Ok(Window::new(own, start, size, true))
     }
 
     /// An unchanged entry's data opened for reading whole: decrypted with
@@ -1198,7 +1255,7 @@ impl Archive {
         check_crc: bool,
     ) -> Result<Reader, Status> {
         let de = self.dirent(idx, flags).map_err(|e| Status::of(e, 0))?;
-        let dostime = de.last_mod.time;
+        let (dostime, bitflags) = (de.last_mod.time, de.bitflags);
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let layers = Layers {
             method: st.comp_method,
@@ -1208,6 +1265,7 @@ impl Archive {
             comp_size: st.comp_size,
             crc: (check_crc && crc_valid).then_some(st.crc),
             dostime,
+            bitflags,
             check: self.open_flags & CHECKCONS != 0,
         };
         let window = self.window(idx)?;
@@ -1248,6 +1306,22 @@ impl Archive {
         }
         let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false)?;
         Ok(reader.read_to_end())
+    }
+
+    /// `file` swapped with the archive's `FILE`: lent to it, and taken
+    /// back by the same call.
+    pub(crate) fn lend(&mut self, file: &mut Option<Stdio>) {
+        if let Some(d) = &mut self.data {
+            std::mem::swap(&mut d.stdio, file);
+        }
+    }
+
+    /// `zip_fread` on an entry this archive opened, through its `FILE`.
+    pub(crate) fn read_entry(&mut self, zf: &mut Reader, len: usize) -> Result<Vec<u8>, Status> {
+        match &mut self.data {
+            Some(d) => zf.read_through(len, &mut d.stdio),
+            None => zf.read(len),
+        }
     }
 
     /// `zip_fopen_index_encrypted`: entry `idx` opened for reading,

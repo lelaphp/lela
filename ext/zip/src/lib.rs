@@ -84,13 +84,15 @@ pub(crate) struct Countable;
 /// Request-scoped (ADR-0005): the two resource types, registered on
 /// first use, and the archives `ZipArchive` opened by number, those
 /// closed since kept so a stream over one of their entries reads php's
-/// `ZIP_ER_ZIPCLOSED` (`_zip_source_invalidate`).
+/// `ZIP_ER_ZIPCLOSED` (`_zip_source_invalidate`), and the open ones'
+/// stdio `FILE`, which the object and its entries' streams read through.
 #[derive(Default)]
 struct State {
     dir: Option<ResourceType>,
     entry: Option<ResourceType>,
     archives: u64,
     closed: std::collections::HashSet<u64>,
+    files: std::collections::HashMap<u64, read::Stdio>,
 }
 
 /// The extension value (design §7.1): the ten procedural natives,
