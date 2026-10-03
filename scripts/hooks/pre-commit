@@ -6,8 +6,8 @@
 # the hook there, before clippy has built anything, since a vocab word or
 # a missing lock line is seconds to find and a clippy and test cycle is
 # minutes. Then clippy and test on the crates with a staged change, and
-# witness on them beside crosscheck on the staged extensions the binary
-# carries (#1312); each writes a reading, so `done` has
+# witness on them beside crosscheck on the extensions the binary carries
+# whose rendering reads a staged file (#1312, #1159); each writes a reading, so `done` has
 # the readings its condition 1 asks a touched crate for. With `--staged`
 # each leaves out a crate whose reading passes and was taken over exactly
 # what is staged, naming the reading (#1143), a retired worktree's

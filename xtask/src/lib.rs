@@ -413,21 +413,19 @@ fn crosscheck_command(
 ) -> Result<()> {
     let registry = Registry::load(root)?;
     let ext = if staged {
-        // The carried extensions with a staged change: what `done` holds
-        // to its row, and nothing it does not (#1312).
+        // The carried extensions whose rendering reads a staged file and
+        // no reading stands for (#1159): what `done` holds to its row,
+        // and an engine crate's change reaches every one (#1312).
         let carried = crosscheck::extensions(
             manifest,
             &carried::Carried::binary(root)?,
             &crosscheck::Ask::default(),
         );
-        let touched: Vec<String> = sources::staged_crates(root, manifest)?
-            .iter()
-            .filter_map(|name| name.strip_prefix("ext/"))
-            .filter(|name| carried.iter().any(|c| c == name))
-            .map(str::to_owned)
-            .collect();
+        let touched = crosscheck::staged(root, manifest, store, &carried)?;
         if touched.is_empty() {
-            println!("crosscheck: no extension the binary carries has a staged change");
+            println!(
+                "crosscheck: no extension the binary carries renders again for what is staged"
+            );
             return Ok(());
         }
         touched

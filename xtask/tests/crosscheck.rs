@@ -528,17 +528,17 @@ fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     }
 }
 
-/// `--staged`, pre-commit's (#1312): a commit that stages no extension the
-/// binary carries renders nothing and writes no reading, where the lane
-/// without it renders every one.
+/// `--staged`, pre-commit's (#1312, #1159): a commit that stages only a
+/// harness file, which no extension's rendering reads, renders nothing
+/// and writes no reading, where the lane without it renders every one.
 #[test]
-fn staged_with_no_extension_staged_renders_nothing() {
+fn staged_with_no_file_a_rendering_reads_renders_nothing() {
     let root = Tree::new("crosscheck-staged").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
-    fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
-    fs::write(root.join("crates/php_heap/src/lib.rs"), "// moved\n").unwrap();
+    fs::create_dir_all(root.join("xtask/src")).unwrap();
+    fs::write(root.join("xtask/src/lib.rs"), "// moved\n").unwrap();
     let add = std::process::Command::new("git")
-        .args(["add", "--", "crates/php_heap/src/lib.rs"])
+        .args(["add", "--", "xtask/src/lib.rs"])
         .current_dir(&root)
         .status()
         .unwrap();
@@ -556,7 +556,7 @@ fn staged_with_no_extension_staged_renders_nothing() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("no extension the binary carries has a staged change"),
+        stdout.contains("no extension the binary carries renders again for what is staged"),
         "{stdout}"
     );
     let store = Store::of_workspace(&root);

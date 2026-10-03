@@ -440,3 +440,88 @@ fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
         b"Extension [ x ] {\n\n  - INI {\n}"
     );
 }
+
+/// Both columns of each of `names` pass over the tree as it is on disk.
+fn rendered(tree: &Path, manifest: &Manifest, store: &Store, names: &[&str]) {
+    for name in names {
+        for column in Column::ALL {
+            let mut reading = reading_of(tree, manifest, name, Host::Cli, column).unwrap();
+            reading.status = Status::Pass;
+            store.record(&[reading]).unwrap();
+        }
+    }
+}
+
+/// Write `text` at `path` under the tree and stage it.
+fn staging(tree: &Path, path: &str, text: &str) {
+    let at = tree.join(path);
+    fs::create_dir_all(at.parent().unwrap()).unwrap();
+    fs::write(&at, text).unwrap();
+    crate::git::git(tree, &["add", "--", path], None).unwrap();
+}
+
+/// `crosscheck --staged` over the closure fixture of #1318, both
+/// extensions rendered and passing (#1159): a staged xtask file renders
+/// nothing; a staged change to `ext/ctype` alone renders ctype alone, and
+/// once its readings are taken over what is staged, nothing; a staged
+/// `php_engine` change, in every extension's closure, renders every one.
+#[test]
+fn a_staged_change_renders_again_the_extensions_whose_rendering_reads_it() {
+    let tree = crate::key::fixture("crosscheck-staged");
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let store = Store::at(tree.join("target/harness"));
+    let carried = ["ctype".to_owned(), "reflection".to_owned()];
+    rendered(&tree, &manifest, &store, &["ctype", "reflection"]);
+    let again = || staged(&tree, &manifest, &store, &carried).unwrap();
+
+    staging(&tree, "xtask/src/lib.rs", "pub fn harness() {}\n");
+    assert!(again().is_empty(), "{:?}", again());
+
+    staging(&tree, "ext/ctype/src/lib.rs", "pub fn ctype_digit() {}\n");
+    assert_eq!(again(), ["ctype"]);
+    rendered(&tree, &manifest, &store, &["ctype"]);
+    assert!(again().is_empty(), "{:?}", again());
+
+    staging(
+        &tree,
+        "crates/php_engine/src/lib.rs",
+        "pub fn execute() { }\n",
+    );
+    assert_eq!(again(), carried);
+}
+
+/// A staged change to `ext/reflection`, whose `ReflectionExtension`
+/// prints every extension's `--re` and is in no other extension's
+/// closure, renders ctype again though ctype's readings were taken over
+/// what is staged, since its key does not move with reflection
+/// ([`Reads::beyond`]); reflection's own key does, and its readings over
+/// what is staged stand.
+#[test]
+fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
+    let tree = crate::key::fixture("crosscheck-beyond");
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let store = Store::at(tree.join("target/harness"));
+    let carried = ["ctype".to_owned(), "reflection".to_owned()];
+    staging(&tree, "ext/reflection/src/lib.rs", "pub fn export() {}\n");
+    rendered(&tree, &manifest, &store, &["ctype", "reflection"]);
+    let graph = crate::key::Graph::of(&tree).unwrap();
+    let reads = Reads::of(
+        &graph,
+        &manifest,
+        &Carried::linked().unwrap(),
+        "ctype",
+        Host::Cli,
+    );
+    assert!(
+        reads.beyond.contains(&PathBuf::from("ext/reflection")),
+        "{reads:?}"
+    );
+    assert!(
+        !reads.keyed.contains(&PathBuf::from("ext/reflection")),
+        "{reads:?}"
+    );
+    assert_eq!(
+        staged(&tree, &manifest, &store, &carried).unwrap(),
+        ["ctype"]
+    );
+}
