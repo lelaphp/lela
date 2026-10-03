@@ -22,7 +22,10 @@
 //!
 //! And the build's facts, php's `main/build-defs.h` and `php_build_date`,
 //! each stamped here once for every host, every constant and phpinfo to
-//! read ([`build_defs`]).
+//! read ([`build_defs`]), the install layout among them ([`layout`]).
+
+#[path = "src/api/request/build_defs/layout.rs"]
+mod layout;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -77,7 +80,8 @@ fn main() {
 /// `uname -a`, which would carry its name into the binary); and
 /// `PHP_BUILD_PROVIDER` only where the environment names one, as
 /// `configure` defines it only then (`Z/main/main_arginfo.h:13`), the
-/// cfg `php_build_provider` saying whether it does.
+/// cfg `php_build_provider` saying whether it does; and the install
+/// layout, each value under its macro's name ([`layout::layout`]).
 fn build_defs() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=PHP_BUILD_PROVIDER");
@@ -101,6 +105,11 @@ fn build_defs() {
     {
         println!("cargo:rustc-env=PHP_BUILD_PROVIDER={provider}");
         println!("cargo:rustc-cfg=php_build_provider");
+    }
+    let var = |name: &str| env::var(name).ok();
+    for (name, value) in layout::layout(&var) {
+        println!("cargo:rerun-if-env-changed={name}");
+        println!("cargo:rustc-env={name}={value}");
     }
 }
 

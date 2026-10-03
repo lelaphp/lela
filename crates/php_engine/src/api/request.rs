@@ -20133,7 +20133,7 @@ impl Request {
     /// error_prepend_string => no value => no value
     /// error_reporting => 30719 => 30719
     /// expose_php => On => On
-    /// extension_dir => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925 => /opt/homebrew/Cellar/php/8.5.9/lib/php/20250925
+    /// extension_dir => %s => %s
     /// fatal_error_backtraces => Off => Off
     /// fiber.stack_size => no value => no value
     /// file_uploads => On => On
@@ -20148,7 +20148,7 @@ impl Request {
     /// ignore_repeated_source => Off => Off
     /// ignore_user_abort => Off => Off
     /// implicit_flush => On => On
-    /// include_path => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear => .:/opt/homebrew/Cellar/php/8.5.9/share/php/pear
+    /// include_path => %s => %s
     /// input_encoding => no value => no value
     /// internal_encoding => no value => no value
     /// log_errors => Off => Off
@@ -20250,7 +20250,7 @@ impl Request {
     /// <tr><td class="e">error_prepend_string</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">error_reporting</td><td class="v">30719</td><td class="v">30719</td></tr>
     /// <tr><td class="e">expose_php</td><td class="v">On</td><td class="v">On</td></tr>
-    /// <tr><td class="e">extension_dir</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td><td class="v">/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925</td></tr>
+    /// <tr><td class="e">extension_dir</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">fatal_error_backtraces</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">fiber.stack_size</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">file_uploads</td><td class="v">On</td><td class="v">On</td></tr>
@@ -20265,7 +20265,7 @@ impl Request {
     /// <tr><td class="e">ignore_repeated_source</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">ignore_user_abort</td><td class="v">Off</td><td class="v">Off</td></tr>
     /// <tr><td class="e">implicit_flush</td><td class="v">Off</td><td class="v">Off</td></tr>
-    /// <tr><td class="e">include_path</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td><td class="v">.:/opt/homebrew/Cellar/php/8.5.9/share/php/pear</td></tr>
+    /// <tr><td class="e">include_path</td><td class="v">%s</td><td class="v">%s</td></tr>
     /// <tr><td class="e">input_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">log_errors</td><td class="v">Off</td><td class="v">Off</td></tr>

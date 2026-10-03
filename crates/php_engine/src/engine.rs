@@ -1432,8 +1432,8 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     ("internal_encoding", None),
     ("input_encoding", None),
     ("output_encoding", None),
-    // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
-    // which `DEFAULT_INCLUDE_PATH` says too.
+    // `PHP_INCLUDE_PATH`, this build's `.:${PEAR_INSTALLDIR}`, which
+    // `DEFAULT_INCLUDE_PATH` says too.
     ("include_path", Some(crate::constants::PHP_INCLUDE_PATH)),
     // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
     // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
