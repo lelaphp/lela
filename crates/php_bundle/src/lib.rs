@@ -140,6 +140,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_readline::extension,
         #[cfg(feature = "ffi")]
         php_ext_ffi::extension,
+        #[cfg(feature = "intl")]
+        php_ext_intl::extension,
     ]
 }
 
@@ -186,6 +188,8 @@ pub const CONFIGURE: &[&str] = &[
     "--with-gmp",
     #[cfg(not(feature = "iconv"))]
     "--without-iconv",
+    #[cfg(feature = "intl")]
+    "--enable-intl",
     #[cfg(not(feature = "libxml"))]
     "--without-libxml",
     #[cfg(feature = "mbstring")]

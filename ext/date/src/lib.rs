@@ -60,6 +60,7 @@ use crate::datetime::{DateTime, DateTimeImmutable};
 use crate::ffi::{Errors, Tzdb};
 pub use crate::ffi::{Offset, Zone};
 use crate::interval::DateInterval;
+pub use crate::obj::TzKind;
 use crate::period::DatePeriod;
 use crate::timezone::DateTimeZone;
 
@@ -104,6 +105,49 @@ pub fn get_timezone_info(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
 /// writes a date with it, past a subclass's `format()`.
 pub fn php_format_date_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
     datetime::format_obj(req, format, object)
+}
+
+/// What ext/intl reads of a `DateTimeInterface`'s `php_date_obj`
+/// (`php_date.h`, which `common_date.cpp` includes): the time's
+/// microseconds, and its zone, none where the time is UTC
+/// (`!time->is_localtime`).
+pub struct DateParts {
+    pub us: i64,
+    pub zone: Option<TzKind>,
+}
+
+/// `php_date_obj_from_obj(obj)->time`, as ext/intl's
+/// `intl_datetime_decompose` reads it; none where no constructor set the
+/// time (design §4.10).
+#[must_use]
+pub fn date_obj(req: &Request, object: PhpObject) -> Option<DateParts> {
+    let time = object.native::<obj::DateObj>(req)?.time.as_ref()?;
+    let zone = if time.is_localtime == 0 {
+        None
+    } else {
+        obj::tz_from_time(time)
+    };
+    Some(DateParts { us: time.us, zone })
+}
+
+/// `php_timezone_obj_from_obj(obj)`'s `type` and `tzi`, as ext/intl's
+/// `timezone_convert_datetimezone` reads them; none where the object is
+/// not `initialized` (design §4.10).
+#[must_use]
+pub fn timezone_obj(req: &Request, object: PhpObject) -> Option<TzKind> {
+    object.native::<obj::TzObj>(req)?.tz.clone()
+}
+
+/// `object_init_ex(php_date_get_timezone_ce())` with its `type` and `tzi`
+/// written, as ext/intl's `timezone_convert_to_datetimezone` lays down an
+/// offset zone the constructor cannot (design §4.10): one owner, the
+/// caller's.
+///
+/// # Errors
+///
+/// What making the object threw.
+pub fn new_timezone(req: &mut Request, kind: TzKind) -> Result<PhpObject, Thrown> {
+    obj::new_timezone(req, kind).map(|tz| tz.object())
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
