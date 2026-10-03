@@ -1219,3 +1219,51 @@ fn after_clean_the_refused_context_stands_at_an_invisible_prompt() {
         }
     }
 }
+
+/// phpdbg opens the context as a stream (`php_stream_open_for_zend_ex`)
+/// to compile it, so the id after `STDERR` is spent before the program
+/// runs, at the prompt's `r` and in an init file's `run` alike; `run
+/// <file` registers the three handles again after that compile (the
+/// pinned phpdbg's bytes for `phpdbg -qb -n`).
+#[test]
+fn compiling_the_context_spends_a_resource_id() {
+    let program = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n";
+    let looping = Setup {
+        files: &[("data.txt", "x\n")],
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let rows = |a, b, c| {
+        format!(
+            "resource({a}) of type (stream)\nresource({b}) of type (stream)\n\
+             resource({c}) of type (stream)\n"
+        )
+    };
+    let served = under_phpdbg("rsrc-prompt", &["-qb", "-n"], None, program, "r\nq\n");
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let expected = format!(
+        "{compiled}prompt> {}[Script ended normally]\nprompt> ",
+        rows(1, 3, 6)
+    );
+    assert_eq!(served.out, expected);
+    for (init, (a, b, c)) in [
+        ("run\n", (1, 3, 6)),
+        ("run x\n", (1, 3, 6)),
+        ("run <data.txt\n", (5, 7, 9)),
+    ] {
+        let served = under_phpdbg_with(
+            "rsrc-init",
+            &["-qb", "-n"],
+            Some(init),
+            program,
+            "q\n",
+            &looping,
+        );
+        let compiled = format!("[Successful compilation of {}]\n", served.file);
+        let expected = format!(
+            "{compiled}{}{compiled}[Script ended normally]\n",
+            rows(a, b, c)
+        );
+        assert!(served.out.starts_with(&expected), "{init}: {}", served.out);
+    }
+}

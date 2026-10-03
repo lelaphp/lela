@@ -3308,7 +3308,10 @@ impl Engine {
     }
 
     /// The file at `path` compiled for the request: what an extension's
-    /// `zend_compile_file` answers, or the unit cache's.
+    /// `zend_compile_file` answers, or the unit cache's. A bare program
+    /// is opened as phpdbg's `phpdbg_compile` opens it, a stream through
+    /// `php_stream_open_for_zend_ex`, and spends a resource id where the
+    /// CLI's `FILE *` spends none.
     fn compile_file(
         &self,
         req: &mut Request,
@@ -3319,7 +3322,13 @@ impl Engine {
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => req.cached_file(path, Some(path), crate::api::request::HandlePath::Host),
+            Ok(None) => {
+                let handle = match req.primary() {
+                    Primary::Wrapped => crate::api::request::HandlePath::Host,
+                    Primary::Bare => crate::api::request::HandlePath::Opened,
+                };
+                req.cached_file(path, Some(path), handle)
+            }
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None
