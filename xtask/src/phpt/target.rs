@@ -24,7 +24,7 @@ use super::against::{RUNS, Run};
 use super::{CORPUS, Judgement};
 use crate::divergence::Registry;
 use crate::oracle::Pin;
-use crate::reading::{listed, plural};
+use crate::reading::{Reading, listed, plural};
 
 /// What names the pin a target is kept under: the corpus's tag and the
 /// oracle's digest.
@@ -134,6 +134,28 @@ pub(crate) struct Measure {
 }
 
 impl Measure {
+    /// The key of a reading's `numbers` that counts the target's tests.
+    pub(crate) const TARGET: &str = "target";
+    /// The key that counts the target's tests the engine met.
+    pub(crate) const MET: &str = "met";
+    /// The key that counts the subset's tests outside the target.
+    pub(crate) const OUTSIDE: &str = "outside";
+    /// The key that counts the subset's tests the kept target predates,
+    /// written only where there are any (#1644).
+    pub(crate) const PREDATED: &str = "predated";
+
+    /// The measure written into the reading's numbers, under the keys
+    /// above.
+    pub(crate) fn write(&self, reading: &mut Reading) -> Result<()> {
+        reading.count(Self::TARGET, self.target)?;
+        reading.count(Self::MET, self.met)?;
+        reading.count(Self::OUTSIDE, self.outside)?;
+        if self.predated > 0 {
+            reading.count(Self::PREDATED, self.predated)?;
+        }
+        Ok(())
+    }
+
     /// Every verdict of the run, by divergence key, placed against `target`.
     pub(crate) fn of<'a>(
         target: &Target,

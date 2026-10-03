@@ -48,6 +48,9 @@ use anyhow::{Result, anyhow};
 use crate::oracle::Runner;
 use crate::reading::{Reading, Status, listed};
 
+/// The key of a lane's reading that counts the items judged.
+pub(crate) const RUN: &str = "run";
+
 /// What one item of a lane came to. A lane's enum carries the variants
 /// upstream gives it; the tally reads three things of any of them.
 pub trait Judgement: Copy + Eq + fmt::Debug {
@@ -379,7 +382,7 @@ impl<J: Judgement> Tally<J> {
         outcome: &Outcome<'_>,
         message: String,
     ) -> Result<Reading> {
-        reading.count("run", self.judged.len() as u64)?;
+        reading.count(RUN, self.judged.len() as u64)?;
         reading.status = outcome.status();
         reading.message = message;
         Ok(reading)
