@@ -46,7 +46,7 @@ pub const PHP_LOCALSTATEDIR: &str = env!("PHP_LOCALSTATEDIR");
 
 /// `PHP_SHLIB_SUFFIX`: `dll` on Windows and `so` everywhere else, macOS
 /// included, as php's `configure` sets it.
-const SHLIB_SUFFIX: &str = if cfg!(windows) { "dll" } else { "so" };
+pub(crate) const SHLIB_SUFFIX: &str = if cfg!(windows) { "dll" } else { "so" };
 
 /// `PHP_OS_STR`, the system `configure` ran on as `uname -s` names it,
 /// and `WINNT` on Windows.

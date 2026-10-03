@@ -10926,10 +10926,9 @@ impl Emit<'_> {
     /// under `empty`, and php's compile error under `isset`; `$GLOBALS`
     /// itself is set.
     ///
-    /// php's handler branches on the answer where a `JMPZ` or a `JMPNZ`
-    /// follows (`ZEND_VM_SMART_BRANCH`); the temporary stands and the
-    /// jump reads it, which is the same observable path one opline
-    /// longer, as `TYPE_CHECK`'s is.
+    /// Where a `JMPZ` or a `JMPNZ` follows over the temporary, the
+    /// handler branches over it (`ZEND_VM_SMART_BRANCH`); the compiler
+    /// emits the two oplines all the same, as `TYPE_CHECK`'s are.
     ///
     /// Every link under the last is `FETCH_DIM_IS`, the read that raises
     /// nothing, so a chain says no where a read would have warned:

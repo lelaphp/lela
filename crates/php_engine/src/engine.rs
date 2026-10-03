@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use php_compile::multibyte::Multibyte;
@@ -628,9 +628,11 @@ pub(crate) struct Shared {
     startup_errors: String,
     /// What the extensions' `on_modify` raised as the engine registered
     /// their ini entries ([`Engine::register_ini`]), which php shows once
-    /// `php_module_startup` is done and before any request's `RINIT`:
-    /// each request raises it again first, at no file and no line.
+    /// `php_module_startup` is done and before any request's `RINIT`,
+    /// once: the first request raises it first, at no file and no line.
     startup_raised: Vec<(Level, String)>,
+    /// Whether a request has raised [`Shared::startup_raised`].
+    startup_shown: AtomicBool,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -1592,6 +1594,16 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+    loads: Loads,
+}
+
+/// php's `extension_lists`: the names `zend_extension=` and
+/// `extension=` lines set outside a `[PATH=]` or `[HOST=]` section, which
+/// never reach the table, each list in the order written.
+#[derive(Default)]
+struct Loads {
+    engine: Vec<Vec<u8>>,
+    functions: Vec<Vec<u8>>,
 }
 
 /// One row of php's `configuration_hash`, what `cfg_get_entry` finds
@@ -1640,6 +1652,7 @@ impl Configuration {
             special: false,
             section: None,
             stderr: String::new(),
+            loads: Loads::default(),
         };
         if let Some(file) = &mut files.loaded {
             startup.read(&std::mem::take(&mut file.bytes), &file.path);
@@ -1655,6 +1668,7 @@ impl Configuration {
         Configuration {
             table: startup.table,
             stderr: startup.stderr,
+            loads: startup.loads,
         }
     }
 
@@ -1681,6 +1695,7 @@ struct Startup<'c> {
     section: Option<Vec<u8>>,
     /// What `ini_error` wrote.
     stderr: String,
+    loads: Loads,
 }
 
 /// `zend_get_constant` for the INI grammar: the declared value as a
@@ -1824,7 +1839,12 @@ impl Startup<'_> {
                 let loads = label.eq_ignore_ascii_case(b"extension")
                     || label.eq_ignore_ascii_case(b"zend_extension");
                 if loads && !self.special {
-                    return;
+                    let list = if label.len() == 9 {
+                        &mut self.loads.functions
+                    } else {
+                        &mut self.loads.engine
+                    };
+                    return list.push(ini_text(&value));
                 }
                 let value = ini_text(&value);
                 if let Some(section) = &self.section {
@@ -1930,42 +1950,79 @@ fn ini_quantity(value: &[u8]) -> i64 {
     crate::ini_quantity::parse(value).0
 }
 
-/// The end of `php_module_startup`'s check for deprecated directives
-/// (`Z/main/main.c:2393`), raised at the request's first moment where
-/// this engine has a request to raise it on: `allow_url_include` set to
-/// a number other than zero is `Directive 'allow_url_include' is
-/// deprecated` at `Unknown` line 0, `cfg_get_long` reading the value as
-/// `ZEND_STRTOL` does, so `On` is zero.
+/// `php_module_startup`'s check for deprecated directives
+/// (`Z/main/main.c:2393-2450`), its last step: each name of the
+/// configuration table `cfg_get_long` reads as a number other than zero,
+/// `zval_get_long` over the string or the array, raised at `Unknown`
+/// line 0. `allow_url_include` is deprecated; each name of the second
+/// half is `E_CORE_ERROR`, the first ending the startup, so no request
+/// runs ([`Engine::begin`]).
 ///
 /// ```php
-/// var_dump(ini_get('allow_url_fopen'), ini_get('allow_url_include'), ini_set('allow_url_include', '1'));
+/// foreach ([['allow_url_include=1', 'magic_quotes_gpc=1', 'track_errors=1'], ['register_globals=0.9e1'], ['safe_mode=0.5', 'allow_url_include=On']] as $set) {
+///     $args = [PHP_BINARY, '-n'];
+///     foreach ($set as $d) { array_push($args, '-d', $d); }
+///     $p = proc_open([...$args, '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]); var_dump(proc_close($p));
+/// }
 /// ```
-/// ```expect
-/// string(1) "1"
-/// string(1) "0"
-/// bool(false)
+/// ```expect process
+/// Deprecated: Directive 'allow_url_include' is deprecated in Unknown on line 0
+///
+/// Fatal error: Directive 'magic_quotes_gpc' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+/// int(1)
+///
+/// Fatal error: Directive 'register_globals' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+/// int(1)
+///
+/// Deprecated: Directive 'allow_url_include' is deprecated in Unknown on line 0
+/// ran
+/// int(0)
 /// ```
-fn deprecated_directives(req: &mut Request) {
-    let set = req.ini_get(b"allow_url_include").is_some_and(|value| {
-        let digits = value.trim_ascii_start();
-        let digits = digits
-            .strip_prefix(b"-")
-            .or_else(|| digits.strip_prefix(b"+"))
-            .unwrap_or(digits);
-        digits.first().is_some_and(u8::is_ascii_digit)
-            && digits
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .any(|b| *b != b'0')
-    });
-    if set {
-        crate::api::raising::raise_at(
-            req,
-            crate::api::raising::Level::Deprecated,
-            "Directive 'allow_url_include' is deprecated",
-            b"Unknown",
-            0,
-        );
+fn startup_directives(req: &mut Request, shared: &Shared) {
+    const REMOVED: [&str; 18] = [
+        "allow_call_time_pass_reference",
+        "asp_tags",
+        "define_syslog_variables",
+        "highlight.bg",
+        "magic_quotes_gpc",
+        "magic_quotes_runtime",
+        "magic_quotes_sybase",
+        "register_globals",
+        "register_long_arrays",
+        "safe_mode",
+        "safe_mode_gid",
+        "safe_mode_include_dir",
+        "safe_mode_exec_dir",
+        "safe_mode_allowed_env_vars",
+        "safe_mode_protected_env_vars",
+        "zend.ze1_compatibility_mode",
+        "track_errors",
+        "disable_classes",
+    ];
+    let set = |name: &str| {
+        shared
+            .configured(name.as_bytes())
+            .is_some_and(|entry| match entry {
+                Configured::Str(text) => match php_heap::numeric_prefix(text) {
+                    Some((php_heap::Number::Long(n), _)) => n != 0,
+                    Some((php_heap::Number::Double(d), _)) => d.is_finite() && d.abs() >= 1.0,
+                    None => false,
+                },
+                Configured::Array(rows) => !rows.is_empty(),
+            })
+    };
+    if set("allow_url_include") {
+        let message = "Directive 'allow_url_include' is deprecated";
+        crate::api::raising::raise_at(req, Level::Deprecated, message, b"Unknown", 0);
+    }
+    if let Some(name) = REMOVED.into_iter().find(|name| set(name)) {
+        let message = format!("Directive '{name}' is no longer available in PHP");
+        crate::api::raising::raise_at(req, Level::CoreError, &message, b"Unknown", 0);
     }
 }
 
@@ -1993,6 +2050,69 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// `php_ini_register_extensions` (`Z/main/php_ini.c:741-749`) with no
+/// loader behind it (§7.1): each `zend_extension=` name, then each
+/// `extension=` name, through php's path building for its kind, and the
+/// `dlopen` this engine cannot make failing with "dynamic modules are not
+/// supported" (`trace:ini-extension-no-loader`). An absolute Zend
+/// extension is `zend_load_extension`'s line on `stderr`, the answer.
+///
+/// ```php
+/// // The parentheses carry the host's dlerror text, the paths php's.
+/// $tried = '/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m';
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-v'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.9 (cli)") ? "version\n" : $out;
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
+/// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
+/// ```
+/// ```expect process
+/// 0
+/// PHP Startup: Unable to load dynamic library 'x': /nope/x, /nope/x.so
+/// version
+/// Failed loading /a/z.so
+/// 0
+/// Failed loading Zend extension 'y': /z/y, /z/y.so
+/// PHP Startup: Unable to load dynamic library '/a/q.so': /a/q.so, /z///a/q.so.so
+/// ran
+/// ```
+fn register_extensions(req: &mut Request, loads: &Loads) -> String {
+    const NO_LOADER: &str = "dynamic modules are not supported";
+    let dir = req.ini_get(b"extension_dir").unwrap_or_default().to_vec();
+    let dir = String::from_utf8_lossy(&dir);
+    let sep = if dir.ends_with('/') { "" } else { "/" };
+    let so = crate::constants::SHLIB_SUFFIX;
+    let mut stderr = String::new();
+    for name in &loads.engine {
+        let name = String::from_utf8_lossy(name);
+        if name.starts_with('/') {
+            let _ = writeln!(stderr, "Failed loading {name}:  {NO_LOADER}");
+            continue;
+        }
+        let message = format!(
+            "Failed loading Zend extension '{name}' (tried: {dir}{sep}{name} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
+        );
+        crate::api::raising::raise_at(req, Level::CoreWarning, &message, b"Unknown", 0);
+    }
+    for name in &loads.functions {
+        let name = String::from_utf8_lossy(name);
+        let first = if name.contains('/') {
+            name.to_string()
+        } else if dir.is_empty() {
+            continue;
+        } else {
+            format!("{dir}{sep}{name}")
+        };
+        let sep = if name.contains('/') { "/" } else { sep };
+        let message = format!(
+            "Unable to load dynamic library '{name}' (tried: {first} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
+        );
+        crate::api::raising::docref(req, Level::CoreWarning, &message);
+    }
+    stderr
 }
 
 /// `zend_disable_function`'s refusal of `exit`, `die` and `clone`: a
@@ -2480,6 +2600,7 @@ impl EngineBuilder {
                 shell,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
+                startup_shown: AtomicBool::new(false),
                 configuration: configuration.table,
                 ini_files,
                 #[cfg(feature = "witness-trace")]
@@ -2498,7 +2619,7 @@ impl EngineBuilder {
                 started: OnceLock::new(),
             }),
         };
-        engine.register_ini(held, self.sapi_name);
+        engine.register_ini(held, &configuration.loads, self.sapi_name);
         engine
     }
 }
@@ -2880,7 +3001,12 @@ impl Engine {
     /// pin's `session-startup` regime holds it, with the test below for
     /// a refused value, and `ext/date`'s `date.timezone` is the one the
     /// phpt corpus reads.
-    fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>, bool)>, sapi_name: &str) {
+    fn register_ini(
+        &mut self,
+        mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+        loads: &Loads,
+        sapi_name: &str,
+    ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
@@ -2907,6 +3033,7 @@ impl Engine {
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
+        let failed = register_extensions(&mut req, loads);
         for (name, value, activate) in held {
             req.set_ini_stage(if activate {
                 IniStage::Activate
@@ -2926,6 +3053,7 @@ impl Engine {
             taken.push((b"zend.script_encoding".to_vec(), None));
         }
         disable_warnings(&mut req);
+        startup_directives(&mut req, &self.shared);
         let raised = req.end_startup();
         let written = req.startup_stderr();
         drop(req);
@@ -2943,6 +3071,7 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared.startup_errors.push_str(&failed);
         shared.script_encodings = script_encodings;
         shared
             .startup_errors
@@ -3336,15 +3465,28 @@ impl Engine {
         let _ = req.hash_environment();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
-        // sent by it and a session may still start.
-        for (level, message) in &self.shared.startup_raised {
-            req.note_startup_error(*level, message);
+        // sent by it and a session may still start; and once, as php
+        // writes it to the process's `stdout` as its modules start, so a
+        // later request of a long-lived host carries none of it.
+        if !self.shared.startup_shown.swap(true, Ordering::Relaxed) {
+            for (level, message) in &self.shared.startup_raised {
+                req.note_startup_error(*level, message);
+            }
+        }
+        // An `E_CORE_ERROR` bailed out of `php_module_startup`, which
+        // failed, and the host ends with status 1 before any request.
+        if (self.shared.startup_raised.iter()).any(|(level, _)| *level == Level::CoreError) {
+            crate::preload::hand_over(&mut req, sink);
+            return Err(Observables {
+                exit_code: 1,
+                headers_sent: true,
+                ..Observables::default()
+            });
         }
         // `accel_activate`: a reset a request asked for empties the unit
         // cache at the next request's start.
         self.shared.units.restart_if_pending();
         serve_rinits(&mut req, &self.shared.extensions);
-        deprecated_directives(&mut req);
         self.arm_preloaded(&mut req);
         if req.web().is_some_and(|web| web.no_headers) {
             req.output_mut().quiet();
@@ -3547,8 +3689,8 @@ impl Engine {
         // deactivated after them, with the header block committed if
         // nothing had, and the shutdown entries freed behind it
         // (`php_free_shutdown_functions`); then `PG(http_globals)` given
-        // up; then `shutdown_executor`,
-        // which closes the open resources first, destroys the symbol
+        // up; then `shutdown_executor`, after each extension's
+        // `deactivate`, which closes the open resources first, destroys the symbol
         // table after them (`zend_shutdown_executor_values`) and frees
         // the object storage last. The globals stand through all of it,
         // as php's `EG(symbol_table)` does, so the shutdown functions
@@ -3588,6 +3730,14 @@ impl Engine {
         req.free_shutdown_functions();
         req.destroy_http_globals();
         req.destroy_uploaded_files();
+        // `zend_deactivate` reaches `shutdown_executor`: each extension's
+        // `deactivate`, in reverse, before the resources are closed.
+        for extension in self.shared.extensions.iter().rev() {
+            if let Some(deactivate) = extension.deactivate {
+                deactivate(req);
+            }
+        }
+        req.catch_bailout();
         req.close_resources();
         req.return_persistent();
         req.free_user_handlers();
@@ -4205,6 +4355,20 @@ mod tests {
         };
         assert_eq!(dir_under("/srv/one"), "/srv/one");
         assert_eq!(dir_under("/srv/two"), "/srv/two");
+    }
+
+    /// `error_log=syslog` with no `request::Syslog` registered, as
+    /// without ext/standard: the entry reaches the host's log (#1364).
+    #[test]
+    fn error_log_syslog_without_a_registered_syslog_reaches_the_host_s_log() {
+        let engine = Engine::builder().ini("error_log", "syslog").build();
+        let mut sink = Kept::default();
+        let source = "<?php ini_set('log_errors', 1); ini_set('display_errors', 0); echo $u;";
+        engine.serve(description(source), &mut sink);
+        assert_eq!(
+            sink.logged(),
+            "PHP Warning:  Undefined variable $u in witness.php on line 1\n"
+        );
     }
 
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
