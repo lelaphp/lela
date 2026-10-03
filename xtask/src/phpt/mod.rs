@@ -139,8 +139,8 @@ pub(crate) mod against;
 pub(crate) mod cgi;
 mod fpm;
 pub(crate) mod phpdbg;
-/// The suffix of a control run's scope: the subset under the oracle.
-pub(crate) const CONTROL: &str = "@control";
+mod scope;
+pub(crate) use scope::Scope;
 mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
@@ -443,16 +443,12 @@ impl Subset {
     /// The reading's scope: the subset's, and what the run was beside it,
     /// so that a tier lane and a control of the runner each keep a reading
     /// of their own and neither displaces the engine's.
-    pub(crate) fn scope(&self, runner: &Runner, lane: Option<Lane>) -> String {
-        let mut scope = self.scope.clone();
-        if matches!(runner, Runner::Control(_)) {
-            scope.push_str(CONTROL);
+    pub(crate) fn scope(&self, runner: &Runner, lane: Option<Lane>) -> Scope {
+        Scope {
+            control: matches!(runner, Runner::Control(_)),
+            lane,
+            ..Scope::of(&self.scope)
         }
-        if let Some(lane) = lane {
-            scope.push('@');
-            scope.push_str(lane.as_str());
-        }
-        scope
     }
 }
 
@@ -563,7 +559,7 @@ pub(crate) fn reading(
         oracle_absent,
         ..
     } = under;
-    let scope = subset.scope(runner, lane);
+    let scope = subset.scope(runner, lane).to_string();
     let absent = subset.absent();
     // A directory the design derives for an extension that the pinned tree
     // has not, or that holds no `.phpt`: an extension with no tests of its
@@ -914,7 +910,8 @@ pub fn run(
     // any other cause, is that subset's failing reading, and the lane goes
     // on, so one missing service never takes the readings the subsets
     // before and after it wrote with it (#1612).
-    let mut taken = |subset: &Subset, scope: &str| -> Result<Vec<Reading>> {
+    let mut taken = |subset: &Subset, held_as: &Scope| -> Result<Vec<Reading>> {
+        let scope = &held_as.to_string();
         let own = Own::of(&oracle, subset, scope, copy.is_some())?;
         let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(&oracle);
@@ -937,7 +934,7 @@ pub fn run(
         )?;
         let held = runs.after(
             manifest,
-            scope,
+            held_as,
             (&tally, &runner),
             &reading,
             target.as_ref(),
@@ -960,7 +957,7 @@ pub fn run(
         let scope = subset.scope(&runner, ask.lane);
         match taken(subset, &scope) {
             Ok(taken) => readings.extend(taken),
-            Err(why) => readings.push(refused(root, manifest, &scope, &why)?),
+            Err(why) => readings.push(refused(root, manifest, &scope.to_string(), &why)?),
         }
     }
     // One subset's census is the census; a lane's is worth a second line

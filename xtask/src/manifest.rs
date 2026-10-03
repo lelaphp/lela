@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout;
 use crate::oracle::Pin;
+use crate::phpt::Scope;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -989,8 +990,9 @@ impl Manifest {
     ///   holds.
     /// - a crate: its sources ([`Crate::path`]).
     /// - a subset: the crate whose subset it is, under the crate's name
-    ///   and beside a tier lane or a control of the runner alike
-    ///   (`ext/pcre@jit`, `ext/pcre@control`), so `done` finds the
+    ///   and beside a tier lane, a control of the runner or a comparison
+    ///   alike (`ext/pcre@force`, `ext/pcre@control`, the grammar
+    ///   [`Scope`] reads), so `done` finds the
     ///   engine's reading under the crate; a directory of the pinned
     ///   corpus no crate owns (`Zend/tests`) is the whole tree, since no
     ///   crate's sources are what it measures and `done` never asks for it.
@@ -999,8 +1001,9 @@ impl Manifest {
     ///   lock no row names.
     /// - a generated file the manifest names (`ext/clippy.toml`): itself.
     ///
-    /// `None` for a name none of these know, which the reading's
-    /// constructor refuses by name rather than stamping over a guess.
+    /// `None` for a name none of these know, or a suffix outside that
+    /// grammar, which the reading's constructor refuses by name rather than
+    /// stamping over a guess.
     pub fn scope_path(&self, scope: &str) -> Option<PathBuf> {
         if scope == "workspace" {
             return Some(PathBuf::from("."));
@@ -1008,7 +1011,10 @@ impl Manifest {
         if scope == SCRIPTS {
             return Some(PathBuf::from(SCRIPTS));
         }
-        let name = scope.split_once('@').map_or(scope, |(name, _)| name);
+        let Ok(Scope { subset: name, .. }) = scope.parse() else {
+            return None;
+        };
+        let name = name.as_str();
         if let Some(krate) = self.crate_named(name) {
             return Some(krate.path());
         }

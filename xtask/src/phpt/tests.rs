@@ -806,16 +806,14 @@ fn a_tier_lane_and_a_control_are_readings_of_their_own() {
     let tree = fixture_tree();
     let subset = resolve(&tracked_over_fixture(&tree), "pcre").unwrap();
     let engine = Runner::Engine(PathBuf::from("target/debug/php"));
-    assert_eq!(subset.scope(&engine, None), "ext/pcre");
-    assert_eq!(subset.scope(&engine, Some(Lane::Force)), "ext/pcre@force");
-    assert_eq!(
-        subset.scope(&engine, Some(Lane::ExitFuzz)),
-        "ext/pcre@exit-fuzz"
-    );
+    let scope = |runner: &Runner, lane| subset.scope(runner, lane).to_string();
+    assert_eq!(scope(&engine, None), "ext/pcre");
+    assert_eq!(scope(&engine, Some(Lane::Force)), "ext/pcre@force");
+    assert_eq!(scope(&engine, Some(Lane::ExitFuzz)), "ext/pcre@exit-fuzz");
     // A control of the runner keeps a reading of its own, so a green one
     // can never sit where the engine's reading belongs.
     let control = Runner::Control(PathBuf::from("php"));
-    assert_eq!(subset.scope(&control, None), "ext/pcre@control");
+    assert_eq!(scope(&control, None), "ext/pcre@control");
 }
 
 #[test]
