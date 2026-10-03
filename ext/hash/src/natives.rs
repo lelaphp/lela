@@ -1056,7 +1056,15 @@ fn hash_final(
 /// the state forked into an allocation of its own, and a key `ecalloc`ed
 /// whether or not the original holds one, as php's clone does, the
 /// original's copied in where it does; a finalised state is php's
-/// `ValueError`.
+/// `ValueError`, refused once the copy is made, which stands across it.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { $c = hash_init('md5'); hash_final($c); try { $d = clone $c; } catch (ValueError $e) {} });
+/// ```
+/// ```expect
+/// 1976 32
+/// ```
 fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let forked = object.native::<Context>(req).map(|c| {
         (
@@ -1066,14 +1074,15 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
             c.key.as_ref().map(|key| key.bytes().to_vec()),
         )
     });
-    let Some((Some(algo), Some(state), flags, key)) = forked else {
-        return Err(throw(
-            req,
-            "ValueError",
-            "Cannot clone a finalized HashContext",
-        ));
-    };
+    // `php_hashcontext_create` before the state is read, so the copy
+    // stands across the refusal and is released after it, as the
+    // `CLONE` handler frees the object php's clone returns.
     let copy = new_object(req, object.class())?;
+    let Some((Some(algo), Some(state), flags, key)) = forked else {
+        let thrown = throw(req, "ValueError", "Cannot clone a finalized HashContext");
+        req.release(copy.as_value());
+        return Err(thrown);
+    };
     for (key, value) in object.props(req)? {
         req.addref(&value);
         match key {

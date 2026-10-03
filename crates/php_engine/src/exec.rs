@@ -266,6 +266,95 @@ pub(crate) struct HeapOpArray {
 /// `sizeof(zend_op_array)` as `emalloc` bins it, the 256-byte bin.
 pub(crate) const OP_ARRAY_SIZE: usize = 256;
 
+/// `EX(extra_named_params)`: the extra named arguments, name and value
+/// in the order given, beside the table php keeps them in on the
+/// request's heap, `zend_new_array(0)`'s 56 bytes and the bucket and
+/// hash data `zend_hash_real_init_mixed` lays at eight rows and
+/// `zend_hash_do_resize` doubles, so a frame that carries them, and a
+/// throw it meets, peaks at php's sizes. The rows read as the `Vec`
+/// they are; [`ExtraNamed::lay`] grows the table to hold them.
+#[derive(Default)]
+pub(crate) struct ExtraNamed {
+    rows: Vec<(PhpString, Value)>,
+    /// The `HashTable` and its data at `nTableSize` rows.
+    table: Option<(php_heap::Block, php_heap::Block, usize)>,
+}
+
+impl ExtraNamed {
+    /// These rows with a table laid for them, `zend_handle_named_arg`
+    /// over each in turn.
+    pub(crate) fn laid(
+        req: &mut Request,
+        rows: Vec<(PhpString, Value)>,
+    ) -> Result<ExtraNamed, Thrown> {
+        let mut named = ExtraNamed { rows, table: None };
+        named.lay(req)?;
+        Ok(named)
+    }
+
+    /// The table grown to hold the rows: `zend_new_array(0)` and
+    /// `zend_hash_real_init_mixed`'s `HT_SIZE_EX(8, -16)` for the first,
+    /// and the next doubling allocated before the old one is freed, as
+    /// `zend_hash_do_resize` copies, for a row past `nTableSize`. A
+    /// `Bucket` is 32 bytes and each row two hash slots of 4.
+    pub(crate) fn lay(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let (head, mut data, mut size) = if let Some(table) = self.table.take() {
+            table
+        } else {
+            let head = req.heap_mut().block(56);
+            let head = req.fatal_of(head)?;
+            let data = req.heap_mut().block(8 * 40);
+            (head, req.fatal_of(data)?, 8)
+        };
+        while self.rows.len() > size {
+            size <<= 1;
+            let grown = req.heap_mut().block(size * 40);
+            let grown = req.fatal_of(grown)?;
+            req.heap_mut()
+                .free_block(std::mem::replace(&mut data, grown));
+        }
+        self.table = Some((head, data, size));
+        Ok(())
+    }
+
+    /// The table alone taken off, the rows left: what `RECV_VARIADIC`
+    /// hands an untyped variadic with no positional extras as its
+    /// array, `ZVAL_ARR(params, EX(extra_named_params))`, which the
+    /// engine's collected array stands for.
+    pub(crate) fn take_table(&mut self) -> ExtraNamed {
+        ExtraNamed {
+            rows: Vec::new(),
+            table: self.table.take(),
+        }
+    }
+
+    /// `zend_array_destroy` of the table: its data, then the 56 bytes;
+    /// the rows handed back for their owners to be given up.
+    pub(crate) fn free(self, req: &mut Request) -> Vec<(PhpString, Value)> {
+        if let Some((head, data, _)) = self.table {
+            req.heap_mut().free_block(data);
+            req.heap_mut().free_block(head);
+        }
+        self.rows
+    }
+}
+
+impl std::ops::Deref for ExtraNamed {
+    type Target = Vec<(PhpString, Value)>;
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+impl std::ops::DerefMut for ExtraNamed {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rows
+    }
+}
+
 /// One frame's engine state.
 pub(crate) struct FrameState {
     /// The unit being served, shared with every other request serving it
@@ -329,7 +418,7 @@ pub(crate) struct FrameState {
     /// array by name after the extra arguments, and a backtrace prints
     /// them `name: value`. Each name and value one owner of the frame's,
     /// given up with it (`zend_free_extra_named_params`).
-    pub(crate) extra_named: Vec<(PhpString, Value)>,
+    pub(crate) extra_named: ExtraNamed,
     /// How many calls stood on the call stack when the frame was pushed,
     /// which is where the frame sits among them: php's one
     /// `prev_execute_data` chain is two stacks here, and this is what
@@ -578,7 +667,7 @@ pub(crate) struct CallState {
     /// refuses them as `Z_PARAM_VARIADIC` refuses them; a user
     /// function's frame takes them over. Each name and value one owner
     /// the call holds, given up with it.
-    pub(crate) extra_named: Vec<(PhpString, Value)>,
+    pub(crate) extra_named: ExtraNamed,
     /// Where the call stands.
     pub(crate) stage: CallStage,
     /// `ZEND_CALL_SEND_ARG_BY_REF`: what the last `CHECK_FUNC_ARG` read
@@ -797,7 +886,7 @@ impl Vm {
             closure: None,
             num_args,
             extra_args: Vec::new(),
-            extra_named: Vec::new(),
+            extra_named: ExtraNamed::default(),
             calls_below,
             leaving: false,
             generator: None,
@@ -1891,7 +1980,7 @@ pub(crate) fn unfinished_execution_gc(
     for extra in &state.extra_args {
         visit(*extra);
     }
-    for (_, value) in &state.extra_named {
+    for (_, value) in state.extra_named.iter() {
         visit(*value);
     }
     unfinished_calls_gc(calls, visit);
@@ -1926,7 +2015,7 @@ pub(crate) fn unfinished_calls_gc(calls: &[CallState], visit: &mut dyn FnMut(Val
         if let Some(this) = call.receiver.and_then(Receiver::owned) {
             visit(this.as_value());
         }
-        for (_, value) in &call.extra_named {
+        for (_, value) in call.extra_named.iter() {
             visit(*value);
         }
         if let Some(closure) = call.closure {

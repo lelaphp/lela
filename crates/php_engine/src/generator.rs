@@ -1394,10 +1394,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         let value = take(&mut slots, at);
         req.release(value);
     }
-    for (name, value) in state.extra_named {
-        req.release(Value::string(name));
-        req.release(value);
-    }
+    req.release_named(state.extra_named);
     if let Some(this) = state.receiver.and_then(crate::exec::Receiver::owned) {
         req.release(this.as_value());
     }

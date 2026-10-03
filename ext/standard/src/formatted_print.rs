@@ -15,7 +15,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Emalloc, FreshString, PhpArray, PhpString, Value};
 
 /// `sprintf(string $format, mixed ...$values): string`, php's
 /// `PHP_FUNCTION(sprintf)`: the format and every argument after it
@@ -220,6 +220,23 @@ use php_ext::values::{PhpArray, PhpString, Value};
 ///   thrown in %s on line 2
 /// ```
 ///
+/// The string formatted into is `zend_string_alloc(240)`, laid down before the format
+/// is read, so it stands across a throw part-way, beside `vsprintf`'s
+/// copy of its array, and is handed out at the size it grew to, never
+/// cut to its bytes.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { sprintf('%d %d', 1); } catch (ArgumentCountError $e) {} });
+/// pk(function () { try { vsprintf('%d %d', [1]); } catch (ValueError $e) {} });
+/// $f = 'sprintf'; $m = memory_get_usage(); $x = $f("%s", "abc"); $y = $f("%s", str_repeat("a", 300)); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 2952 32
+/// 2984 0
+/// 832
+/// ```
+///
 /// The declarations as Reflection renders them.
 ///
 /// ```php
@@ -283,8 +300,7 @@ fn sprintf(
     format: PhpString,
     values: Variadic<Value>,
 ) -> Result<PhpString, Thrown> {
-    let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
-    PhpString::new(req, &formatted)
+    formatted(req, format.as_bytes(), &values.0, Some(1))
 }
 
 /// `printf(string $format, mixed ...$values): int`, php's
@@ -307,8 +323,8 @@ fn sprintf(
 #[php_function]
 fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Result<i64, Thrown> {
     let formatted = formatted(req, format.as_bytes(), &values.0, Some(1))?;
-    req.write(&formatted);
-    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
+    req.write(formatted.as_bytes());
+    Ok(efree(req, formatted))
 }
 
 /// `vsprintf(string $format, array $values): string`, php's
@@ -334,15 +350,28 @@ fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Resu
 /// ```
 #[php_function]
 fn vsprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<PhpString, Thrown> {
-    let arguments = values_of(values);
-    let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
-    PhpString::new(req, &formatted)
+    let (arguments, args) = values_of(req, values)?;
+    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    args.free(req);
+    formatted
 }
 
 /// `php_formatted_print_get_array`: the array's values in their order,
-/// keys ignored.
-fn values_of(array: PhpArray) -> Vec<Value> {
-    array.iter().map(|(_, value)| value).collect()
+/// keys ignored, beside the `safe_emalloc(n, sizeof(zval), 0)` php
+/// copies them into, which stands across the format and its throws
+/// until the caller's `efree(args)`.
+fn values_of(req: &mut Request, array: PhpArray) -> Result<(Vec<Value>, Emalloc), Thrown> {
+    let values: Vec<Value> = array.iter().map(|(_, value)| value).collect();
+    let args = Emalloc::new(req, values.len() * 16)?;
+    Ok((values, args))
+}
+
+/// `zend_string_efree(result)` after a printing caller wrote it: the
+/// count it answers, `ZSTR_LEN(result)`.
+fn efree(req: &mut Request, result: PhpString) -> i64 {
+    let len = i64::try_from(result.len()).unwrap_or(i64::MAX);
+    req.release(Value::string(result));
+    len
 }
 
 /// `vprintf(string $format, array $values): int`, php's
@@ -364,10 +393,12 @@ fn values_of(array: PhpArray) -> Vec<Value> {
 /// ```
 #[php_function]
 fn vprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<i64, Thrown> {
-    let arguments = values_of(values);
-    let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
-    req.write(&formatted);
-    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
+    let (arguments, args) = values_of(req, values)?;
+    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    args.free(req);
+    let formatted = formatted?;
+    req.write(formatted.as_bytes());
+    Ok(efree(req, formatted))
 }
 
 /// `fprintf($stream, string $format, mixed ...$values): int`, php's
@@ -416,9 +447,9 @@ fn fprintf(
     let format = format.hold(req)?;
     let formatted = formatted(req, format.as_bytes(), &values.0, Some(2))?;
     if !formatted.is_empty() {
-        stream.write(req, &formatted);
+        stream.write(req, formatted.as_bytes());
     }
-    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
+    Ok(efree(req, formatted))
 }
 
 /// `vfprintf($stream, string $format, array $values): int`, php's
@@ -442,12 +473,14 @@ fn vfprintf(
     format: PhpString,
     values: PhpArray,
 ) -> Result<i64, Thrown> {
-    let arguments = values_of(values);
-    let formatted = formatted(req, format.as_bytes(), &arguments, None)?;
+    let (arguments, args) = values_of(req, values)?;
+    let formatted = formatted(req, format.as_bytes(), &arguments, None);
+    args.free(req);
+    let formatted = formatted?;
     if !formatted.is_empty() {
-        stream.write(req, &formatted);
+        stream.write(req, formatted.as_bytes());
     }
-    Ok(i64::try_from(formatted.len()).unwrap_or(i64::MAX))
+    Ok(efree(req, formatted))
 }
 
 /// `INT_MAX`, the bound on an argnum, a width and a precision.
@@ -520,20 +553,41 @@ fn formatted(
     format: &[u8],
     args: &[Value],
     additional: Option<usize>,
-) -> Result<Vec<u8>, Thrown> {
-    let mut out = Vec::with_capacity(format.len());
+) -> Result<PhpString, Thrown> {
+    let mut out = Buffer::alloc(req)?;
+    match format_into(req, &mut out, format, args, additional) {
+        Ok(()) => out.finish(req),
+        Err(thrown) => {
+            out.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// The loop of `php_formatted_print` over a string already laid down,
+/// so whatever it throws stands beside that string, which the caller
+/// frees after it, php's `goto fail`.
+fn format_into(
+    req: &mut Request,
+    out: &mut Buffer,
+    format: &[u8],
+    args: &[Value],
+    additional: Option<usize>,
+) -> Result<(), Thrown> {
     let mut at = 0;
     let mut currarg = 0usize;
     let mut max_missing: Option<usize> = None;
     while at < format.len() {
         let Some(percent) = format[at..].iter().position(|b| *b == b'%') else {
-            out.extend_from_slice(&format[at..]);
+            out.chars(req, &format[at..])?;
             break;
         };
-        out.extend_from_slice(&format[at..at + percent]);
+        if percent > 0 {
+            out.chars(req, &format[at..at + percent])?;
+        }
         at += percent + 1;
         if byte_at(format, at) == b'%' {
-            out.push(b'%');
+            out.char(req, b'%')?;
             at += 1;
             continue;
         }
@@ -573,7 +627,7 @@ fn formatted(
                 "Missing format specifier at end of string",
             ));
         }
-        convert(req, &mut out, &spec, conversion, argument)?;
+        convert(req, out, &spec, conversion, argument)?;
         at += 1;
     }
     if let Some(missing) = max_missing {
@@ -597,7 +651,7 @@ fn formatted(
             ),
         });
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The byte at `at`, and the terminator past the end: `ZSTR_VAL` is
@@ -706,7 +760,7 @@ fn modifiers(
 /// `argument` appended, or the `ValueError` for a byte that is none.
 fn convert(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     spec: &Spec,
     conversion: u8,
     argument: &Value,
@@ -741,8 +795,7 @@ fn convert(
         }
         b'c' => {
             let number = to_long(req, argument)?;
-            out.push((number & 0xff).to_le_bytes()[0]);
-            Ok(())
+            out.char(req, (number & 0xff).to_le_bytes()[0])
         }
         b'o' | b'x' | b'X' | b'b' => {
             let number = to_long(req, argument)?;
@@ -753,10 +806,7 @@ fn convert(
             };
             append_2n(req, out, number, spec, bits, conversion == b'X')
         }
-        b'%' => {
-            out.push(b'%');
-            Ok(())
-        }
+        b'%' => out.char(req, b'%'),
         other => {
             // `zend_value_error("Unknown format specifier \"%c\"", *format)`,
             // which `zend_throw_exception` then reads as a C string, so
@@ -838,7 +888,7 @@ enum Sign {
 /// precision empties `%x`, `%o` and `%b`, as php's does.
 fn append_string(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     add: &[u8],
     spec: &Spec,
     sign: Sign,
@@ -857,7 +907,7 @@ fn append_string(
 )]
 fn append_string_at(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     add: &[u8],
     min_width: i64,
     max_width: usize,
@@ -874,35 +924,139 @@ fn append_string_at(
     let npad = min_width.saturating_sub(copy_len);
     let m_width = min_width.max(copy_len);
     let int_max = usize::try_from(INT_MAX).unwrap_or(usize::MAX);
-    if m_width > int_max.saturating_sub(out.len()).saturating_sub(1) {
+    if m_width > int_max.saturating_sub(out.pos).saturating_sub(1) {
         return Err(fatal(req, &format!("Field width {m_width} is too long")));
+    }
+    let req_size = out.pos + m_width + 1;
+    if req_size > out.len() {
+        let mut size = out.len();
+        while req_size > size {
+            if size > usize::MAX / 2 {
+                return Err(fatal(req, &format!("Field width {req_size} is too long")));
+            }
+            size <<= 1;
+        }
+        out.extend(req, size)?;
     }
     let mut add = add;
     if spec.alignment == Align::Right {
         if sign != Sign::None && spec.padding == b'0' && copy_len > 0 {
-            out.push(if sign == Sign::Negative { b'-' } else { b'+' });
+            out.put(&[if sign == Sign::Negative { b'-' } else { b'+' }]);
             add = &add[1..];
             copy_len -= 1;
         }
-        out.extend(std::iter::repeat_n(spec.padding, npad));
+        out.pad(spec.padding, npad);
     }
-    out.extend_from_slice(&add[..copy_len]);
+    out.put(&add[..copy_len]);
     if spec.alignment == Align::Left {
-        out.extend(std::iter::repeat_n(spec.padding, npad));
+        out.pad(spec.padding, npad);
     }
     Ok(())
+}
+
+/// `php_formatted_print`'s `result`: `zend_string_alloc(240, 0)` laid
+/// down before the format is read, `outpos` into it, grown by
+/// `zend_string_extend` to a doubling of its length where an appender
+/// needs more, and handed out at its length with its allocation as it
+/// stands, as php never cuts it.
+struct Buffer {
+    result: Option<FreshString>,
+    /// `outpos`: the bytes written so far.
+    pos: usize,
+}
+
+impl Buffer {
+    /// `result = zend_string_alloc(size, 0)` with `size = 240`.
+    fn alloc(req: &mut Request) -> Result<Buffer, Thrown> {
+        Ok(Buffer {
+            result: Some(FreshString::new(req, 240)?),
+            pos: 0,
+        })
+    }
+
+    /// `ZSTR_LEN(result)`: the bytes the allocation holds.
+    fn len(&self) -> usize {
+        self.result.as_ref().map_or(0, FreshString::len)
+    }
+
+    /// `result = zend_string_extend(result, size, 0)`; a memory limit
+    /// met leaves the string the request's end's.
+    fn extend(&mut self, req: &mut Request, size: usize) -> Result<(), Thrown> {
+        if let Some(result) = self.result.take() {
+            self.result = Some(result.extend(req, size)?);
+        }
+        Ok(())
+    }
+
+    /// `php_sprintf_appendchar`: one byte, the length doubled first
+    /// where it and the NUL would not fit.
+    fn char(&mut self, req: &mut Request, add: u8) -> Result<(), Thrown> {
+        if self.pos + 1 >= self.len() {
+            self.extend(req, self.len() << 1)?;
+        }
+        self.put(&[add]);
+        Ok(())
+    }
+
+    /// `php_sprintf_appendchars`: the bytes, the length doubled until
+    /// they and the NUL fit.
+    fn chars(&mut self, req: &mut Request, add: &[u8]) -> Result<(), Thrown> {
+        if self.pos + add.len() >= self.len() {
+            let mut size = self.len();
+            while self.pos + add.len() >= size {
+                size <<= 1;
+            }
+            self.extend(req, size)?;
+        }
+        self.put(add);
+        Ok(())
+    }
+
+    /// The bytes written at `outpos`, where the appender made room.
+    fn put(&mut self, add: &[u8]) {
+        if let Some(result) = self.result.as_mut()
+            && let Some(at) = result.bytes_mut().get_mut(self.pos..self.pos + add.len())
+        {
+            at.copy_from_slice(add);
+        }
+        self.pos += add.len();
+    }
+
+    /// `npad` padding bytes at `outpos`.
+    fn pad(&mut self, padding: u8, npad: usize) {
+        if let Some(result) = self.result.as_mut()
+            && let Some(at) = result.bytes_mut().get_mut(self.pos..self.pos + npad)
+        {
+            at.fill(padding);
+        }
+        self.pos += npad;
+    }
+
+    /// `ZSTR_LEN(result) = outpos` and the string handed out; one an
+    /// extension lost to the memory limit never reaches here.
+    fn finish(self, req: &mut Request) -> Result<PhpString, Thrown> {
+        match self.result {
+            Some(mut result) => {
+                result.set_len(self.pos);
+                Ok(result.finish())
+            }
+            None => PhpString::new(req, b""),
+        }
+    }
+
+    /// `fail: zend_string_efree(result)`.
+    fn free(self, req: &mut Request) {
+        if let Some(result) = self.result {
+            result.free(req);
+        }
+    }
 }
 
 /// `php_sprintf_appendint`: the long's decimal with its sign, or a `+`
 /// where `always_sign` asks for one, and zero padding turned to spaces
 /// where the alignment is left, since php cannot right-pad an integer
 /// with zeros.
-fn append_int(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    number: i64,
-    spec: &Spec,
-) -> Result<(), Thrown> {
+fn append_int(req: &mut Request, out: &mut Buffer, number: i64, spec: &Spec) -> Result<(), Thrown> {
     let mut text = number.unsigned_abs().to_string();
     let sign = if number < 0 {
         text.insert(0, '-');
@@ -920,7 +1074,7 @@ fn append_int(
 /// `php_sprintf_appenduint`: the long's bits as an unsigned decimal.
 fn append_uint(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     number: i64,
     spec: &Spec,
 ) -> Result<(), Thrown> {
@@ -947,7 +1101,7 @@ fn integer_padding(spec: &Spec) -> Spec {
 /// was given.
 fn append_2n(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     number: i64,
     spec: &Spec,
     n: u32,
@@ -980,7 +1134,7 @@ fn append_2n(
 /// zero precision read as one.
 fn append_double(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut Buffer,
     number: f64,
     spec: &Spec,
     fmt: u8,
