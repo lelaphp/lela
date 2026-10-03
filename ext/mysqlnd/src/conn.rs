@@ -482,10 +482,13 @@ impl ConnData {
         let (transport, unix) = ConnData::scheme(host, &mut socket, port);
         let flags = self.connect_flags(flags);
         // `connect_handshake`.
-        let connected = self.net.connect(req, &transport, &mut self.error)? && {
-            self.net.reset();
-            self.handshake(req, user, password, db, flags)?
-        };
+        let connected = self
+            .net
+            .connect(req, &transport, self.persistent, &mut self.error)?
+            && {
+                self.net.reset();
+                self.handshake(req, user, password, db, flags)?
+            };
         if !connected {
             if self.error.errno == 0 {
                 let via = String::from_utf8_lossy(&transport).into_owned();

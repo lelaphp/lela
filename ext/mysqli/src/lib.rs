@@ -17,9 +17,12 @@
 //!
 //! **What a request holds.** `MyG(...)` is the request's [`State`]: the
 //! `report_mode`, the last connect error, the link
-//! counts, and the persistent links a closed `p:` link left for the next
-//! connect with the same key, which php keeps in `EG(persistent_list)` and
-//! this engine keeps for the request (ADR-0005).
+//! counts, and the `p:` links it took out of the engine's pool or opened,
+//! held under php's `hash_key` until `rshutdown` gives them back. php
+//! keeps them in `EG(persistent_list)`, one list per php-fpm process; here
+//! the list is a pool of the engine's (design §4.10, revision 55), lent to
+//! one request at a time, and the inactive links php counts per process
+//! are the pool's idle ones and the request's free ones.
 //!
 //! **Twins.** php serves `mysqli_query($link, ...)` and `$link->query(...)`
 //! with one C function that asks `hasThis()`. Here the procedural function
@@ -48,13 +51,13 @@ mod props;
 mod result;
 mod stmt;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, Pool};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpObject, PhpString, Value};
-use php_ext_mysqlnd::client::{CLIENT_INFO, Mysqlnd, ReverseApi};
+use php_ext_mysqlnd::client::{CLIENT_INFO, Kept, Mysqlnd, ReverseApi};
 
 /// `MYSQLI_VERSION_ID`, what the deprecated `driver_version` reads.
 const VERSION_ID: i64 = 101_009;
@@ -99,10 +102,30 @@ pub(crate) struct State {
     pub(crate) connect_error: Option<Vec<u8>>,
     pub(crate) num_links: i64,
     pub(crate) num_active_persistent: i64,
-    pub(crate) num_inactive_persistent: i64,
-    /// `EG(persistent_list)`'s `mysqli_plist_entry`s: by `hash_key`, the
-    /// connections a closed persistent link left free.
-    pub(crate) free_links: Vec<(Vec<u8>, Vec<Mysqlnd>)>,
+    /// The free links of [`State::plinks`], the request's share of
+    /// `num_inactive_persistent`.
+    pub(crate) num_free_persistent: i64,
+    /// `EG(persistent_list)`'s `mysqli_plist_entry`s the request holds, by
+    /// `hash_key`: each persistent connection it took out of the pool or
+    /// opened, open on a link or free for the next connect.
+    pub(crate) plinks: Lent<Vec<u8>, link::Plinks>,
+}
+
+/// The engine's pool of persistent connections, keyed by `hash_key`.
+pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Kept>);
+
+/// The idle persistent connections the pool keeps; php bounds mysqli's by
+/// `mysqli.max_persistent` alone, and this is the engine's own streams'
+/// bound.
+const POOLED: usize = 1024;
+
+/// `MyG(num_inactive_persistent)`: the pool's idle connections and the
+/// request's free ones.
+pub(crate) fn num_inactive_persistent(req: &mut Request) -> i64 {
+    let pooled = req
+        .engine::<Pooled>()
+        .map_or(0, |Pooled(pool)| pool.idle_len());
+    req.state::<State>().num_free_persistent + i64::try_from(pooled).unwrap_or(i64::MAX)
 }
 
 impl Default for State {
@@ -113,8 +136,8 @@ impl Default for State {
             connect_error: None,
             num_links: 0,
             num_active_persistent: 0,
-            num_inactive_persistent: 0,
-            free_links: Vec::new(),
+            num_free_persistent: 0,
+            plinks: Lent::default(),
         }
     }
 }
@@ -306,6 +329,8 @@ pub fn extension() -> Extension {
             extension: "mysqli",
         })
         .request_state::<State>()
+        .engine_state(|_| Pooled(Pool::new(POOLED)))
+        .rshutdown(link::rshutdown)
         .info(mysqli_info)
         .build("mysqli")
 }
@@ -335,10 +360,10 @@ fn required(name: &str) -> Dependency {
 /// Active Links => 0
 /// ```
 fn mysqli_info(req: &mut Request) {
+    let inactive = num_inactive_persistent(req).to_string();
     let state = req.state::<State>();
-    let (active, inactive, links) = (
+    let (active, links) = (
         state.num_active_persistent.to_string(),
-        state.num_inactive_persistent.to_string(),
         state.num_links.to_string(),
     );
     req.info_table(&[

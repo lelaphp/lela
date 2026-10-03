@@ -209,29 +209,46 @@ impl Target {
     }
 }
 
-/// A free connection of the key's, taken up with `change_user` under the
-/// new credentials; `None` where there is none or the change failed, which
-/// closes it.
-fn reuse(
-    req: &mut Request,
-    mysql: &mut Conn,
-    target: &Target,
-    key: Vec<u8>,
-) -> Result<bool, Thrown> {
-    let state = req.state::<State>();
-    let free = if let Some((_, free)) = state.free_links.iter_mut().find(|(k, _)| *k == key) {
-        free.pop()
-    } else {
-        state.free_links.push((key, Vec::new()));
-        None
+/// The persistent connections the request holds under one `hash_key`:
+/// those open on a link, and those a closed link left free, php's
+/// `plist->free_links`.
+#[derive(Default)]
+pub(crate) struct Plinks {
+    open: Vec<Mysqlnd>,
+    free: Vec<Mysqlnd>,
+}
+
+/// The request's [`Plinks`] under `key`, held from here to `rshutdown`;
+/// `None` once given back.
+fn plinks<'r>(req: &'r mut Request, key: &[u8]) -> Option<&'r mut Plinks> {
+    let plinks = &mut req.state::<State>().plinks;
+    let key = key.to_vec();
+    let at = match plinks.find(&key) {
+        Some(at) => at,
+        None => plinks.hold(key, Plinks::default()),
     };
-    let Some(pooled) = free else {
-        return Ok(false);
+    plinks.get_mut(at)
+}
+
+/// A free connection of the key's, the request's or one the engine's pool
+/// lends, taken up with `change_user` under the new credentials; `false`
+/// where there is none or the change failed, which closes it.
+fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Result<bool, Thrown> {
+    let pooled = if let Some(free) = plinks(req, key).and_then(|held| held.free.pop()) {
+        req.state::<State>().num_free_persistent -= 1;
+        free
+    } else {
+        let kept = req
+            .engine::<crate::Pooled>()
+            .and_then(|crate::Pooled(pool)| pool.take(&key.to_vec()));
+        let Some(kept) = kept else {
+            return Ok(false);
+        };
+        Mysqlnd::take_up(req, kept)?
     };
     if let Some(made) = mysql.mysql.take() {
         made.close(req, CloseType::Implicit)?;
     }
-    req.state::<State>().num_inactive_persistent -= 1;
     let changed = pooled.command(
         req,
         Command::ChangeUser {
@@ -246,11 +263,64 @@ fn reuse(
         return Ok(false);
     }
     pooled.restart_psession(req);
+    if let Some(held) = plinks(req, key) {
+        held.open.push(pooled);
+    }
     req.state::<State>().num_active_persistent += 1;
     let status = pooled.status(req);
     set_connect_error(req, status.errno, &status.error);
     mysql.mysql = Some(pooled);
     Ok(true)
+}
+
+/// mysqli's `RSHUTDOWN` in this engine: every persistent connection the
+/// request holds given back to the engine's pool, one still open on a link
+/// first given back as `php_mysqli_close` gives it, as php's free of the
+/// link at the request's end does; one past the pool's bound closed.
+pub(crate) fn rshutdown(req: &mut Request) {
+    for (key, plinks) in req.state::<State>().plinks.drain() {
+        for handle in plinks.open {
+            if !matches!(end_psession(req, handle), Ok(true)) {
+                let _ = handle.close(req, CloseType::Explicit);
+                continue;
+            }
+            give_to_pool(req, &key, handle);
+        }
+        for handle in plinks.free {
+            give_to_pool(req, &key, handle);
+        }
+    }
+}
+
+/// `handle` kept in the engine's pool under `key`, or closed past its bound.
+fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
+    let Some(kept) = handle.keep(req) else {
+        return;
+    };
+    let back = req
+        .engine::<crate::Pooled>()
+        .and_then(|crate::Pooled(pool)| pool.give(key.to_vec(), kept));
+    if let Some(back) = back
+        && let Ok(handle) = Mysqlnd::take_up(req, back)
+    {
+        let _ = handle.close(req, CloseType::Implicit);
+    }
+}
+
+/// `php_mysqli_close`'s persistent half before the push:
+/// `mysqlnd_end_psession`, and the rollback `mysqli.rollback_on_cached_plink`
+/// asks for; `false` where that rollback failed, which closes the
+/// connection instead.
+fn end_psession(req: &mut Request, handle: Mysqlnd) -> Result<bool, Thrown> {
+    handle.end_psession(req)?;
+    Ok(!ini_bool(req, b"mysqli.rollback_on_cached_plink")
+        || handle.command(
+            req,
+            Command::Rollback {
+                flags: 0,
+                name: None,
+            },
+        )?)
 }
 
 /// `mysqli.max_links` and `mysqli.max_persistent` held to the counts: the
@@ -259,7 +329,9 @@ fn over_limit(req: &mut Request, persistent: bool) -> Option<String> {
     let max_links = ini_long(req, b"mysqli.max_links");
     let max_persistent = ini_long(req, b"mysqli.max_persistent");
     let state = req.state::<State>();
-    let persistent_links = state.num_active_persistent + state.num_inactive_persistent;
+    let persistent_links = state.num_active_persistent;
+    let persistent_links = persistent_links + crate::num_inactive_persistent(req);
+    let state = req.state::<State>();
     if max_links != -1 && state.num_links >= max_links {
         Some(format!("Too many open links ({})", state.num_links))
     } else if persistent && max_persistent != -1 && persistent_links >= max_persistent {
@@ -333,7 +405,7 @@ pub(crate) fn common_connect(
             persistent = true;
             let key = target.key();
             mysql.hash_key = Some(key.clone());
-            reused = reuse(req, &mut mysql, &target, key)?;
+            reused = reuse(req, &mut mysql, &target, &key)?;
         } else {
             let text = "Persistent connections are disabled. Downgrading to normal";
             docref(req, Level::Warning, text);
@@ -375,6 +447,11 @@ pub(crate) fn common_connect(
             return Ok(None);
         }
         connected(req, handle);
+        if let Some(key) = &mysql.hash_key
+            && let Some(held) = plinks(req, key)
+        {
+            held.open.push(handle);
+        }
     }
     // `end:`
     let state = req.state::<State>();
@@ -450,26 +527,22 @@ fn close_conn(
             handle.close(req, kind)?;
         }
         Some(key) => {
-            handle.end_psession(req)?;
-            let rollback = ini_bool(req, b"mysqli.rollback_on_cached_plink")
-                && !handle.command(
-                    req,
-                    Command::Rollback {
-                        flags: 0,
-                        name: None,
-                    },
-                )?;
-            let state = req.state::<State>();
-            state.num_active_persistent -= 1;
-            if rollback {
-                handle.close(req, kind)?;
-            } else {
-                let state = req.state::<State>();
-                match state.free_links.iter_mut().find(|(k, _)| *k == key) {
-                    Some((_, free)) => free.push(handle),
-                    None => state.free_links.push((key, vec![handle])),
+            req.state::<State>().num_active_persistent -= 1;
+            // A link freed after `rshutdown` gave its connection back.
+            if req.state::<State>().plinks.find(&key).is_none() {
+                return Ok(());
+            }
+            let ended = end_psession(req, handle)?;
+            if let Some(held) = plinks(req, &key) {
+                held.open.retain(|open| *open != handle);
+                if ended {
+                    held.free.push(handle);
                 }
-                state.num_inactive_persistent += 1;
+            }
+            if ended {
+                req.state::<State>().num_free_persistent += 1;
+            } else {
+                handle.close(req, kind)?;
             }
         }
     }
@@ -976,11 +1049,12 @@ pub(crate) fn text(req: &mut Request, text: Option<&[u8]>) -> Result<PhpString, 
 
 /// `mysqli_get_links_stats`.
 pub(crate) fn links_stats(req: &mut Request) -> Result<PhpArray, Thrown> {
+    let inactive = crate::num_inactive_persistent(req);
     let state = req.state::<State>();
     let counts = [
         ("total", state.num_links),
         ("active_plinks", state.num_active_persistent),
-        ("cached_plinks", state.num_inactive_persistent),
+        ("cached_plinks", inactive),
     ];
     let mut out = PhpArray::new(req)?;
     for (name, n) in counts {

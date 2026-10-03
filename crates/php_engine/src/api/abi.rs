@@ -250,6 +250,13 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         entry
     }
 
+    /// The entries idle under every key, which php counts as a process's
+    /// inactive persistent links, `MyG(num_inactive_persistent)`.
+    #[must_use]
+    pub fn idle_len(&self) -> usize {
+        self.idle().values().map(Vec::len).sum()
+    }
+
     /// `entry` given back under `key` at the end of the request that
     /// held it; past the bound it is handed back to the caller, whose
     /// drop closes it outside the `Mutex`.

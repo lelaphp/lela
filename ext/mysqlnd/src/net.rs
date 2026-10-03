@@ -90,9 +90,18 @@ pub(crate) struct Net {
     pub(crate) cmd_buffer: usize,
     /// `pfc->data->sha256_server_public_key`.
     pub(crate) sha256_server_public_key: Option<Vec<u8>>,
+    /// A persistent connection's `hashed_details`, the `%p` of its vio
+    /// the stream is kept under in the persistent streams, with the
+    /// scheme it was opened for.
+    persistent: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Net {
+    /// Whether the stream is a persistent one, kept under its vio's `%p`.
+    pub(crate) fn persistent(&self) -> bool {
+        self.persistent.is_some()
+    }
+
     /// Whether a stream is open, `has_valid_stream`.
     pub(crate) fn open(&self) -> bool {
         self.stream.is_some()
@@ -132,9 +141,12 @@ impl Net {
         &mut self,
         req: &mut Request,
         scheme: &[u8],
+        persistent: bool,
         error: &mut ErrorInfo,
     ) -> Result<bool, Thrown> {
         self.close(req);
+        let key = persistent.then(|| format!("{:p}", std::ptr::from_ref(self)).into_bytes());
+        self.persistent = key.clone().map(|key| (key, scheme.to_vec()));
         let tcp = scheme.starts_with(b"tcp://") && scheme.len() > 6;
         let unix = scheme.starts_with(b"unix://") && scheme.len() > 7;
         if !tcp && !unix {
@@ -148,7 +160,7 @@ impl Net {
             Xport::Client {
                 timeout,
                 connect: true,
-                persistent: None,
+                persistent: key,
                 // `post_connect_set_opt`'s `mysqlnd_set_sock_no_delay`
                 // on a TCP stream, set as the socket connects.
                 socket: SocketOptions {
@@ -172,7 +184,38 @@ impl Net {
         };
         self.stream = Some(stream);
         self.unix = unix;
-        // `post_connect_set_opt`.
+        self.post_connect_set_opt(req, stream);
+        Ok(true)
+    }
+
+    /// A kept persistent connection's stream found again under its key, as
+    /// php's `MYSQLND` holds its `php_stream` across requests: the socket
+    /// the persistent streams kept, alive, or one holding no socket, whose
+    /// first read fails and has the caller connect anew.
+    pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        self.stream = None;
+        let Some((key, scheme)) = self.persistent.clone() else {
+            return Ok(());
+        };
+        let made = req.xport_create(
+            &scheme,
+            Xport::Client {
+                timeout: None,
+                connect: false,
+                persistent: Some(key),
+                socket: SocketOptions::default(),
+                context: None,
+            },
+        )?;
+        if let Ok(stream) = made {
+            self.stream = Some(stream);
+            self.post_connect_set_opt(req, stream);
+        }
+        Ok(())
+    }
+
+    /// `post_connect_set_opt`.
+    fn post_connect_set_opt(&self, req: &mut Request, stream: Stream) {
         if self.options.timeout_read > 0 {
             let wait = Duration::from_secs(u64::from(self.options.timeout_read));
             stream.set_option(req, StreamOption::ReadTimeout(wait));
@@ -185,7 +228,6 @@ impl Net {
         // that fails is the connection's error in mysqlnd's words, not
         // the socket's notice.
         stream.set_option(req, StreamOption::SuppressErrors(true));
-        Ok(true)
     }
 
     /// `mysqlnd_vio::close_stream`.

@@ -31,6 +31,13 @@ pub const CLIENT_VERSION: u64 = 80509;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mysqlnd(Handle);
 
+/// A persistent connection between requests, what `mysqli_plist_entry`'s
+/// `free_links` holds of a `MYSQLND`: its data and nothing of a request's,
+/// its socket kept in the persistent streams under the vio's `%p`, as
+/// `mysqlnd_vio::open_tcp_or_unix` opens it. A pool of the engine's keeps
+/// it; [`Mysqlnd::take_up`] lends it to the next request.
+pub struct Kept(Box<ConnData>);
+
 /// `enum mysqlnd_connection_close_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseType {
@@ -155,6 +162,23 @@ impl Mysqlnd {
     /// `mysqlnd_init`: a connection not yet connected.
     pub fn init(req: &mut Request, persistent: bool) -> Mysqlnd {
         Mysqlnd(Handle::alloc(req, persistent))
+    }
+
+    /// A persistent connection given back past `mysqlnd_end_psession`,
+    /// taken out of the request for a pool to keep; `None` where the number
+    /// names none.
+    pub fn keep(self, req: &mut Request) -> Option<Kept> {
+        self.0.take(req).map(Kept)
+    }
+
+    /// A kept connection taken up by this request, one owner counted, its
+    /// stream found again: alive, or failing its first read, which has the
+    /// caller close it and connect anew, as `mysqli_change_user_silent`
+    /// failing does.
+    pub fn take_up(req: &mut Request, kept: Kept) -> Result<Mysqlnd, Thrown> {
+        let Kept(mut conn) = kept;
+        conn.net.take_up(req)?;
+        Ok(Mysqlnd(Handle::hold(req, conn)))
     }
 
     /// `get_reference`: one more owner, for a statement or a set of rows
