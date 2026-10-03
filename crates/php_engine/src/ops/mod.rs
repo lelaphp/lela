@@ -1511,6 +1511,12 @@ fn property_type_error(
     declaring: crate::api::values::ClassId,
     name: &[u8],
 ) -> Thrown {
+    // `if (EG(exception)) return;`: nothing is raised over a pending
+    // throwable, the write is refused and that one leaves, one more owner.
+    if let Some(standing) = req.pending() {
+        req.addref(&standing.as_value());
+        return Thrown::of(Some(standing));
+    }
     let class = req.class_name(declaring);
     let declared = crate::api::coerce::declared_type_name(ty);
     let given = value_name(req, &value.undef_as_null());
