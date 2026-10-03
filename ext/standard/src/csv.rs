@@ -366,7 +366,7 @@ pub fn fgetcsv(
 /// ```php
 /// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(array_map('bin2hex', str_getcsv("\x95\\,x", "\\", '"', ""))); }
 /// ```
-/// ```expect
+/// ```expect locale=ja_JP.SJIS
 /// array(2) {
 ///   [0]=>
 ///   string(2) "95"

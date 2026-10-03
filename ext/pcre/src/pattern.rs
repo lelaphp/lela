@@ -87,7 +87,7 @@ pub(super) fn engine_state(ini: &StartupIni) -> Patterns {
 /// var_dump(setlocale(LC_CTYPE, "C"), preg_match('/\w/', "\xe4"));
 /// var_dump(setlocale(LC_ALL, "de_DE.ISO8859-1"), preg_match('/[[:alpha:]]/', "\xe4"), setlocale(LC_CTYPE, "C.UTF-8"), preg_match('/\w/', "\xe4"));
 /// ```
-/// ```expect
+/// ```expect locale=de_DE locale=de_DE.ISO8859-1
 /// int(0)
 /// string(5) "de_DE"
 /// int(1)

@@ -185,7 +185,7 @@ pub(super) fn strnatcmp(string1: PhpString, string2: PhpString) -> i64 {
 /// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(strnatcasecmp("\xe9t\xe92", "\xc9T\xc910"), strnatcmp("a\xa01", "a1")); }
 /// setlocale(LC_CTYPE, 'C.UTF-8'); var_dump(strnatcmp("a\xa01", "a1"));
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// int(1)
 /// int(1)
 /// int(-1)

@@ -91,6 +91,12 @@
 //! a person writes them, so a fence carries the name alone; a name the pin
 //! does not carry is read before anything runs, and the block is one the
 //! lane cannot run, named beside the regimes the pin has.
+//!
+//! **What `locale=<name>` is.** A locale the snippet needs the host to
+//! know, as a `.phpt`'s `--SKIPIF--` asks `setlocale` for one (#1678).
+//! Where neither the oracle nor the linked engine can move `LC_ALL` to it,
+//! the witness is not run: it is a skip that names the locale, counted as
+//! `skipped` in the reading, and neither a pass nor a fail.
 
 mod anchor;
 pub(crate) mod fence;
@@ -140,6 +146,9 @@ pub(crate) enum Judgement {
     Unpinned,
     /// The witness could not be run or read at all.
     Bork,
+    /// A `locale=<name>` the host knows to neither run: not run, counted,
+    /// and neither a pass nor a fail (#1678).
+    Skipped,
 }
 
 impl tally::Judgement for Judgement {
@@ -153,6 +162,7 @@ impl tally::Judgement for Judgement {
             Judgement::Fail => "fail",
             Judgement::Unpinned => "unpinned",
             Judgement::Bork => "bork",
+            Judgement::Skipped => "skip",
         }
     }
 
@@ -267,6 +277,15 @@ pub(crate) fn reading(
             )
         }
     };
+    // What a `locale=<name>` the host lacks kept from running, as a
+    // message's tail (#1678).
+    let unrun = match run.count(Judgement::Skipped) {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "es" };
+            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
+        }
+    };
     let message = match &outcome {
         Outcome::Failed => {
             let uncovered = if tally.missing.is_empty() {
@@ -303,8 +322,8 @@ pub(crate) fn reading(
             tally.subjects
         ),
         Outcome::Passed => format!(
-            "{name}: {} witnesses pass over {} kernels or natives",
-            run.judged.len(),
+            "{name}: {} witnesses pass over {} kernels or natives{unrun}",
+            run.met(),
             tally.subjects
         ),
         // The ladder's two rungs for a lane that resolves a binary, which
@@ -321,7 +340,7 @@ pub(crate) fn reading(
         // A witness that met nothing counts against the crate, so this
         // rung is one the ladder has and this lane's pre-rung reaches
         // first; the words are here so no rung is without any.
-        Outcome::NothingRan => format!("{name}: no witness ran of {} found", run.found),
+        Outcome::NothingRan => format!("{name}: no witness ran of {} found{unrun}", run.found),
     };
     // Constructed here and not before the run, since `--accept` writes the
     // sources the stamp is over.
@@ -334,6 +353,7 @@ pub(crate) fn reading(
     reading.count("failed", run.against().len() as u64)?;
     reading.count("diverged", run.count(Judgement::Diverged))?;
     reading.count("unpinned", run.count(Judgement::Unpinned))?;
+    reading.count("skipped", run.count(Judgement::Skipped))?;
     reading.count("subjects", tally.subjects as u64)?;
     reading.count("missing", tally.missing.len() as u64)?;
     reading.count("accepted", tally.captured.len() as u64)?;

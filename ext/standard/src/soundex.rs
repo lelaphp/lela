@@ -56,7 +56,7 @@ const TABLE: &[u8; 26] = b"\x00123\x0012\x00\x0022455\x0012623\x001\x002\x002";
 /// ```php
 /// foreach (['C', 'tr_TR.ISO8859-9'] as $l) { setlocale(LC_CTYPE, $l); var_dump(soundex("B\xfdb"), soundex("\xfdrmak")); }
 /// ```
-/// ```expect
+/// ```expect locale=tr_TR.ISO8859-9
 /// string(4) "B000"
 /// string(4) "R520"
 /// string(4) "B100"

@@ -274,7 +274,7 @@ fn try_setlocale(req: &mut Request, category: i64, loc: &[u8]) -> Option<Vec<u8>
 /// var_dump(setlocale(LC_TIME, ""), setlocale(LC_ALL, null), setlocale(LC_ALL, "0"));
 /// var_dump(setlocale(LC_ALL, "C"), setlocale(LC_ALL, "0"));
 /// ```
-/// ```expect
+/// ```expect locale=de_DE locale=is_IS locale=fr_FR.ISO8859-1 locale=de_DE.UTF-8 locale=fr_FR.UTF-8
 /// string(5) "de_DE"
 /// string(5) "is_IS"
 /// string(35) "de_DE/de_DE/de_DE/is_IS/de_DE/de_DE"
@@ -385,7 +385,7 @@ pub(super) fn setlocale(
 /// var_dump($l["decimal_point"], $l["thousands_sep"], $l["int_curr_symbol"], $l["mon_decimal_point"], $l["frac_digits"], $l["p_cs_precedes"], $l["grouping"], $l["mon_grouping"]);
 /// setlocale(LC_MONETARY, "C"); var_dump(localeconv()["currency_symbol"], localeconv()["decimal_point"]);
 /// ```
-/// ```expect
+/// ```expect locale=de_DE.UTF-8
 /// string(1) ","
 /// string(1) "."
 /// string(4) "EUR "
@@ -478,7 +478,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// var_dump(nl_langinfo(CODESET), bin2hex(nl_langinfo(MON_2)), nl_langinfo(ABDAY_1), strtr(nl_langinfo(D_FMT), "%", "#"), nl_langinfo(RADIXCHAR), bin2hex(nl_langinfo(THOUSEP)));
 /// setlocale(LC_TIME, "de_DE.UTF-8"); var_dump(nl_langinfo(MON_3), nl_langinfo(RADIXCHAR));
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1 locale=de_DE.UTF-8
 /// string(9) "ISO8859-1"
 /// string(14) "66e97672696572"
 /// string(4) "dim."
@@ -526,7 +526,7 @@ pub(crate) fn collate(left: &[u8], right: &[u8]) -> Ordering {
 /// setlocale(LC_COLLATE, "fr_FR.ISO8859-1");
 /// var_dump(strcoll("\xC9cosse", "Ontario") < 0, strcoll("Qu\xE9bec", "Quebed") < 0, strcoll("a", "B") < 0, strcoll("abc", "abc"));
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// bool(false)
 /// bool(false)
 /// bool(true)

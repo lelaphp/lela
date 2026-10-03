@@ -52,7 +52,7 @@ use php_ext::values::{Emalloc, FreshString, PhpArray, PhpString, Value};
 /// setlocale(LC_ALL, "de_DE"); printf("%.2f %.2F\n", 3.14, 3.14);
 /// setlocale(LC_ALL, "C"); printf("%.2f\n", 3.14);
 /// ```
-/// ```expect
+/// ```expect locale=is_IS locale=de_DE
 /// string(26) "100,426|123,10|100,426000'"
 /// string(37) "1.231e+2|1.500000|1,5|1,5E+25|1.5|1.5"
 /// string(3) "1.5"
