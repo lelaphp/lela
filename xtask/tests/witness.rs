@@ -501,6 +501,48 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     );
 }
 
+/// An anchored crate is counted by its natives and by its kernels (#1264;
+/// design §8): the fixture's engine declares one native on the attributes
+/// and holds two kernels in `ops`, one without a witness. Read with the
+/// oracle away, the native reads `missing` as any fixture's does (no engine
+/// links it), the witnessed kernel is covered by the fence in its own doc
+/// block, and the kernel without one is named. The plain `pub fn` outside `ops` and
+/// the private function inside it are no subjects. The control: before
+/// #1264 the same fixture counted one subject, the native, and named no
+/// kernel.
+#[test]
+fn an_anchored_crate_counts_its_kernels_beside_its_natives() {
+    let root = fixture_at("witness", "anchor-kernel");
+    let mut manifest = Manifest::load(&root).unwrap();
+    manifest.pin.oracle.path = root.join("no-php-here");
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &Ask {
+            crates: vec!["php_engine".to_owned()],
+            accept: false,
+            staged: false,
+            ..Ask::default()
+        },
+    )
+    .unwrap();
+    let [reading] = readings.as_slice() else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "subjects"), 3, "{reading:#?}");
+    assert_eq!(count(reading, "missing"), 2, "{reading:#?}");
+    assert!(
+        reading.message.contains("ops/mod.rs:15 pub fn sub"),
+        "{}",
+        reading.message
+    );
+    for absent in ["pub fn add", "helper"] {
+        assert!(!reading.message.contains(absent), "{}", reading.message);
+    }
+}
+
 /// The one reading of the `request fpm` fixture `name`, run with `host`
 /// standing in for the pin's php-fpm.
 fn served_by_a_stand_in(name: &str, host: PathBuf) -> Reading {

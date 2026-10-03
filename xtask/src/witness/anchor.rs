@@ -17,7 +17,9 @@
 //! method it never reaches covers nothing. A crate whose covered sources
 //! declare no attribute is counted by [`super::fence::Subject`]'s older
 //! sentence, so the anchor moves coverage one crate at a time as natives
-//! move onto the attributes.
+//! move onto the attributes; an anchored crate's kernels, the functions of
+//! its `ops` module, are still counted by that sentence beside its natives
+//! (#1264).
 //!
 //! The scan is textual over the source with its comments and literals
 //! blanked ([`rust::without_comments_or_literals`]), which keeps offsets
@@ -273,6 +275,14 @@ impl Anchored {
     /// stands on them as much as one it has.
     pub(super) fn declares(&self) -> bool {
         !self.natives.is_empty()
+    }
+
+    /// Whether a native stands at `line` of `file`, the line of its `fn`,
+    /// so the older count does not count it a second time as a kernel.
+    pub(super) fn declares_at(&self, file: &Path, line: usize) -> bool {
+        self.natives
+            .iter()
+            .any(|native| native.subject.file == file && native.subject.line == line)
     }
 
     /// The subjects coverage counts, one per native the build has, each

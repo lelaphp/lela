@@ -1,0 +1,25 @@
+# A negative control (harness-design.md §4.1, §12 item 4): a workspace that
+# must fail the instrument named by the directory above it, here an engine
+# whose natives stand on the attributes and whose kernel has no witness
+# (#1264). The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_engine"
+budget = 1000
+
+[[rule]]
+id = "witness.coverage"
+scope = ["crates/php_engine/src/**", "ext/*/src/**"]
+check = "witness-coverage"
+text = "A kernel or a native without a witness fails CI (fixture)."
