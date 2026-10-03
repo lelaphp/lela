@@ -5,8 +5,8 @@
 //! the methods that start, bind and describe.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor,
-    PropertyPurpose, Raw, Ref, Std, This, True, Union, Variadic,
+    ClassIterator, CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed,
+    PropertiesFor, PropertyPurpose, Raw, Ref, Std, This, True, Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -99,21 +99,6 @@ enum Slot {
     Lent,
 }
 
-/// The fetch the statement's iterator made ahead, `fetch_ahead` of
-/// `struct php_pdo_iterator`: the element at `index` steps past the
-/// start with its key, or nothing more to walk.
-#[derive(Clone, Copy, Default)]
-pub(crate) enum Ahead {
-    #[default]
-    Unset,
-    Row {
-        index: usize,
-        key: i64,
-        value: Value,
-    },
-    Done,
-}
-
 /// `pdo_stmt_t`, the payload of a `PDOStatement` and of every subclass.
 #[derive(Default)]
 pub(crate) struct StmtState {
@@ -152,7 +137,6 @@ pub(crate) struct StmtState {
     pub(crate) row_count: i64,
     /// `stmt->error_code`, `None` before anything cleared it.
     pub(crate) error_code: Option<SqlState>,
-    pub(crate) ahead: Ahead,
 }
 
 /// The payload: `pdo_stmt_t`'s fields, boxed, inside the `sizeof` php
@@ -181,7 +165,6 @@ impl ObjectHandlers for Handlers {
         let columns = std::mem::take(&mut stmt.columns_bound);
         let slot = std::mem::take(&mut stmt.slot);
         let target = std::mem::take(&mut stmt.target);
-        let ahead = std::mem::take(&mut stmt.ahead);
         let dbh = std::mem::take(&mut stmt.dbh);
         let mut driver = match slot {
             Slot::Ready(driver) => Some(driver),
@@ -194,9 +177,6 @@ impl ObjectHandlers for Handlers {
             driver.close(req);
         }
         target.release(req);
-        if let Ahead::Row { value, .. } = ahead {
-            req.release(value);
-        }
         if let DbLink::Owned(dbh) = dbh {
             req.release(dbh.as_value());
         }
@@ -291,39 +271,46 @@ impl ObjectHandlers for Handlers {
         Std.unset_property(req, object, name)
     }
 
-    /// `pdo_stmt_iter_funcs` read through an `InternalIterator`: the row
-    /// fetched ahead at `index`, the next one fetched when the iterator
-    /// has moved past it.
-    fn iterator_element(
+    /// `pdo_stmt_iter_get`, what a `foreach` walks without asking
+    /// `getIterator()`, so a fetch's throw is raised in no frame of the
+    /// statement's: the walk by reference refused, an uninitialized
+    /// statement refused, and the iterator, whose first row is fetched
+    /// once it stands in the object store.
+    ///
+    /// ```php
+    /// class P { protected $v; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query("SELECT 'y' AS v");
+    /// $s->setFetchMode(PDO::FETCH_INTO, new P);
+    /// try { foreach ($s as $o) {} } catch (Error $e) { echo count($e->getTrace()), ' ', $e->getMessage(), "\n"; }
+    /// try { foreach ($db->query('SELECT 1') as &$r) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// foreach ($db->query('SELECT 1 AS n UNION SELECT 2') as $k => $r) echo $k, ':', $r['n'], "\n";
+    /// ```
+    /// ```expect
+    /// 0 Cannot access protected property P::$v
+    /// An iterator cannot be used with foreach by reference
+    /// 0:1
+    /// 1:2
+    /// ```
+    fn get_iterator(
         &self,
         req: &mut Request,
         object: PhpObject,
-        index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
-        let ahead = object
-            .native::<Stmt>(req)
-            .map(|s| s.ahead)
-            .unwrap_or_default();
-        let (key, value) = match ahead {
-            Ahead::Row {
-                index: at,
-                key,
-                value,
-            } if at == index => (key, value),
-            Ahead::Row { index: at, key, .. } if at + 1 == index => {
-                match fetch_ahead(req, object, index, key + 1)? {
-                    Some(row) => row,
-                    None => return Ok(None),
-                }
-            }
-            Ahead::Unset if index == 0 => match fetch_ahead(req, object, 0, 0)? {
-                Some(row) => row,
-                None => return Ok(None),
-            },
-            _ => return Ok(None),
-        };
-        req.addref(&value);
-        Ok(Some((Value::int(key), value)))
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        if by_ref {
+            return Err(throw_error(
+                req,
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            ));
+        }
+        handle(req, object)?;
+        Ok(Some(Box::new(Rows {
+            started: false,
+            key: None,
+            ahead: None,
+        })))
     }
 
     fn get_properties_for(
@@ -337,29 +324,70 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// `pdo_stmt_iter_move_forwards`: the element fetched ahead given up
-/// and the next row fetched with the default style, its error handled on
-/// the statement where there is none.
-fn fetch_ahead(
-    req: &mut Request,
-    object: PhpObject,
-    index: usize,
-    key: i64,
-) -> Result<Option<(i64, Value)>, Thrown> {
-    let old = object
-        .native_mut::<Stmt>(req)
-        .map(|s| std::mem::replace(&mut s.ahead, Ahead::Done));
-    if let Some(Ahead::Row { value, .. }) = old {
-        req.release(value);
-    }
-    if let Some(value) = fetch::row(req, object, 0)? {
-        if let Some(s) = object.native_mut::<Stmt>(req) {
-            s.ahead = Ahead::Row { index, key, value };
+/// `struct php_pdo_iterator`: the key and the row fetched ahead, `None`
+/// once a fetch found none; the first is fetched at the first step, as
+/// `pdo_stmt_iter_get` fetches it after `zend_iterator_init`.
+struct Rows {
+    started: bool,
+    key: Option<i64>,
+    ahead: Option<Value>,
+}
+
+impl Rows {
+    /// `pdo_stmt_iter_move_forwards`.
+    fn forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.started = true;
+        if let Some(old) = self.ahead.take() {
+            req.release(old);
         }
-        Ok(Some((key, value)))
-    } else {
-        handle_error(req, object, false)?;
-        Ok(None)
+        self.ahead = fetch::row(req, object, 0)?;
+        if self.ahead.is_none() {
+            self.key = None;
+            return handle_error(req, object, false);
+        }
+        self.key = Some(self.key.map_or(0, |key| key + 1));
+        Ok(())
+    }
+
+    fn start(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        if self.started {
+            return Ok(());
+        }
+        self.forward(req, object)
+    }
+}
+
+impl ClassIterator for Rows {
+    /// No `rewind` in `pdo_stmt_iter_funcs`: the first step alone fetches.
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.start(req, object)
+    }
+
+    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
+        self.start(req, object)?;
+        Ok(self.ahead.is_some())
+    }
+
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        self.start(req, object)?;
+        let row = self.ahead.unwrap_or_default();
+        req.addref(&row);
+        Ok(row)
+    }
+
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        self.start(req, object)?;
+        Ok(self.key.map_or_else(Value::null, Value::int))
+    }
+
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.forward(req, object)
+    }
+
+    fn release(&mut self, req: &mut Request, _: PhpObject) {
+        if let Some(row) = self.ahead.take() {
+            req.release(row);
+        }
     }
 }
 
@@ -1824,10 +1852,9 @@ impl PDOStatement {
     }
 
     /// `PDOStatement::getIterator(): Iterator`: an `InternalIterator` over
-    /// the statement, its first row fetched now, as `pdo_stmt_iter_get`
-    /// fetches it once `zend_iterator_init` has given the iterator its
-    /// number in the object store, so a `PDORow` the fetch makes takes
-    /// the number after it.
+    /// the statement's own iterator ([`Handlers`]'s `get_iterator`), its
+    /// first row fetched once that iterator has its number in the object
+    /// store, so a `PDORow` the fetch makes takes the number after it.
     ///
     /// ```php
     /// $db = new PDO('sqlite::memory:');
@@ -1855,11 +1882,6 @@ impl PDOStatement {
     fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
         let stmt = this.object();
         handle(req, stmt)?;
-        let iterator = internal_iterator(req, &stmt)?;
-        if let Err(thrown) = fetch_ahead(req, stmt, 0, 0) {
-            req.release(iterator.as_value());
-            return Err(thrown);
-        }
-        Ok(Instance::of(iterator))
+        Ok(Instance::of(internal_iterator(req, &stmt)?))
     }
 }
