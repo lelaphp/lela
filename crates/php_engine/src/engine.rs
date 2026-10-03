@@ -3258,6 +3258,14 @@ impl Engine {
         self.shared.ini_default(name).map(<[u8]>::to_vec)
     }
 
+    /// `INI_STR` outside any request: the value each request starts
+    /// with as php holds it, `None` where it has none (`NULL`), as for a
+    /// name php does not know; the empty string where the ini set it so.
+    #[must_use]
+    pub fn ini_value(&self, name: &[u8]) -> Option<Vec<u8>> {
+        self.shared.ini_default_value(name).map(<[u8]>::to_vec)
+    }
+
     /// `zend_parse_ini_string` under the normal scanner, as a host reads
     /// its own configuration once php has started (php-fpm's
     /// `fpm_conf_load_ini_file`): each statement's event in order, a

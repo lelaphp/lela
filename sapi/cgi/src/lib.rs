@@ -479,9 +479,9 @@ fn describe(
     let server = invocation.origin == Origin::Server;
     let settings = php_sapi::cgi::settings(engine);
     if server && enabled(engine, "cgi.force_redirect") {
+        // `NULL` falls back; an explicitly empty name finds nothing.
         let name = engine
-            .ini_get(b"cgi.redirect_status_env")
-            .filter(|name| !name.is_empty())
+            .ini_value(b"cgi.redirect_status_env")
             .unwrap_or_else(|| b"REDIRECT_STATUS".to_vec());
         if env.get(&name).is_none() {
             return Err(Refusal::Redirect);
