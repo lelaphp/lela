@@ -142,7 +142,7 @@ impl Tree {
 
 /// `cargo` stood in at `dir/cargo`, and the `PATH` that finds it first.
 ///
-/// `worktree add`, `track new` and `track sync` each end in `cargo build
+/// `worktree add` and `track sync` each end in `cargo build
 /// -p xtask` in the checkout they lay down or move, and a scratch clone
 /// has no `target/` for that build to start from: every test through one
 /// of them compiled the harness and all its dependencies cold, two

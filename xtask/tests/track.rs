@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::scratch::Tree;
-use xtask::track::{Base, Found, Model, Ticket, Track};
+use xtask::track::{Found, Model, Ticket, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -253,24 +253,23 @@ fn json_is_the_same_facts_as_one_object() {
     assert_eq!(value["track"], "main");
 }
 
-/// `done`'s base is the track's, taken through the same function.
-#[test]
-fn dones_base_is_the_tracks() {
-    let root = on_a_track("base");
-    let base = Base::of(&root, None).unwrap();
-    let track = Track::of(&root, None).unwrap();
-    assert_eq!(base.since, track.name);
-    assert_eq!(base.commit, track.base);
-    let given = Base::of(&root, Some("main")).unwrap();
-    assert_eq!(given.since, "main");
-    assert_eq!(given.commit, rev(&root, "main"));
-}
-
 #[test]
 fn track_is_listed_by_the_help() {
     let (code, out, _) = xtask(Path::new("."), &["--help"]);
     assert_eq!(code, 0);
     assert!(out.contains("\n  track "), "{out}");
+}
+
+/// A track is a label on the tracker, laid down by nothing (ADR-0009):
+/// `track` lays no clone, so it has no `new`.
+#[test]
+fn track_lays_no_track_down() {
+    let (code, out, _) = xtask(Path::new("."), &["track", "--help"]);
+    assert_eq!(code, 0);
+    for command in ["next", "chains", "work"] {
+        assert!(out.contains(&format!("\n  {command} ")), "{out}");
+    }
+    assert!(!out.contains("\n  new "), "{out}");
 }
 
 /// The ticket is a record on the branch, read by name (#30): a branch

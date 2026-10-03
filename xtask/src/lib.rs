@@ -64,7 +64,6 @@ pub mod test;
 pub mod ticket;
 pub mod track;
 pub mod track_chains;
-pub mod track_new;
 pub mod track_next;
 pub mod track_sync;
 pub mod track_work;
@@ -467,18 +466,6 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track {
-            command:
-                Some(TrackCommand::New {
-                    name,
-                    model,
-                    subagent_model,
-                }),
-            ..
-        } => {
-            let model = track::Model::new(model.clone(), subagent_model.clone());
-            Some(track_new::lay(root, name, &model).map(|_| ()))
-        }
-        Command::Track {
             command: Some(TrackCommand::Next { track, json, why }),
             ..
         } => Some(track_next::command(root, track.as_deref(), *json, *why)),
@@ -496,9 +483,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_sync::command(root)),
         Command::Track {
-            command: Some(TrackCommand::Work { one }),
+            command: Some(TrackCommand::Work { one, run }),
             ..
-        } => Some(track_work::command(root, *one)),
+        } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Steer {

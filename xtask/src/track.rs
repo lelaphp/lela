@@ -2,15 +2,11 @@
 //! branches is worked above, named by being a proper path prefix of theirs.
 //! Four things every reader of a track asks are answered here, for one
 //! worktree, by [`Track::of`]: which track its branch is on, the commit
-//! `done` measures since, which root holds the track's store, and which
+//! the branch was taken off, which root holds the track's store, and which
 //! ticket the branch's work is for. `xtask track` prints them, as text or
 //! as one JSON object, and writes no reading, since it measures nothing;
-//! `done` takes its base through [`Base::of`]; and the add command asks
-//! for a branch not yet made.
-//!
-//! The rule once lived in `done`'s reads and again in a prefix loop of the
-//! add command, and the console was about to write a third. This module
-//! is the one statement the three read.
+//! and the add command asks for a branch not yet made. `done` asks no
+//! track: its base is the merge base with `main` (ADR-0009).
 //!
 //! The ticket is a record on the branch, `branch.<name>.ticket` in the
 //! repository's configuration (#30): git's own per-branch record, shared
@@ -22,18 +18,14 @@
 //!
 //! A track's own clone is detached at `origin/<name>`, so its `HEAD` is
 //! on no branch, and which track it is is a record on the clone too
-//! (#76): `track.name`, written once by `xtask track new` and read here
-//! for a detached `HEAD` alone, since a branch names its own track. The
-//! commit a track's clone is detached at is not the record: two tracks
-//! laid down from the same `main` share it. Beside the name the clone
-//! records the model its sessions run on, role-keyed (#75):
+//! (#76): `track.name`, read here for a detached `HEAD` alone, since a
+//! branch names its own track. The commit a track's clone is detached at
+//! is not the record: two tracks laid down from the same `main` share
+//! it. Beside the name the clone records the model its sessions run on,
+//! role-keyed (#75):
 //! `track.model.session` and `track.model.subagent`, the second
 //! defaulting to the first. A clone with no record names no model,
-//! which is stated, and none is guessed from the track's name. A third
-//! record, `track.frontier=auto` (#85), says the track fills its own
-//! frontier: `track work` starts a `/frontier` session in the clone when
-//! `next` answers "none". A clone without it works the frontier it is
-//! given and stops.
+//! which is stated, and none is guessed from the track's name.
 
 use std::path::{Path, PathBuf};
 
@@ -130,9 +122,9 @@ pub struct Track {
     /// it, `origin`'s otherwise, which is where a track lives in a
     /// repository with worktrees on its branches (harness ledger 14).
     pub at: String,
-    /// The commit `done` measures since: the merge base of the branch with
-    /// the track, and the track's tip for a branch not yet made, which is
-    /// where the add command takes it off.
+    /// The merge base of the branch with the track, and the track's tip
+    /// for a branch not yet made, which is where the add command takes it
+    /// off.
     pub base: String,
     /// The root whose `target/harness` is the track's store: the main
     /// worktree, which is the checkout every linked worktree was added
@@ -228,7 +220,7 @@ impl Track {
             ),
         };
         format!(
-            "branch: {branch}\ntrack: {} ({})\nbase: {}, what done measures since\nstore: {}, whose target/harness is the track's\nticket: {ticket}\nmodel.session: {session}\nmodel.subagent: {subagent}\n",
+            "branch: {branch}\ntrack: {} ({})\nbase: {}, where the branch was taken off\nstore: {}, whose target/harness is the track's\nticket: {ticket}\nmodel.session: {session}\nmodel.subagent: {subagent}\n",
             self.name,
             self.at,
             short(&self.base),
@@ -251,47 +243,6 @@ impl Track {
                 "subagent": model.subagent(),
             })),
         })
-    }
-}
-
-/// The commit the changes are measured since, and the ref it was taken
-/// from: `--base`'s, or the branch's track ([`Track::of`]), which is
-/// [`MAIN`] for a branch that is on none (harness-design.md §4.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Base {
-    pub since: String,
-    pub commit: String,
-}
-
-impl Base {
-    /// The base of a bare `done`: the branch's track, or [`MAIN`]; with a
-    /// ref, the merge base of `HEAD` with it, the ref first and then
-    /// `origin`'s, for a checkout that has only the remote's.
-    pub fn of(root: &Path, since: Option<&str>) -> Result<Base> {
-        if let Some(since) = since {
-            return Ok(Base {
-                since: since.to_owned(),
-                commit: merge_base(root, "HEAD", since)?,
-            });
-        }
-        let track = Track::of(root, None)?;
-        Ok(Base {
-            since: track.name,
-            commit: track.base,
-        })
-    }
-}
-
-impl std::fmt::Display for Base {
-    /// The ref the base was taken from and the commit it resolved to, and
-    /// the commit alone when the ref was that commit.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let short = short(&self.commit);
-        if self.since == self.commit || self.since == short {
-            write!(f, "{short}")
-        } else {
-            write!(f, "{} ({short})", self.since)
-        }
     }
 }
 
@@ -348,26 +299,8 @@ const NAME_KEY: &str = "track.name";
 const SESSION_KEY: &str = "track.model.session";
 const SUBAGENT_KEY: &str = "track.model.subagent";
 
-/// The configuration key that says the track fills its own frontier
-/// (#85), and the one value it takes.
-const FRONTIER_KEY: &str = "track.frontier";
-const AUTO: &str = "auto";
-
-/// Whether the clone records `track.frontier=auto`; unset is `false`,
-/// and a record that is neither is an error naming it, not a clone that
-/// records none.
-pub(crate) fn fills_own_frontier(root: &Path) -> Result<bool> {
-    match config(root, FRONTIER_KEY).as_deref() {
-        None => Ok(false),
-        Some(AUTO) => Ok(true),
-        Some(other) => bail!(
-            "{FRONTIER_KEY} is {other:?}, and `{AUTO}` is the one value it takes; unset it, or `git config {FRONTIER_KEY} {AUTO}`"
-        ),
-    }
-}
-
 /// One configuration value, `None` where the key is unset or empty:
-/// the clone's records, read here and by `track work` for its own.
+/// the clone's records.
 pub(crate) fn config(root: &Path, key: &str) -> Option<String> {
     let text = git(root, &["config", "--get", key], None).ok()?;
     let text = text.trim();
@@ -393,20 +326,6 @@ fn model_of(root: &Path) -> Result<Option<Model>> {
         }
         None => Ok(None),
     }
-}
-
-/// The track and the model recorded on the clone at `root`: the one write
-/// of both records, what `track new` does to the clone it laid down.
-pub(crate) fn record_track(root: &Path, name: &str, model: &Model) -> Result<()> {
-    let mut records = vec![(NAME_KEY, name), (SESSION_KEY, model.session.as_str())];
-    if let Some(subagent) = &model.subagent {
-        records.push((SUBAGENT_KEY, subagent));
-    }
-    for (key, value) in records {
-        git(root, &["config", key, value], None)
-            .with_context(|| format!("cannot record {value:?} as {key}"))?;
-    }
-    Ok(())
 }
 
 /// The branch whose record names `ticket`, if one does: what refuses a
@@ -467,7 +386,7 @@ fn prefix_branch(root: &Path, branch: &str) -> Option<String> {
 /// The merge base of `from` and `other`, `other` being the ref it is here
 /// when it is a branch, and the name given otherwise, so git's own text
 /// says what is missing.
-fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
+pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
     let at = ref_of(root, other);
     let name = at.as_deref().unwrap_or(other);
     git(root, &["merge-base", from, name], None)

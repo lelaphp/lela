@@ -49,6 +49,8 @@ divergence::Status
 divergence::Status::ALL
 divergence::Status::as_str
 divergence::reason
+done::Base
+done::Base::of
 done::FRESH
 done::Verdict
 done::Verdict::met
@@ -290,8 +292,6 @@ ticket::parent
 ticket::parent_scope
 ticket::run
 ticket::ticket_of
-track::Base
-track::Base::of
 track::Found
 track::Model
 track::Model::new
@@ -308,7 +308,6 @@ track_chains::Chains::of
 track_chains::Chains::render
 track_chains::Row
 track_chains::command
-track_new::lay
 track_next::Next
 track_next::Next::render
 track_next::Next::to_json
@@ -321,19 +320,16 @@ track_sync::Synced::render
 track_sync::command
 track_sync::sync
 track_work::Landed
+track_work::Run
 track_work::Session
 track_work::Session::arguments
-track_work::Session::of
 track_work::Session::prompt
 track_work::Skill
 track_work::Skill::name
 track_work::Skill::of
-track_work::Swept
-track_work::Swept::render
 track_work::Worked
 track_work::Worked::render
 track_work::command
-track_work::sweep
 track_work::work
 unsafe_audit::run
 usage::ContextUsage

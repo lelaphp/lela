@@ -104,7 +104,7 @@ pub(crate) enum Command {
     /// exit 1 while any is; the Stop hook, pre-push and CI read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
-        /// default the branch's track, and `main` for a branch on none.
+        /// default `main`, or `origin`'s where the checkout has none.
         #[arg(long, value_name = "REF", conflicts_with = "hook")]
         base: Option<String>,
         /// Read the Stop hook's stdin: exit 0 when `stop_hook_active`,
@@ -112,7 +112,7 @@ pub(crate) enum Command {
         #[arg(long)]
         hook: bool,
     },
-    /// Say which track the branch is on, the commit `done` measures since,
+    /// Say which track the branch is on, the commit it was taken off,
     /// the track's store root, the branch's ticket and the track's model;
     /// as text or as one object. Writes no reading.
     ///
@@ -122,17 +122,13 @@ pub(crate) enum Command {
     /// carries, and `main` where there is none. The model is the clone's
     /// record too, one per role, and a clone with none says so.
     ///
-    /// `new <name> --model <name>` lays a track down: `origin/<name>` at
-    /// `main`, a clone beside the repository detached at it and recording
-    /// its track and its model, `xtask` built there, the console's row,
-    /// the `computed trust` line printed as a person's.
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
     /// branch of this clone; `chains` prints every open ticket of the
     /// track under the one that blocks it. `sync` catches the track up
     /// with main.
-    /// `work` takes that ticket from start to retire without a person,
-    /// syncing before each.
+    /// `work --model <name>` takes that ticket from start to retire
+    /// without a person.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
@@ -492,24 +488,6 @@ pub(crate) struct Identity {
 /// What is done to a track rather than asked of it.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
-    /// Lay a track down: push `main` to `origin/<name>`, clone origin
-    /// beside the repository detached at it, record the track and its
-    /// model on the clone, build `xtask` there, add the console's row and
-    /// print the trust line; refuses a branch that exists, on the clone
-    /// or on origin, and a directory that does.
-    New {
-        /// The track's name, a branch not yet made, with no slash: it is
-        /// the path prefix of its branches' names.
-        name: String,
-        /// The model the track's sessions run on, recorded on the clone
-        /// as `track.model.session` and read by `xtask track`.
-        #[arg(long, value_name = "NAME")]
-        model: String,
-        /// The model the sessions' subagents run on, recorded as
-        /// `track.model.subagent`; the session's when not given.
-        #[arg(long, value_name = "NAME")]
-        subagent_model: Option<String>,
-    },
     /// The ticket the track works next: the oldest open `ready-for-agent`
     /// ticket that no open ticket blocks, that carries no `track:<name>`
     /// label naming another track, and that no branch of this clone
@@ -560,30 +538,30 @@ pub(crate) enum TrackCommand {
     /// conflict, and changes neither the branch nor the clone. Writes
     /// no reading.
     Sync,
-    /// The frontier until it empties, without a person: for each ticket
-    /// `next` names, the track caught up with main first, its worktree
-    /// laid down on `<track>/t<n>`, a headless session in it on the model
-    /// the clone records, and when the session ends with the ticket
-    /// closed, the track's branch fast-forwarded to the worktree's tip,
+    /// The frontier until it empties, without a person, from main's
+    /// checkout: for each ticket `next` names on `--track`, its worktree
+    /// laid down on `t<n>` off `main`, a headless session in it on
+    /// `--model`, and when the session ends with the ticket closed, the
+    /// branch it was taken off fast-forwarded to the worktree's tip,
     /// pushed to origin and the worktree retired. A session that ends
-    /// with the ticket open, or closed with the branch not ahead of the
-    /// track, leaves the worktree standing for a person and the run goes
-    /// on; a failure of the harness itself, a sync that refuses included,
-    /// stops it, named. With `track.frontier=auto` recorded on the clone,
-    /// "none" from `next` starts a `/frontier` session in the clone and
-    /// the run goes on with what it filed; a frontier still empty after
-    /// it ends the run listing the track's open `for-a-person` tickets.
+    /// with the ticket open, or closed with the branch not ahead, leaves
+    /// the worktree standing for a person and the run goes on; a failure
+    /// of the harness itself stops it, named. With `--fill`, "none" from
+    /// `next` starts a `/frontier` session in the checkout and the run
+    /// goes on with what it filed; a frontier still empty after it ends
+    /// the run listing the track's open `for-a-person` tickets.
     /// Prints one line per ticket naming the ticket, the
     /// commit and the outcome, then a closing line once any was worked.
     /// Writes one reading per step, scoped to the ticket, and one for the
     /// run; `xtask status --section track` renders the last run.
     Work {
-        /// One step alone, a `/frontier` session before it when the clone
-        /// records `track.frontier=auto` and the frontier is empty: the
-        /// line printed, and exit 1 with the reason when the session
-        /// leaves the ticket to a person.
+        /// One step alone, a `/frontier` session before it under `--fill`
+        /// when the frontier is empty: the line printed, and exit 1 with
+        /// the reason when the session leaves the ticket to a person.
         #[arg(long)]
         one: bool,
+        #[command(flatten)]
+        run: crate::track_work::Run,
     },
 }
 

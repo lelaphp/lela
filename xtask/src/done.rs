@@ -2,9 +2,9 @@
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
 //! command hook, pre-push, and CI per commit) read one list. The base is
-//! the merge base of `HEAD` with the branch's track ([`Base`], taken through
-//! `track`, the one statement of the rule), or with `--base`; the changes are every file the working tree differs in from
-//! it, committed since or not, plus the untracked files.
+//! the merge base of `HEAD` with `main` ([`Base`]), or with `--base`; the
+//! changes are every file the working tree differs in from it, committed
+//! since or not, plus the untracked files.
 //!
 //! The conditions, one sentence each, are §4.5's seven:
 //!
@@ -115,7 +115,7 @@ use crate::port_map;
 use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
-use crate::track::{self, Ticket};
+use crate::track::{self, MAIN, Ticket, merge_base, short};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
@@ -199,7 +199,40 @@ fn lock_home(manifest: &Manifest) -> Option<String> {
         .map(|krate| krate.name.clone())
 }
 
-pub(crate) use crate::track::Base;
+/// The commit the changes are measured since, and the ref it was taken
+/// from: `--base`'s, or `main`, every ticket's branch being cut from it
+/// (ADR-0009, harness-design.md §4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Base {
+    pub since: String,
+    pub commit: String,
+}
+
+impl Base {
+    /// The merge base of `HEAD` with `since`, `main` for a bare `done`:
+    /// the ref first and then `origin`'s, for a checkout that has only the
+    /// remote's.
+    pub fn of(root: &Path, since: Option<&str>) -> Result<Base> {
+        let since = since.unwrap_or(MAIN);
+        Ok(Base {
+            since: since.to_owned(),
+            commit: merge_base(root, "HEAD", since)?,
+        })
+    }
+}
+
+impl std::fmt::Display for Base {
+    /// The ref the base was taken from and the commit it resolved to, and
+    /// the commit alone when the ref was that commit.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short = short(&self.commit);
+        if self.since == self.commit || self.since == short {
+            write!(f, "{short}")
+        } else {
+            write!(f, "{} ({short})", self.since)
+        }
+    }
+}
 
 /// What `done` found over one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,8 +331,8 @@ fn names(id: &str, part: &str) -> bool {
     id.contains(&format!("/{}/", part.trim_matches('/')))
 }
 
-/// Judge the changes since the merge base with `base`, the branch's
-/// track ([`Base::of`]) when none is given.
+/// Judge the changes since the merge base with `base`, `main`
+/// ([`Base::of`]) when none is given.
 pub fn judge(
     root: &Path,
     manifest: &Manifest,

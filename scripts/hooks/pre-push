@@ -5,8 +5,8 @@
 # --base <remote sha>` prints what is unmet in everything the push would
 # add and exits 1 while anything is, which refuses the push. A ref the
 # remote does not have yet (its sha all zeros) is judged since done's own
-# default, the merge base with the branch's track. A deletion (the local
-# sha all zeros) adds nothing, so there is nothing to judge; a branch with
+# default, the merge base with main. A deletion (the local sha all zeros)
+# adds nothing, so there is nothing to judge; a branch with
 # no history in common with its base, as dashboard-data was, would
 # otherwise fail on the merge base. Installed per clone by the SessionStart
 # hook, or by hand: `git config core.hooksPath scripts/hooks`. It goes
