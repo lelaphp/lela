@@ -181,7 +181,7 @@ pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Box<DbhState>>);
 pub(crate) const POOLED: usize = 1024;
 
 /// The persistent connections the request took out of the pool or
-/// opened, each held under its key until `rshutdown` gives it back.
+/// opened, each held under its key until `deactivate` gives it back.
 #[derive(Default)]
 pub(crate) struct Persistent {
     lent: Lent<Vec<u8>, Box<DbhState>>,
@@ -202,10 +202,12 @@ fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
     }
 }
 
-/// pdo's `RSHUTDOWN` in this engine: every persistent connection the
-/// request holds given back to the engine's pool, nothing of the
-/// request's left on it; one past the pool's bound is closed.
-pub(crate) fn rshutdown(req: &mut Request) {
+/// What php's `shutdown_executor` does to pdo's persistent connections,
+/// after every extension's `RSHUTDOWN`, so a session save handler's
+/// `write` still has them: every persistent connection the request holds
+/// given back to the engine's pool, nothing of the request's left on it;
+/// one past the pool's bound is closed.
+pub(crate) fn deactivate(req: &mut Request) {
     for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
         persistent_shutdown(req, &mut dbh);
         if let Conn::Open(conn) = &mut dbh.conn {

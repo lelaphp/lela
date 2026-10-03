@@ -38,3 +38,56 @@ fn a_persistent_connection_serves_the_next_request() {
         "int(1)\nbool(false)\nno such function: f"
     );
 }
+
+/// A session save handler whose `write` goes through a persistent
+/// connection in a global, served in session's `RSHUTDOWN`, still has
+/// that connection: php gives pdo's persistent connections back in
+/// `shutdown_executor`, after every extension's `RSHUTDOWN`. The second
+/// request prints what the write left, the oracle's bytes for the same
+/// two requests (#1695).
+#[test]
+fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_session::extension(),
+            php_ext_pdo::extension(),
+            php_ext_pdo_sqlite::extension(),
+        ])
+        .build();
+    let path = std::env::temp_dir().join(format!("t1695-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let dsn = format!("sqlite:{}", path.display());
+    let written = format!(
+        "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
+        $db = new PDO('{dsn}', null, null, [PDO::ATTR_PERSISTENT => true]);
+        $db->exec('CREATE TABLE t (v TEXT)');
+        class H implements SessionHandlerInterface {{
+            function __construct(public $db) {{}}
+            function open(string $p, string $n): bool {{ return true; }}
+            function close(): bool {{ return true; }}
+            function read(string $id): string|false {{ return ''; }}
+            function write(string $id, string $data): bool {{
+                global $db;
+                return $db->exec(\"INSERT INTO t VALUES ('$data')\") === 1;
+            }}
+            function destroy(string $id): bool {{ return true; }}
+            function gc(int $m): int|false {{ return 0; }}
+        }}
+        session_set_save_handler(new H($db), false);
+        session_id('t1695');
+        session_start();
+        $_SESSION['a'] = 1;"
+    );
+    let served = engine.serve_capture(&written, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    let read = format!(
+        "<?php var_dump((new PDO('{dsn}'))->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));"
+    );
+    let served = engine.serve_capture(&read, Capture::default());
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
+    );
+}
