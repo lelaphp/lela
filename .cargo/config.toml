@@ -14,10 +14,17 @@ xtask = "run --quiet --package xtask --"
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
 
-# pcre2-sys links a system libpcre2-8 when pkg-config finds one, which
-# makes the pattern library whatever the machine has; set, it builds the
-# source the crate bundles, one version on every machine (design §7.2).
-PCRE2_SYS_STATIC = { value = "1", force = true }
+# pcre2-sys finds libpcre2-8 through pkg-config, which on a Mac is
+# Homebrew's `pcre2` keg, the library the oracle links (design §7.2, #624,
+# #717), and builds the source it bundles, a release of its own, only when
+# that misses; ext/pcre's build.rs fails the build on the miss instead.
+# The keg's archive is linked, not its dylib: the SDK ships a
+# `libpcre2-8.tbd`, and its libxml2 puts `-L /usr/lib` ahead of the keg on
+# the link line (#1510), where `-lpcre2-8` would find the SDK's library;
+# set, pkg-config's `--static` makes the link the keg's `libpcre2-8.a`,
+# held inside pcre2-sys's rlib, whatever the order. A host whose
+# libpcre2-8 has no archive links its shared library.
+LIBPCRE2_8_STATIC = { value = "1", force = true }
 
 # libsqlite3-sys finds libsqlite3 through pkg-config, which on a Mac finds
 # the SDK's library first, where the oracle links Homebrew's `sqlite` keg
