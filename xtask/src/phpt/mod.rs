@@ -140,7 +140,7 @@ pub(crate) mod cgi;
 mod fpm;
 pub(crate) mod phpdbg;
 mod scope;
-pub(crate) use scope::Scope;
+pub(crate) use scope::{Comparison, Scope};
 mod census;
 pub(crate) mod file;
 pub(crate) mod miss;

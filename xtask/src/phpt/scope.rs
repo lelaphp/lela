@@ -30,12 +30,28 @@ pub(crate) struct Scope {
     pub against: bool,
 }
 
-impl Scope {
-    /// The word of the control's suffix, and of its column in `status`.
-    pub(crate) const CONTROL: &str = "control";
-    /// The word of the comparison's suffix, and of its column in `status`.
-    pub(crate) const AGAINST: &str = "against";
+/// What a scope is beside the run it compares: the comparison against a
+/// kept commit, or the runner's control under the oracle. `status` folds
+/// each into the run's row as the column its word names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Comparison {
+    Against,
+    Control,
+}
 
+impl Comparison {
+    pub(crate) const ALL: [Comparison; 2] = [Comparison::Against, Comparison::Control];
+
+    /// The word of the suffix, and of the column.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Comparison::Against => "against",
+            Comparison::Control => "control",
+        }
+    }
+}
+
+impl Scope {
     /// The engine's own run over `subset`, beside nothing.
     pub(crate) fn of(subset: &str) -> Scope {
         Scope {
@@ -53,19 +69,40 @@ impl Scope {
             ..self.clone()
         }
     }
+
+    /// The run this scope compares, and how: `@against` compares the scope
+    /// without it, and `@control`, where nothing is held against, the
+    /// engine's run of the same subset and lane. None for a run of its own.
+    pub(crate) fn compares(&self) -> Option<(Scope, Comparison)> {
+        if self.against {
+            let run = Scope {
+                against: false,
+                ..self.clone()
+            };
+            Some((run, Comparison::Against))
+        } else if self.control {
+            let run = Scope {
+                control: false,
+                ..self.clone()
+            };
+            Some((run, Comparison::Control))
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.subset)?;
         if self.control {
-            write!(f, "{AT}{}", Scope::CONTROL)?;
+            write!(f, "{AT}{}", Comparison::Control.as_str())?;
         }
         if let Some(lane) = self.lane {
             write!(f, "{AT}{}", lane.as_str())?;
         }
         if self.against {
-            write!(f, "{AT}{}", Scope::AGAINST)?;
+            write!(f, "{AT}{}", Comparison::Against.as_str())?;
         }
         Ok(())
     }
@@ -98,10 +135,10 @@ impl FromStr for Scope {
                 .iter()
                 .copied()
                 .find(|lane| lane.as_str() == suffix);
-            let place = match (suffix, lane) {
-                (Scope::CONTROL, _) => Place::Control,
-                (_, Some(_)) => Place::Lane,
-                (Scope::AGAINST, _) => Place::Against,
+            let place = match lane {
+                _ if suffix == Comparison::Control.as_str() => Place::Control,
+                Some(_) => Place::Lane,
+                None if suffix == Comparison::Against.as_str() => Place::Against,
                 _ => bail!(
                     "the scope {text:?} carries `{AT}{suffix}`, which is no control, lane or comparison"
                 ),
@@ -124,7 +161,7 @@ impl FromStr for Scope {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lane, Scope};
+    use super::{Comparison, Lane, Scope};
 
     /// Every scope the writers spell reads back as the parts that spelled
     /// it, and renders as the same bytes (#1744).
@@ -196,10 +233,30 @@ mod tests {
         }
     }
 
-    /// The comparison of a run is the run's scope with `@against` last.
+    /// The comparison of a run is the run's scope with `@against` last,
+    /// and what a scope compares is read back off the same suffixes: the
+    /// comparison first, then the control, a lane kept either way.
     #[test]
     fn a_comparison_is_its_run_held_against() {
         let run: Scope = "ext/pcre@force".parse().unwrap();
         assert_eq!(run.held_against().to_string(), "ext/pcre@force@against");
+        let compares = |text: &str| {
+            let scope: Scope = text.parse().unwrap();
+            scope.compares().map(|(run, how)| (run.to_string(), how))
+        };
+        assert_eq!(compares("ext/pcre"), None);
+        assert_eq!(compares("ext/pcre@force"), None);
+        assert_eq!(
+            compares("ext/pcre@force@against"),
+            Some(("ext/pcre@force".to_owned(), Comparison::Against))
+        );
+        assert_eq!(
+            compares("ext/pcre@control@force"),
+            Some(("ext/pcre@force".to_owned(), Comparison::Control))
+        );
+        assert_eq!(
+            compares("X@control@against"),
+            Some(("X@control".to_owned(), Comparison::Against))
+        );
     }
 }

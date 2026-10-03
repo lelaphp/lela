@@ -180,9 +180,10 @@ fn settled(row: &Row) -> bool {
         .reading
         .as_ref()
         .is_some_and(|r| r.status == reading::Status::Pass);
-    let compared_clean = COMPARISONS
-        .iter()
-        .all(|key| !row.fact(key).starts_with(reading::Status::Fail.as_str()));
+    let compared_clean = phpt::Comparison::ALL.iter().all(|how| {
+        !row.fact(how.as_str())
+            .starts_with(reading::Status::Fail.as_str())
+    });
     let lines = row
         .reading
         .as_ref()
@@ -749,32 +750,6 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
         .collect()
 }
 
-/// The comparisons a subset's run is read beside, each folded into the
-/// subset's own row as the column its suffix names: the regression verdict
-/// against the base and the runner's control under the oracle.
-const COMPARISONS: [&str; 2] = [phpt::Scope::AGAINST, phpt::Scope::CONTROL];
-
-/// The run a comparison is read beside and the column it is folded into:
-/// `@against` compares the scope without it, and `@control` the engine's
-/// run of the same subset and lane. None for a run of its own.
-fn beside(scope: &phpt::Scope) -> Option<(phpt::Scope, &'static str)> {
-    if scope.against {
-        let run = phpt::Scope {
-            against: false,
-            ..scope.clone()
-        };
-        Some((run, phpt::Scope::AGAINST))
-    } else if scope.control {
-        let run = phpt::Scope {
-            control: false,
-            ..scope.clone()
-        };
-        Some((run, phpt::Scope::CONTROL))
-    } else {
-        None
-    }
-}
-
 /// The counts that size a run rather than judge it; the subset's row
 /// carries them, so a comparison's cell leaves them out.
 const SIZE: [&str; 7] = [
@@ -794,19 +769,20 @@ fn compared(rows: Vec<Row>) -> Vec<Row> {
     let scope = |row: &Row| row.fact("scope");
     let scopes: BTreeSet<String> = rows.iter().map(scope).collect();
     let of = |row: &Row| {
-        let (run, key) = beside(&scope_of(row)?)?;
-        let own = beside(&run).is_none() && scopes.contains(&run.to_string());
-        own.then(|| (run.to_string(), key))
+        let (run, how) = scope_of(row)?.compares()?;
+        let own = run.compares().is_none() && scopes.contains(&run.to_string());
+        own.then(|| (run.to_string(), how))
     };
     let (folded, mut kept): (Vec<Row>, Vec<Row>) =
         rows.into_iter().partition(|row| of(row).is_some());
     for row in folded {
-        let (Some((base, key)), Some(r)) = (of(&row), &row.reading) else {
+        let (Some((base, how)), Some(r)) = (of(&row), &row.reading) else {
             continue;
         };
         let cell = format!("{} {}", r.status.as_str(), row.numbers_but(&SIZE));
         if let Some(own) = kept.iter_mut().find(|k| scope(k) == base) {
-            own.facts.insert(key.to_owned(), json!(cell.trim_end()));
+            own.facts
+                .insert(how.as_str().to_owned(), json!(cell.trim_end()));
         }
     }
     kept
@@ -1722,7 +1698,8 @@ mod tests {
 
     /// Each comparison folds into the row of the run it compares, read off
     /// the one grammar: `@against` into the scope without it, a lane's
-    /// included, and `@control` into the engine's run. A control's own
+    /// included, and `@control` into the engine's run, of a lane too. A
+    /// control's own
     /// comparison has no row to fold into, its control's being folded, so
     /// it stays a row of its own rather than vanishing (#1744).
     #[test]
@@ -1738,6 +1715,7 @@ mod tests {
             "X@control@against",
             "X@force",
             "X@force@against",
+            "X@control@force",
             "Y@against",
         ]
         .map(row);
@@ -1756,7 +1734,7 @@ mod tests {
             [
                 ("X", true, true),
                 ("X@control@against", false, false),
-                ("X@force", true, false),
+                ("X@force", true, true),
                 ("Y@against", false, false),
             ]
         );
