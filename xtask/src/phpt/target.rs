@@ -10,7 +10,11 @@
 //! outside, named and never counted against the engine. An engine's run of
 //! the subset is then read as met-of-target: the target's tests whose
 //! verdict under the engine is the oracle's, or whose id a registry row
-//! holds whatever the engine did, a skip included (#1161).
+//! holds whatever the engine did, a skip included (#1161). A test the
+//! kept target holds no verdict for at all is neither: the target was kept
+//! over a corpus the subset no longer is, as #1598 grew `ext/intl` by
+//! `ext/intl/uchar/tests` under the same pin, and the reading counts it
+//! apart and says how to keep the target again (#1644).
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +24,7 @@ use super::against::{RUNS, Run};
 use super::{CORPUS, Judgement};
 use crate::divergence::Registry;
 use crate::oracle::Pin;
-use crate::reading::listed;
+use crate::reading::{listed, plural};
 
 /// What names the pin a target is kept under: the corpus's tag and the
 /// oracle's digest.
@@ -40,6 +44,9 @@ pub(crate) enum Standing {
     /// The oracle skipped or missed it: outside the target, whatever the
     /// engine's verdict of the moment.
     Outside,
+    /// The target holds no verdict for it: kept over another corpus than
+    /// the one the subset holds now, so it predates the test.
+    Predated,
     /// In the target, and the engine's verdict is the oracle's or a
     /// registry row holds the id.
     Met,
@@ -101,7 +108,8 @@ impl Target {
                     Standing::Missed
                 }
             }
-            _ => Standing::Outside,
+            Some(_) => Standing::Outside,
+            None => Standing::Predated,
         }
     }
 }
@@ -112,6 +120,8 @@ pub(crate) struct Measure {
     pub target: u64,
     pub met: u64,
     pub outside: u64,
+    /// The subset's tests the kept target holds no verdict for.
+    pub predated: u64,
     /// The target's tests the engine missed, by divergence key.
     pub missed: Vec<String>,
 }
@@ -127,6 +137,7 @@ impl Measure {
         for (id, engine) in verdicts {
             match target.standing(registry, id, engine) {
                 Standing::Outside => measure.outside += 1,
+                Standing::Predated => measure.predated += 1,
                 Standing::Met => {
                     measure.target += 1;
                     measure.met += 1;
@@ -140,8 +151,10 @@ impl Measure {
         measure
     }
 
-    /// The reading's words for it: met of target, and the misses named.
-    pub(crate) fn words(&self) -> String {
+    /// The reading's words for it: met of target, the misses named, and
+    /// where the target predates some of the subset's tests, how many and
+    /// `keeps`, the command that keeps the target again.
+    pub(crate) fn words(&self, keeps: &str) -> String {
         let prefix = format!("phpt:{CORPUS}/");
         let names: Vec<&str> = self
             .missed
@@ -153,8 +166,15 @@ impl Measure {
         } else {
             format!("; the target's misses: {}", listed(&names))
         };
+        let predated = match self.predated {
+            0 => String::new(),
+            n => format!(
+                "; {n} test{} the target predates, kept over another corpus; {keeps}",
+                plural(usize::try_from(n).unwrap_or(usize::MAX))
+            ),
+        };
         format!(
-            "{} of {} target tests met, {} outside{missed}",
+            "{} of {} target tests met, {} outside{missed}{predated}",
             self.met, self.target, self.outside
         )
     }
@@ -237,7 +257,7 @@ mod tests {
         assert_eq!(measure.met, 3, "{measure:#?}");
         assert_eq!(measure.missed, [id("missed.phpt")]);
         assert_eq!(
-            measure.words(),
+            measure.words("unread"),
             "3 of 4 target tests met, 3 outside; the target's misses: ext/fixture/tests/missed.phpt"
         );
     }

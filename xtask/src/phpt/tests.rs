@@ -1819,3 +1819,102 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
     let tally = run_on(&subset, 1, 10);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
+
+/// A target kept over another corpus than the one the subset holds now
+/// (#1644), as #1598 grew `ext/intl` by `ext/intl/uchar/tests` under the
+/// same pin: the tests it holds no verdict for are counted as `predated`
+/// and not `outside`, met-of-target stays over the target's own tests, and
+/// the reading says how many and the command that keeps the target again.
+/// The negative control is the same run held to a target that has a
+/// verdict for every test: nothing predated, and the words say nothing of
+/// it.
+#[test]
+fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
+    use crate::reading::Number;
+    let id = |name: &str| format!("phpt:php-src/ext/fixture/tests/{name}");
+    let run = |verdicts: &[(&str, &str)]| -> against::Run {
+        let verdicts: serde_json::Map<String, serde_json::Value> = verdicts
+            .iter()
+            .map(|(name, j)| (id(name), serde_json::Value::from(*j)))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "commit": "e01b1f6",
+            "corpus": "the fixture's corpus",
+            "engine": "php md5 0",
+            "verdicts": verdicts,
+        }))
+        .unwrap()
+    };
+    let judged = |name: &str, judgement| Judged::new(&id(name), name, judgement, "");
+    let tally = Tally {
+        judged: vec![
+            judged("met.phpt", Judgement::Pass),
+            judged("oracle-miss.phpt", Judgement::Fail),
+            judged("uchar/new.phpt", Judgement::Pass),
+            judged("uchar/newer.phpt", Judgement::Fail),
+        ],
+        found: 4,
+    };
+    let pin = manifest().pin;
+    let held = |target: &Target| {
+        let mut reading = Reading::new(INSTRUMENT, "ext/fixture");
+        held_to(
+            &mut reading,
+            (&tally, "ext/fixture"),
+            (Some(target), false),
+            &Registry::parse("").unwrap(),
+            (&Runner::Linked, &pin),
+        )
+        .unwrap();
+        reading
+    };
+    let number = |reading: &Reading, key: &str| reading.numbers.get(key).copied();
+
+    let older = Target::of(run(&[("met.phpt", "pass"), ("oracle-miss.phpt", "fail")]));
+    let reading = held(&older);
+    assert_eq!(
+        number(&reading, "target"),
+        Some(Number::Int(1)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "met"),
+        Some(Number::Int(1)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "outside"),
+        Some(Number::Int(1)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "predated"),
+        Some(Number::Int(2)),
+        "{reading:#?}"
+    );
+    let keeps = format!(
+        "1 of 1 target tests met, 1 outside; 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --engine {}` keeps it again",
+        pin.oracle.path.display()
+    );
+    assert!(reading.message.contains(&keeps), "{}", reading.message);
+
+    let current = Target::of(run(&[
+        ("met.phpt", "pass"),
+        ("oracle-miss.phpt", "fail"),
+        ("uchar/new.phpt", "pass"),
+        ("uchar/newer.phpt", "skip"),
+    ]));
+    let reading = held(&current);
+    assert_eq!(
+        number(&reading, "target"),
+        Some(Number::Int(2)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "outside"),
+        Some(Number::Int(2)),
+        "{reading:#?}"
+    );
+    assert_eq!(number(&reading, "predated"), None, "{reading:#?}");
+    assert!(!reading.message.contains("predates"), "{}", reading.message);
+}
