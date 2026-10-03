@@ -125,27 +125,24 @@ pub(crate) enum Command {
         #[arg(long)]
         hook: bool,
     },
-    /// Say which track the branch is on, the commit it was taken off,
-    /// the track's store root, the branch's ticket and the track's model;
-    /// as text or as one object. Writes no reading.
+    /// Say the branch, the commit it was taken off main at, the store
+    /// and the branch's ticket; as text or as one object. Writes no
+    /// reading.
     ///
-    /// The track is the longest existing branch that is a proper path
-    /// prefix of the branch's name, `main` for a branch on none; for a
-    /// detached `HEAD` it is the clone's record, which a track's own clone
-    /// carries, and `main` where there is none. The model is the clone's
-    /// record too, one per role, and a clone with none says so.
+    /// A track is a `track:<name>` label on the tracker, `main` for a
+    /// ticket with none, and has no branch (ADR-0009), so none is
+    /// printed. The base is the merge base with `main`, `origin`'s where
+    /// the checkout has none; the store is the main checkout's.
     ///
-    /// `next` names the ticket the track works next, the oldest open
-    /// `ready-for-agent` ticket that is unblocked, this track's and on no
-    /// branch of this clone; `chains` prints every open ticket of the
-    /// track under the one that blocks it. `sync` catches the track up
-    /// with main.
-    /// `work --model <name>` takes that ticket from start to retire
-    /// without a person.
+    /// `next --track <name>` names the ticket the track works next, the
+    /// widest open `ready-for-agent` ticket that is unblocked, the
+    /// track's and on no branch; `chains` prints every open ticket of the
+    /// track under the one that blocks it. `work --model <name>` takes
+    /// those tickets from start to retire without a person.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
-        /// command asks before it takes the branch off its track.
+        /// command asks before it cuts the branch from `main`.
         #[arg(long, value_name = "NAME")]
         branch: Option<String>,
         /// Print the same facts as one JSON object.
@@ -154,17 +151,17 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<TrackCommand>,
     },
-    /// A track's worktrees: `add` lays one down beside the checkout, at <checkout>-worktrees/<branch>,
-    /// `retire` appends its log into the track's store and removes it.
-    /// Writes no reading.
+    /// A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>,
+    /// `retire` appends its log into the store and removes it. Writes no
+    /// reading.
     ///
-    /// `add` lays the worktree down ready to be worked in, the branch off
-    /// its track with the ticket it is for recorded on it, `xtask` built
-    /// there, the local file laid and rendered under the clone's grant,
-    /// which covers the worktree and asks for none of its own (#74, §11);
-    /// refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's
-    /// store, removes the worktree and prints the branch-delete line as a
-    /// person's; refuses uncommitted work.
+    /// `add` lays the worktree down ready to be worked in, the branch cut
+    /// from `main` with the ticket it is for recorded on it, `xtask` built
+    /// there, the local file laid and rendered under the grant over the
+    /// worktrees' directory (#74, §11); refuses a branch that exists and
+    /// a directory that does. `retire` appends the worktree's log into the
+    /// main checkout's store, removes the worktree and prints the
+    /// branch-delete line as a person's; refuses uncommitted work.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
@@ -501,16 +498,15 @@ pub(crate) struct Identity {
 /// What is done to a track rather than asked of it.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
-    /// The ticket the track works next: the oldest open `ready-for-agent`
-    /// ticket that no open ticket blocks, that carries no `track:<name>`
-    /// label naming another track, and that no branch of this clone
-    /// records; "none" when the frontier is empty. Reads the tracker
+    /// The ticket the track works next: the widest open `ready-for-agent`
+    /// ticket by the census that no open ticket blocks, that carries no
+    /// `track:<name>` label naming another track, and that no branch of
+    /// the repository records; "none" when the frontier is empty. Reads the tracker
     /// through the ticket module and writes no reading.
     Next {
-        /// The track, by name; default the branch's, `main` for a branch
-        /// on none and for a detached `HEAD`, which a track's own clone is.
-        #[arg(long, value_name = "NAME")]
-        track: Option<String>,
+        /// The track, by its `track:` label.
+        #[arg(long, value_name = "NAME", default_value = crate::track::MAIN)]
+        track: String,
         /// Print the answer as one JSON object.
         #[arg(long)]
         json: bool,
@@ -525,14 +521,13 @@ pub(crate) enum TrackCommand {
     /// unblocks, a ticket with two blockers is written out under the
     /// first and named under the others, and the tickets with no edge
     /// follow on their own. Each line carries the ticket's standing as
-    /// `next` judges it: `ready` or `a person's`, the branch of this
-    /// clone recording it, the open tickets it waits on. Reads the
+    /// `next` judges it: `ready` or `a person's`, the branch recording
+    /// it, the open tickets it waits on. Reads the
     /// tracker through the ticket module and writes no reading.
     Chains {
-        /// The track, by name; default the branch's, `main` for a branch
-        /// on none and for a detached `HEAD`.
-        #[arg(long, value_name = "NAME")]
-        track: Option<String>,
+        /// The track, by its `track:` label.
+        #[arg(long, value_name = "NAME", default_value = crate::track::MAIN)]
+        track: String,
         /// Keep the tickets whose title names this crate before its colon
         /// (`php_engine, ext/standard: ...`); `none` keeps the ones naming
         /// no crate, the manifest rows, design revisions and decisions.
@@ -543,23 +538,14 @@ pub(crate) enum TrackCommand {
         #[arg(long)]
         json: bool,
     },
-    /// The track caught up with main: from inside the track's clone,
-    /// `origin/main` merged into the track's branch, the branch pushed
-    /// to origin, the clone re-detached at the new tip and `xtask` built
-    /// there, so the track never runs a harness older than main's; one
-    /// line says what moved. A merge that conflicts refuses, names the
-    /// conflict, and changes neither the branch nor the clone. Writes
-    /// no reading.
-    Sync,
     /// The frontier until it empties, without a person, from main's
     /// checkout: for each ticket `next` names on `--track`, its worktree
     /// laid down on `t<n>` off `main`, a headless session in it on
     /// `--model`, and when the session ends with the ticket closed, the
-    /// branch it was taken off fast-forwarded to the worktree's tip,
-    /// pushed to origin and the worktree retired. A session that ends
-    /// with the ticket open, or closed with the branch not ahead, leaves
-    /// the worktree standing for a person and the run goes on; a failure
-    /// of the harness itself stops it, named. With `--fill`, "none" from
+    /// worktree retired and the branch left for /specs to merge; `main`
+    /// is never moved or pushed. A session that ends with the ticket
+    /// open leaves the worktree standing for a person and the run goes
+    /// on; a failure of the harness itself stops it, named. With `--fill`, "none" from
     /// `next` starts a `/frontier` session in the checkout and the run
     /// goes on with what it filed; a frontier still empty after it ends
     /// the run listing the track's open `for-a-person` tickets.
@@ -578,13 +564,13 @@ pub(crate) enum TrackCommand {
     },
 }
 
-/// The two halves of a track's worktree.
+/// The two halves of a ticket's worktree.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in, with
     /// the ticket its work is for recorded on the branch.
     Add {
-        /// The branch, not yet made; it names its own track.
+        /// The branch, not yet made; it is cut from `main`.
         branch: String,
         /// The issue the branch's work is for, recorded on the branch and
         /// read by `xtask track`; one branch per ticket. Without it the
@@ -592,10 +578,10 @@ pub(crate) enum WorktreeCommand {
         #[arg(long, value_name = "N")]
         ticket: Option<u64>,
     },
-    /// Append the worktree's log into its track's store, then remove the
-    /// worktree; the branch is kept.
+    /// Append the worktree's log into the main checkout's store, then
+    /// remove the worktree; the branch is kept.
     Retire {
-        /// The branch a worktree is on; it names its own track.
+        /// The branch a worktree is on.
         branch: String,
     },
 }

@@ -155,8 +155,8 @@ Commands:
   status             Render one section from the manifest and the store, or with `--session` the map and the local facts; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
-  track              Say which track the branch is on, the commit it was taken off, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
-  worktree           A track's worktrees: `add` lays one down beside the checkout, at <checkout>-worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
+  track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
+  worktree           A ticket's worktree: `add` lays one down at <checkout>-worktrees/<branch>, `retire` appends its log into the store and removes it. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -181,7 +181,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=7100f84d12faccdaece5c6921ac1d8edc6ae013b9cd1076ab2213fa00359fa84 out=74f4ee2a0d19b431a8d17dc2085376d1bda46060e875009bb11db0625254a992 -->
+<!-- /computed in=a9f824d433046772efd259f73f9eb8dae43fce878779fa2ea034e35c3eaa3d3c out=f34f24ee2b3f0b818f066f99b6054d4e4de0e14bc81f0adfde0c9fd3b0a73265 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

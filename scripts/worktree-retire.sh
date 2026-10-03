@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # worktree-retire.sh — `xtask worktree retire <branch>` by the name
 # harness-design.md §5 gives the other half: the worktree's log appended
-# into its track's store, the worktree removed, the branch kept and its
+# into the main checkout's store, the worktree removed, the branch kept and its
 # delete line printed as a person's. The clone's built harness where one
 # is, release before debug as the command hook tries them, `cargo xtask`
 # otherwise.

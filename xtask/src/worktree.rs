@@ -1,9 +1,9 @@
-//! A track's worktrees (harness-design.md §4.2, §5, §11): where one lives,
-//! `xtask worktree add`, which lays one down ready to be worked in, and
-//! `xtask worktree retire`, which keeps its evidence and removes it. A
-//! track runs an agent per worktree on a branch off its track branch, and
-//! four facts about a fresh worktree are why the add is an instrument and
-//! not a bare `git worktree add`:
+//! A ticket's worktree (harness-design.md §4.2, §5, §11): where one
+//! lives, `xtask worktree add`, which lays one down ready to be worked in,
+//! and `xtask worktree retire`, which keeps its evidence and removes it.
+//! Every ticket is worked by an agent in a worktree on its own branch cut
+//! from `main` (ADR-0009), and four facts about a fresh worktree are why
+//! the add is an instrument and not a bare `git worktree add`:
 //!
 //! * `computed` trust is a person's grant (§11), and a grant covers every
 //!   repository under the granted path (#74, revision 18). The worktrees
@@ -27,7 +27,7 @@
 //!   clone-on-write copy where the volume supports one, so the registry
 //!   dependencies are blocks the two directories share and cargo compiles
 //!   the workspace's own crates alone, since a fresh checkout's files are
-//!   newer than the seeded fingerprints (§5, "A track's worktrees"; #245).
+//!   newer than the seeded fingerprints (§5, "Worktrees"; #245).
 //!   What it must not do is give two worktrees one `CARGO_TARGET_DIR`:
 //!   cargo keys a workspace member's artifact by its path under the
 //!   workspace root and judges the slot fresh by mtime, so a checkout
@@ -37,12 +37,11 @@
 //!   variable is set and no `.cargo/config.toml` is written; the seeding
 //!   is best-effort and a `cp -c` that cannot is one line and a cold start.
 //!
-//! The branch names its own track ([`Track::of`]): the longest existing
-//! branch that is a proper path prefix of it, `main` for a branch on none,
-//! which is the track `xtask done` will judge the worktree against (§4.5).
-//! A branch that exists, on the clone or on `origin`, a directory that
-//! exists, and a ticket another branch already records, refuse before
-//! anything is laid down, as `new-ext` does. Nothing is measured here and
+//! The branch is cut from `main`'s tip ([`Track::of`]'s base for a branch
+//! not yet made), which is what `xtask done` will judge the worktree
+//! against (§4.5). A branch that exists, on the clone or on `origin`, a
+//! directory that exists, and a ticket another branch already records,
+//! refuse before anything is laid down, as `new-ext` does. Nothing is measured here and
 //! no reading is written: the readings are the worktree's own, once an
 //! agent is in it.
 //!
@@ -54,17 +53,17 @@
 //! branch per ticket: a second add on a ticket a branch records is
 //! refused, naming that branch, so no ticket is closed twice.
 //!
-//! The retire is where a track keeps that evidence. A worktree's readings
-//! live in its own `target/harness/` and removing the worktree removes
-//! them, so the worktree's `log.jsonl` is appended into the track's store
-//! first, the root [`Track::of`] names for the branch, and only then is
-//! the worktree removed, which keeps a merged agent's denials in the
+//! The retire is where that evidence is kept. A worktree's readings live
+//! in its own `target/harness/` and removing the worktree removes them,
+//! so the worktree's `log.jsonl` is appended into the one store first,
+//! the main checkout's, which [`Track::of`] names, and only then is the
+//! worktree removed, which keeps a merged agent's denials in the
 //! `permits` section the console reads (§4.2). The log alone, through the
 //! store's own append, one line per write, so a retire during a run tears
 //! no line of either log (#56). The per-key files beside it stay with the
-//! worktree, each being a scope's latest run over a tree the track does
-//! not have, and copying one in would hand `done` a reading that is
-//! fresh for nothing (§5, "A track's worktrees"; #35). What the log
+//! worktree, each being a scope's latest run over a tree the main
+//! checkout does not have, and copying one in would hand `done` a reading
+//! that is fresh for nothing (§5, "Worktrees"; #35). What the log
 //! carries is found at the branch's merge by the tree each reading was
 //! taken over, so a pass over what the merge stages is not run again
 //! there (`Store::latest_over`, #1252). The worktree's kept phpt runs
@@ -87,7 +86,7 @@ use crate::computed;
 use crate::git::{git, has_ref};
 use crate::phpt::against;
 use crate::reading::{self, Store};
-use crate::track::{self, Ticket, Track};
+use crate::track::{self, MAIN, Ticket, Track, short};
 
 /// Where the worktrees of the repository whose main checkout is
 /// `checkout` are laid down, one directory per branch: beside the
@@ -151,7 +150,7 @@ impl std::error::Error for NotReady {}
 /// down with a fact missing.
 pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
     let track = Track::of(root, Some(branch))
-        .with_context(|| format!("which track {branch} is on could not be said"))?;
+        .with_context(|| format!("where {branch} is taken off could not be said"))?;
     let homes = homes(&track.store)?;
     let dir = homes.join(branch);
     if has_ref(root, &format!("refs/heads/{branch}")) {
@@ -194,12 +193,7 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     .context("git worktree add refused; nothing was laid down")?;
     say(
         ADD,
-        &format!(
-            "{branch} off the track {} at {} ({})",
-            track.name,
-            track.at,
-            &track.base[..track.base.len().min(7)]
-        ),
+        &format!("{branch} off {MAIN} at {}", short(&track.base)),
     );
     say(ADD, &format!("worktree {}", dir.display()));
     match ticket {
@@ -218,10 +212,10 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
 
     seed(&dir, root);
     let mut ready = true;
-    ready &= build(ADD, &dir);
+    ready &= build(&dir);
     ready &= lay_local(&dir);
     trust(&dir, &homes);
-    carried_over(ADD, &dir);
+    carried_over(&dir);
     if ready {
         say(ADD, &format!("ready: cd {}", dir.display()));
         Ok(dir)
@@ -234,17 +228,17 @@ pub(crate) fn say(whose: &str, line: &str) {
     println!("{whose}: {line}");
 }
 
-pub(crate) fn complain(whose: &str, line: &str) {
+fn complain(whose: &str, line: &str) {
     eprintln!("{whose}: {line}");
 }
 
-/// Retire the worktree on `branch`: its log appended into the track's
-/// store and emptied, the worktree removed, the branch kept. A branch no
-/// worktree is on, the main worktree and uncommitted work are refusals;
-/// the last one after the append, which the lines say.
+/// Retire the worktree on `branch`: its log appended into the main
+/// checkout's store and emptied, the worktree removed, the branch kept.
+/// A branch no worktree is on, the main worktree and uncommitted work are
+/// refusals; the last one after the append, which the lines say.
 pub fn retire(root: &Path, branch: &str) -> Result<()> {
     let track = Track::of(root, Some(branch))
-        .with_context(|| format!("which track {branch} is on could not be said"))?;
+        .with_context(|| format!("where {branch} was taken off could not be said"))?;
     let store = &track.store;
     let dir = track::worktrees(store)?
         .into_iter()
@@ -252,7 +246,7 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
         .with_context(|| format!("no worktree is on {branch}"))?;
     if dir == *store {
         bail!(
-            "{} is the main worktree, which is the track's own root; it is not retired",
+            "{} is the main worktree, which holds the one store; it is not retired",
             dir.display()
         );
     }
@@ -347,7 +341,7 @@ fn carry_runs(dir: &Path) -> Result<()> {
 /// The worktree's `target/debug` seeded from the clone's at `root` with
 /// `cp -c -R`, a clone-on-write copy where the volume supports one, so the
 /// build that follows compiles the workspace's own crates and no
-/// dependency (harness-design.md §5, "A track's worktrees"; #245). The
+/// dependency (harness-design.md §5, "Worktrees"; #245). The
 /// copy is `target/debug` and nothing beside it: the worktree's
 /// `target/harness/` is its own from its first instrument. Best-effort: a
 /// clone with no `target/debug`, and a `cp -c` that fails, are one line
@@ -403,9 +397,8 @@ fn seed(dir: &Path, root: &Path) {
 /// `xtask` built here, so the first `Edit` is judged rather than waiting
 /// on a build; whether it was, with what the build compiled on the line:
 /// the workspace's own crates, which a seeded worktree compiles, and the
-/// dependencies, which it does not. `whose` prefixes the lines, since
-/// `track sync` builds through this too.
-pub(crate) fn build(whose: &str, dir: &Path) -> bool {
+/// dependencies, which it does not.
+fn build(dir: &Path) -> bool {
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])
         .current_dir(dir)
@@ -420,7 +413,7 @@ pub(crate) fn build(whose: &str, dir: &Path) -> bool {
                 format!("{own} crates of the workspace and {deps} dependencies")
             };
             say(
-                whose,
+                ADD,
                 &format!(
                     "built target/debug/xtask, compiling {what}: the first Edit in it is judged by this build, not by a cold cargo run"
                 ),
@@ -430,14 +423,14 @@ pub(crate) fn build(whose: &str, dir: &Path) -> bool {
         Ok(out) => {
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             complain(
-                whose,
+                ADD,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied",
             );
             false
         }
         Err(err) => {
             complain(
-                whose,
+                ADD,
                 &format!("cargo did not run ({err}); an Edit there is judged by nothing"),
             );
             false
@@ -536,41 +529,40 @@ fn trust(dir: &Path, homes: &Path) {
     }
 }
 
-/// What the clone already has, said rather than set again; `whose`
-/// prefixes the lines.
-pub(crate) fn carried_over(whose: &str, dir: &Path) {
+/// What the clone already has, said rather than set again.
+fn carried_over(dir: &Path) {
     match git(dir, &["config", "core.hooksPath"], None) {
         Ok(hooks) if !hooks.trim().is_empty() => say(
-            whose,
+            ADD,
             &format!(
                 "carried over: core.hooksPath={}, which is repository config",
                 hooks.trim()
             ),
         ),
         _ => say(
-            whose,
+            ADD,
             "core.hooksPath is unset, so pre-commit and pre-push are not wired; the session hook points it at scripts/hooks",
         ),
     }
     if dir.join(".claude/settings.json").is_file() {
         say(
-            whose,
+            ADD,
             "carried over: .claude/settings.json, which is tracked, so the plugin settings are the clone's",
         );
     } else {
         say(
-            whose,
+            ADD,
             ".claude/settings.json is missing, so this worktree loads no harness plugin",
         );
     }
     if dir.join("oracle.toml").is_file() {
         say(
-            whose,
+            ADD,
             "carried over: oracle.toml, which is tracked, and the php-src tree it pins, which is outside the clone; `xtask phpt` says if that tree is gone",
         );
     } else {
         say(
-            whose,
+            ADD,
             "oracle.toml is missing, so this worktree has no oracle and no pinned php-src",
         );
     }

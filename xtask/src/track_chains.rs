@@ -25,7 +25,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::ticket::{Gh, Open, State};
-use crate::track::{self, Ticket, Track};
+use crate::track::{self, Ticket};
 use crate::track_next::{PERSON, READY, is_tracks};
 
 /// The `--crate` value that keeps the tickets naming no crate.
@@ -263,15 +263,11 @@ fn is_crate(word: &str) -> bool {
         })
 }
 
-/// `xtask track chains`: the track named, or the branch's, and its chains
-/// printed as text or as one JSON object; no reading.
-pub fn command(root: &Path, track: Option<&str>, krate: Option<&str>, json: bool) -> Result<()> {
-    let name = match track {
-        Some(name) => name.to_owned(),
-        None => Track::of(root, None)?.name,
-    };
+/// `xtask track chains`: the track named and its chains printed as text
+/// or as one JSON object; no reading.
+pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
     let open = Gh::on_path().open(root)?;
-    let chains = Chains::of(open, &name, krate, |number| {
+    let chains = Chains::of(open, track, krate, |number| {
         track::branch_of_ticket(root, Ticket::new(number))
     });
     if json {
@@ -334,12 +330,12 @@ mod tests {
             ticket(5, "ext/json: e", &["ready-for-agent"], &[]),
             ticket(7, "php_heap: f", &["ready-for-agent", "track:other"], &[]),
         ];
-        let chains = Chains::of(open, "t-x", None, |number| {
-            (number == 5).then(|| "t-x/t5".to_owned())
+        let chains = Chains::of(open, "main", None, |number| {
+            (number == 5).then(|| "t5".to_owned())
         });
         assert_eq!(
             chains.render(),
-            "t-x: 5 open, 2 no open ticket blocks, 3 waiting on an open ticket, 1 a person's\n\
+            "main: 5 open, 2 no open ticket blocks, 3 waiting on an open ticket, 1 a person's\n\
              \n\
              #1 php_engine: a [ready]\n\
              \x20 #2 php_compile: b [ready, waits on #1]\n\
@@ -348,7 +344,7 @@ mod tests {
              \n\
              2 on their own: no open ticket shown blocks them and they block nothing shown\n\
              #4 xtask: d [no label, waits on #7]\n\
-             #5 ext/json: e [ready, on t-x/t5]\n"
+             #5 ext/json: e [ready, on t5]\n"
         );
     }
 

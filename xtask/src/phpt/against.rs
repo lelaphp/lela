@@ -109,7 +109,7 @@ pub(crate) struct Diff {
 pub(crate) struct Runs {
     root: PathBuf,
     /// The workspaces a target is looked for in: this one, then the main
-    /// worktree, whose store is the track's.
+    /// worktree, whose store is the one store.
     roots: Vec<PathBuf>,
     tree: String,
     commit: String,
@@ -276,7 +276,7 @@ impl Base {
 }
 
 /// The workspaces a kept run or target is looked for in: `root`, then the
-/// main worktree, whose store is the track's (harness-design.md §4.2).
+/// main worktree, whose store is the one store (harness-design.md §4.2).
 fn roots(root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![root.to_path_buf()];
     roots.extend(crate::track::main_worktree(root).ok());

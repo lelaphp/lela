@@ -292,10 +292,6 @@ ticket::parent
 ticket::parent_scope
 ticket::run
 ticket::ticket_of
-track::Found
-track::Model
-track::Model::new
-track::Model::subagent
 track::Ticket
 track::Ticket::new
 track::Ticket::number
@@ -314,11 +310,6 @@ track_next::Next::to_json
 track_next::command
 track_next::for_a_person
 track_next::next
-track_sync::How
-track_sync::Synced
-track_sync::Synced::render
-track_sync::command
-track_sync::sync
 track_work::Landed
 track_work::Run
 track_work::Session

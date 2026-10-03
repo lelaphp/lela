@@ -18,28 +18,32 @@
 //! something outside the ticket blocks that close, files the blocker as
 //! a ticket and names it in its reply, so the contract travels with the
 //! job rather than resting on a skill file elsewhere in the filesystem.
-//! The hooks that already exist
-//! police the session: `permit` judges each call and the Stop hook holds
-//! the turn until `done` is green and the ticket's boxes are ticked, so
-//! nothing here judges the work. When the session ends with the ticket
-//! closed at the tracker, the branch `t<n>` was taken off is
-//! fast-forwarded to the worktree's tip, pushed to `origin`, and the
-//! worktree retired, which appends its readings into the checkout's
-//! store. When the session ends
-//! with the ticket open, the worktree is left standing for a person, the
-//! ticket's record kept with its branch, nothing retired, and the line
-//! says so; the console shows the worktree.
+//! The hooks that already exist police the session: `permit` judges each
+//! call and the Stop hook holds the turn until `done` is green and the
+//! ticket's boxes are ticked, so nothing here judges the work. When the session ends with the ticket
+//! closed at the tracker, the worktree is retired, which appends its
+//! readings into the checkout's store, and the branch `t<n>` is left
+//! with its record for the /specs coordinator to merge through its merge
+//! check (#1749, ADR-0009): the loop never moves `main` and pushes
+//! nothing. The close is the one signal, so a ticket closed with nothing
+//! committed, as a withdrawn one is, is retired the same way. When the
+//! session ends with the ticket open, the worktree is left standing for a
+//! person, the ticket's record kept with its branch, nothing retired, and
+//! the line says so; the console shows the worktree. A worktree left
+//! standing is not the loop's again, whatever becomes of its ticket: a
+//! run lays down, and retires, only the worktree its own session ran in,
+//! and a standing one is retired by /specs or a person with `xtask
+//! worktree retire` once its branch is merged or waits to be (#1755).
 //!
 //! Without `--one` the step repeats while `track next` names a ticket
-//! (#78): a ticket the session left open, or closed with the branch not
-//! ahead of `main`, is the session's failure and does not stop the
-//! run, since its branch records it and the frontier names it no more,
-//! and the run ends at "none" with one line per ticket and, once any was
-//! worked, a closing line naming each with its outcome. A failure of the
-//! harness itself stops the run and is named: a
-//! tracker that does not answer, a build that does not stand, a session
-//! program that does not start, a push refused, a retire that will not;
-//! what was worked before it is named the same way in the error. `--one` runs the step once and
+//! (#78): a ticket the session left open is the session's failure and
+//! does not stop the run, since its branch records it and the frontier
+//! names it no more, and the run ends at "none" with one line per ticket
+//! and, once any was worked, a closing line naming each with its outcome.
+//! A failure of the harness itself stops the run and is named: a tracker
+//! that does not answer, a build that does not stand, a session program
+//! that does not start, a retire that will not; what was worked before it
+//! is named the same way in the error. `--one` runs the step once and
 //! exits 1 when the ticket is left to a person.
 //!
 //! With `--fill` the run fills its own frontier (#85): when `next`
@@ -59,13 +63,8 @@
 //! session's, handed to the child through the setting Claude Code reads
 //! for it, the environment variable [`SUBAGENT_VARIABLE`], and the
 //! permission mode and the effort, whose defaults are [`PERMISSION_MODE`]
-//! and [`EFFORT`]. A repository with no `origin` refuses before any
-//! worktree is laid down, since a closed ticket's branch is pushed to it.
-//!
-//! The branch moves only by fast-forward: a tip that is not ahead of it,
-//! its own commit included, refuses, with the worktree standing. No
-//! trust line is waited on: `computed` covers a worktree by the grant
-//! over the worktrees' directory (#74).
+//! and [`EFFORT`]. No trust line is waited on: `computed` covers a
+//! worktree by the grant over the worktrees' directory (#74).
 //!
 //! What a run leaves behind is not stdout alone (#117). Every step is
 //! held by [`hold`]: its verdict, [`Landed`], joins the run's [`Tally`]
@@ -92,11 +91,10 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use crate::git::git;
 use crate::reading::{Reading, Status, Store};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, STAMPED_OVER, State};
-use crate::track::{Ticket, Track, fast_forward, not_ahead, rev, short};
+use crate::track::{Ticket, rev, short};
 use crate::track_next::{self, Next};
 use crate::usage::{Spent, Total};
 use crate::worktree::{self, say};
@@ -302,18 +300,16 @@ pub enum Worked {
     /// nothing was laid down, and `waits_on` is the track's open
     /// `for-a-person` tickets.
     StillEmpty { track: String, waits_on: Vec<Next> },
-    /// The ticket closed: `onto`, the branch `branch` was taken off, is
-    /// at `commit`, pushed, and the worktree on `branch` retired.
+    /// The ticket closed: the worktree on `branch` retired, and `branch`,
+    /// at `commit`, left for /specs to merge (#1749).
     Closed {
         ticket: Ticket,
         branch: String,
         commit: String,
-        onto: String,
     },
-    /// The session ended and the ticket is the session's to finish, `why`:
-    /// open, or closed with the branch not ahead of `main`. The
-    /// worktree at `dir` stands for a person with the branch at `commit`,
-    /// nothing retired.
+    /// The session ended with the ticket open, `why`: the ticket is the
+    /// session's to finish. The worktree at `dir` stands for a person with
+    /// the branch at `commit`, nothing retired.
     Standing {
         ticket: Ticket,
         commit: String,
@@ -362,9 +358,8 @@ impl Worked {
                 ticket,
                 branch,
                 commit,
-                onto,
             } => format!(
-                "{ticket} closed at {}; {onto} fast-forwarded to it and pushed to origin, {branch} retired",
+                "{ticket} closed at {}; {branch} is left for /specs to merge, its worktree retired",
                 short(commit)
             ),
             Worked::Standing {
@@ -417,7 +412,8 @@ struct Step {
 /// status from (#117).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Landed {
-    /// The ticket closed and its branch merged back.
+    /// The ticket closed, its worktree retired and its branch left for
+    /// /specs.
     Closed,
     /// The worktree stands for a person, and the ticket is the session's
     /// to have finished.
@@ -551,13 +547,11 @@ fn record_run(
 }
 
 /// One ticket, start to retire: the track's next ticket, its worktree on
-/// `t<n>` off `main`, the session, and on a close the fast-forward, the
-/// push and the retire. A session that ends with the ticket open, or
-/// closed with the branch not ahead of `main`, is an outcome naming the
-/// worktree that stands; a failure of the harness is the error.
+/// `t<n>` off `main`, the session, and on a close the retire, the branch
+/// left for /specs. A session that ends with the ticket open is an
+/// outcome naming the worktree that stands; a failure of the harness is
+/// the error.
 pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
-    git(root, &["remote", "get-url", "origin"], None)
-        .context("the repository has no origin, and a closed ticket's branch is pushed to it; nothing is laid down")?;
     let track = run.track.clone();
     let next = match track_next::next(root, gh, &track)? {
         Some(next) => next,
@@ -592,61 +586,18 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
             why: format!("is open after the session ({status})"),
         });
     }
-    // What the branch was taken off, `main`, read again: a run's earlier
-    // close moved it.
-    let onto = Track::of(root, Some(&branch))?;
-    match merge_back(root, &onto, ticket, &branch, &tip, &dir)? {
-        Some(why) => Ok(Worked::Standing {
-            ticket,
-            commit: tip,
-            dir,
-            why: format!(
-                "closed, but the branch is not ahead of {}: {why}",
-                onto.name
-            ),
-        }),
-        None => Ok(Worked::Closed {
-            ticket,
-            branch,
-            commit: tip,
-            onto: onto.name,
-        }),
-    }
-}
-
-/// The branch of a closed ticket merged back into the branch it was
-/// taken off: the fast-forward, the push to `origin` and the retire, in
-/// that order, or why `tip` is not ahead of it, which merges nothing back
-/// and leaves the worktree at `dir` standing; a fast-forward or a retire
-/// that refuses is a failure of the harness, named against the worktree.
-fn merge_back(
-    root: &Path,
-    onto: &Track,
-    ticket: Ticket,
-    branch: &str,
-    tip: &str,
-    dir: &Path,
-) -> Result<Option<String>> {
-    if let Some(why) = not_ahead(root, onto, tip)? {
-        return Ok(Some(why));
-    }
-    fast_forward(WORK, root, onto, tip).with_context(|| {
+    worktree::retire(root, &branch).with_context(|| {
         format!(
-            "{ticket} closed, but {} did not move to {}; the worktree stands at {}, nothing retired",
-            onto.name,
-            short(tip),
+            "{ticket} closed at {}, but its worktree stands at {}; retire it by hand once it is clean",
+            short(&tip),
             dir.display()
         )
     })?;
-    worktree::retire(root, branch).with_context(|| {
-        format!(
-            "{ticket} closed and {} pushed at {}, but the worktree stands at {}; retire it by hand once it is clean",
-            onto.name,
-            short(tip),
-            dir.display()
-        )
-    })?;
-    Ok(None)
+    Ok(Worked::Closed {
+        ticket,
+        branch,
+        commit: tip,
+    })
 }
 
 /// The frontier of `track` filled by a `/frontier` session in the

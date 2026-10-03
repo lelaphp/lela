@@ -65,7 +65,6 @@ pub mod ticket;
 pub mod track;
 pub mod track_chains;
 pub mod track_next;
-pub mod track_sync;
 pub mod track_work;
 pub mod unsafe_audit;
 pub mod usage;
@@ -317,7 +316,6 @@ fn ticket_command(
         act,
         ticket,
         session_id.as_deref(),
-        &track::Track::of(root, None)?.name,
     )?;
     record(store, std::slice::from_ref(&reading))
 }
@@ -450,7 +448,7 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 
 /// The commands that measure nothing and read no manifest, answered
 /// before `Manifest::load`: the track, so a worktree whose manifest is
-/// unreadable can still say which track it is on; the two halves of a
+/// unreadable can still say its branch, base and ticket; the two halves of a
 /// worktree, whose manifest is the worktree's, once built there, and is
 /// gone once it is retired; and the regions, which pre-commit renders
 /// whatever the manifest says.
@@ -459,20 +457,11 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Track {
             command: Some(TrackCommand::Next { track, json, why }),
             ..
-        } => Some(track_next::command(root, track.as_deref(), *json, *why)),
+        } => Some(track_next::command(root, track, *json, *why)),
         Command::Track {
             command: Some(TrackCommand::Chains { track, krate, json }),
             ..
-        } => Some(track_chains::command(
-            root,
-            track.as_deref(),
-            krate.as_deref(),
-            *json,
-        )),
-        Command::Track {
-            command: Some(TrackCommand::Sync),
-            ..
-        } => Some(track_sync::command(root)),
+        } => Some(track_chains::command(root, track, krate.as_deref(), *json)),
         Command::Track {
             command: Some(TrackCommand::Work { one, run }),
             ..

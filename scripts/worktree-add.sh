@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # worktree-add.sh — `xtask worktree add <branch>` by the name harness-design.md
-# §5 gives the bootstrap: the branch off its track, `xtask` built in the
+# §5 gives the bootstrap: the branch cut from `main`, `xtask` built in the
 # worktree, the local file laid and rendered, the `computed trust` line
 # printed as a person's, and what the clone carries reported. The clone's
 # built harness where one is, release before debug as the command hook

@@ -501,7 +501,7 @@ impl Store {
     /// or not at all (#56): `line`, rendered whole with its newline, is
     /// handed to the file in one `write` on a descriptor opened with
     /// `O_APPEND`, so two instruments appending at once, which pre-commit
-    /// and a track's worktrees do, cannot interleave inside a line. POSIX
+    /// and the worktrees do, cannot interleave inside a line. POSIX
     /// promises a whole write only under `PIPE_BUF` (4096 bytes on Linux,
     /// 512 on macOS), and the platforms the harness runs on land a single
     /// `O_APPEND` write to a regular file whole in practice; a reading
@@ -861,11 +861,11 @@ impl Log {
     }
 }
 
-/// The commits a track stands on: the first-parent chain of `HEAD`, each
-/// with its distance from the tip. A branch merged into the track sits on
+/// The commits a checkout stands on: the first-parent chain of `HEAD`,
+/// each with its distance from the tip. A branch merged into it sits on
 /// a second parent and a branch cut behind the tip is off it past the cut,
 /// so the readings their worktrees took, which `worktree retire` appends
-/// into the track's store, are not taken on it (#787).
+/// into the main checkout's store, are not taken on it (#787).
 #[derive(Debug, Clone, Default)]
 pub struct Chain {
     distance: BTreeMap<String, usize>,
@@ -892,7 +892,7 @@ impl Chain {
         (!commit.is_empty() && id.starts_with(commit)).then_some(*n)
     }
 
-    /// The reading of each scope of `instrument` that stands for the track,
+    /// The reading of each scope of `instrument` that stands for the tip,
     /// in scope order: the one taken at the tip or at its nearest ancestor
     /// on the chain, the last written of those taken at one commit. One
     /// taken off the chain stands for nothing, and one taken at no commit,
