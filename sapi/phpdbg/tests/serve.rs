@@ -1127,3 +1127,45 @@ fn run_with_a_stdin_file_in_the_init_file_runs_inline() {
         format!("{ran}{ask}{ran}[Script ended normally]\n{ran}[Script ended normally]\n");
     assert!(served.out.starts_with(&expected), "{}", served.out);
 }
+
+/// A yes to a `run` the init file reads after its run has php count a
+/// startup run and read on, so the startup run asks again after the
+/// file, where the last cycle kept no line to resubmit; where it kept
+/// one, the startup run resubmits it and asks nothing (the first two
+/// cycles of the pinned phpdbg's bytes for `phpdbg -qb -n` and `-qrb -n`).
+#[test]
+fn a_yes_to_a_second_run_in_the_init_file_reads_on() {
+    let program = "<?php\necho \"prog \", $argv[1] ?? \"none\", \"\\n\";\n";
+    let looping = Setup {
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let init = Some("run x\nprint exec\nrun y\n");
+    let ask = "Do you really want to restart execution? (type y or n): ";
+    for flags in [["-qb", "-n"], ["-qrb", "-n"]] {
+        let served = under_phpdbg_with("init-run-twice", &flags, init, program, "y\nq\n", &looping);
+        let compiled = format!("[Successful compilation of {}]\n", served.file);
+        let ran = format!(
+            "{compiled}prog x\n{compiled}[Context {} (7 ops)]\n{ask}",
+            served.file
+        );
+        let expected = format!("{ran}{ask}Please enter either y (yes) or n (no): {ran}");
+        assert!(served.out.starts_with(&expected), "{}", served.out);
+    }
+    let served = under_phpdbg_with(
+        "init-run-kept",
+        &["-qb", "-n"],
+        init,
+        program,
+        "n\ny\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!(
+        "{compiled}prog x\n{compiled}[Context {} (7 ops)]\n{ask}",
+        served.file
+    );
+    let ended = "[Script ended normally]\n";
+    let expected = format!("{ran}{compiled}{ended}{ran}{ended}");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}

@@ -949,9 +949,15 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
         return Ret::Success;
     }
     let args = args.filter(|args| !args.is_empty()).map(<[u8]>::to_vec);
+    // A yes in the init files, after the run among them, has php count
+    // a startup run and clean the cycle, and the reading goes on.
     if in_execution(s, here) {
         if restart_permitted(s) {
-            s.stopped = Some(Stop::Restart(args));
+            if s.initializing {
+                s.startup_run = true;
+            } else {
+                s.stopped = Some(Stop::Restart(args));
+            }
         }
         return Ret::Success;
     }
