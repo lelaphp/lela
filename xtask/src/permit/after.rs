@@ -340,11 +340,12 @@ fn reached(root: &Path, call: &Call) -> Vec<PathBuf> {
 
 /// The rule's text and the blob of every tracked file it scopes and does
 /// not exempt in `checkout`; `None` where the manifest carries no such
-/// rule. A file
+/// rule. The exempt is read in the manifest's one path grammar,
+/// [`manifest::scope_matches`], as `permit` reads it at the call. A file
 /// whose blob the object database may not hold, one edited and not
 /// staged, is written into it, so the record can always put it back.
 fn guard(checkout: &Path) -> Result<Option<Guarded>> {
-    let Some(Row {
+    let Some(Reach {
         text,
         scope,
         exempt,
@@ -355,7 +356,6 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     let mut args = vec!["ls-files".to_owned(), "-s".to_owned(), "-z".to_owned()];
     args.push("--".to_owned());
     args.extend(scope.iter().map(|s| format!(":(glob){s}")));
-    args.extend(exempt.iter().map(|s| format!(":(exclude,glob){s}")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let listing = git::git(checkout, &args, None)?;
     let mut blobs = BTreeMap::new();
@@ -367,7 +367,11 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
         let [mode, staged, "0"] = head.split(' ').collect::<Vec<_>>()[..] else {
             continue;
         };
-        if mode == "160000" {
+        if mode == "160000"
+            || exempt
+                .iter()
+                .any(|pattern| manifest::scope_matches(pattern, Path::new(path)))
+        {
             continue;
         }
         let blob = on_disk(&checkout.join(path));
@@ -387,8 +391,9 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     }))
 }
 
-/// What the sensor reads of `harness.self`'s row.
-struct Row {
+/// What the sensor reads of `harness.self`'s row: the text a denial
+/// prints and the paths the rule reaches, its scope less its exempt.
+struct Reach {
     text: String,
     scope: Vec<String>,
     exempt: Vec<String>,
@@ -397,7 +402,7 @@ struct Row {
 /// `harness.self`'s text, scope and exempt in the manifest at `checkout`,
 /// read as plain TOML so a build older or newer than the manifest still
 /// finds them.
-fn rule_of(checkout: &Path) -> Result<Option<Row>> {
+fn rule_of(checkout: &Path) -> Result<Option<Reach>> {
     let path = checkout.join(manifest::FILE);
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(None);
@@ -433,7 +438,7 @@ fn rule_of(checkout: &Path) -> Result<Option<Row>> {
         .and_then(toml::Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    Ok((!scope.is_empty()).then_some(Row {
+    Ok((!scope.is_empty()).then_some(Reach {
         text,
         scope,
         exempt,
