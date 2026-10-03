@@ -151,6 +151,10 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
             if !dry_run {
                 fs::write(&path, &proposed)
                     .with_context(|| format!("writing {}", path.display()))?;
+                // The reading is stamped over what steer left, so the
+                // sensor beside `permit` can tell steer's write from one
+                // made beside it in the same call (#1516).
+                reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
             }
             reading.status = Status::Pass;
             reading.count("added", added.len() as u64)?;

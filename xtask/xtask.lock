@@ -188,6 +188,7 @@ permit::Judgement::hook_stdout
 permit::Judgement::notes
 permit::Kind
 permit::Kind::of
+permit::after
 permit::judge
 permit::judged_at_the_call
 permit::run

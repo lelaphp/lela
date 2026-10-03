@@ -122,17 +122,19 @@ fn command_line() -> Result<()> {
     if let Command::Permit {
         json,
         above_the_command_hook,
+        after,
         bench: false,
         diff: false,
         ..
     } = &cli.command
     {
-        let adapter = if *above_the_command_hook {
-            permit::Adapter::AboveTheCommandHook
-        } else {
-            permit::Adapter::CommandHook
+        return match (*after, *above_the_command_hook) {
+            (true, _) => permit::after(&root, json.as_deref()),
+            (false, true) => {
+                permit::run(&root, json.as_deref(), permit::Adapter::AboveTheCommandHook)
+            }
+            (false, false) => permit::run(&root, json.as_deref(), permit::Adapter::CommandHook),
         };
-        return permit::run(&root, json.as_deref(), adapter);
     }
     if let Some(answered) = before_the_manifest(&root, &cli.command) {
         return answered;

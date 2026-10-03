@@ -21,13 +21,16 @@
 //! quotes removed and heredoc bodies skipped, in [`argv`] (#1001); what a
 //! shell can hide beyond that is `done`'s to find at pre-push and in CI.
 //!
-//! The interface is three things: [`judge`], one call against the manifest;
-//! [`run`], the command each adapter is over; and [`judge_files`], the diff
-//! judge that `done` and pre-commit's `--diff` read one verdict from. Each
+//! The interface is four things: [`judge`], one call against the manifest;
+//! [`run`], the command each adapter is over; [`after`], the `PostToolUse`
+//! hook's call, which puts back a file of `harness.self`'s that a `Bash`
+//! call moved; and [`judge_files`], the diff judge that `done` and
+//! pre-commit's `--diff` read one verdict from. Each
 //! is one file under this one, with the call and its path resolution in
 //! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
 //! region-body rule in [`region`],
-//! the `unless` qualifier's sensor in [`unless`], the `exempt_label`
+//! the sensor over `harness.self`'s files around a `Bash` call in
+//! [`after`], the `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
@@ -36,6 +39,7 @@
 //! the fixture test and the `permits` section read them.
 
 mod adapters;
+mod after;
 mod argv;
 mod bench;
 mod call;
@@ -47,6 +51,7 @@ mod rules;
 mod unless;
 
 pub use adapters::{Adapter, run};
+pub use after::after;
 pub(crate) use argv::Element;
 pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
