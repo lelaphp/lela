@@ -4556,8 +4556,10 @@ mod tests {
     /// the `dlopen` parentheses the engine cannot make.
     #[test]
     fn a_startup_diagnostic_writes_its_bytes() {
-        let mut builder = Engine::builder();
-        builder.ini_entries = b"extension_dir=\"a/\xe4/w\"\nextension=x\n".to_vec();
+        let mut builder = Engine::cli_builder();
+        builder
+            .ini_entries
+            .extend_from_slice(b"extension_dir=\"a/\xe4/w\"\nextension=x\n");
         let out = builder
             .build()
             .serve_capture("", crate::test::Capture::default());
