@@ -25,6 +25,7 @@ use crate::api::abi::Extension;
 use crate::{exec, interrupt};
 
 pub use crate::api::request::Request;
+pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 pub use php_unit::Opcode;
 
@@ -98,6 +99,12 @@ pub enum Flow {
 pub trait Tier: 'static {
     /// Asked at the three sites and nowhere else.
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow;
+
+    /// Which of php's execution hooks the tier replaces, as phpdbg
+    /// replaces `zend_execute_ex`: every unit the engine compiles is
+    /// compiled under it, so its calls are the ones `zend_get_call_op`
+    /// picks for the same host (design §4.3, revision 58).
+    const HOOKED: Hooked = Hooked::NONE;
 
     /// The tier's engine state, request state and ini, under seam 3
     /// without being an extension; `None` declares nothing.

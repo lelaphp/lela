@@ -140,6 +140,9 @@ pub struct Options<'a> {
     /// the scanner made of the file as it opened it
     /// ([`multibyte::Multibyte`]); `None` where the entry is off.
     pub multibyte: Option<multibyte::Multibyte<'a>>,
+    /// Which of php's execution hooks the host replaced, [`Hooked`],
+    /// which `zend_get_call_op` reads; none for an engine with no tier.
+    pub hooked: Hooked,
 }
 
 impl Default for Options<'_> {
@@ -160,8 +163,36 @@ impl Default for Options<'_> {
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
             multibyte: None,
+            hooked: Hooked::NONE,
         }
     }
+}
+
+/// Which of php's two execution hooks the host replaced, as
+/// `zend_get_call_op` (`Z/Zend/zend_compile.c:3919-3949`) reads them
+/// while a call compiles: whether `zend_execute_ex` is no longer
+/// `execute_ex`, the hook phpdbg and xdebug replace, and whether
+/// `zend_execute_internal` is set. A call the hook would not see is
+/// never given the opcode that passes it by: under the first no user
+/// call is `DO_UCALL` and no call by name `DO_FCALL_BY_NAME`; under the
+/// second no native call is `DO_ICALL` or frameless, and no call by
+/// name `DO_FCALL_BY_NAME`. Every such call is `DO_FCALL`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Hooked {
+    /// `zend_execute_ex != execute_ex`: the hook every user op array
+    /// runs through.
+    pub user: bool,
+    /// `zend_execute_internal != NULL`: the hook every native call runs
+    /// through.
+    pub natives: bool,
+}
+
+impl Hooked {
+    /// php's own loop with neither hook replaced.
+    pub const NONE: Hooked = Hooked {
+        user: false,
+        natives: false,
+    };
 }
 
 /// The names of the classes a request has declared, as the compiler
@@ -2499,6 +2530,55 @@ mod tests {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// `zend_get_call_op` under each of php's hooks ([`Hooked`]): a
+    /// user call, a native one, a call by name and a frameless one, as
+    /// php compiles them with neither hook replaced, under phpdbg's
+    /// `zend_execute_ex`, and with `zend_execute_internal` set beside it.
+    #[test]
+    fn a_replaced_hook_makes_every_call_it_would_not_see_do_fcall() {
+        use Opcode::{DoFcall, DoFcallByName, DoIcall, DoUcall, FramelessIcall2};
+        let source = b"<?php function foo($b) {} foo(1); var_dump($a); bar(); substr($a, 1);";
+        let calls = |hooked: Hooked| {
+            let mut strings = php_heap::Strings::new();
+            let options = Options {
+                hooked,
+                ..bundled()
+            };
+            let parsed = php_syntax::parse(source, &php_syntax::Options::default());
+            compile(&parsed, &options, &mut strings)
+                .unwrap_or_default()
+                .main
+                .oplines
+                .iter()
+                .map(|op| op.opcode)
+                .filter(|op| {
+                    matches!(
+                        op,
+                        Opcode::DoUcall
+                            | Opcode::DoIcall
+                            | Opcode::DoFcall
+                            | Opcode::DoFcallByName
+                            | Opcode::FramelessIcall2
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            calls(Hooked::NONE),
+            [DoUcall, DoIcall, DoFcallByName, FramelessIcall2]
+        );
+        let phpdbg = Hooked {
+            user: true,
+            natives: false,
+        };
+        assert_eq!(calls(phpdbg), [DoFcall, DoIcall, DoFcall, FramelessIcall2]);
+        let both = Hooked {
+            user: true,
+            natives: true,
+        };
+        assert_eq!(calls(both), [DoFcall, DoFcall, DoFcall, DoFcall]);
     }
 
     /// The oracle's dump of the four file constructs (#396), each one

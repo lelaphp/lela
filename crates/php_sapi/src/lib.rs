@@ -46,8 +46,8 @@ pub use php_engine::{
 /// face is, so no host names `php_engine`.
 pub mod tier {
     pub use php_engine::tier::{
-        Argument, Aside, Called, Class, Code, Evaluated, Fatal, Flow, FrameRef, Identity, Key,
-        Named, Opcode, Pending, Position, Request, SafepointIdx, Serves, Shape, Shown, Site,
+        Argument, Aside, Called, Class, Code, Evaluated, Fatal, Flow, FrameRef, Hooked, Identity,
+        Key, Named, Opcode, Pending, Position, Request, SafepointIdx, Serves, Shape, Shown, Site,
         Stepped, Tier, TraceRow, Under, Variable, backtrace, below, call, caller, catches,
         class_named, entry, evaluate, evaluate_code, exit, exiting, frame_code, function_exists,
         function_named, included_files, last_error, literals, method_named, oplines, pending,
