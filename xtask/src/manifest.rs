@@ -681,7 +681,9 @@ impl Rule {
     /// Whether the rule's `exempt` covers `path`, under the grammar
     /// `covers` reads: a call at an exempt path is not judged by the rule.
     /// A rule without an exempt exempts nothing, and so does an exempt for
-    /// a call without a file, a `Bash` call: an exempt names files.
+    /// a call without a file, a `Bash` call: an exempt names files. The
+    /// sensor after a `Bash` call reads `harness.self`'s exempt over the
+    /// files the call wrote, in this grammar (`permit::after`, #626).
     pub fn exempts(&self, path: &Path) -> bool {
         any_matches(self.exempt.iter().map(String::as_str), path)
     }

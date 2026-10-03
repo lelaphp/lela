@@ -285,6 +285,39 @@ fn a_write_beside_steer_in_the_same_call_is_put_back() {
     assert_denied(&root, &out, "oracle.toml", "# beside");
 }
 
+/// `.claude/skills/**` is an ordinary file (#626): a program writing a
+/// skill and the settings beside it in one call leaves the skill as it
+/// wrote it, and the settings, which the rule still scopes, are put back.
+#[test]
+fn a_write_the_rule_exempts_stands_and_the_settings_beside_it_are_put_back() {
+    let root = scratch("exempt");
+    let manifest = xtask::manifest::Manifest::load(&root).unwrap();
+    let rule = manifest.rule("harness.self").unwrap();
+    assert!(
+        rule.exempts(Path::new(".claude/skills/build/SKILL.md")),
+        "the tracked row exempts the skills"
+    );
+    std::fs::create_dir_all(root.join(".claude/skills/build")).unwrap();
+    std::fs::write(root.join(".claude/skills/build/SKILL.md"), "# build\n").unwrap();
+    std::fs::write(root.join(".claude/settings.json"), "{}\n").unwrap();
+    git(&root, &["add", ".claude"]);
+    git(&root, &["commit", "-q", "-m", "the skill and the settings"]);
+    let settings = read(&root, ".claude/settings.json");
+    let (out, _) = through_the_hooks(
+        &root,
+        "toolu_exempt",
+        "python3 -c \"[open(p, 'a').write('# written\\n') for p in ('.claude/skills/build/SKILL.md', '.claude/settings.json')]\"",
+    );
+    assert_eq!(
+        read(&root, ".claude/skills/build/SKILL.md"),
+        "# build\n# written\n",
+        "the skill's write stands"
+    );
+    assert_eq!(read(&root, ".claude/settings.json"), settings, "put back");
+    assert_denied(&root, &out, ".claude/settings.json", "# written");
+    assert!(!out.contains("SKILL.md"), "the skill is not named: {out}");
+}
+
 /// A call `permit` took nothing before is never put back blindly.
 #[test]
 fn a_call_with_no_record_is_left_as_it_stands() {

@@ -448,6 +448,41 @@ fn the_harness_files_are_denied_by_their_absolute_path() {
     }
 }
 
+/// `harness.self`'s scope narrows to leave `.claude/skills/**` an ordinary
+/// file (#626), and what it leaves a person's is still denied: every
+/// `deny*.json` under its fixtures is denied by the rule, the `Edit` and
+/// the `Write` of `.claude/settings.json` among them, and every
+/// `allow*.json` is let through, the `Edit` of a skill among them.
+#[test]
+fn harness_self_lets_a_skill_through_and_still_denies_the_settings() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let dir = fixtures().join("rules/harness.self");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("deny") || n.starts_with("allow"))
+        .collect();
+    names.sort();
+    for named in [
+        "allow-skill.json",
+        "deny-settings-edit.json",
+        "deny-settings-write.json",
+    ] {
+        assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
+    }
+    for name in &names {
+        let judged = judge(&manifest, workspace(), &call(&dir.join(name))).unwrap();
+        let denied = judged.denial().map(|f| f.rule.as_str()) == Some("harness.self");
+        assert_eq!(denied, name.starts_with("deny"), "{name}: {judged:?}");
+        if !denied {
+            assert!(
+                judged.findings.iter().all(|f| f.rule != "harness.self"),
+                "{name}: {judged:?}"
+            );
+        }
+    }
+}
+
 /// A worktree carries the tracked manifest, so it is a workspace of its
 /// own by the one rule (`Call::workspace`, #57); it also has a `.git`, so
 /// it is the checkout its readings go to. This one is gitignored.

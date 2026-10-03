@@ -5,7 +5,7 @@ The skeleton every builder is dispatched with. Fill the `<…>` fields per spec 
 ```
 You are the builder for #<n>, <title>. Build it as `.claude/skills/build/SKILL.md` says; it is user-invoked, so read it rather than calling it.
 
-Worktree: <checkout>/.claude/worktrees/t<n>, on t<n>, laid on <main | t<m>, #<m>'s finished branch, not yet merged>. Every path you touch is under it, by absolute path.
+Worktree: <checkout>-worktrees/t<n>, on t<n>, laid on <main | t<m>, #<m>'s finished branch, not yet merged>. Every path you touch is under it, by absolute path.
 
 Your scratch files, commit messages and run output alike, go in <scratchpad>/t<n>/, never the scratchpad's top level: two builders both wrote `msg1.txt` there, and one commit landed under the other ticket's subject.
 <Laid on a branch only:> Before your first commit, run `cargo xtask status --session` once in the worktree; it lays `.claude/harness.local.md`, which the hook reads.
@@ -26,5 +26,5 @@ Standard: modern Rust and decisions that hold as the engine grows. State is a ty
 
 Leave pushing and merging to the coordinator. Close as the build skill closes, through `cargo xtask ticket close`, with what the spec didn't do filed. A `permit` denial is a `for-a-person` ticket, filed, and the work it stops waits on it.
 
-Spec: <anything the ticket doesn't say: its lane, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<lane>` label, as the build skill carries a ticket's label.
+Spec: <anything the ticket doesn't say: its track, the neighbouring slots and what they own, the counts measured at the cut>. What you file carries the spec's `track:parity-<name>` label, as the build skill carries a ticket's label.
 ```
