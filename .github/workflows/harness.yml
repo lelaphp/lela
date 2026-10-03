@@ -2,8 +2,8 @@
 # held by `computed check`, which runs no loader and needs no trust grant;
 # the harness's own tests hold the map, the hook wiring and the rules'
 # negative controls; and per commit the instruments run over the whole
-# workspace, then `done` judges the changes since the branch's track, the
-# base the Stop hook took; the reading store is the only thing the run
+# workspace, then `done` judges the changes since the merge base with
+# `main`, the base the Stop hook took; the reading store is the only thing the run
 # uploads, and the permits section is the summary. A ticket is closed by
 # the session that worked it, through `xtask ticket close`, the instrument
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
@@ -11,11 +11,11 @@
 name: harness
 on:
   push:
-    branches: [main, "t-*"] # main and the track branches, whose base is main
+    branches: [main] # a ticket's branch reaches CI as a pull request (ADR-0009)
   pull_request:
-# A push to a track branch supersedes the run of the push before it, which
-# is cancelled: `track work` pushes on every ticket it closes, and a run
-# nobody reads is minutes billed. `main`'s runs queue and finish.
+# A push to a pull request supersedes the run of the push before it, which
+# is cancelled: a run nobody reads is minutes billed. `main`'s runs queue
+# and finish.
 concurrency:
   group: harness-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # done measures since the merge base with the track
+          fetch-depth: 0 # done measures since the merge base with main
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The platform libraries the workspace links, from the one list the
@@ -191,11 +191,10 @@ jobs:
       # pin's path.
       - run: cargo xtask crosscheck
         continue-on-error: true
-      # A push is judged since the branch's track, which `done` reads off
-      # the branch it stands on. A pull request's checkout is a detached
-      # merge commit, on no branch and so on no track, so the base is the
-      # ref the pull request targets, which is the track the Stop hook
-      # took (§4.5).
+      # A push to `main` is judged since the merge base with `main`, the
+      # base `done` takes by default (§4.5, ADR-0009). A pull request's
+      # checkout is a detached merge commit, so the base is the ref the
+      # pull request targets.
       - name: done
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then

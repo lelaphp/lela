@@ -1319,28 +1319,28 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     }
     assert!(
         text.contains("fetch-depth: 0"),
-        "done needs the merge base with the branch's track: {text}"
+        "done needs the merge base with main: {text}"
     );
 }
 
-/// CI per commit runs on the track branches as well as `main`, and judges
-/// each since the base its Stop hook took (harness-design.md §4.5, §7). A
-/// push is on its branch, so `done` reads the track off it; a pull
-/// request's checkout is a detached merge commit, on no branch and so on
-/// no track, so the step passes the ref the pull request targets, which
-/// is that branch's track.
+/// CI per commit runs on a push to `main` alone, since branch tracks are
+/// gone and a ticket's branch reaches CI as a pull request (ADR-0009,
+/// #1757), and judges each since the base its Stop hook took
+/// (harness-design.md §4.5, §7). A push passes no base, so `done` takes
+/// the merge base with `main`; a pull request's checkout is a detached
+/// merge commit, so the step passes the ref the pull request targets.
 #[test]
-fn ci_runs_the_per_commit_job_on_the_track_branches_and_judges_since_the_same_base() {
+fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
     let text = read(".github/workflows/harness.yml");
     let on = &text[text.find("on:").unwrap()..text.find("jobs:").unwrap()];
     let branches = on
         .lines()
         .find(|l| l.trim_start().starts_with("branches:"))
         .unwrap_or_else(|| panic!("no push branches: {on}"));
-    assert!(branches.contains("main"), "{branches}");
-    assert!(
-        branches.contains("t-*"),
-        "the track branches are pushed to: {branches}"
+    assert_eq!(
+        branches.split('#').next().map(str::trim),
+        Some("branches: [main]"),
+        "a push to main alone: {branches}"
     );
     let step = &text[text.find("- name: done").unwrap()..];
     let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
@@ -1354,7 +1354,7 @@ fn ci_runs_the_per_commit_job_on_the_track_branches_and_judges_since_the_same_ba
     );
     assert!(
         step.contains("cargo xtask done\n"),
-        "a push passes nothing and gets the track off the branch: {step}"
+        "a push passes nothing and gets the merge base with main: {step}"
     );
 }
 
