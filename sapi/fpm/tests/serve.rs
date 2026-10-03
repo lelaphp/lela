@@ -381,3 +381,71 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     assert!(written.contains(&expected), "{written}");
     assert!(String::from_utf8_lossy(&body).ends_with("ran"), "{body:?}");
 }
+
+/// A php.ini's `[HOST=]` table of the request's `SERVER_NAME`, lowered,
+/// and its `[PATH=]` tables along the script's directory, set for that
+/// request alone as `PHP_INI_SYSTEM`: the oracle's bytes from php-fpm
+/// `-c php.ini` serving the two requests on its one child (#1692), held
+/// here since a fence takes no ini of its own (#1634).
+#[test]
+fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
+    let dir = tree("sections");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    std::fs::create_dir_all(dir.join("www/sub")).unwrap();
+    std::fs::create_dir_all(dir.join("scan")).unwrap();
+    let www = dir.join("www").display().to_string();
+    let ini = dir.join("php.ini");
+    std::fs::write(
+        &ini,
+        format!(
+            "precision=10\n[PATH={www}]\nprecision=5\n[PATH={www}/sub/]\nprecision=3\n\
+             [HOST=Example.COM]\nserialize_precision=7\n"
+        ),
+    )
+    .unwrap();
+    let program = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n";
+    std::fs::write(dir.join("www/sub/t.php"), program).unwrap();
+    std::fs::write(dir.join("www/t.php"), program).unwrap();
+    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        .env("PHP_INI_SCAN_DIR", dir.join("scan"))
+        .arg("-c")
+        .arg(&ini)
+        .args(["-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let served = |script: &str, server_name: &str| {
+        let script = dir.join(script).display().to_string();
+        let pairs = [
+            ("SCRIPT_FILENAME", script.as_str()),
+            ("REQUEST_METHOD", "GET"),
+            ("SERVER_NAME", server_name),
+        ];
+        let body = connect(&socket, started)
+            .map(|s| request(s, &pairs))
+            .unwrap_or_default();
+        String::from_utf8_lossy(&body).into_owned()
+    };
+    let sub = served("www/sub/t.php", "Example.com");
+    let top = served("www/t.php", "other");
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status();
+    let _ = master.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let head = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n";
+    assert_eq!(
+        sub,
+        format!("{head}string(1) \"3\"\nstring(1) \"7\"\nbool(false)\n")
+    );
+    assert_eq!(
+        top,
+        format!("{head}string(1) \"5\"\nstring(2) \"-1\"\nbool(false)\n")
+    );
+}

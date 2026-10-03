@@ -635,6 +635,8 @@ pub(crate) struct Shared {
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
+    /// Whether it holds a `[PATH=]` table and a `[HOST=]` table.
+    sections: [bool; 2],
     /// The php.ini files read into it ([`EngineBuilder::ini_files`]).
     pub(crate) ini_files: crate::api::request::IniFiles,
     /// Where every request of this engine appends the natives it
@@ -1592,16 +1594,18 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+    sections: [bool; 2],
 }
 
 /// One row of php's `configuration_hash`, what `cfg_get_entry` finds
 /// and `get_cfg_var()` answers: a string `name=value` set, or the array
-/// `name[]=value` and `name[offset]=value` lines built, whose values
-/// are strings (`php_ini_parser_cb`, `Z/main/php_ini.c:199-258`).
+/// `name[]=value` and `name[offset]=value` lines built, or a `[PATH=]`
+/// or `[HOST=]` section's table, which holds either in turn
+/// (`php_ini_parser_cb`, `Z/main/php_ini.c:199-305`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Configured {
     Str(Vec<u8>),
-    Array(Vec<(ConfiguredKey, Vec<u8>)>),
+    Array(Vec<(ConfiguredKey, Configured)>),
 }
 
 /// A key of such an array, as `zend_symtable_update` makes it: an
@@ -1640,6 +1644,7 @@ impl Configuration {
             special: false,
             section: None,
             stderr: String::new(),
+            sections: [false; 2],
         };
         if let Some(file) = &mut files.loaded {
             startup.read(&std::mem::take(&mut file.bytes), &file.path);
@@ -1655,6 +1660,7 @@ impl Configuration {
         Configuration {
             table: startup.table,
             stderr: startup.stderr,
+            sections: startup.sections,
         }
     }
 
@@ -1681,6 +1687,8 @@ struct Startup<'c> {
     section: Option<Vec<u8>>,
     /// What `ini_error` wrote.
     stderr: String,
+    /// `has_per_dir_config` and `has_per_host_config`.
+    sections: [bool; 2],
 }
 
 /// `zend_get_constant` for the INI grammar: the declared value as a
@@ -1798,6 +1806,9 @@ impl Startup<'_> {
                     .find(|prefix| name.len() >= 4 && name[..4].eq_ignore_ascii_case(prefix))
                     .map(|_| &name[4..]);
                 self.special = key.is_some();
+                if key.is_some() {
+                    self.sections[usize::from(name[..4].eq_ignore_ascii_case(b"HOST"))] = true;
+                }
                 if let Some(key) = key.filter(|key| !key.is_empty()) {
                     let mut key = key.to_vec();
                     if name[..4].eq_ignore_ascii_case(b"HOST") {
@@ -1827,39 +1838,26 @@ impl Startup<'_> {
                     return;
                 }
                 let value = ini_text(&value);
-                if let Some(section) = &self.section {
-                    if let Some((_, Configured::Array(rows))) =
-                        self.table.iter_mut().find(|(n, _)| n == section)
-                    {
-                        configured_insert(rows, &label, value);
+                if let Some(rows) = self.section_rows() {
+                    let key = configured_key(&label);
+                    match rows.iter_mut().find(|(k, _)| *k == key) {
+                        Some(row) => row.1 = Configured::Str(value),
+                        None => rows.push((key, Configured::Str(value))),
                     }
                     return;
                 }
                 self.set(label, Configured::Str(value));
             }
-            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label,
-            // made where the label holds none, the value placed at the
-            // offset or appended where the offset is empty.
+            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label in
+            // the active table, a section's where one is active, made where
+            // the label holds none, the value placed at the offset or
+            // appended where the offset is empty.
             IniEvent::PopEntry(label, value, offset) => {
-                if self.section.is_some() {
-                    return;
-                }
                 let label = ini_text(&label);
                 let (value, offset) = (ini_text(&value), ini_text(&offset));
-                let at = self
-                    .table
-                    .iter()
-                    .position(|(n, _)| *n == label)
-                    .unwrap_or_else(|| {
-                        self.table.push((label, Configured::Array(Vec::new())));
-                        self.table.len() - 1
-                    });
-                let entry = &mut self.table[at].1;
-                if !matches!(entry, Configured::Array(_)) {
-                    *entry = Configured::Array(Vec::new());
-                }
-                if let Configured::Array(rows) = entry {
-                    configured_insert(rows, &offset, value);
+                match self.section_rows() {
+                    Some(rows) => popped(rows, configured_key(&label), &offset, value),
+                    None => popped(&mut self.table, label, &offset, value),
                 }
             }
             // A bare label sets nothing.
@@ -1868,9 +1866,46 @@ impl Startup<'_> {
     }
 }
 
+impl Startup<'_> {
+    /// The rows of the `[PATH=]` or `[HOST=]` table that is active.
+    fn section_rows(&mut self) -> Option<&mut Vec<(ConfiguredKey, Configured)>> {
+        let section = self.section.as_ref()?;
+        match self.table.iter_mut().find(|(n, _)| n == section) {
+            Some((_, Configured::Array(rows))) => Some(rows),
+            _ => None,
+        }
+    }
+}
+
+/// The array under `label` in `table`, made where it holds none, and
+/// `value` inserted into it at `offset`.
+fn popped<K: PartialEq>(table: &mut Vec<(K, Configured)>, label: K, offset: &[u8], value: Vec<u8>) {
+    let at = table.iter().position(|(n, _)| *n == label);
+    let at = at.unwrap_or(table.len());
+    if at == table.len() {
+        table.push((label, Configured::Array(Vec::new())));
+    }
+    let entry = &mut table[at].1;
+    if !matches!(entry, Configured::Array(_)) {
+        *entry = Configured::Array(Vec::new());
+    }
+    if let Configured::Array(rows) = entry {
+        configured_insert(rows, offset, value);
+    }
+}
+
+/// A key as `zend_symtable_update` makes it.
+fn configured_key(offset: &[u8]) -> ConfiguredKey {
+    match canonical_integer(offset) {
+        Some(n) => ConfiguredKey::Index(n),
+        None => ConfiguredKey::Name(offset.to_vec()),
+    }
+}
+
 /// `zend_symtable_update` for a non-empty offset, else
 /// `zend_hash_next_index_insert`, over one array of the table.
-fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], value: Vec<u8>) {
+fn configured_insert(rows: &mut Vec<(ConfiguredKey, Configured)>, offset: &[u8], value: Vec<u8>) {
+    let value = Configured::Str(value);
     let key = if offset.is_empty() {
         let next = rows
             .iter()
@@ -1883,10 +1918,7 @@ fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], va
             .max(0);
         ConfiguredKey::Index(next)
     } else {
-        match canonical_integer(offset) {
-            Some(n) => ConfiguredKey::Index(n),
-            None => ConfiguredKey::Name(offset.to_vec()),
-        }
+        configured_key(offset)
     };
     match rows.iter_mut().find(|(k, _)| *k == key) {
         Some(row) => row.1 = value,
@@ -2481,6 +2513,7 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 configuration: configuration.table,
+                sections: configuration.sections,
                 ini_files,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
@@ -2973,6 +3006,62 @@ impl Engine {
     #[must_use]
     pub fn has_shell(&self) -> bool {
         self.shared.shell.is_some()
+    }
+
+    /// `php_ini_activate_per_host_config` for `host`, lowered as a CGI's
+    /// `SERVER_NAME` is, then `php_ini_activate_per_dir_config` along each
+    /// directory prefix of `path_translated`'s directory
+    /// (`Z/main/php_ini.c:815-875`): each `[HOST=]` and `[PATH=]` table's
+    /// strings, which `php_ini_activate_config` sets under `PHP_INI_SYSTEM`
+    /// at `PHP_INI_STAGE_ACTIVATE` and so locks as an admin value is
+    /// locked. A `name[]=` array in such a table, which php hands
+    /// `zend_alter_ini_entry_ex` as the string it is not, is passed over.
+    #[must_use]
+    pub fn activated_ini(
+        &self,
+        host: Option<&[u8]>,
+        path_translated: &[u8],
+    ) -> Vec<(Vec<u8>, Vec<u8>, IniOrigin)> {
+        let [per_dir, per_host] = self.shared.sections;
+        let mut tables = Vec::new();
+        if let Some(host) = host.filter(|host| per_host && !host.is_empty()) {
+            tables.push(host.to_ascii_lowercase());
+        }
+        // `zend_dirname`, and the slash `sapi_cgi_activate` puts after it.
+        let mut dir = path_translated;
+        while dir.len() > 1 && dir.ends_with(b"/") {
+            dir = &dir[..dir.len() - 1];
+        }
+        dir = match dir.iter().rposition(|b| *b == b'/') {
+            Some(at) => match dir[..at].iter().rposition(|b| *b != b'/') {
+                Some(end) => &dir[..=end],
+                None => b"/",
+            },
+            None => b".",
+        };
+        let path = [dir, b"/"].concat();
+        if per_dir && path.len() <= crate::virtual_cwd::MAXPATHLEN {
+            for (at, byte) in path.iter().enumerate().skip(1) {
+                if *byte == b'/' {
+                    tables.push(path[..at].to_vec());
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        for table in tables {
+            if let Some(Configured::Array(rows)) = self.shared.configured(&table) {
+                for (key, value) in rows {
+                    let name = match key {
+                        ConfiguredKey::Name(name) => name.clone(),
+                        ConfiguredKey::Index(n) => n.to_string().into_bytes(),
+                    };
+                    if let Configured::Str(value) = value {
+                        entries.push((name, value.clone(), IniOrigin::Admin));
+                    }
+                }
+            }
+        }
+        entries
     }
 
     /// `ini_get()` outside any request: the value each request starts
@@ -4574,6 +4663,53 @@ mod tests {
             read("precision", "M_PI", b"precision").as_deref(),
             Some("M_PI")
         );
+    }
+
+    /// The `[PATH=]` and `[HOST=]` tables as the pinned oracle keeps them:
+    /// `php -n -d 'x=1<newline>[PATH=/w]…'` dumps `get_cfg_var('/w')` as
+    /// `["precision"]=>"5"` and `["arr"]=>[0=>"a","k"=>"b"]`, a `name[]=`
+    /// nested in the section's table; and php-cgi serving `/w/sub/t.php`
+    /// for `SERVER_NAME=Example.com` reads `precision` 3 and
+    /// `serialize_precision` 7, the host's table and then each directory
+    /// from the root down, the nested array set as nothing.
+    #[test]
+    fn a_section_s_table_nests_its_arrays_and_activates_its_strings() {
+        let text = "1\n[PATH=/w]\nprecision=5\narr[]=a\narr[k]=b\n\
+                    [PATH=/w/sub/]\nprecision=3\n[HOST=Example.COM]\nserialize_precision=7";
+        let engine = Engine::cli_builder().ini("x", text).build();
+        let str = |s: &str| Configured::Str(s.as_bytes().to_vec());
+        let name = |s: &str| ConfiguredKey::Name(s.as_bytes().to_vec());
+        assert_eq!(
+            engine.shared.configured(b"/w"),
+            Some(&Configured::Array(vec![
+                (name("precision"), str("5")),
+                (
+                    name("arr"),
+                    Configured::Array(vec![
+                        (ConfiguredKey::Index(0), str("a")),
+                        (name("k"), str("b")),
+                    ])
+                ),
+            ]))
+        );
+        let row = |n: &str, v: &str| {
+            (
+                n.as_bytes().to_vec(),
+                v.as_bytes().to_vec(),
+                IniOrigin::Admin,
+            )
+        };
+        assert_eq!(
+            engine.activated_ini(Some(b"Example.com"), b"/w/sub/t.php"),
+            vec![
+                row("serialize_precision", "7"),
+                row("precision", "5"),
+                row("precision", "3"),
+            ]
+        );
+        assert_eq!(engine.activated_ini(Some(b"other"), b"sub/t.php"), vec![]);
+        let none = Engine::cli_builder().ini("arr[]", "a").build();
+        assert_eq!(none.activated_ini(Some(b"arr"), b"/arr/t.php"), vec![]);
     }
 
     /// What the pinned oracle answers under `-n -d disable_functions=<list>`

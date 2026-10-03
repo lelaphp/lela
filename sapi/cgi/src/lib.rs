@@ -466,8 +466,12 @@ consult the installation file that came with this distribution, or visit \n\
 /// working directory the file's own unless `-C`. A file that cannot be
 /// opened is php's `No input file specified.` under a 404, or `Access
 /// denied.` under a 403, the request served with that as its body and
-/// the exit php's 255.
+/// the exit php's 255. Where the request has a path translated,
+/// `sapi_cgi_activate` sets the php.ini's `[HOST=]` table of its
+/// `SERVER_NAME` and its `[PATH=]` tables along the path's directory
+/// ([`Engine::activated_ini`]).
 fn describe(
+    engine: &Engine,
     invocation: &Invocation,
     ini: &[(String, String)],
     mut env: Environment,
@@ -488,6 +492,9 @@ fn describe(
     } else {
         from_shell(invocation, ini, &info)
     };
+    let activated = path.as_deref().map_or_else(Vec::new, |path| {
+        engine.activated_ini(env.get(b"SERVER_NAME"), path)
+    });
     let program = Program::of(path.as_deref(), invocation.origin);
     let process_cwd = std::env::current_dir().unwrap_or_default();
     let cwd = match (&program, invocation.no_chdir) {
@@ -534,6 +541,7 @@ fn describe(
             web: Some(web),
             script_name,
             source,
+            ini: activated,
             ..RequestDescription::default()
         },
         failed,
@@ -687,7 +695,7 @@ pub fn serve(
     if invocation.behavior == Behavior::Lint {
         return lint(engine, invocation, &env, ini);
     }
-    let (description, failed) = match describe(invocation, ini, env) {
+    let (description, failed) = match describe(engine, invocation, ini, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
             let _ = Process.write(SECURITY_ALERT.as_bytes());
@@ -717,7 +725,7 @@ fn lint(
     let mut this = invocation.clone();
     let mut exit_code = 0;
     loop {
-        let (description, failed) = match describe(&this, ini, env.clone()) {
+        let (description, failed) = match describe(engine, &this, ini, env.clone()) {
             Ok(described) => described,
             Err(Refusal::Redirect) => {
                 let _ = Process.write(SECURITY_ALERT.as_bytes());

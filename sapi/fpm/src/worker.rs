@@ -1112,7 +1112,11 @@ impl Worker {
         entries
     }
 
-    /// The request description of a request of the web.
+    /// The request description of a request of the web: its entries the
+    /// `PHP_VALUE`s kept, then the php.ini's `[HOST=]` table of its
+    /// `SERVER_NAME` and `[PATH=]` tables along its directory, which
+    /// `sapi_cgi_activate` sets ([`Engine::activated_ini`]), then its
+    /// `.user.ini` lines.
     fn describe(
         &mut self,
         env: &Environment,
@@ -1122,6 +1126,7 @@ impl Worker {
     ) -> RequestDescription {
         let mut ini = self.sticky.clone();
         if let Some(path) = &info.path_translated {
+            ini.extend(self.engine.activated_ini(env.get(b"SERVER_NAME"), path));
             ini.extend(
                 self.user_ini(path, env)
                     .into_iter()

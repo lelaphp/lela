@@ -21465,21 +21465,27 @@ impl Request {
         let Some(entry) = shared.configured(name) else {
             return Ok(None);
         };
-        Ok(Some(match entry {
+        self.configured_value(entry).map(Some)
+    }
+
+    /// `add_config_entries`: a row of the table as a value of the
+    /// request, an array's arrays copied as deep as they go.
+    fn configured_value(&mut self, entry: &Configured) -> Result<Value, Thrown> {
+        Ok(match entry {
             Configured::Str(bytes) => Value::string(PhpString::new(self, bytes)?),
             Configured::Array(rows) => {
                 let mut array = PhpArray::new(self)?;
-                for (key, bytes) in rows {
+                for (key, entry) in rows {
                     let key = match key {
                         ConfiguredKey::Index(n) => Key::Int(*n),
                         ConfiguredKey::Name(name) => Key::Str(PhpString::new(self, name)?),
                     };
-                    let value = Value::string(PhpString::new(self, bytes)?);
+                    let value = self.configured_value(entry)?;
                     array.set(self, key, value)?;
                 }
                 Value::array(array)
             }
-        }))
+        })
     }
 
     /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`

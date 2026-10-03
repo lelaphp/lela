@@ -828,6 +828,7 @@ syntax::scanned
 syntax::strip
 test::Capture
 test::Engine
+test::Engine::activated_ini
 test::Engine::build_defs
 test::Engine::builder
 test::Engine::command_line
