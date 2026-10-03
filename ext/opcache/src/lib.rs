@@ -868,6 +868,29 @@ fn opcache_jit_blacklist(closure: Instance<Closure>) {
 /// array(0) {
 /// }
 /// ```
+///
+/// Each entry is listed as `expand_filepath` resolved it at startup: a
+/// link followed where the path has one, so a `..` after it climbs out of
+/// where it led, a part that does not exist kept as written, a relative
+/// entry taken against the list's directory and a trailing slash kept. A
+/// file through the link is kept out of the cache.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/blacklist' . getmypid();
+/// @mkdir("$dir/a/real", 0777, true);
+/// symlink("$dir/a/real", "$dir/link");
+/// file_put_contents("$dir/link/c.php", '<?php var_dump(opcache_is_script_cached(__FILE__));');
+/// file_put_contents("$dir/list", "$dir/link/c.php\n$dir/link/none/x.php\n$dir/link/../y.php\nlink/\n");
+/// echo str_replace(realpath($dir), 'D', shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 -d opcache.blacklist_filename=$dir/list -r 'echo implode(\"\\n\", opcache_get_configuration()[\"blacklist\"]), \"\\n\"; include \$argv[1];' $dir/link/c.php"));
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process
+/// D/a/real/c.php
+/// D/a/real/none/x.php
+/// D/a/y.php
+/// D/a/real/
+/// bool(false)
+/// ```
 #[php_function]
 fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     if !api_allowed(req) {
