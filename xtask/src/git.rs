@@ -21,10 +21,12 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    /// Stamp the sources under `scope` (relative to `root`) now.
+    /// Stamp the sources under `scope` (relative to `root`) now, with the
+    /// key [`crate::key::of`] takes over the working tree: the scope's
+    /// files and, for a crate, its dependency closure's (#1318).
     pub fn take(root: &Path, scope: &Path) -> Result<Stamp> {
         Ok(Stamp {
-            tree: tree_hash(root, scope)?,
+            tree: crate::key::of(root, scope, crate::key::Content::Disk)?,
             commit: head_commit(root)?,
         })
     }
@@ -100,20 +102,23 @@ fn read_head(root: &Path) -> Option<String> {
 /// tracked or not, as paths relative to `root`, sorted. What an instrument
 /// means by "the sources" of a scope; `tree_hash` is one hash over them.
 pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
-    let scope = scope.to_str().context("the scope path is not UTF-8")?;
-    let listing = git(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            scope,
-        ],
-        None,
-    )?;
+    files_under(root, &[scope.to_path_buf()])
+}
+
+/// [`files`] under each of `scopes` at once, one listing of their union.
+fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
+    let mut args = vec![
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+    ];
+    for scope in scopes {
+        args.push(scope.to_str().context("the scope path is not UTF-8")?);
+    }
+    let listing = git(root, &args, None)?;
     let mut paths: Vec<String> = listing
         .split('\0')
         .filter(|p| !p.is_empty() && root.join(p).is_file())
@@ -124,13 +129,14 @@ pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-/// One object id over every file under `scope` that git does not ignore,
+/// One object id over every file under `scopes` that git does not ignore,
 /// tracked or not, with its content as it is on disk: the blob id of each
 /// file, then the blob id of the sorted `<id> <path>` listing, which is
-/// what `git hash-object` would print for the same bytes.
-pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
+/// what `git hash-object` would print for the same bytes. A reading's key
+/// is this over its scope's closure ([`crate::key::of`]).
+pub fn tree_hash(root: &Path, scopes: &[PathBuf]) -> Result<String> {
     let mut listing = Vec::new();
-    for path in files(root, scope)? {
+    for path in files_under(root, scopes)? {
         let file = root.join(&path);
         let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
         listing.push((path, blob_id(&bytes)));
@@ -174,15 +180,17 @@ impl Index {
         Ok(Index(entries))
     }
 
-    /// [`tree_hash`] over what the index holds under `scope`: the hash the
-    /// scope would have on disk were the working tree the index, with no
+    /// [`tree_hash`] over what the index holds under `scopes`: the hash
+    /// they would have on disk were the working tree the index, with no
     /// untracked file beside it.
-    pub fn hash(&self, scope: &Path) -> String {
-        let whole = scope == Path::new(".") || scope.as_os_str().is_empty();
+    pub fn hash(&self, scopes: &[PathBuf]) -> String {
+        let whole = scopes
+            .iter()
+            .any(|s| s == Path::new(".") || s.as_os_str().is_empty());
         let under: Vec<(String, String)> = self
             .0
             .iter()
-            .filter(|(path, _)| whole || Path::new(path).starts_with(scope))
+            .filter(|(path, _)| whole || scopes.iter().any(|s| Path::new(path).starts_with(s)))
             .cloned()
             .collect();
         listing_id(&under)
@@ -398,7 +406,7 @@ mod tests {
             "ce013625030ba8dba906f756967f9e9ca394464a"
         );
     }
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::{Stamp, files, head_commit, tree_hash};
     use crate::built_root;
@@ -490,7 +498,7 @@ mod tests {
             listing.push('\n');
         }
         assert_eq!(
-            tree_hash(root, Path::new("docs")).unwrap(),
+            tree_hash(root, &[PathBuf::from("docs")]).unwrap(),
             out(&["hash-object", "--stdin"], Some(&listing)).trim()
         );
     }

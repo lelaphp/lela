@@ -845,12 +845,13 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
 }
 
 /// Every crate that exists less those whose `witness` reading passes and
-/// was taken over the crate's tree now under the pin now, `done`'s fresh: what the merge
+/// was taken over the crate's key now ([`crate::key::of`], its tree and its
+/// dependency closure's, #1318) under the pin now, `done`'s fresh: what the merge
 /// check measures after pre-commit measured the staged crates (#1312).
 fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<String>> {
     let mut left = Vec::new();
     for krate in manifest.crates.iter().filter(|k| sources::exists(root, k)) {
-        let tree = crate::git::tree_hash(root, &krate.path())?;
+        let tree = crate::key::of(root, &krate.path(), crate::key::Content::Disk)?;
         let stands = store
             .read(INSTRUMENT, &krate.name)?
             .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin.digest()));
