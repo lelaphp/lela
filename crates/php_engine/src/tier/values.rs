@@ -286,3 +286,12 @@ pub(crate) fn values_shown(req: &mut Request, value: Value) -> Shown {
 pub fn last_error(req: &Request) -> Option<(Vec<u8>, Vec<u8>, u32)> {
     req.last_error_row()
 }
+
+/// `SG(request_info).argv` replaced in the request standing, and `$argv`,
+/// `$argc` and a made `$_SERVER`'s rebuilt from it, as phpdbg's `run`
+/// with arguments does before it executes (`php_build_argv`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:830-838`); a write that meets the
+/// memory limit leaves what it had not reached.
+pub fn set_argv(req: &mut Request, argv: Vec<Vec<u8>>) {
+    let _ = req.build_argv(argv);
+}

@@ -197,6 +197,40 @@ impl Request {
         }
     }
 
+    /// `php_build_argv(NULL, PG(http_globals)[TRACK_VARS_SERVER])` over
+    /// `argv`, `SG(request_info).argv` from here, as phpdbg's `run` with
+    /// arguments rebuilds them in the request standing
+    /// (`Z/main/php_variables.c:658-713`): one array, `$argv` and `$argc`
+    /// written into `EG(symbol_table)` through the CV a frame attached to
+    /// either, and into `$_SERVER` where it was made; a `$_SERVER` made
+    /// later reads them from the table.
+    pub(crate) fn build_argv(&mut self, argv: Vec<Vec<u8>>) -> Result<(), Thrown> {
+        self.description.argv = argv;
+        let server = self.http_globals.server.is_some();
+        if self.description.argv.is_empty() && !server {
+            return Ok(());
+        }
+        let mut words = PhpArray::new(self)?;
+        for word in self.description.argv.clone() {
+            let word = PhpString::new(self, &word)?;
+            words.append(self, Value::string(word))?;
+        }
+        let words = Value::array(words);
+        let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
+        if !self.description.argv.is_empty() {
+            self.addref(&words);
+            self.set_global(b"argv", Some(words));
+            self.set_global(b"argc", Some(count));
+        }
+        if server {
+            self.addref(&words);
+            self.update_server(b"argv", words)?;
+            self.update_server(b"argc", count)?;
+        }
+        self.release(words);
+        Ok(())
+    }
+
     /// `zend_is_auto_global` (`Z/Zend/zend_compile.c:1987`) for one
     /// auto-global: made and laid into `EG(symbol_table)` where it is
     /// still armed, and nothing where it was made already.

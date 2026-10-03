@@ -110,6 +110,7 @@ pub fn run(s: &mut Session, here: &mut Here<'_>) {
     }
     s.initializing = true;
     s.init_compiled = false;
+    s.read_after_run = false;
     let started = std::mem::replace(&mut s.started, s.init_ran);
     s.init_ran = true;
     let files = s.init_files.read();
@@ -264,6 +265,7 @@ fn lines(
         // line kept as the one an empty prompt line repeats. The lexer
         // unquotes the copy it reads in place, and the message below
         // quotes that copy.
+        s.read_after_run |= s.init_cleaning;
         let mut line = input::remembered(line);
         let Ok(commands) = cmd::parse(&mut line) else {
             continue;
