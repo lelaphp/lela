@@ -502,6 +502,7 @@ request::Request::constant_file
 request::Request::constants
 request::Request::content_type
 request::Request::core_ini_info
+request::Request::ctype_locale
 request::Request::current_file
 request::Request::current_line
 request::Request::cwd
@@ -570,6 +571,7 @@ request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_env
 request::Request::loaded_extensions
+request::Request::locale_name
 request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
@@ -622,6 +624,7 @@ request::Request::script_name
 request::Request::serialize_precision
 request::Request::set_assert_callback
 request::Request::set_caller_var
+request::Request::set_ctype_locale
 request::Request::set_cwd
 request::Request::set_display_errors
 request::Request::set_env
@@ -630,6 +633,7 @@ request::Request::set_exception_handler
 request::Request::set_global
 request::Request::set_header_callback
 request::Request::set_local_var
+request::Request::set_locale_name
 request::Request::set_opened_path
 request::Request::set_response_code
 request::Request::set_shutdown_function

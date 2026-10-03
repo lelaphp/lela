@@ -2304,6 +2304,11 @@ pub struct Request {
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
+    /// The name `setlocale()` last answered for each category it moved,
+    /// by `<locale.h>` value, and php's `BG(ctype_string)`: the
+    /// `LC_CTYPE` name while it is not `C` (revision 56).
+    locale_names: Vec<(usize, Vec<u8>)>,
+    ctype_locale: Option<Vec<u8>>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -2845,6 +2850,8 @@ impl Request {
             static_vars: HashMap::new(),
             beside: HashMap::new(),
             preloading: None,
+            locale_names: Vec::new(),
+            ctype_locale: None,
             #[cfg(debug_assertions)]
             dirty: None,
             walk: None,
@@ -21507,6 +21514,37 @@ impl Request {
             self.description.env.push((name.to_vec(), value.to_vec()));
         }
         true
+    }
+
+    /// The name `setlocale()` last answered for `category`, by the
+    /// pinned build's `<locale.h>` value, or `None` while the request
+    /// has not moved it (design §4.4, revision 56). The names go with the
+    /// request, as `basic_functions`'s `RSHUTDOWN` puts the locale back.
+    #[must_use]
+    pub fn locale_name(&self, category: usize) -> Option<&[u8]> {
+        self.locale_names
+            .iter()
+            .find(|(c, _)| *c == category)
+            .map(|(_, name)| name.as_slice())
+    }
+
+    /// What `setlocale()` writes once a category has moved to `name`.
+    pub fn set_locale_name(&mut self, category: usize, name: Vec<u8>) {
+        self.locale_names.retain(|(c, _)| *c != category);
+        self.locale_names.push((category, name));
+    }
+
+    /// php's `BG(ctype_string)`: the name `setlocale()` answered when it
+    /// last moved `LC_CTYPE`, `None` where that was `C` or nothing moved
+    /// it, which ext/pcre keys its compiled patterns by (revision 56).
+    #[must_use]
+    pub fn ctype_locale(&self) -> Option<&[u8]> {
+        self.ctype_locale.as_deref()
+    }
+
+    /// What `setlocale()` writes to [`Request::ctype_locale`].
+    pub fn set_ctype_locale(&mut self, name: Option<Vec<u8>>) {
+        self.ctype_locale = name;
     }
 
     /// The facts of the build serving the request, php's
