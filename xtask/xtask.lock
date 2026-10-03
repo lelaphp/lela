@@ -292,10 +292,6 @@ ticket::parent
 ticket::parent_scope
 ticket::run
 ticket::ticket_of
-track::Found
-track::Model
-track::Model::new
-track::Model::subagent
 track::Ticket
 track::Ticket::new
 track::Ticket::number

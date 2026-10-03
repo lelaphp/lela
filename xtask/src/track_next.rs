@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use crate::census_weight::Weights;
 use crate::reading::Store;
 use crate::ticket::{Gh, Open};
-use crate::track::{self, MAIN, Ticket, Track};
+use crate::track::{self, MAIN, Ticket};
 use toml::value::Datetime;
 
 /// The label a ticket an agent may take carries. The frontier reads it
@@ -203,21 +203,17 @@ pub(crate) fn track_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> &'a str
         .unwrap_or(MAIN)
 }
 
-/// `xtask track next`: the track named, or the branch's, and the answer
-/// printed; no reading.
-pub fn command(root: &Path, track: Option<&str>, json: bool, why: bool) -> Result<()> {
-    let name = match track {
-        Some(name) => name.to_owned(),
-        None => Track::of(root, None)?.name,
-    };
-    let found = next(root, &Gh::on_path(), &name)?;
+/// `xtask track next`: the track named and the answer printed; no
+/// reading.
+pub fn command(root: &Path, track: &str, json: bool, why: bool) -> Result<()> {
+    let found = next(root, &Gh::on_path(), track)?;
     let weights = Weights::of_store(&Store::of_workspace(root))?;
     if json {
-        println!("{}", Next::to_json(found.as_ref(), &name, weights.at()));
+        println!("{}", Next::to_json(found.as_ref(), track, weights.at()));
     } else if why {
-        print!("{}", Next::why(found.as_ref(), &weights, &name));
+        print!("{}", Next::why(found.as_ref(), &weights, track));
     } else {
-        print!("{}", Next::render(found.as_ref(), &name));
+        print!("{}", Next::render(found.as_ref(), track));
     }
     Ok(())
 }

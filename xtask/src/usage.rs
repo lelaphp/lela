@@ -21,9 +21,9 @@
 //! the `usd` total ([`Total`]). A ticket with no usage reading, a stand-in
 //! program in a test, carries none of the three and renders blank, not
 //! zero. The last reading is read off the append-only log and not the
-//! per-key file: a retired worktree's readings reach the track's store
-//! through its log alone (`xtask worktree retire`), and a worktree left
-//! standing still holds its own.
+//! per-key file: a retired worktree's readings reach the main checkout's
+//! store through its log alone (`xtask worktree retire`), and a worktree
+//! left standing still holds its own.
 
 use std::path::Path;
 

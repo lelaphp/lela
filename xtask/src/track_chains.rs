@@ -25,7 +25,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::ticket::{Gh, Open, State};
-use crate::track::{self, Ticket, Track};
+use crate::track::{self, Ticket};
 use crate::track_next::{PERSON, READY, is_tracks};
 
 /// The `--crate` value that keeps the tickets naming no crate.
@@ -263,15 +263,11 @@ fn is_crate(word: &str) -> bool {
         })
 }
 
-/// `xtask track chains`: the track named, or the branch's, and its chains
-/// printed as text or as one JSON object; no reading.
-pub fn command(root: &Path, track: Option<&str>, krate: Option<&str>, json: bool) -> Result<()> {
-    let name = match track {
-        Some(name) => name.to_owned(),
-        None => Track::of(root, None)?.name,
-    };
+/// `xtask track chains`: the track named and its chains printed as text
+/// or as one JSON object; no reading.
+pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
     let open = Gh::on_path().open(root)?;
-    let chains = Chains::of(open, &name, krate, |number| {
+    let chains = Chains::of(open, track, krate, |number| {
         track::branch_of_ticket(root, Ticket::new(number))
     });
     if json {

@@ -1,12 +1,13 @@
-//! The track (CONTEXT.md, harness-design.md §4.5): the branch a set of
-//! branches is worked above, named by being a proper path prefix of theirs.
-//! Four things every reader of a track asks are answered here, for one
-//! worktree, by [`Track::of`]: which track its branch is on, the commit
-//! the branch was taken off, which root holds the track's store, and which
-//! ticket the branch's work is for. `xtask track` prints them, as text or
-//! as one JSON object, and writes no reading, since it measures nothing;
-//! and the add command asks for a branch not yet made. `done` asks no
-//! track: its base is the merge base with `main` (ADR-0009).
+//! What every reader of a worktree asks (CONTEXT.md, Track;
+//! harness-design.md §5; ADR-0009), answered here for one worktree by
+//! [`Track::of`]: the branch it is on, the commit the branch was taken off
+//! `main` at, the main checkout whose `target/harness` is the one store,
+//! and the ticket the branch's work is for. `xtask track` prints them, as
+//! text or as one JSON object, and writes no reading, since it measures
+//! nothing; and the add command asks for a branch not yet made. A track
+//! is a label on the tracker and has no branch, so no track is read
+//! here: `done`'s base is the merge base with `main`, and the frontier
+//! is named by `--track`.
 //!
 //! The ticket is a record on the branch, `branch.<name>.ticket` in the
 //! repository's configuration (#30): git's own per-branch record, shared
@@ -15,53 +16,17 @@
 //! the branch is, and gone with the branch when a person deletes it. A
 //! branch with no record names no ticket, which is stated, and no reader
 //! guesses one from a number in the branch's name.
-//!
-//! A track's own clone is detached at `origin/<name>`, so its `HEAD` is
-//! on no branch, and which track it is is a record on the clone too
-//! (#76): `track.name`, read here for a detached `HEAD` alone, since a
-//! branch names its own track. The commit a track's clone is detached at
-//! is not the record: two tracks laid down from the same `main` share
-//! it. Beside the name the clone records the model its sessions run on,
-//! role-keyed (#75):
-//! `track.model.session` and `track.model.subagent`, the second
-//! defaulting to the first. A clone with no record names no model,
-//! which is stated, and none is guessed from the track's name.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::git::git;
 
-/// The track a branch with no track of its own is on.
+/// The branch every ticket's branch is cut from, and the track of a
+/// ticket that carries no `track:` label (ADR-0009).
 pub(crate) const MAIN: &str = "main";
-
-/// How a track was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Found {
-    /// A proper path prefix of the branch's name is a branch: the track.
-    Prefix,
-    /// No prefix names a branch, so the track is [`MAIN`].
-    NoPrefix,
-    /// `HEAD` is detached and the clone records no track, so the track
-    /// is [`MAIN`].
-    Detached,
-    /// `HEAD` is detached and the clone records its track: a track's own
-    /// clone, detached at `origin/<name>`.
-    Record,
-}
-
-impl Found {
-    fn as_str(self) -> &'static str {
-        match self {
-            Found::Prefix => "prefix",
-            Found::NoPrefix => "no-prefix",
-            Found::Detached => "detached",
-            Found::Record => "record",
-        }
-    }
-}
 
 /// The ticket a branch's work is for: the number of the GitHub issue
 /// recorded on the branch when its worktree was laid down, or the one a
@@ -87,113 +52,56 @@ impl std::fmt::Display for Ticket {
     }
 }
 
-/// The model a track's sessions run on, as the clone records it (#75):
-/// the session's, and its subagents', which is the session's where the
-/// record names none.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Model {
-    pub session: String,
-    /// The subagents' model where the record names one; `None` defaults
-    /// to the session's.
-    pub subagent: Option<String>,
-}
-
-impl Model {
-    pub fn new(session: String, subagent: Option<String>) -> Model {
-        Model { session, subagent }
-    }
-
-    /// The subagents' model: the recorded one, or the session's.
-    pub fn subagent(&self) -> &str {
-        self.subagent.as_deref().unwrap_or(&self.session)
-    }
-}
-
-/// One worktree's track and what follows from it.
+/// One worktree's branch and what follows from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
-    /// The branch whose track this is; `None` for a detached `HEAD`.
+    /// The branch these are the facts of; `None` for a detached `HEAD`.
     pub branch: Option<String>,
-    pub found: Found,
-    /// The track's name: the prefix branch, or [`MAIN`].
-    pub name: String,
-    /// The ref the track is here: its own branch where the repository has
-    /// it, `origin`'s otherwise, which is where a track lives in a
-    /// repository with worktrees on its branches (harness ledger 14).
-    pub at: String,
-    /// The merge base of the branch with the track, and the track's tip
-    /// for a branch not yet made, which is where the add command takes it
-    /// off.
+    /// The merge base of the branch with `main`, and `main`'s tip for a
+    /// branch not yet made, which is where the add command takes it off.
     pub base: String,
-    /// The root whose `target/harness` is the track's store: the main
+    /// The root whose `target/harness` is the one store: the main
     /// worktree, which is the checkout every linked worktree was added
     /// from (harness-design.md §4.2, §5).
     pub store: PathBuf,
     /// The ticket recorded on the branch; `None` for a branch that names
     /// none and for a detached `HEAD`.
     pub ticket: Option<Ticket>,
-    /// The model the clone records; `None` for a clone that records none.
-    pub model: Option<Model>,
 }
 
 impl Track {
-    /// The track of `branch`, or of `HEAD`'s branch when none is named,
-    /// or the clone's record for a detached `HEAD`. A detached `HEAD` with
-    /// no record and a branch whose prefixes name no branch are shapes,
-    /// not errors; a track that is neither a branch nor `origin`'s is one.
+    /// The facts of `branch`, or of `HEAD`'s branch when none is named,
+    /// or of `HEAD` itself when it is detached, which is a shape and not
+    /// an error; a repository with no `main`, its own or `origin`'s, is
+    /// one.
     pub fn of(root: &Path, branch: Option<&str>) -> Result<Track> {
-        let (branch, found, name) = match branch.map(str::to_owned).or_else(|| head_branch(root)) {
-            None => match name_of(root) {
-                Some(name) => (None, Found::Record, name),
-                None => (None, Found::Detached, MAIN.to_owned()),
-            },
-            Some(branch) => match prefix_branch(root, &branch) {
-                Some(track) => (Some(branch), Found::Prefix, track),
-                None => (Some(branch), Found::NoPrefix, MAIN.to_owned()),
-            },
-        };
-        let at = ref_of(root, &name).with_context(|| {
+        let branch = branch.map(str::to_owned).or_else(|| head_branch(root));
+        let main = ref_of(root, MAIN).with_context(|| {
             format!(
-                "the track {name} is neither a branch nor origin's; nothing is measured since it"
+                "the repository has no {MAIN}, its own or origin's; nothing is measured since it"
             )
         })?;
         let from = match &branch {
-            Some(b) if is_branch(root, b) => b.as_str(),
-            Some(_) => at.as_str(),
-            None => "HEAD",
+            Some(b) => ref_of(root, b).unwrap_or_else(|| main.clone()),
+            None => "HEAD".to_owned(),
         };
-        let base = merge_base(root, from, &at)?;
         let ticket = match &branch {
             Some(b) => ticket_of(root, b)?,
             None => None,
         };
         Ok(Track {
+            base: merge_base(root, &from, &main)?,
             branch,
-            found,
-            name,
-            at,
-            base,
             store: main_worktree(root)?,
             ticket,
-            model: model_of(root)?,
         })
     }
 
     /// One line per fact, each stated plainly.
     pub fn render(&self) -> String {
-        let branch = match (&self.branch, self.found) {
-            (Some(b), Found::Prefix) => b.clone(),
-            (Some(b), _) if *b == self.name => format!("{b}, the track itself"),
-            (Some(b), _) => {
-                format!("{b}, whose prefixes name no branch, so on no track of its own")
-            }
-            (None, Found::Record) => {
-                format!(
-                    "none; HEAD is detached at the track {}, which the clone records",
-                    self.name
-                )
-            }
-            _ => "none; HEAD is detached and the clone records no track, so on none".to_owned(),
+        let branch = match &self.branch {
+            Some(b) => b.clone(),
+            None => "none; HEAD is detached".to_owned(),
         };
         let ticket = match self.ticket {
             Some(ticket) => format!("{ticket}, what the branch's work is for"),
@@ -201,27 +109,8 @@ impl Track {
                 "none; the branch records no ticket, and none is guessed from its name".to_owned()
             }
         };
-        let (session, subagent) = match &self.model {
-            Some(model) => (
-                format!("{}, what a session on the track runs on", model.session),
-                match &model.subagent {
-                    Some(subagent) => format!("{subagent}, what its subagents run on"),
-                    None => format!(
-                        "{}, the session's, since the clone records none for the role",
-                        model.session
-                    ),
-                },
-            ),
-            None => (
-                "none; the clone records no model, and none is guessed from the track's name"
-                    .to_owned(),
-                "none; the same record".to_owned(),
-            ),
-        };
         format!(
-            "branch: {branch}\ntrack: {} ({})\nbase: {}, where the branch was taken off\nstore: {}, whose target/harness is the track's\nticket: {ticket}\nmodel.session: {session}\nmodel.subagent: {subagent}\n",
-            self.name,
-            self.at,
+            "branch: {branch}\nbase: {}, where the branch was taken off {MAIN}\nstore: {}, whose target/harness is the one store\nticket: {ticket}\n",
             short(&self.base),
             self.store.display()
         )
@@ -231,16 +120,9 @@ impl Track {
     pub fn to_json(&self) -> Value {
         json!({
             "branch": self.branch,
-            "found": self.found.as_str(),
-            "track": self.name,
-            "at": self.at,
             "base": self.base,
             "store": self.store,
             "ticket": self.ticket.map(Ticket::number),
-            "model": self.model.as_ref().map(|model| json!({
-                "session": model.session,
-                "subagent": model.subagent(),
-            })),
         })
     }
 }
@@ -291,42 +173,6 @@ pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result
     Ok(())
 }
 
-/// The configuration key that is the clone's track record.
-const NAME_KEY: &str = "track.name";
-/// The configuration keys that are the clone's model record, one per
-/// role (#75).
-const SESSION_KEY: &str = "track.model.session";
-const SUBAGENT_KEY: &str = "track.model.subagent";
-
-/// One configuration value, `None` where the key is unset or empty:
-/// the clone's records.
-pub(crate) fn config(root: &Path, key: &str) -> Option<String> {
-    let text = git(root, &["config", "--get", key], None).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_owned())
-}
-
-/// The track the clone records, `None` where it records none.
-fn name_of(root: &Path) -> Option<String> {
-    config(root, NAME_KEY)
-}
-
-/// The model the clone records, `None` where it records none; a
-/// subagents' model recorded with no session's is an error, since the
-/// default runs the other way.
-fn model_of(root: &Path) -> Result<Option<Model>> {
-    let subagent = config(root, SUBAGENT_KEY);
-    match config(root, SESSION_KEY) {
-        Some(session) => Ok(Some(Model { session, subagent })),
-        None if subagent.is_some() => {
-            bail!(
-                "{SUBAGENT_KEY} is recorded and {SESSION_KEY} is not; the subagents' model defaults to the session's, not the other way"
-            )
-        }
-        None => Ok(None),
-    }
-}
-
 /// The branch whose record names `ticket`, if one does: what refuses a
 /// second branch on the same ticket, so no ticket is closed twice.
 pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
@@ -350,12 +196,6 @@ pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
     })
 }
 
-/// Whether `name` is a branch here: a local one, or `origin`'s, which is
-/// what a clone that has never checked the branch out has of it.
-fn is_branch(root: &Path, name: &str) -> bool {
-    ref_of(root, name).is_some()
-}
-
 /// The ref `name` is here: the branch itself, then `origin`'s.
 fn ref_of(root: &Path, name: &str) -> Option<String> {
     let remote = format!("origin/{name}");
@@ -366,20 +206,6 @@ fn ref_of(root: &Path, name: &str) -> Option<String> {
             .ok()
             .map(|_| candidate.to_owned())
     })
-}
-
-/// The longest existing branch that is a proper path prefix of `branch`,
-/// so `t-opus-5/witness` is on the track `t-opus-5`; `None` when no
-/// prefix names a branch.
-fn prefix_branch(root: &Path, branch: &str) -> Option<String> {
-    let mut name = branch;
-    while let Some((prefix, _)) = name.rsplit_once('/') {
-        if is_branch(root, prefix) {
-            return Some(prefix.to_owned());
-        }
-        name = prefix;
-    }
-    None
 }
 
 /// The merge base of `from` and `other`, `other` being the ref it is here

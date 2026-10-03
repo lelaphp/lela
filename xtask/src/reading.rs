@@ -402,7 +402,7 @@ impl Store {
     /// or not at all (#56): `line`, rendered whole with its newline, is
     /// handed to the file in one `write` on a descriptor opened with
     /// `O_APPEND`, so two instruments appending at once, which pre-commit
-    /// and a track's worktrees do, cannot interleave inside a line. POSIX
+    /// and the worktrees do, cannot interleave inside a line. POSIX
     /// promises a whole write only under `PIPE_BUF` (4096 bytes on Linux,
     /// 512 on macOS), and the platforms the harness runs on land a single
     /// `O_APPEND` write to a regular file whole in practice; a reading
@@ -745,7 +745,7 @@ impl Log {
 /// with its distance from the tip. A branch merged into the track sits on
 /// a second parent and a branch cut behind the tip is off it past the cut,
 /// so the readings their worktrees took, which `worktree retire` appends
-/// into the track's store, are not taken on it (#787).
+/// into the main checkout's store, are not taken on it (#787).
 #[derive(Debug, Clone, Default)]
 pub struct Chain {
     distance: BTreeMap<String, usize>,
