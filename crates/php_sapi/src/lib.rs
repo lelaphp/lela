@@ -65,9 +65,7 @@ pub mod tier {
 #[must_use]
 pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> Engine {
     let engine = prepare(builder, ini).build();
-    let _ = std::io::stderr()
-        .lock()
-        .write_all(engine.startup_errors().as_bytes());
+    let _ = std::io::stderr().lock().write_all(engine.startup_errors());
     engine
 }
 
