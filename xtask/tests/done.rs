@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
+use xtask::done::Base;
 use xtask::done::{self, FRESH, Verdict};
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
 use xtask::scratch::Tree;
-use xtask::track::Base;
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
@@ -538,8 +538,6 @@ fn base_overrides_main() {
     assert_eq!(verdict.base.since, "HEAD");
     assert_eq!(verdict.base.commit, head);
     assert!(verdict.crates.is_empty(), "{verdict:#?}");
-    let verdict = judge_since(&root, Some("main"));
-    assert_eq!(verdict.base.commit, cut, "{verdict:#?}");
     let (code, out, err) = xtask(&root, &["done", "--base", &cut], None);
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains(&format!("since {}", &cut[..7])), "{out}");

@@ -2,16 +2,11 @@
 //! branches is worked above, named by being a proper path prefix of theirs.
 //! Four things every reader of a track asks are answered here, for one
 //! worktree, by [`Track::of`]: which track its branch is on, the commit
-//! `done` measures since, which root holds the track's store, and which
+//! the branch was taken off, which root holds the track's store, and which
 //! ticket the branch's work is for. `xtask track` prints them, as text or
 //! as one JSON object, and writes no reading, since it measures nothing;
-//! and the add command asks for a branch not yet made. `done` takes its
-//! base through [`Base::of`], the merge base with `main`, which asks no
-//! track (ADR-0009).
-//!
-//! The rule once lived in `done`'s reads and again in a prefix loop of the
-//! add command, and the console was about to write a third. This module
-//! is the one statement the three read.
+//! and the add command asks for a branch not yet made. `done` asks no
+//! track: its base is the merge base with `main` (ADR-0009).
 //!
 //! The ticket is a record on the branch, `branch.<name>.ticket` in the
 //! repository's configuration (#30): git's own per-branch record, shared
@@ -25,8 +20,9 @@
 //! on no branch, and which track it is is a record on the clone too
 //! (#76): `track.name`, read here for a detached `HEAD` alone, since a
 //! branch names its own track. The commit a track's clone is detached at
-//! is not the record: two tracks laid down from the same `main` share it. Beside the name the clone
-//! records the model its sessions run on, role-keyed (#75):
+//! is not the record: two tracks laid down from the same `main` share
+//! it. Beside the name the clone records the model its sessions run on,
+//! role-keyed (#75):
 //! `track.model.session` and `track.model.subagent`, the second
 //! defaulting to the first. A clone with no record names no model,
 //! which is stated, and none is guessed from the track's name.
@@ -124,9 +120,9 @@ pub struct Track {
     /// it, `origin`'s otherwise, which is where a track lives in a
     /// repository with worktrees on its branches (harness ledger 14).
     pub at: String,
-    /// The commit `done` measures since: the merge base of the branch with
-    /// the track, and the track's tip for a branch not yet made, which is
-    /// where the add command takes it off.
+    /// The merge base of the branch with the track, and the track's tip
+    /// for a branch not yet made, which is where the add command takes it
+    /// off.
     pub base: String,
     /// The root whose `target/harness` is the track's store: the main
     /// worktree, which is the checkout every linked worktree was added
@@ -222,7 +218,7 @@ impl Track {
             ),
         };
         format!(
-            "branch: {branch}\ntrack: {} ({})\nbase: {}, what done measures since\nstore: {}, whose target/harness is the track's\nticket: {ticket}\nmodel.session: {session}\nmodel.subagent: {subagent}\n",
+            "branch: {branch}\ntrack: {} ({})\nbase: {}, where the branch was taken off\nstore: {}, whose target/harness is the track's\nticket: {ticket}\nmodel.session: {session}\nmodel.subagent: {subagent}\n",
             self.name,
             self.at,
             short(&self.base),
@@ -245,41 +241,6 @@ impl Track {
                 "subagent": model.subagent(),
             })),
         })
-    }
-}
-
-/// The commit the changes are measured since, and the ref it was taken
-/// from: `--base`'s, or [`MAIN`], every ticket's branch being cut from it
-/// (ADR-0009, harness-design.md §4.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Base {
-    pub since: String,
-    pub commit: String,
-}
-
-impl Base {
-    /// The merge base of `HEAD` with `since`, [`MAIN`] for a bare `done`:
-    /// the ref first and then `origin`'s, for a checkout that has only the
-    /// remote's.
-    pub fn of(root: &Path, since: Option<&str>) -> Result<Base> {
-        let since = since.unwrap_or(MAIN);
-        Ok(Base {
-            since: since.to_owned(),
-            commit: merge_base(root, "HEAD", since)?,
-        })
-    }
-}
-
-impl std::fmt::Display for Base {
-    /// The ref the base was taken from and the commit it resolved to, and
-    /// the commit alone when the ref was that commit.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let short = short(&self.commit);
-        if self.since == self.commit || self.since == short {
-            write!(f, "{short}")
-        } else {
-            write!(f, "{} ({short})", self.since)
-        }
     }
 }
 
@@ -423,7 +384,7 @@ fn prefix_branch(root: &Path, branch: &str) -> Option<String> {
 /// The merge base of `from` and `other`, `other` being the ref it is here
 /// when it is a branch, and the name given otherwise, so git's own text
 /// says what is missing.
-fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
+pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
     let at = ref_of(root, other);
     let name = at.as_deref().unwrap_or(other);
     git(root, &["merge-base", from, name], None)

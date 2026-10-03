@@ -155,7 +155,7 @@ Commands:
   status             Render one section from the manifest and the store, or with `--session` the map and the local facts; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
-  track              Say which track the branch is on, the commit `done` measures since, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
+  track              Say which track the branch is on, the commit it was taken off, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down beside the checkout, at <checkout>-worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
@@ -181,7 +181,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=6494b89af066269ef3fc1b4fd1b5eae29dad74a7812e56b0dd1642aedbf14d05 out=479f3fd2506e80512ecc2f106ef24326611fc1ae88e6773ab117ba62738672b4 -->
+<!-- /computed in=d18737332f671f51836b6b0a7a83503fb56fd2183dcd36e8c3a229880d199554 out=74f4ee2a0d19b431a8d17dc2085376d1bda46060e875009bb11db0625254a992 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

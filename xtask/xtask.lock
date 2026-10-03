@@ -49,6 +49,8 @@ divergence::Status
 divergence::Status::ALL
 divergence::Status::as_str
 divergence::reason
+done::Base
+done::Base::of
 done::FRESH
 done::Verdict
 done::Verdict::met
@@ -290,8 +292,6 @@ ticket::parent
 ticket::parent_scope
 ticket::run
 ticket::ticket_of
-track::Base
-track::Base::of
 track::Found
 track::Model
 track::Model::new

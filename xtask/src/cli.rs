@@ -112,7 +112,7 @@ pub(crate) enum Command {
         #[arg(long)]
         hook: bool,
     },
-    /// Say which track the branch is on, the commit `done` measures since,
+    /// Say which track the branch is on, the commit it was taken off,
     /// the track's store root, the branch's ticket and the track's model;
     /// as text or as one object. Writes no reading.
     ///
