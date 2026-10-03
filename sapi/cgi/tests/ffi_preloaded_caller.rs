@@ -32,9 +32,9 @@ fn a_preloaded_function_calls_ffi() {
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    // The body alone: the engine's preload request writes a header block
-    // of its own before it, which the oracle's does not (#1633).
+    // The whole of stdout: the preload's request sends no head, as the
+    // oracle's does not (#1633).
     let stdout = String::from_utf8_lossy(&out.stdout);
     let body = "int(7)\nint(2)\nFFI\\Exception: FFI API is restricted by \"ffi.enable\" configuration directive\n";
-    assert!(stdout.ends_with(body), "{stdout:?}");
+    assert_eq!(stdout, body);
 }

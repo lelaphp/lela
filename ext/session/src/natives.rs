@@ -871,6 +871,22 @@ fn session_get_cookie_params(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// -112
 /// 32
 /// ```
+///
+/// A key given twice keeps the last, and the first's string lives to the
+/// request's end, as php overwrites it unreleased
+/// (`Z/ext/session/session.c:1859-1885`):
+///
+/// ```php
+/// ob_start(); ini_set('from', 'x');
+/// $m = memory_get_usage(); session_set_cookie_params(['path' => 123456, 'PATH' => 654321]); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); session_set_cookie_params(['path' => 123456]); echo memory_get_usage() - $m, "\n";
+/// $a = str_repeat('a', 40); $m = memory_get_usage(); session_set_cookie_params(['domain' => $a, 'Domain' => 'x']); unset($a); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 64
+/// 0
+/// 0
+/// ```
 #[allow(clippy::too_many_lines)] // php's function
 #[php_function]
 fn session_set_cookie_params(
@@ -958,10 +974,9 @@ fn session_set_cookie_params(
             };
             if let (Some(slot), Some(made)) = (slot, made) {
                 // A key given twice keeps the last; php overwrites the
-                // first without releasing it, which is released here.
-                if let Some(before) = slot.replace(made) {
-                    before.release(req);
-                }
+                // first without releasing it, so it lives to the request's
+                // end, as `memory_get_usage()` reads it.
+                *slot = Some(made);
                 found += 1;
                 continue;
             }
