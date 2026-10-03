@@ -198,7 +198,7 @@ pub fn while_pending<R>(
 /// `session.use_only_cookies=0` at startup is the witness, in
 /// `ext/session`.
 pub fn startup(req: &mut Request, level: Level, message: &str) {
-    req.note_startup_error(level, message);
+    req.note_startup_error(level, message.as_bytes());
 }
 
 /// `E_WARNING`.
@@ -340,11 +340,23 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
     if req.ini_stage() == crate::api::abi::IniStage::Startup {
-        return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
+        return verror(
+            req,
+            level,
+            Origin::Phase("PHP Startup"),
+            b"",
+            message.as_bytes(),
+        );
     }
     if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();
-        return verror(req, level, Origin::Function(&function), b"", message);
+        return verror(
+            req,
+            level,
+            Origin::Function(&function),
+            b"",
+            message.as_bytes(),
+        );
     }
     let phase = match req.phase() {
         crate::api::request::Phase::Startup => "PHP Request Startup",
@@ -352,7 +364,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         // `get_active_function_name` does when a handler raises it.
         crate::api::request::Phase::Running if !req.bailing_out() => {
             if let Some(name) = req.active_user_function() {
-                return verror(req, level, Origin::Function(&name), b"", message);
+                return verror(req, level, Origin::Function(&name), b"", message.as_bytes());
             }
             "Unknown"
         }
@@ -361,7 +373,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
             "PHP Request Shutdown"
         }
     };
-    verror(req, level, Origin::Phase(phase), b"", message);
+    verror(req, level, Origin::Phase(phase), b"", message.as_bytes());
 }
 
 /// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
@@ -371,7 +383,13 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
 /// raises what libmagic's opens of a magic file raise.
 pub fn docref_parameter(req: &mut Request, level: Level, parameter: &[u8], message: &str) {
     let function = req.active_native();
-    verror(req, level, Origin::Function(&function), parameter, message);
+    verror(
+        req,
+        level,
+        Origin::Function(&function),
+        parameter,
+        message.as_bytes(),
+    );
 }
 
 /// What `php_verror` names a diagnostic by: a function, its parameters
@@ -431,16 +449,16 @@ pub(crate) fn verror(
     level: Level,
     origin: Origin<'_>,
     params: &[u8],
-    message: &str,
+    message: &[u8],
 ) {
     let mut laid = Laid::default();
     let sentence = laid.lay(req, &origin, params, message).and_then(|()| {
-        let params = escaped(req, &String::from_utf8_lossy(params));
+        let params = String::from_utf8_lossy(&escaped(req, params)).into_owned();
         let origin = match origin {
             Origin::Function(function) => self::origin(req, function, &params),
             Origin::Phase(phase) => phase.to_owned(),
         };
-        let text = format!("{origin}: {}", escaped(req, message));
+        let text = [format!("{origin}: ").as_bytes(), &escaped(req, message)].concat();
         strpprintf(req, &text)
     });
     laid.free(req);
@@ -469,12 +487,13 @@ impl Laid {
         req: &mut Request,
         origin: &Origin<'_>,
         params: &[u8],
-        message: &str,
+        message: &[u8],
     ) -> Result<(), Thrown> {
         let html = req.ini_flag(b"html_errors");
         self.message = Some(strpprintf(req, message)?);
         if html {
-            self.blocks.push(escape_buffer(req, message)?);
+            self.blocks
+                .push(escape_buffer(req, &String::from_utf8_lossy(message))?);
             if let Some(printed) = self.message.take() {
                 req.release(Value::string(printed));
             }
@@ -539,12 +558,12 @@ fn escape_buffer(req: &mut Request, text: &str) -> Result<php_heap::Block, Throw
 /// `html_errors` (`Z/main/main.c:1074`, `:1139`): `&`, `<`, `>` and `"`
 /// as entities, a byte that was not UTF-8 already the replacement
 /// character the message was read with. ext/fileinfo's `bug68996.phpt`
-/// is the witness.
-fn escaped(req: &Request, text: &str) -> String {
+/// is the witness. Without it the bytes stand as raised.
+fn escaped(req: &Request, text: &[u8]) -> Vec<u8> {
     if req.ini_flag(b"html_errors") {
-        crate::api::request::escape_html(text)
+        crate::api::request::escape_html(&String::from_utf8_lossy(text)).into_bytes()
     } else {
-        text.to_owned()
+        text.to_vec()
     }
 }
 
@@ -1007,7 +1026,7 @@ pub(crate) fn under_name(
 /// 416 0
 /// 4480 0
 /// ```
-pub(crate) fn strpprintf(req: &mut Request, text: &str) -> Result<PhpString, Thrown> {
+pub(crate) fn strpprintf(req: &mut Request, text: &[u8]) -> Result<PhpString, Thrown> {
     // `SMART_STR_START_LEN`, the 256 bytes less the string's header and
     // terminator, and `SMART_STR_NEW_LEN` past it.
     let paged = text.len() >= 231;
@@ -1020,9 +1039,9 @@ pub(crate) fn strpprintf(req: &mut Request, text: &str) -> Result<PhpString, Thr
     let buffer = req.fatal_of(block)?;
     if paged {
         req.heap_mut().free_block(buffer);
-        return PhpString::new(req, text.as_bytes());
+        return PhpString::new(req, text);
     }
-    let string = PhpString::new(req, text.as_bytes());
+    let string = PhpString::new(req, text);
     req.heap_mut().free_block(buffer);
     string
 }

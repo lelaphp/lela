@@ -4501,7 +4501,7 @@ impl Request {
             return;
         };
         let origin = crate::api::raising::Origin::Function(function);
-        crate::api::raising::verror(self, Level::Warning, origin, path, text);
+        crate::api::raising::verror(self, Level::Warning, origin, path, text.as_bytes());
         self.heap_mut().free_block(copy);
     }
 
