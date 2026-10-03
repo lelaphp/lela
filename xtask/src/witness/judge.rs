@@ -20,6 +20,12 @@
 //! fence names where it names one, its ini after the recipe's in each
 //! (harness §8, ledger 55). The name is resolved against the pin before
 //! anything runs, so the two runs are handed one regime and never two.
+//!
+//! A fence naming a `locale=<name>` is asked first whether the host knows
+//! it, as a `.phpt`'s `--SKIPIF--` asks `setlocale` (#1678): the oracle
+//! and the linked engine each run [`probe`], and where neither can move
+//! `LC_ALL` to one of the names the witness is a skip naming it, run by
+//! neither and counted in the reading.
 
 use std::fmt;
 
@@ -72,6 +78,25 @@ pub(super) fn one(
     binary: &Binary,
     kept: &mut Kept,
 ) -> Judged {
+    match lacking(oracle, witness) {
+        Ok(None) => {}
+        Ok(Some(name)) => {
+            // Not run, so what it would have entered is not known: its
+            // natives are no witness short for a locale this host lacks.
+            kept.entered = Record::Unserved;
+            return judged(
+                witness,
+                Judgement::Skipped,
+                format!(
+                    "neither the oracle nor the linked engine can setlocale(LC_ALL, \"{name}\") on this host, which the fence's `locale={name}` needs"
+                ),
+            );
+        }
+        Err(trouble) => {
+            kept.entered = Record::Unserved;
+            return judged(witness, Judgement::Bork, trouble);
+        }
+    }
     let oracle_run = match &witness.request {
         Some(commands) if witness.served == Served::Phpdbg => oracle.asserted().and_then(|()| {
             let Some(phpdbg) = &oracle.pin().sapi.phpdbg else {
@@ -157,6 +182,46 @@ pub(super) fn one(
         exit,
         [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
     )
+}
+
+/// The snippet that asks a host whether it knows a locale: `bool(true)`
+/// where `setlocale(LC_ALL, <name>)` takes. The fence grammar admits only
+/// names that stand in a single-quoted string as written.
+fn probe(name: &str) -> String {
+    format!("var_dump(setlocale(LC_ALL, '{name}') !== false);")
+}
+
+/// Whether a probe's run says the host knows the locale.
+fn knows(ran: &Observation) -> bool {
+    String::from_utf8_lossy(&ran.stdout).contains("bool(true)")
+}
+
+/// The first locale the fence names that neither the oracle nor the linked
+/// engine can move `LC_ALL` to; nothing where each name is known to one of
+/// them, and then the witness runs and the verdict says whether the two
+/// agree. The engine is asked only where the oracle does not know it.
+fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w str>, String> {
+    for name in &witness.locales {
+        let snippet = probe(name);
+        let oracle_ran = oracle
+            .run(Program::Snippet(&snippet), None)
+            .map_err(|trouble| {
+                format!("the oracle did not run the probe for `locale={name}`: {trouble:#}")
+            })?;
+        if knows(&oracle_ran) {
+            continue;
+        }
+        let engine_ran =
+            linked::serve(&oracle.pin().recipe, None, &snippet).map_err(|trouble| {
+                format!(
+                    "the linked engine did not serve the probe for `locale={name}`: {trouble:#}"
+                )
+            })?;
+        if !knows(&engine_ran) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
 }
 
 /// The run of record, and what it entered: the engine linked into the

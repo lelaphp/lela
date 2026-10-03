@@ -822,3 +822,73 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
         reading.message
     );
 }
+
+/// A fence naming a locale the host knows to neither run is a skip, as a
+/// `.phpt` whose `--SKIPIF--` dies on `!setlocale(...)` is (#1678): not
+/// run, so its pinned bytes, which nothing prints, neither pass nor fail
+/// it; named in the note, counted in the reading as `skipped`, and the
+/// crate's reading does not fail on it. The control: the same fence
+/// naming `C`, which every host knows, runs and fails on the same bytes,
+/// and one naming both is a skip for the one the host lacks.
+#[test]
+fn a_fence_naming_a_locale_the_host_lacks_is_a_counted_skip() {
+    if oracle().is_none() {
+        return;
+    }
+    let pins = |locales: &str| {
+        block(&format!(
+            "/// ```expect {locales}\n/// what nothing prints\n/// ```\n"
+        ))
+    };
+    let tally = judge_text(&pins("locale=xx_XX.NOPE"), &registry(""));
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Skipped, "{note}");
+    assert!(
+        note.contains("setlocale(LC_ALL, \"xx_XX.NOPE\")") && note.contains("locale=xx_XX.NOPE"),
+        "{note}"
+    );
+    assert!(!tally.failed(), "{tally:#?}");
+    assert!(tally.missing.is_empty(), "{tally:#?}");
+
+    let (judgement, note) = only(&judge_text(&pins("locale=C"), &registry("")));
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    let (judgement, note) = only(&judge_text(
+        &pins("locale=C locale=xx_XX.NOPE"),
+        &registry(""),
+    ));
+    assert_eq!(judgement, Judgement::Skipped, "{note}");
+
+    let root = workspace();
+    let manifest = manifest();
+    let krate = manifest
+        .crates
+        .iter()
+        .find(|krate| krate.name == "ext/pcre")
+        .unwrap();
+    let reading = super::reading(&tally, &root, krate, super::coverage_rule(&manifest)).unwrap();
+    assert_eq!(reading.status, crate::reading::Status::Skip, "{reading:#?}");
+    assert_eq!(reading.numbers["skipped"].to_string(), "1", "{reading:#?}");
+    assert_eq!(reading.numbers["failed"].to_string(), "0", "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("1 witness skipped for a locale this host lacks"),
+        "{}",
+        reading.message
+    );
+}
+
+/// A locale the oracle knows is run and held as any fence is: the probe
+/// keeps nothing of the host's locale for the snippet, which runs under
+/// the recipe's.
+#[test]
+fn a_fence_naming_a_locale_the_host_knows_runs_and_is_held() {
+    if oracle().is_none() {
+        return;
+    }
+    let tally = judge_text(
+        &block("/// ```expect locale=C\n/// 1\n/// ```\n"),
+        &registry(""),
+    );
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}

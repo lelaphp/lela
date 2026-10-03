@@ -60,6 +60,16 @@
 //! fences carry it is refused, not judged, where the server does not
 //! answer, as `phpt` refuses a `MySQL` subset (#1366).
 //!
+//! A `locale=<name>`, which may stand more than once, says the snippet
+//! needs the host to know that locale, as a `.phpt` whose `--SKIPIF--`
+//! dies on `!setlocale(LC_CTYPE, "de_DE")` does: where neither the oracle
+//! nor the linked engine can `setlocale(LC_ALL, <name>)` for one of them,
+//! the witness is a skip that names the locale and is counted, never a
+//! pass or a fail (#1678). Where either can, it runs and is held as any
+//! other. The name is letters, digits and `_ . - @`, so it stands in the
+//! probe's string as written. What the snippet runs is not moved by it,
+//! so it is no part of the divergence key.
+//!
 //! The scan is textual, as `vocab`'s is, not a parse. A doc line is one
 //! beginning `///` or `//!` with one leading space dropped from its body; a
 //! block ends at the first item line, which is a line at indentation zero
@@ -169,6 +179,10 @@ pub struct Witness {
     pub served: Served,
     /// `mysql`: the snippet needs the `MySQL` server.
     pub server: bool,
+    /// The locales the snippet needs, each a `locale=<name>` in the order
+    /// written: the witness is a skip where the host knows one of them to
+    /// neither run (#1678).
+    pub locales: Vec<String>,
     /// The `request` fence's body: the `.phpt` sections of a CGI-shaped
     /// test (`--GET--`, `--POST--`, `--POST_RAW--`, `--COOKIE--`) the CGI
     /// host is handed, read by the phpt lane's one translation of them.
@@ -384,7 +398,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `process` and `mysql`, and the ini a regime carries is the pin's"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `locale=<name>`, `process` and `mysql`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -420,6 +434,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
                 attributes.served
             },
             server: attributes.server,
+            locales: attributes.locales,
             request,
         },
         after,
@@ -495,6 +510,8 @@ struct Attributes {
     served: Served,
     /// `mysql`: the snippet needs the `MySQL` server.
     server: bool,
+    /// Each `locale=<name>`, in the order written.
+    locales: Vec<String>,
     /// Attributes this grammar has no meaning for, in the order written.
     unknown: Vec<String>,
 }
@@ -530,12 +547,30 @@ impl Attributes {
                 } else {
                     out.regime = Some(regime.to_owned());
                 }
+            } else if let Some(locale) = word.strip_prefix("locale=") {
+                // A name the probe can carry as written, and a name at
+                // all; whether the host knows it is the instrument's to
+                // ask, at the run.
+                if locale_name(locale) {
+                    out.locales.push(locale.to_owned());
+                } else {
+                    out.unknown.push(word.to_owned());
+                }
             } else {
                 out.unknown.push(word.to_owned());
             }
         }
         out
     }
+}
+
+/// Whether a `locale=` names a locale as a C library spells one:
+/// letters, digits and `_ . - @`, and at least one of them.
+fn locale_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '@'))
 }
 
 /// A declared duration: a number and `ms` or `s`. Nothing longer, since
@@ -786,6 +821,44 @@ mod tests {
         };
         assert_eq!(witness.regime.as_deref(), Some("short-tags"));
         assert_eq!(witness.exit, Exit::Pinned(0));
+    }
+
+    #[test]
+    fn a_locale_attribute_repeats_and_is_no_part_of_the_key() {
+        let marked = php(concat!(
+            "/// ```php\n/// echo 1;\n/// ```\n",
+            "/// ```expect locale=de_DE locale=fr_FR.ISO8859-1 locale=sr_RS@latin\n/// 1\n/// ```\n",
+            "pub fn k() {}\n"
+        ));
+        assert!(marked.problems.is_empty(), "{:#?}", marked.problems);
+        let plain = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\n");
+        assert_eq!(
+            marked.witnesses[0].locales,
+            ["de_DE", "fr_FR.ISO8859-1", "sr_RS@latin"]
+        );
+        assert!(plain.witnesses[0].locales.is_empty());
+        assert_eq!(marked.witnesses[0].id(), plain.witnesses[0].id());
+    }
+
+    #[test]
+    fn a_locale_attribute_without_a_name_the_probe_can_carry_is_a_problem() {
+        for word in ["locale=", "locale=de_DE'", "locale=de DE"] {
+            let found = php(&format!(
+                "/// ```php\n/// x\n/// ```\n/// ```expect {word}\n/// ```\npub fn k() {{}}\n"
+            ));
+            if word == "locale=de DE" {
+                // `DE` is a word of its own, which the grammar has no
+                // meaning for.
+                assert_eq!(found.problems.len(), 1, "{found:#?}");
+                continue;
+            }
+            assert!(found.witnesses.is_empty(), "{word}: {found:#?}");
+            assert!(
+                found.problems[0].what.contains("`locale=<name>`"),
+                "{:?}",
+                found.problems[0]
+            );
+        }
     }
 
     #[test]
