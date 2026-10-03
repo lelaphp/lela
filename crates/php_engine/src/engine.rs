@@ -381,6 +381,13 @@ impl FileHandles {
             *fd = None;
         }
     }
+
+    /// The three with `stdin` under the first and copies of the other
+    /// two, as phpdbg's `php://stdin` opens its `stdin_file`.
+    pub(crate) fn set_stdin(&mut self, stdin: std::os::fd::OwnedFd) {
+        let copy = |at: usize| self.fds.fds[at].as_ref().and_then(|fd| fd.try_clone().ok());
+        *self = FileHandles::new(Some(stdin), copy(1), copy(2));
+    }
 }
 
 /// A body write the host could not make, php's hosts'

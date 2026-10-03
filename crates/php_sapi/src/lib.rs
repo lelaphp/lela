@@ -49,8 +49,8 @@ pub mod tier {
         Stepped, Tier, TraceRow, Under, Variable, backtrace, below, call, caller, catches,
         class_named, entry, evaluate, evaluate_code, exit, exiting, frame_code, function_exists,
         function_named, included_files, last_error, literals, method_named, oplines, pending,
-        position, restore, serves, set_argv, set_aside, step, superglobals, table_sizes, unwind,
-        user_classes, user_constants, user_functions, variable, variables,
+        position, restore, serves, set_argv, set_aside, set_stdin, step, superglobals, table_sizes,
+        unwind, user_classes, user_constants, user_functions, variable, variables,
     };
 }
 

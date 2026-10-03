@@ -965,16 +965,24 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
     // there and then, `PHPDBG_IS_INITIALIZING` keeping the loop from
     // stopping but for a throwable nothing catches, and the reading goes
     // on after it.
-    // With arguments, it rebuilds `argv` in the request first; a `<file`
-    // among them, which php opens as the program's stdin there, starts
-    // a run of its own.
+    // With arguments, it rebuilds `argv` in the request first, a `<file`
+    // among them opened as the program's stdin there, and one that does
+    // not open refusing the run.
     if s.initializing && s.program_held {
+        compiled_in_init(s);
         if let Some(args) = &args {
             crate::host::set_arguments(s, args);
-            if s.stdin_file.is_some() {
-                s.stdin_file = None;
-                s.stopped = Some(Stop::RunWith(Some(args.clone())));
-                return Ret::Success;
+            if let Some(path) = s.stdin_file.take() {
+                let Ok(file) = std::fs::File::open(&path) else {
+                    out::error(
+                        format!("Could not open '{}' for reading from stdin", path.display())
+                            .as_bytes(),
+                    );
+                    return Ret::Success;
+                };
+                if let Some(req) = here.request() {
+                    tier::set_stdin(req, file.into());
+                }
             }
             if let Some(req) = here.request() {
                 let mut words = vec![s.exec.clone().unwrap_or_default()];
@@ -982,7 +990,6 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
                 tier::set_argv(req, words);
             }
         }
-        compiled_in_init(s);
         s.inline_run = true;
         return Ret::Success;
     }

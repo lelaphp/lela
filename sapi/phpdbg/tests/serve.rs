@@ -1084,3 +1084,46 @@ fn a_yes_after_the_init_files_run_asks_again_only_where_nothing_followed_it() {
     );
     assert!(served.out.starts_with(&expected), "{}", served.out);
 }
+
+/// `run <file` in the init file opens the file as the program's stdin in
+/// the request the file runs in, `STDIN` registered again over it, and
+/// runs the program there, as php's `run` does with its `stdin_file`;
+/// under `-r` the startup run asks after it (the first two cycles of the
+/// pinned phpdbg's bytes for `phpdbg -qb -n` and `-qrb -n`).
+#[test]
+fn run_with_a_stdin_file_in_the_init_file_runs_inline() {
+    let program = "<?php\necho \"got \", fgets(STDIN);\n";
+    let looping = Setup {
+        files: &[("data.txt", "line one\nline two\n")],
+        limit: Some(4096),
+        ..Setup::default()
+    };
+    let init = Some("run <data.txt\nev 3\n");
+    let served = under_phpdbg_with(
+        "init-run-stdin",
+        &["-qb", "-n"],
+        init,
+        program,
+        "q\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!("{compiled}got line one\n");
+    let expected =
+        format!("{ran}{compiled}[Script ended normally]\n{ran}[Script ended normally]\n");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+    let served = under_phpdbg_with(
+        "init-run-stdin-r",
+        &["-qrb", "-n"],
+        init,
+        program,
+        "y\nq\n",
+        &looping,
+    );
+    let compiled = format!("[Successful compilation of {}]\n", served.file);
+    let ran = format!("{compiled}got line one\n");
+    let ask = "Do you really want to restart execution? (type y or n): ";
+    let expected =
+        format!("{ran}{ask}{ran}[Script ended normally]\n{ran}[Script ended normally]\n");
+    assert!(served.out.starts_with(&expected), "{}", served.out);
+}
