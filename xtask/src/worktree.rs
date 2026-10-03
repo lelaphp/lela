@@ -39,9 +39,9 @@
 //!
 //! The branch is cut from `main`'s tip ([`Track::of`]'s base for a branch
 //! not yet made), which is what `xtask done` will judge the worktree
-//! against (§4.5). A branch that exists, on the clone or on `origin`, a directory that
-//! exists, and a ticket another branch already records, refuse before
-//! anything is laid down, as `new-ext` does. Nothing is measured here and
+//! against (§4.5). A branch that exists, on the clone or on `origin`, a
+//! directory that exists, and a ticket another branch already records,
+//! refuse before anything is laid down, as `new-ext` does. Nothing is measured here and
 //! no reading is written: the readings are the worktree's own, once an
 //! agent is in it.
 //!
@@ -233,9 +233,9 @@ fn complain(whose: &str, line: &str) {
 }
 
 /// Retire the worktree on `branch`: its log appended into the main
-/// checkout's store and emptied, the worktree removed, the branch kept. A branch no
-/// worktree is on, the main worktree and uncommitted work are refusals;
-/// the last one after the append, which the lines say.
+/// checkout's store and emptied, the worktree removed, the branch kept.
+/// A branch no worktree is on, the main worktree and uncommitted work are
+/// refusals; the last one after the append, which the lines say.
 pub fn retire(root: &Path, branch: &str) -> Result<()> {
     let track = Track::of(root, Some(branch))
         .with_context(|| format!("where {branch} was taken off could not be said"))?;

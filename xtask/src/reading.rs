@@ -741,8 +741,8 @@ impl Log {
     }
 }
 
-/// The commits a track stands on: the first-parent chain of `HEAD`, each
-/// with its distance from the tip. A branch merged into the track sits on
+/// The commits a checkout stands on: the first-parent chain of `HEAD`,
+/// each with its distance from the tip. A branch merged into it sits on
 /// a second parent and a branch cut behind the tip is off it past the cut,
 /// so the readings their worktrees took, which `worktree retire` appends
 /// into the main checkout's store, are not taken on it (#787).
@@ -772,7 +772,7 @@ impl Chain {
         (!commit.is_empty() && id.starts_with(commit)).then_some(*n)
     }
 
-    /// The reading of each scope of `instrument` that stands for the track,
+    /// The reading of each scope of `instrument` that stands for the tip,
     /// in scope order: the one taken at the tip or at its nearest ancestor
     /// on the chain, the last written of those taken at one commit. One
     /// taken off the chain stands for nothing, and one taken at no commit,

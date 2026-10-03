@@ -189,8 +189,8 @@ impl Spent {
 
     /// The last usage reading under `scope` in the first of `stores` whose
     /// log holds one, oldest store first: the worktree's own where one
-    /// still stands, then the track's, which a retire appended into. None
-    /// where no store has one.
+    /// still stands, then the main checkout's, which a retire appended
+    /// into. None where no store has one.
     pub fn last(stores: &[&Store], scope: &str) -> Result<Option<Spent>> {
         for store in stores {
             let log = store.log()?;
@@ -353,7 +353,8 @@ mod tests {
     /// The join with a usage reading: the last one under the ticket's
     /// scope in the log carries its `usd`, `tokens` and `turn` onto the
     /// ticket's reading, and the run's total sums the usd; the worktree's
-    /// store is read before the track's, since a retire moves the log.
+    /// store is read before the main checkout's, since a retire moves the
+    /// log.
     #[test]
     fn the_join_carries_the_last_reading_under_the_scope_and_the_run_totals_it() {
         let tree = Tree::new("usage-join").unwrap();

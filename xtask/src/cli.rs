@@ -485,10 +485,10 @@ pub(crate) struct Identity {
 /// What is done to a track rather than asked of it.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
-    /// The ticket the track works next: the oldest open `ready-for-agent`
-    /// ticket that no open ticket blocks, that carries no `track:<name>`
-    /// label naming another track, and that no branch of the repository
-    /// records; "none" when the frontier is empty. Reads the tracker
+    /// The ticket the track works next: the widest open `ready-for-agent`
+    /// ticket by the census that no open ticket blocks, that carries no
+    /// `track:<name>` label naming another track, and that no branch of
+    /// the repository records; "none" when the frontier is empty. Reads the tracker
     /// through the ticket module and writes no reading.
     Next {
         /// The track, by its `track:` label.

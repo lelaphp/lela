@@ -837,7 +837,7 @@ impl Gh {
     }
 
     /// `gh issue view <n> --json …`, one issue, its labels among them,
-    /// since a close holds a successor to the track it was filed on.
+    /// since a close holds a successor to the closed ticket's track.
     pub fn view(&self, root: &Path, ticket: Ticket) -> Result<Issue> {
         let number = ticket.number().to_string();
         let text = gh(

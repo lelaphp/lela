@@ -155,9 +155,9 @@ fn ticket_of(root: &Path, branch: &str) -> Result<Option<Ticket>> {
 
 /// The ticket recorded on the branch `HEAD` is on, `None` for a branch
 /// that records none and for a detached `HEAD`: what `done` asks for
-/// condition 7 (#31, proposed for harness-design.md §4.5), the record alone, with no
+/// condition 7 (#31, harness-design.md §4.5), the record alone, with no
 /// merge base taken, so a base a caller passed is not second-guessed and
-/// a track that is missing is not a reason to skip the ticket.
+/// a `main` that is missing is not a reason to skip the ticket.
 pub(crate) fn head_ticket(root: &Path) -> Result<Option<Ticket>> {
     match head_branch(root) {
         Some(branch) => ticket_of(root, &branch),
