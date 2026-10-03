@@ -31,6 +31,7 @@
 mod inventory;
 pub(crate) mod lock;
 mod ops;
+pub(crate) mod row;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,9 +46,23 @@ use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, extension_calls, uses};
 use lock::{Block, Diff, Lock, list};
+use numbers::{EDGES, EXTENSIONS, ITEMS, PRIVATE as PRIVATE_ITEMS};
 use workspace::{Crates, Present};
 
 pub(crate) const INSTRUMENT: &str = "api-check";
+
+/// The keys of an api-check reading's counts, named once for the
+/// instrument that writes them and the rendering that reads them.
+pub(crate) mod numbers {
+    /// A seam's lock lines: its public items, or the opcodes of `ops.toml`.
+    pub(crate) const ITEMS: &str = "items";
+    /// Of a seam's items, those `__private` names.
+    pub(crate) const PRIVATE: &str = "private";
+    /// A crate's workspace dependencies, each held to its edges.
+    pub(crate) const EDGES: &str = "edges";
+    /// The extensions the bundle registers, held to the crate graph.
+    pub(crate) const EXTENSIONS: &str = "extensions";
+}
 
 /// Run the instrument over `root`, print one line per reading, and record
 /// them; the outcome is the exit. With `staged`, a crate whose reading
@@ -219,7 +234,7 @@ fn seam_reading(
     let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
     reading
         .numbers
-        .insert("items".to_owned(), count(generated.len()));
+        .insert(ITEMS.to_owned(), count(generated.len()));
     let subject = match kind {
         LockKind::Items => format!("public items of {home}"),
         LockKind::Imports => format!("imports from {}", seam.producer),
@@ -243,8 +258,8 @@ fn seam_reading(
             let private = generated.iter().filter(|line| private(line)).count();
             items -= private;
             beside = " beside __private's";
-            reading.numbers.insert("items".to_owned(), count(items));
-            reading.numbers.insert("private".to_owned(), count(private));
+            reading.numbers.insert(ITEMS.into(), count(items));
+            reading.numbers.insert(PRIVATE_ITEMS.into(), count(private));
             if private as u64 > cap {
                 problems.push(format!(
                     "{shown} has {private} {PRIVATE} items; the ceiling is {cap} (api_private_items)"
@@ -486,7 +501,7 @@ fn crate_reading(
     reading.adr = adr.join(", ");
     reading
         .numbers
-        .insert("edges".to_owned(), count(krate.deps.len()));
+        .insert(EDGES.to_owned(), count(krate.deps.len()));
 
     let mut problems = Vec::new();
     let mut notes = Vec::new();
@@ -534,7 +549,7 @@ fn crate_reading(
             let listed = bundle_order(krate)?;
             reading
                 .numbers
-                .insert("extensions".to_owned(), count(listed.len()));
+                .insert(EXTENSIONS.to_owned(), count(listed.len()));
             problems.extend(not_topological(crates, &listed));
         } else {
             problems.push(format!(

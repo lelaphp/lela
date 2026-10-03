@@ -884,6 +884,60 @@ fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
     assert!(!ok && err.contains("no-such-log.jsonl"), "{err}");
 }
 
+/// `--every --log` renders every budget, api-check (the locks section's)
+/// and witness reading of
+/// a log it is handed as one versioned line each, in the log's order
+/// (#1763), as it does a phpt reading: a whole line, a lean row of the
+/// published history, a torn line counted on stderr and skipped, and the
+/// other instruments' lines left out. Each fixture's `expected.jsonl` is
+/// what the dashboard's tests read as the rows xtask renders.
+#[test]
+fn every_budget_api_check_and_witness_reading_of_a_log_handed_in_is_one_versioned_line() {
+    let root = scratch("every-sections");
+    for (section, instrument, torn) in [
+        ("budget", "budget", 8),
+        ("locks", "api-check", 6),
+        ("witness", "witness", 5),
+    ] {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/status-{section}"));
+        let log = fixture.join("log.jsonl");
+        let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
+        let every = [
+            "--section",
+            section,
+            "--format",
+            "jsonl",
+            "--every",
+            "--log",
+        ];
+
+        let (ok, lines, err) = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
+        assert!(ok, "{section}: {err}");
+        assert_eq!(lines, expected, "{section}");
+        assert!(
+            err.contains(&format!("1 line unreadable at {torn}")),
+            "{section}: {err}"
+        );
+        for line in lines.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                (&row["v"], &row["instrument"]),
+                (&serde_json::json!(1), &serde_json::json!(instrument)),
+                "{line}"
+            );
+        }
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        let (ok, piped, err) = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
+        assert!(ok, "{section}: {err}");
+        assert_eq!(
+            piped, expected,
+            "{section}: the standard input reads as the file does"
+        );
+    }
+}
+
 /// Without `--log`, `--every` renders the store's own log, every reading
 /// and none picked, where the section without it renders the one that
 /// stands, as it did; and each flag is refused where it means nothing.
@@ -933,8 +987,8 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
         (&["--section", "phpt", "--format", "jsonl"][..], "--every"),
         (&["--section", "phpt", "--every"][..], "--format jsonl"),
         (
-            &["--section", "budget", "--format", "jsonl", "--every"][..],
-            "budget",
+            &["--section", "test", "--format", "jsonl", "--every"][..],
+            "test",
         ),
         (&["--section", "phpt", "--log", "-"][..], "--every"),
     ] {

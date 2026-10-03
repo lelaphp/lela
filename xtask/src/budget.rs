@@ -6,6 +6,8 @@
 //! workspace, one for `scripts/**` against `[budget] scripts`, one per
 //! generated file.
 
+pub(crate) mod row;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -18,6 +20,32 @@ use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Manifest};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::{self, Standing};
+
+/// The instrument whose readings this module writes.
+pub(crate) const INSTRUMENT: &str = "budget";
+
+/// The scope of the reading of the whole workspace against `[budget]`.
+pub(crate) const WORKSPACE: &str = "workspace";
+
+/// The keys of a budget reading's counts, named once for the instrument
+/// that writes them and the rendering that reads them.
+pub(crate) mod numbers {
+    /// The lines counted: a crate's own, or `scripts/**`'s.
+    pub(crate) const LINES: &str = "lines";
+    /// The ceiling a crate's, or `scripts/**`'s, lines are held to.
+    pub(crate) const CEILING: &str = "ceiling";
+    /// A crate's binding lines, `ext/*/src/ffi/**`, pooled apart.
+    pub(crate) const BINDINGS: &str = "bindings";
+    /// The tracked files `scripts/**` counts.
+    pub(crate) const FILES: &str = "files";
+    /// The workspace's every counted line, against `[budget] total`.
+    pub(crate) const TOTAL: &str = "total";
+
+    /// The key of the ceiling a workspace pool `name` is held to.
+    pub(crate) fn ceiling_of(name: &str) -> String {
+        format!("{name}_ceiling")
+    }
+}
 
 /// Where the design's sentence on ceilings is, for the failure text; the
 /// `[[crate]]` row carries no text of its own.
@@ -36,7 +64,7 @@ pub(crate) fn measure(
     store: &Store,
     staged: bool,
 ) -> Result<Vec<Reading>> {
-    let standing = Standing::of_every_crate(staged, root, manifest, store, "budget")?;
+    let standing = Standing::of_every_crate(staged, root, manifest, store, INSTRUMENT)?;
     over(root, manifest, &standing)
 }
 
@@ -52,8 +80,8 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
                 Some(Number::Int(n)) => u64::try_from(*n).unwrap_or(0),
                 _ => 0,
             };
-            total.lines += number("lines");
-            total.bindings += number("bindings");
+            total.lines += number(numbers::LINES);
+            total.bindings += number(numbers::BINDINGS);
             continue;
         }
         let (reading, count) = crate_reading(root, krate)?;
@@ -80,7 +108,7 @@ const SCRIPTS_LINE_TEXT: &str =
 /// than no row. Without the row, which a person writes, the count is
 /// measured and held to nothing: a skip that says the number.
 fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
-    let mut reading = Reading::for_scope("budget", manifest::SCRIPTS, manifest, root)?;
+    let mut reading = Reading::for_scope(INSTRUMENT, manifest::SCRIPTS, manifest, root)?;
     let row = manifest.budget.scripts.as_ref();
     let generators: &[String] = row.map_or(&[], |s| s.generators.as_slice());
     let mut counted = Vec::new();
@@ -102,8 +130,8 @@ fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
         .filter(|g| !excluded.contains(g))
         .map(String::as_str)
         .collect();
-    reading.count("lines", lines)?;
-    reading.count("files", u64::try_from(counted.len())?)?;
+    reading.count(numbers::LINES, lines)?;
+    reading.count(numbers::FILES, u64::try_from(counted.len())?)?;
     let mut made_up = if counted.is_empty() {
         "made up of nothing".to_owned()
     } else {
@@ -120,7 +148,7 @@ fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
         );
         return Ok(reading);
     };
-    reading.count("ceiling", row.ceiling)?;
+    reading.count(numbers::CEILING, row.ceiling)?;
     let mut failures = Vec::new();
     if lines > row.ceiling {
         failures.push(format!(
@@ -152,16 +180,16 @@ fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
 /// One crate against its ceiling, and what it counted. A crate not yet
 /// created is measured by nothing and its reading carries no stamp.
 fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
-    let mut reading = Reading::for_crate("budget", krate, root)?;
-    reading.count("ceiling", krate.budget)?;
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
+    reading.count(numbers::CEILING, krate.budget)?;
     if !sources::exists(root, krate) {
         reading.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
         return Ok((reading, Count::default()));
     }
     let count = count(root, krate)?;
-    reading.count("lines", count.lines)?;
+    reading.count(numbers::LINES, count.lines)?;
     if count.bindings > 0 {
-        reading.count("bindings", count.bindings)?;
+        reading.count(numbers::BINDINGS, count.bindings)?;
     }
     if count.lines > krate.budget {
         reading.status = Status::Fail;
@@ -182,25 +210,25 @@ fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
 /// The workspace against `[budget]`: the pooled counts, every crate
 /// declared, no committed generated code outside the exceptions.
 fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<Reading> {
-    let mut reading = Reading::for_scope("budget", "workspace", manifest, root)?;
+    let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, root)?;
     let budget: &Budget = &manifest.budget;
     let mut failures = Vec::new();
     let mut ceiling = |name: &str, value: u64, limit: u64, what: &str| -> Result<()> {
         reading.count(name, value)?;
-        reading.count(&format!("{name}_ceiling"), limit)?;
+        reading.count(&numbers::ceiling_of(name), limit)?;
         if value > limit {
             failures.push(format!("{what}: {value} over the ceiling of {limit}"));
         }
         Ok(())
     };
     ceiling(
-        "total",
+        numbers::TOTAL,
         total.lines + total.bindings,
         budget.total,
         "workspace lines",
     )?;
     ceiling(
-        "bindings",
+        numbers::BINDINGS,
         total.bindings,
         budget.bindings,
         "ext/*/src/ffi/** lines",
@@ -263,7 +291,7 @@ fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> 
     let mut readings = Vec::new();
     for rule in &manifest.rules {
         for (file, from) in rule.predicate.generated.iter().flatten() {
-            let mut reading = Reading::for_scope("budget", file, manifest, root)?;
+            let mut reading = Reading::for_scope(INSTRUMENT, file, manifest, root)?;
             reading.rule.clone_from(&rule.id);
             let source = manifest.rule(from);
             let adrs: Vec<&str> = source

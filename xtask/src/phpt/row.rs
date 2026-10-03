@@ -10,8 +10,9 @@ use serde::Serialize;
 
 use super::target::Measure;
 use super::{Comparison, Judgement, Lane, Scope, numbers};
-use crate::reading::{Number, Reading, Status};
+use crate::reading::{Reading, Status};
 use crate::status::PerReading;
+use crate::status::every::whole;
 use crate::tally;
 
 /// The version of [`Row`]'s shape. It changes when the shape does, a
@@ -188,16 +189,6 @@ impl PerReading for Row {
                 predated: count(Measure::PREDATED),
             }),
         }
-    }
-}
-
-/// A count as a whole number: a negative one, which no lane writes, is
-/// none, and a measurement is rounded.
-fn whole(n: Number) -> u64 {
-    match n {
-        Number::Int(n) => u64::try_from(n).unwrap_or(0),
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Number::Float(n) => n.max(0.0).round() as u64,
     }
 }
 

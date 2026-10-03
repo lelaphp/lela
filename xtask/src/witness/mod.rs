@@ -103,6 +103,7 @@ pub(crate) mod fence;
 mod fpm;
 mod judge;
 mod process;
+pub(crate) mod row;
 #[cfg(test)]
 mod tests;
 mod watch;
@@ -130,6 +131,36 @@ use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "witness";
+
+/// The keys of a witness reading's counts beside the tally's `run`, named
+/// once for the lane that writes them and the rendering that reads them.
+pub(crate) mod numbers {
+    /// Witnesses that met their pinned verdict.
+    pub(crate) const PASSED: &str = "passed";
+    /// Witnesses that count against the crate.
+    pub(crate) const FAILED: &str = "failed";
+    /// Witnesses that differ under an accepted registry row.
+    pub(crate) const DIVERGED: &str = "diverged";
+    /// Witnesses with no verdict pinned yet.
+    pub(crate) const UNPINNED: &str = "unpinned";
+    /// Witnesses the lane skipped.
+    pub(crate) const SKIPPED: &str = "skipped";
+    /// The kernels and natives the coverage scope holds.
+    pub(crate) const SUBJECTS: &str = "subjects";
+    /// Those of them without a witness.
+    pub(crate) const MISSING: &str = "missing";
+    /// The fence lines `--accept` wrote.
+    pub(crate) const ACCEPTED: &str = "accepted";
+    /// The blocks the fence grammar could not read.
+    pub(crate) const UNREAD: &str = "unread";
+    /// Witnesses found and not run, the oracle not here to run them.
+    pub(crate) const NOT_RUN: &str = "not_run";
+    /// Witnesses the engine did not serve, each standing as one the
+    /// oracle's run failed does (#1535).
+    pub(crate) const UNSERVED: &str = "unserved";
+    /// The sum of the witnesses' declared durations, in milliseconds.
+    pub(crate) const WALL_MS: &str = "wall_ms";
+}
 /// What the manifest's coverage rule names in its `check` predicate.
 pub(crate) const COVERAGE: &str = "witness-coverage";
 
@@ -349,18 +380,18 @@ pub(crate) fn reading(
         &outcome,
         message,
     )?;
-    reading.count("passed", run.count(Judgement::Pass))?;
-    reading.count("failed", run.against().len() as u64)?;
-    reading.count("diverged", run.count(Judgement::Diverged))?;
-    reading.count("unpinned", run.count(Judgement::Unpinned))?;
-    reading.count("skipped", run.count(Judgement::Skipped))?;
-    reading.count("subjects", tally.subjects as u64)?;
-    reading.count("missing", tally.missing.len() as u64)?;
-    reading.count("accepted", tally.captured.len() as u64)?;
-    reading.count("unread", tally.problems.len() as u64)?;
-    reading.count("not_run", run.not_run())?;
-    reading.count("unserved", tally.unserved.len() as u64)?;
-    reading.count("wall_ms", declared_ms(tally.wall))?;
+    reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
+    reading.count(numbers::FAILED, run.against().len() as u64)?;
+    reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
+    reading.count(numbers::UNPINNED, run.count(Judgement::Unpinned))?;
+    reading.count(numbers::SKIPPED, run.count(Judgement::Skipped))?;
+    reading.count(numbers::SUBJECTS, tally.subjects as u64)?;
+    reading.count(numbers::MISSING, tally.missing.len() as u64)?;
+    reading.count(numbers::ACCEPTED, tally.captured.len() as u64)?;
+    reading.count(numbers::UNREAD, tally.problems.len() as u64)?;
+    reading.count(numbers::NOT_RUN, run.not_run())?;
+    reading.count(numbers::UNSERVED, tally.unserved.len() as u64)?;
+    reading.count(numbers::WALL_MS, declared_ms(tally.wall))?;
     Ok(reading)
 }
 

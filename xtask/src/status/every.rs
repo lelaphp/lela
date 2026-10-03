@@ -4,7 +4,8 @@
 //! another store's or the published history. Under `--format jsonl` a row
 //! is one line and carries `v`, the version of its shape. What is here is
 //! the section's alone in one place, its row ([`PerReading`]); the source,
-//! the order and the lines are every section's.
+//! the order and the lines are every section's, and so is what every row
+//! opens with ([`Head`]) and how a count is read ([`count`]).
 
 use std::fs;
 use std::io::Read;
@@ -15,8 +16,8 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::cli::{Format, Section};
-use crate::phpt;
-use crate::reading::{LOG, Log, Reading, Store};
+use crate::reading::{LOG, Log, Number, Reading, Status, Store};
+use crate::{api_check, budget, phpt, witness};
 
 /// What `--log` takes for the standard input.
 const STDIN: &str = "-";
@@ -64,8 +65,70 @@ pub(crate) fn render(
 type Lines = fn(&Log) -> Result<String>;
 
 /// The sections `--every` renders, each with its row: the one table a
-/// section joins by its line (#1763 adds budget, api-check and witness).
-const ROWS: &[(Section, Lines)] = &[(Section::Phpt, lines::<phpt::row::Row>)];
+/// section joins by its line.
+const ROWS: &[(Section, Lines)] = &[
+    (Section::Phpt, lines::<phpt::row::Row>),
+    (Section::Budget, lines::<budget::row::Row>),
+    // The locks section is the api-check readings': a seam's lock, and
+    // under `--every` each crate's edges beside it.
+    (Section::Locks, lines::<api_check::row::Row>),
+    (Section::Witness, lines::<witness::row::Row>),
+];
+
+/// What every row opens with, whatever its section: the version of the
+/// row's shape and where the reading was taken. A row flattens it first,
+/// so the fields after it are the section's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct Head {
+    /// The version of the row's shape, its section's own.
+    v: u32,
+    /// The instrument that took the reading.
+    instrument: String,
+    /// The scope as the reading spells it.
+    scope: String,
+    /// The reading's own verdict.
+    status: Status,
+    /// When the reading was taken, RFC 3339.
+    at: String,
+    /// The commit it was taken at, as the reading records it; null where
+    /// it records none.
+    commit: Option<String>,
+    /// The digest of the oracle pin the run was taken under, where the
+    /// reading records one (#1387).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recipe: Option<String>,
+}
+
+impl Head {
+    /// The head of `reading`'s row, of the shape `v`.
+    pub(crate) fn of(reading: &Reading, v: u32) -> Head {
+        Head {
+            v,
+            instrument: reading.instrument.clone(),
+            scope: reading.scope.clone(),
+            status: reading.status,
+            at: reading.at.to_string(),
+            commit: Some(reading.commit.clone()).filter(|commit| !commit.is_empty()),
+            recipe: reading.recipe.clone(),
+        }
+    }
+}
+
+/// The count `reading` keeps under `key`, as a whole number; none where it
+/// keeps none.
+pub(crate) fn count(reading: &Reading, key: &str) -> Option<u64> {
+    reading.numbers.get(key).map(|n| whole(*n))
+}
+
+/// A count as a whole number: a negative one, which no instrument writes,
+/// is none, and a measurement is rounded.
+pub(crate) fn whole(n: Number) -> u64 {
+    match n {
+        Number::Int(n) => u64::try_from(n).unwrap_or(0),
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Number::Float(n) => n.max(0.0).round() as u64,
+    }
+}
 
 /// A section as the command line spells it.
 fn name(section: Section) -> String {
