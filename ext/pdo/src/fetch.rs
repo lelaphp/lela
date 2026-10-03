@@ -10,7 +10,9 @@ use php_ext::abi::{Callable, ClassRef, OrFalse, Raw, True};
 use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
 use php_ext::decl::Name;
-use php_ext::raising::{Level, Thrown, arg_count_error, argument_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_count_error, argument_error, docref, throw_error, while_pending,
+};
 use php_ext::request::Request;
 use php_ext::values::{
     ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
@@ -611,6 +613,18 @@ fn class_object(
 /// }
 /// Cannot access protected property P::$v
 /// ```
+///
+/// A later typed column that fails while that throwable is pending is
+/// left unwritten and raises nothing (`zend_verify_property_type_error`):
+///
+/// ```php
+/// class E { public int $a; public int $b; }
+/// $db = new PDO('sqlite::memory:');
+/// try { $db->query("SELECT 'x' AS a, 'y' AS b")->fetchObject('E'); } catch (TypeError $e) { echo $e->getMessage(), "|", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot assign string to property E::$a of type int|
+/// ```
 #[allow(clippy::too_many_arguments)]
 fn fill(
     req: &mut Request,
@@ -739,7 +753,14 @@ fn write_column(
     fetched: Value,
 ) -> Result<(), Thrown> {
     let name = PhpString::new(req, name)?;
-    let Err(thrown) = made.write_prop_in(req, scope, name, fetched) else {
+    let wrote = match pending {
+        Some(standing) => while_pending(req, standing, |req| {
+            made.write_prop_in(req, scope, name, fetched)
+        })
+        .unwrap_or(Ok(())),
+        None => made.write_prop_in(req, scope, name, fetched),
+    };
+    let Err(thrown) = wrote else {
         return Ok(());
     };
     if thrown.exception().is_none() {
