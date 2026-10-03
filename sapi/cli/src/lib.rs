@@ -124,18 +124,23 @@ pub fn main() -> ExitCode {
         Ask::Usage => print(&usage_text()),
         Ask::Version => {
             let engine = engine(&options.ini);
-            match request::started(&engine) {
+            match request::started(&engine, NAME) {
                 0 => print(&version(&engine)),
                 failed => failed,
             }
         }
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini))),
-        Ask::Server(server) => server::run(
-            server_engine(&options.ini),
-            server,
-            php_sapi::ini::enabled(&options.ini, "cli_server.color", false),
-        ),
+        Ask::Server(server) => {
+            let engine = server_engine(&options.ini);
+            match request::started(&engine, server::NAME) {
+                0 => {
+                    let color = php_sapi::ini::enabled(&options.ini, "cli_server.color", false);
+                    server::run(engine, server, color)
+                }
+                failed => failed,
+            }
+        }
         ask => {
             if options.interactive {
                 print("Interactive shell\n\n");
