@@ -688,7 +688,7 @@ text = "A ticket closes through `xtask ticket close`, the instrument that read i
 [[rule]]
 id = "ticket.close-api"
 tool = "Bash"
-deny_pattern = '''gh\s+api\b[^|;&]*([\s'"]state=(closed|open)\b|"state"\s*:\s*"(closed|open)"|--input\b|(close|reopen)Issue\()'''
+deny_pattern = '''gh\s+api\b[^|;&]*([\s'"]state=(closed|open)\b|"state"\s*:\s*"(closed|open)"|--input\b|(close|reopen)Issue\(|=@-|=["']?\$\()'''
 text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else."
 
 [[rule]]
