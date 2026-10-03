@@ -4661,6 +4661,23 @@ impl Request {
         })
     }
 
+    /// `zend_update_property_ex(scope, ...)`: the write through the
+    /// object's `write_property` with `EG(fake_scope)` set to `scope`,
+    /// `None` leaving the executed scope to decide, and put back after.
+    pub(crate) fn write_property_in(
+        &mut self,
+        object: PhpObject,
+        scope: Option<ClassId>,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let table = self.object_handlers(object.heap());
+        let saved = std::mem::replace(&mut self.fake_scope, scope);
+        let done = table.write_property(self, object, name, value);
+        self.fake_scope = saved;
+        done
+    }
+
     /// `f` called with `EG(fake_scope)` the class whose declaration
     /// `class`'s table holds for `name`, as `zend_update_property_ex(ce,
     /// ...)` makes a write, and put back after it; a name no class
@@ -11190,6 +11207,17 @@ impl Request {
             if o.slot_uninit(p.slot) {
                 return self.write_std_property(object, name, value);
             }
+        }
+        // `zend_get_property_offset` refusing a slot the scope may not
+        // reach, silent only for a class with a `__set` to serve it.
+        if let Some(p) = placed.as_ref()
+            && !self.reaches(p)
+            && !self.serves_accessor(class, b"__set")
+        {
+            let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
         if bad_name && !self.serves_accessor(class, b"__set") {
