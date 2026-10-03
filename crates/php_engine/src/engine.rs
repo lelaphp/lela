@@ -3576,8 +3576,8 @@ impl Engine {
         // deactivated after them, with the header block committed if
         // nothing had, and the shutdown entries freed behind it
         // (`php_free_shutdown_functions`); then `PG(http_globals)` given
-        // up; then `shutdown_executor`,
-        // which closes the open resources first, destroys the symbol
+        // up; then `shutdown_executor`, after each extension's
+        // `deactivate`, which closes the open resources first, destroys the symbol
         // table after them (`zend_shutdown_executor_values`) and frees
         // the object storage last. The globals stand through all of it,
         // as php's `EG(symbol_table)` does, so the shutdown functions
@@ -3617,6 +3617,14 @@ impl Engine {
         req.free_shutdown_functions();
         req.destroy_http_globals();
         req.destroy_uploaded_files();
+        // `zend_deactivate` reaches `shutdown_executor`: each extension's
+        // `deactivate`, in reverse, before the resources are closed.
+        for extension in self.shared.extensions.iter().rev() {
+            if let Some(deactivate) = extension.deactivate {
+                deactivate(req);
+            }
+        }
+        req.catch_bailout();
         req.close_resources();
         req.return_persistent();
         req.free_user_handlers();
