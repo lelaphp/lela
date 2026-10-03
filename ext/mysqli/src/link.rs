@@ -218,7 +218,7 @@ pub(crate) struct Plinks {
     free: Vec<Mysqlnd>,
 }
 
-/// The request's [`Plinks`] under `key`, held from here to `rshutdown`;
+/// The request's [`Plinks`] under `key`, held from here to `deactivate`;
 /// `None` once given back.
 fn plinks<'r>(req: &'r mut Request, key: &[u8]) -> Option<&'r mut Plinks> {
     let plinks = &mut req.state::<State>().plinks;
@@ -276,14 +276,15 @@ fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Re
     Ok(true)
 }
 
-/// mysqli's `RSHUTDOWN` in this engine: a link `mysqli_init` made and
-/// connected without `p:` freed, as php's free of the link at the
-/// request's end closes its stream, before the engine's end would keep
-/// that stream in its pool; then every persistent connection the request
-/// holds given back to the engine's pool, one still open on a link first
-/// given back as `php_mysqli_close` gives it; one past the pool's bound
-/// closed.
-pub(crate) fn rshutdown(req: &mut Request) {
+/// What php's `shutdown_executor` does to mysqli's links, after every
+/// extension's `RSHUTDOWN`, so a session save handler's `write` still has
+/// them: a link `mysqli_init` made and connected without `p:` freed, as
+/// php's free of the link closes its stream, before the engine's end
+/// would keep that stream in its pool; then every persistent connection
+/// the request holds given back to the engine's pool, one still open on
+/// a link first given back as `php_mysqli_close` gives it; one past the
+/// pool's bound closed.
+pub(crate) fn deactivate(req: &mut Request) {
     for object in std::mem::take(&mut req.state::<State>().unkeyed) {
         free_link(req, object);
     }
@@ -543,7 +544,7 @@ fn close_conn(
         }
         Some(key) => {
             req.state::<State>().num_active_persistent -= 1;
-            // A link freed after `rshutdown` gave its connection back.
+            // A link freed after `deactivate` gave its connection back.
             if req.state::<State>().plinks.find(&key).is_none() {
                 return Ok(());
             }

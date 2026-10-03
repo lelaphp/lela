@@ -79,3 +79,74 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
     let served = engine.serve_capture(&second, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), "gone");
 }
+
+/// A session save handler whose `write` queries through a link in a
+/// global, served in session's `RSHUTDOWN`, finds that link open, a
+/// `mysqli_init` link without `p:` and a `p:` link alike: php frees
+/// mysqli's links in `shutdown_executor`, after every extension's
+/// `RSHUTDOWN`. The last request prints what each write left, the
+/// oracle's bytes for the same requests (#1689). Against the server of `ci/mysql/compose.yaml`;
+/// with none listening the test says so and passes.
+#[test]
+fn a_session_written_at_the_request_end_still_has_the_link() {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_session::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
+        .build();
+    let table = "CREATE TABLE IF NOT EXISTS t1689 (k VARCHAR(8) PRIMARY KEY, v TEXT)";
+    let setup = format!(
+        "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test'); mysqli_query($l, '{table}'); mysqli_query($l, 'DELETE FROM t1689');"
+    );
+    assert_eq!(engine.serve_capture(&setup, Capture::default()).stdout, b"");
+    for (key, connect) in [
+        (
+            "init",
+            "$l = mysqli_init(); $l->real_connect('127.0.0.1', 'root', '', 'test');",
+        ),
+        (
+            "p",
+            "$l = mysqli_connect('p:127.0.0.1', 'root', '', 'test');",
+        ),
+    ] {
+        let written = format!(
+            "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
+            {connect}
+            class H implements SessionHandlerInterface {{
+                function __construct(public $link) {{}}
+                function open(string $p, string $n): bool {{ return true; }}
+                function close(): bool {{ return true; }}
+                function read(string $id): string|false {{ return ''; }}
+                function write(string $id, string $data): bool {{
+                    global $l;
+                    return (bool) mysqli_query($l, \"INSERT INTO t1689 VALUES ('{key}', '$data')\");
+                }}
+                function destroy(string $id): bool {{ return true; }}
+                function gc(int $m): int|false {{ return 0; }}
+            }}
+            session_set_save_handler(new H($l), false);
+            session_id('t1689');
+            session_start();
+            $_SESSION['{key}'] = 1;"
+        );
+        assert_eq!(
+            engine.serve_capture(&written, Capture::default()).stdout,
+            b""
+        );
+    }
+    let read = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        foreach (mysqli_query($l, 'SELECT k, v FROM t1689 ORDER BY k') as $r) echo $r['k'], ' ', $r['v'], \"\\n\";
+        mysqli_query($l, 'DROP TABLE t1689');";
+    let served = engine.serve_capture(read, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "init init|i:1;\np p|i:1;\n"
+    );
+}
