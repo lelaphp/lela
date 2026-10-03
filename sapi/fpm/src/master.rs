@@ -360,7 +360,7 @@ impl Fpm {
 
     /// `fpm_conf_post_process`.
     fn post_process(&mut self, daemonize: Option<bool>) -> bool {
-        let local = Some(conf::PHP_LOCALSTATEDIR.as_bytes());
+        let local = Some(php_sapi::PHP_LOCALSTATEDIR.as_bytes());
         if let Some(pid) = self.global.pid_file.clone() {
             self.global.pid_file =
                 conf::evaluate_full_path(&pid, None, self.prefix.as_deref(), local, false);

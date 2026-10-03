@@ -11,9 +11,9 @@
 //! and so the request's ([`crate::api::request::Request::constant_named`]).
 //!
 //! A value that is a fact of the build is the pinned oracle's where the
-//! engine answers as that build does: its version, its install paths,
-//! and the `ZEND_VM_KIND` it was compiled with. Its date and provider are
-//! this build's own, from the one stamp every host reads them from
+//! engine answers as that build does: its version and the `ZEND_VM_KIND`
+//! it was compiled with. Its date, provider and install layout are this
+//! build's own, from the one stamp every host reads them from
 //! ([`crate::api::request::BuildDefs`]). A value that is a fact of the host, the system's name and its
 //! family, its path limit and `FD_SETSIZE`, is read off the target the
 //! engine is compiled for, which is what php's `configure` reads it off.
@@ -23,13 +23,26 @@
 use php_heap::{Intern, Strings, Zval};
 use php_macros::php_const;
 
-/// `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`: what
-/// `DEFAULT_INCLUDE_PATH` says and what `include_path` defaults to.
-pub(crate) const PHP_INCLUDE_PATH: &str = ".:/opt/homebrew/Cellar/php/8.5.9/share/php/pear";
+/// `PHP_INCLUDE_PATH`, `.:${PEAR_INSTALLDIR}` of this build's layout
+/// (`build.rs`): what `DEFAULT_INCLUDE_PATH` says and what
+/// `include_path` defaults to.
+pub(crate) const PHP_INCLUDE_PATH: &str = env!("PHP_INCLUDE_PATH");
 
-/// `PHP_EXTENSION_DIR`, the pinned build's: the constant, and the
-/// default of `extension_dir`, which `dl()` names a library under.
-pub(crate) const PHP_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
+/// `PHP_EXTENSION_DIR`, this build's: the constant, and the default of
+/// `extension_dir`, which `dl()` names a library under.
+pub(crate) const PHP_EXTENSION_DIR: &str = env!("PHP_EXTENSION_DIR");
+
+/// `PHP_CONFIG_FILE_PATH` and `PHP_CONFIG_FILE_SCAN_DIR`, this build's:
+/// where a host's php.ini search ends and what it scans where the
+/// environment names no scan directory (`Z/main/php_ini.c:534`, `:626`).
+pub const PHP_CONFIG_FILE_PATH: &str = env!("PHP_CONFIG_FILE_PATH");
+pub const PHP_CONFIG_FILE_SCAN_DIR: &str = env!("PHP_CONFIG_FILE_SCAN_DIR");
+
+/// `PHP_PREFIX`, `PHP_SYSCONFDIR` and `PHP_LOCALSTATEDIR`, this build's,
+/// which php-fpm puts its configuration, its pid file and its log under.
+pub const PHP_PREFIX: &str = env!("PHP_PREFIX");
+pub const PHP_SYSCONFDIR: &str = env!("PHP_SYSCONFDIR");
+pub const PHP_LOCALSTATEDIR: &str = env!("PHP_LOCALSTATEDIR");
 
 /// `PHP_SHLIB_SUFFIX`: `dll` on Windows and `so` everywhere else, macOS
 /// included, as php's `configure` sets it.
@@ -267,22 +280,21 @@ pub(crate) mod startup {
     const PHP_OS: &str = OS;
     const PHP_OS_FAMILY: &str = OS_FAMILY;
     const DEFAULT_INCLUDE_PATH: &str = PHP_INCLUDE_PATH;
-    // The install paths the pinned build's `configure` wrote into
-    // `main/build-defs.h`, from `PEAR_INSTALL_DIR` to
-    // `PHP_CONFIG_FILE_SCAN_DIR`, and the shared library suffix.
-    const PEAR_INSTALL_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/php/pear";
-    const PEAR_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
+    // The install layout this build's `build.rs` stamped, as `configure`
+    // writes it into `main/build-defs.h`, and the shared library suffix.
+    const PEAR_INSTALL_DIR: &str = env!("PEAR_INSTALL_DIR");
+    const PEAR_EXTENSION_DIR: &str = super::PHP_EXTENSION_DIR;
     const PHP_EXTENSION_DIR: &str = super::PHP_EXTENSION_DIR;
-    const PHP_PREFIX: &str = "/opt/homebrew/Cellar/php/8.5.9";
-    const PHP_BINDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/bin";
-    const PHP_SBINDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/sbin";
-    const PHP_MANDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/man";
-    const PHP_LIBDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php";
-    const PHP_DATADIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/php";
-    const PHP_SYSCONFDIR: &str = "/opt/homebrew/etc/php/8.5";
-    const PHP_LOCALSTATEDIR: &str = "/opt/homebrew/var";
-    const PHP_CONFIG_FILE_PATH: &str = "/opt/homebrew/etc/php/8.5";
-    const PHP_CONFIG_FILE_SCAN_DIR: &str = "/opt/homebrew/etc/php/8.5/conf.d";
+    const PHP_PREFIX: &str = super::PHP_PREFIX;
+    const PHP_BINDIR: &str = env!("PHP_BINDIR");
+    const PHP_SBINDIR: &str = env!("PHP_SBINDIR");
+    const PHP_MANDIR: &str = env!("PHP_MANDIR");
+    const PHP_LIBDIR: &str = env!("PHP_LIBDIR");
+    const PHP_DATADIR: &str = env!("PHP_DATADIR");
+    const PHP_SYSCONFDIR: &str = super::PHP_SYSCONFDIR;
+    const PHP_LOCALSTATEDIR: &str = super::PHP_LOCALSTATEDIR;
+    const PHP_CONFIG_FILE_PATH: &str = super::PHP_CONFIG_FILE_PATH;
+    const PHP_CONFIG_FILE_SCAN_DIR: &str = super::PHP_CONFIG_FILE_SCAN_DIR;
     const PHP_SHLIB_SUFFIX: &str = SHLIB_SUFFIX;
     const PHP_EOL: &str = "\n";
     const PHP_MAXPATHLEN: i64 = MAXPATHLEN;

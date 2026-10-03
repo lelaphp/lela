@@ -20,10 +20,10 @@ use crate::out;
 use crate::prompt::{self, Here, InitLine};
 use crate::session::Session;
 
-/// `PHP_CONFIG_FILE_PATH` and `PHP_CONFIG_FILE_SCAN_DIR` of the pinned
-/// build, as its `php -n -r 'echo PHP_CONFIG_FILE_PATH;'` names them.
-const CONFIG_FILE_PATH: &[u8] = b"/opt/homebrew/etc/php/8.5";
-const CONFIG_FILE_SCAN_DIR: &[u8] = b"/opt/homebrew/etc/php/8.5/conf.d";
+/// `PHP_CONFIG_FILE_PATH` and `PHP_CONFIG_FILE_SCAN_DIR`, the engine's,
+/// from the build's layout.
+const CONFIG_FILE_PATH: &[u8] = php_sapi::PHP_CONFIG_FILE_PATH.as_bytes();
+const CONFIG_FILE_SCAN_DIR: &[u8] = php_sapi::PHP_CONFIG_FILE_SCAN_DIR.as_bytes();
 
 /// What the line asked of `phpdbg_init`: the file `-i` named, or the
 /// default ones unless `-I`; and `PHP_INI_SCAN_DIR` as the process's

@@ -34,6 +34,7 @@ use std::process::ExitCode;
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
     FileHandles, HostValue, IniEvent, IniOrigin, IniValue, Method, Observables, OutputSink,
+    PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
     PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught,
     WebRequest,
 };

@@ -11,18 +11,11 @@
 
 use std::os::unix::ffi::OsStrExt;
 
-use php_sapi::{Engine, IniEvent, IniValue};
+use php_sapi::{Engine, IniEvent, IniValue, PHP_PREFIX, PHP_SYSCONFDIR};
 
 use crate::zlog::Level;
 use crate::{zlog, zlog_sys};
 
-/// `PHP_PREFIX`, the prefix the oracle was configured with, which the
-/// engine reports as `PHP_PREFIX`.
-pub(crate) const PHP_PREFIX: &str = "/opt/homebrew/Cellar/php/8.5.9";
-/// `PHP_SYSCONFDIR`.
-const PHP_SYSCONFDIR: &str = "/opt/homebrew/etc/php/8.5";
-/// `PHP_LOCALSTATEDIR`.
-pub(crate) const PHP_LOCALSTATEDIR: &str = "/opt/homebrew/var";
 /// `FPM_BACKLOG_DEFAULT`.
 pub(crate) const BACKLOG_DEFAULT: i32 = -1;
 
@@ -942,7 +935,7 @@ pub(crate) fn read(engine: &Engine, config: &[u8], prefix: Option<&[u8]>) -> Opt
 }
 
 /// `fpm_conf_init_main`'s default configuration file: `php-fpm.conf`
-/// under `PHP_SYSCONFDIR`, or under `-p`'s `etc`.
+/// under the engine's `PHP_SYSCONFDIR`, or under `-p`'s `etc`.
 pub(crate) fn default_config(prefix: Option<&[u8]>) -> Vec<u8> {
     match prefix {
         None => format!("{PHP_SYSCONFDIR}/php-fpm.conf").into_bytes(),
