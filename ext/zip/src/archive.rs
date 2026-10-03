@@ -442,6 +442,19 @@ impl Archive {
 
     /// `_zip_open` past the stat: the central directory through the zip
     /// crate, each record read again here for what libzip keeps of it.
+    /// A file with no end record is `ER_TRUNCATED_ZIP` when its first four
+    /// bytes are a local header, read from offset 0 as `_is_truncated_zip`
+    /// seeks there:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('nocd-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 3000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
+    /// $h = fopen('nocd-witness.zip', 'r+'); ftruncate($h, 1000); fclose($h);
+    /// var_dump($z->open('nocd-witness.zip')); unlink('nocd-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(35)
+    /// ```
     fn read_cdir(&mut self, mut file: File, len: u64, mode: u32) -> Result<(), Status> {
         let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
         let reader = file
@@ -455,7 +468,9 @@ impl Archive {
             zip::result::ZipError::UnsupportedArchive(_) => Status::of(Er::Multidisk, 0),
             _ => {
                 let mut head = [0u8; 4];
-                let truncated = file.read_exact(&mut head).is_ok() && head == *b"PK\x03\x04";
+                let truncated = file.seek(SeekFrom::Start(0)).is_ok()
+                    && file.read_exact(&mut head).is_ok()
+                    && head == *b"PK\x03\x04";
                 Status::of(
                     if truncated {
                         Er::TruncatedZip
