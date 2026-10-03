@@ -38,6 +38,9 @@ jobs:
           fetch-depth: 0 # done measures since the merge base with the track
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The platform libraries the workspace links, from the one list the
+      # action reads (design §7.2; #1300).
+      - uses: ./.github/actions/platform-libraries
       # The named locales a request's setlocale() asks the C library for
       # (design §5.14, revision 40; #1150), in the tests and the witnesses
       # alike: de_DE for ext/standard's two-request test, and the names
