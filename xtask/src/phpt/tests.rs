@@ -1638,6 +1638,52 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
     }
 }
 
+/// A child that shares its program's stdout and writes there after the
+/// program exits is read, as upstream reads a test's stdout to its end
+/// (#1491): gh20582.phpt's `proc_open`ed `php -r` lost its `var_dump` to
+/// the group kill 13 times in 200 at twelve jobs, the oracle's as often as
+/// the engine's. One that still holds the pipe at the limit leaves what
+/// came by then and goes with its group, so it neither holds the run nor
+/// outlives it.
+#[test]
+fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
+    if oracle().is_none() {
+        return;
+    }
+    let shares = |child: &str| {
+        format!(
+            "--TEST--\nshares stdout\n--FILE--\n<?php\n\
+             $p = proc_open([PHP_BINARY, '-n', '-r', '{child}'], [1 => STDOUT, 2 => STDOUT], $pipes);\n\
+             file_put_contents(__DIR__ . '/child.pid', proc_get_status($p)['pid']);\n\
+             echo \"parent\\n\";\n--EXPECT--\nparent\nchild\n"
+        )
+    };
+    let (_root, subset) = rooted(
+        "writes-after",
+        &shares(r#"usleep(300000); echo "child\n";"#),
+    );
+    let tally = run_on(&subset, 1, 2);
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+
+    let (root, subset) = rooted("holds-past-limit", &shares("sleep(120);"));
+    let since = std::time::Instant::now();
+    let tally = run_on(&subset, 1, 2);
+    assert!(
+        since.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        since.elapsed()
+    );
+    let (went, note) = only(&tally);
+    assert_eq!(went, Judgement::Fail, "{note}");
+    let pid: i32 = fs::read_to_string(root.join("ext/fixture/tests/child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(pid > 0, "the child never started");
+    assert!(!stands(pid), "the child {pid} outlived its run");
+}
+
 /// The fixture at `xtask/fixtures/phpt/mysql` (#1366): a subset of a `MySQL`
 /// suite whose server does not answer is refused, by the probe that asks
 /// the server and by the runner handed it with no server named, and never
