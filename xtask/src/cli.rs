@@ -100,9 +100,8 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = crate::permit::BAR_MS, value_name = "MS", requires = "bench")]
         bar: f64,
     },
-    /// The definition of done: print the conditions unmet for the changes
-    /// since the base and exit 1 while any is; the Stop hook, pre-push and
-    /// CI read the same list.
+    /// The definition of done: the conditions unmet since the base, and
+    /// exit 1 while any is; the Stop hook, pre-push and CI read the list.
     Done {
         /// Measure the changes since the merge base with this ref;
         /// default the branch's track, and `main` for a branch on none.
@@ -183,9 +182,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TicketCommand,
     },
-    /// What a session spent, per turn from the plugin: `record` reads the
-    /// `SessionUsage` object on stdin and writes one `usage` reading under
-    /// the branch's ticket, or the session id
+    /// What a session spent per turn: `record` reads the plugin's
+    /// `SessionUsage` on stdin and writes one `usage` reading under the
+    /// branch's ticket, or the session id
     ///
     /// The object is what `$.session.usage()` answered, and the plugin's
     /// `turn.complete` pipes it here once a turn, so the last reading
@@ -209,9 +208,8 @@ pub(crate) enum Command {
         #[arg(required = true, value_name = "FILE")]
         files: Vec<String>,
     },
-    /// Measure one bar under the measurement protocol: paired reps with
-    /// the A/A control, the load average recorded, one reading per bar,
-    /// and the exit 0 whatever the reading says.
+    /// Measure one bar under the protocol: paired reps with the A/A
+    /// control and the load average, one reading per bar, exit 0 always.
     ///
     /// Without an argument, every bar the harness declares.
     Bench(Bench),
@@ -250,9 +248,9 @@ pub(crate) enum Command {
     ///
     /// Without `--subset`, the per-commit lane the manifest composes.
     Phpt(Phpt),
-    /// Join the Mahout census to `api.lock`: every item `same`, `renamed`
-    /// or `gone`, the rows the port has not taken as the number. One
-    /// reading, at the crate the lock lives with.
+    /// Join the Mahout census to `api.lock`: each item `same`, `renamed`
+    /// or `gone`, the rows not yet taken as the number; one reading, at the
+    /// lock's crate.
     ///
     /// Without `--tree`, the committed census `data/port-map.v0.toml`.
     PortMap {
@@ -270,9 +268,8 @@ pub(crate) enum Command {
     /// Without an argument, the per-commit corpus of design §6.1: every
     /// file of `Zend/tests`, `tests` and `sapi/cli` of the pinned php-src.
     CompileIdentity(Identity),
-    /// Hold each default extension's rendering to the oracle's `php --re
-    /// <name>` and `php --ri <name>` bytes, kept in the store; one reading
-    /// per extension per flag.
+    /// Hold each default extension's `--re` and `--ri` rendering to the
+    /// oracle's bytes, kept in the store; one reading per extension per flag.
     ///
     /// The oracle's bytes are kept at
     /// `target/harness/crosscheck/ext/<name>/<digest>.re` and `.ri`; the
@@ -329,9 +326,9 @@ pub(crate) enum Command {
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
-    /// Lay one extension crate down at ext/<name> in the template topology,
-    /// its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md;
-    /// refuses an existing one.
+    /// Lay one extension crate down at ext/<name> from the template, with
+    /// its `php_bundle` line, ext/clippy.toml and ext/AGENTS.md row; refuses
+    /// an existing one.
     ///
     /// The template: the facade as its one dependency, `extension()`, state
     /// on the value, a test through the capture sink and a witness.
@@ -339,9 +336,9 @@ pub(crate) enum Command {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
-    /// Lay one host crate down at sapi/<name> in the topology the CLI and CGI
-    /// have, its binary and its test; refuses one without its `[[crate]]` row
-    /// or an existing one (ADR-0008).
+    /// Lay one host crate down at sapi/<name> as the CLI and CGI are laid,
+    /// with its binary and test; refuses an existing one or one without its
+    /// `[[crate]]` row (ADR-0008).
     ///
     /// The template: the facade and the bundle as its two dependencies,
     /// `main`, a host that serves the file its line names until its own
@@ -353,9 +350,8 @@ pub(crate) enum Command {
         #[arg(long = "bin", value_name = "NAME")]
         binary: Option<String>,
     },
-    /// Extract every `php` fence and its `expect` fence from a crate's
-    /// rustdoc, run each under the oracle's recipe and hold it to what the
-    /// fence pins. One reading per crate.
+    /// Run every `php` fence of a crate's rustdoc under the oracle's recipe
+    /// and hold it to its `expect` fence; one reading per crate.
     ///
     /// Each snippet runs as `witness.php`; the kernels and natives without
     /// a witness are counted.
