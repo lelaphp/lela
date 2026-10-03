@@ -5,7 +5,10 @@
 //! (design §7.2, ADR-0005). What a request reaches is an `Arc` of
 //! the immutable [`Pattern`]; a pattern php refuses is cached as the
 //! warning it raises, so a second use raises it again as php's uncached
-//! failure does.
+//! failure does. While the request's `LC_CTYPE` is not `C` the string is
+//! keyed behind the locale's name and compiled under the character tables
+//! `pcre2_maketables` builds in that locale, cached by the name as php's
+//! `char_tables` (design §4.4, revision 56).
 
 use std::sync::Arc;
 
@@ -14,11 +17,18 @@ use php_ext::raising::{Level, Thrown, docref, raise_while_pending};
 use php_ext::request::Request;
 
 use crate::constants::PREG_INTERNAL_ERROR;
-use crate::ffi::{self, Code};
+use crate::ffi::{self, Code, Tables};
 use crate::set_error;
 
 /// `PCRE_CACHE_SIZE`.
 const CACHE_SIZE: usize = 4096;
+
+/// The locales whose tables are kept at once; php's `char_tables` has no
+/// bound, and a pattern keeps the tables it compiled with.
+const TABLES_SIZE: usize = 64;
+
+/// One locale's tables, or `None` where the library could not build them.
+type Built = Option<Arc<Tables>>;
 
 /// One compiled pattern, a `pcre_cache_entry` less its refcount, which
 /// the `Arc` is.
@@ -43,6 +53,7 @@ type Compiled = Result<Arc<Pattern>, String>;
 /// ini entries' startup values, the master column of `php --ri pcre`.
 pub(crate) struct Patterns {
     cache: Cache<Box<[u8]>, Compiled>,
+    tables: Cache<Box<[u8]>, Built>,
     pub(crate) master: [Vec<u8>; 3],
 }
 
@@ -60,12 +71,34 @@ pub(super) fn engine_state(ini: &StartupIni) -> Patterns {
     });
     Patterns {
         cache: Cache::new(CACHE_SIZE),
+        tables: Cache::new(TABLES_SIZE),
         master,
     }
 }
 
 /// `pcre_get_compiled_regex_cache(regex)`: the compiled pattern, or
-/// `None` with php's warning raised and `PREG_INTERNAL_ERROR` set.
+/// `None` with php's warning raised and `PREG_INTERNAL_ERROR` set. The
+/// same string compiles apart under each `LC_CTYPE` the request moves to,
+/// and back under `C` as it first did.
+///
+/// ```php
+/// var_dump(preg_match('/\w/', "\xe4"));
+/// var_dump(setlocale(LC_CTYPE, "de_DE", "de-DE"), preg_match('/\w/', "\xe4"), preg_match('/^\w\W$/i', "\xc4!"));
+/// var_dump(setlocale(LC_CTYPE, "C"), preg_match('/\w/', "\xe4"));
+/// var_dump(setlocale(LC_ALL, "de_DE.ISO8859-1"), preg_match('/[[:alpha:]]/', "\xe4"), setlocale(LC_CTYPE, "C.UTF-8"), preg_match('/\w/', "\xe4"));
+/// ```
+/// ```expect
+/// int(0)
+/// string(5) "de_DE"
+/// int(1)
+/// int(1)
+/// string(1) "C"
+/// int(0)
+/// string(15) "de_DE.ISO8859-1"
+/// int(1)
+/// string(7) "C.UTF-8"
+/// int(1)
+/// ```
 pub(super) fn compiled(req: &mut Request, regex: &[u8]) -> Option<Arc<Pattern>> {
     compiled_under(req, regex, None)
 }
@@ -88,11 +121,22 @@ pub(super) fn compiled_under(
     };
     let jit = crate::ini_bool(req, "pcre.jit");
     let mut jit_failure = None;
+    let ctype = req.ctype_locale().map(<[u8]>::to_vec);
+    let tables = |patterns: Option<&Patterns>| {
+        let name = ctype.as_deref()?;
+        let make = || Tables::make().map(Arc::new);
+        Some(patterns.map_or_else(make, |p| {
+            (*p.tables.get_or_build(name.into(), |_| make())).clone()
+        }))
+    };
     let built = match req.engine::<Patterns>() {
-        Some(patterns) => patterns
-            .cache
-            .get_or_build(regex.into(), |key| compile(key, jit, &mut jit_failure)),
-        None => Arc::new(compile(regex, jit, &mut jit_failure)),
+        Some(patterns) => {
+            let key = [ctype.as_deref().unwrap_or_default(), regex].concat();
+            patterns.cache.get_or_build(key.into(), |_| {
+                compile(regex, tables(Some(patterns)), jit, &mut jit_failure)
+            })
+        }
+        None => Arc::new(compile(regex, tables(None), jit, &mut jit_failure)),
     };
     if let Some(message) = jit_failure {
         warn(req, &message);
@@ -109,8 +153,14 @@ pub(super) fn compiled_under(
 }
 
 /// Everything `pcre_get_compiled_regex_cache_ex` does after the cache
-/// missed, as a value: the pattern, or the warning.
-fn compile(regex: &[u8], jit: bool, jit_failure: &mut Option<String>) -> Compiled {
+/// missed, as a value: the pattern, or the warning. `tables` is `None`
+/// in the C locale and `Some` of what `pcre2_maketables` built otherwise.
+fn compile(
+    regex: &[u8],
+    tables: Option<Built>,
+    jit: bool,
+    jit_failure: &mut Option<String>,
+) -> Compiled {
     let (body, modifiers) = split(regex)?;
     let mut options = 0;
     let mut extra = 0;
@@ -136,7 +186,12 @@ fn compile(regex: &[u8], jit: bool, jit_failure: &mut Option<String>) -> Compile
             other => return Err(format!("Unknown modifier '{}'", char::from(other))),
         }
     }
-    let mut code = Code::compile(body, options, extra).map_err(|error| {
+    let tables = match tables {
+        Some(None) => return Err("Failed to generate locale character tables".to_owned()),
+        Some(built) => built,
+        None => None,
+    };
+    let mut code = Code::compile(body, options, extra, tables).map_err(|error| {
         format!(
             "Compilation failed: {} at offset {}",
             ffi::error_message(error.number),
