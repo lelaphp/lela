@@ -77,6 +77,17 @@ pub fn serve(engine: &Engine) -> i32 {
                         s.refused = refused(engine, &s).unwrap_or_default();
                     }
                     Plan::Idle
+                } else if std::mem::take(&mut s.exec_in_log)
+                    && let Some(refused) = refused(engine, &s)
+                {
+                    // `exec`'s compile inside the log: its refusal is
+                    // logged nowhere and bails out of the log with its
+                    // guard left set, to the prompt outside it.
+                    s.refused = refused;
+                    s.context = Context::Refused;
+                    s.status = Some(255);
+                    out::stick_log();
+                    Plan::Idle
                 } else if s.init_due
                     && let Some(refused) = refused(engine, &s)
                 {

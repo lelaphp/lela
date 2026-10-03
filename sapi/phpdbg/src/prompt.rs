@@ -875,6 +875,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     s.exec = Some(resolved);
     s.stdin_code = None;
     s.refused.clear();
+    s.exec_in_log = !in_execution(s, here) && out::logging();
     s.context = if in_execution(s, here) {
         Context::Announced
     } else {

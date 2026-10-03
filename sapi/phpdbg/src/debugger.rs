@@ -466,6 +466,12 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         session::put(session);
         return AfterLog::Returned;
     }
+    // The context's own compile refused it: nothing is held, and the
+    // first frame an `ev` at this prompt enters is no program's.
+    if session.plan == Some(Plan::Hold) {
+        session.plan = Some(Plan::Run);
+        session.context = Context::Refused;
+    }
     let mut here = match standing {
         Some((frame, _)) => Here::Paused { req, frame },
         None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },

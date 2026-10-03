@@ -159,6 +159,9 @@ pub struct Session {
     pub args: Vec<Vec<u8>>,
     /// `run <file`: the file the program reads as its stdin.
     pub stdin_file: Option<PathBuf>,
+    /// `exec` set the context at a prompt inside the host's log, where
+    /// php's `phpdbg_compile` compiles it then and there.
+    pub exec_in_log: bool,
     pub breaks: Breakpoints,
     /// `bp_tmp`: the breakpoints a cycle that ended exported as `break`
     /// lines, which the next cycle runs once its init files have
@@ -295,6 +298,7 @@ impl Session {
             line_args: Vec::new(),
             args: Vec::new(),
             stdin_file: None,
+            exec_in_log: false,
             breaks: Breakpoints::default(),
             carried: None,
             watches: Watches::default(),
