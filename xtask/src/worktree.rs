@@ -221,7 +221,7 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     ready &= build(&dir);
     ready &= lay_local(&dir);
     trust(&dir, &homes);
-    carried_over(ADD, &dir);
+    carried_over(&dir);
     if ready {
         say(ADD, &format!("ready: cd {}", dir.display()));
         Ok(dir)
@@ -234,7 +234,7 @@ pub(crate) fn say(whose: &str, line: &str) {
     println!("{whose}: {line}");
 }
 
-pub(crate) fn complain(whose: &str, line: &str) {
+fn complain(whose: &str, line: &str) {
     eprintln!("{whose}: {line}");
 }
 
@@ -405,7 +405,6 @@ fn seed(dir: &Path, root: &Path) {
 /// the workspace's own crates, which a seeded worktree compiles, and the
 /// dependencies, which it does not.
 fn build(dir: &Path) -> bool {
-    let whose = ADD;
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])
         .current_dir(dir)
@@ -420,7 +419,7 @@ fn build(dir: &Path) -> bool {
                 format!("{own} crates of the workspace and {deps} dependencies")
             };
             say(
-                whose,
+                ADD,
                 &format!(
                     "built target/debug/xtask, compiling {what}: the first Edit in it is judged by this build, not by a cold cargo run"
                 ),
@@ -430,14 +429,14 @@ fn build(dir: &Path) -> bool {
         Ok(out) => {
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             complain(
-                whose,
+                ADD,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied",
             );
             false
         }
         Err(err) => {
             complain(
-                whose,
+                ADD,
                 &format!("cargo did not run ({err}); an Edit there is judged by nothing"),
             );
             false
@@ -536,41 +535,40 @@ fn trust(dir: &Path, homes: &Path) {
     }
 }
 
-/// What the clone already has, said rather than set again; `whose`
-/// prefixes the lines.
-pub(crate) fn carried_over(whose: &str, dir: &Path) {
+/// What the clone already has, said rather than set again.
+fn carried_over(dir: &Path) {
     match git(dir, &["config", "core.hooksPath"], None) {
         Ok(hooks) if !hooks.trim().is_empty() => say(
-            whose,
+            ADD,
             &format!(
                 "carried over: core.hooksPath={}, which is repository config",
                 hooks.trim()
             ),
         ),
         _ => say(
-            whose,
+            ADD,
             "core.hooksPath is unset, so pre-commit and pre-push are not wired; the session hook points it at scripts/hooks",
         ),
     }
     if dir.join(".claude/settings.json").is_file() {
         say(
-            whose,
+            ADD,
             "carried over: .claude/settings.json, which is tracked, so the plugin settings are the clone's",
         );
     } else {
         say(
-            whose,
+            ADD,
             ".claude/settings.json is missing, so this worktree loads no harness plugin",
         );
     }
     if dir.join("oracle.toml").is_file() {
         say(
-            whose,
+            ADD,
             "carried over: oracle.toml, which is tracked, and the php-src tree it pins, which is outside the clone; `xtask phpt` says if that tree is gone",
         );
     } else {
         say(
-            whose,
+            ADD,
             "oracle.toml is missing, so this worktree has no oracle and no pinned php-src",
         );
     }
