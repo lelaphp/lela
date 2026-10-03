@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::git;
+use crate::key;
 use crate::layout;
 use crate::lock;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
@@ -107,7 +108,7 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 
 /// The readings that stand for a commit (#1143): of one instrument, each
 /// that passes and was taken over exactly what the index holds of its
-/// scope, by scope, so pre-commit measures what none covers and writes no
+/// scope and of its dependency closure ([`key::of`], #1318), by scope, so pre-commit measures what none covers and writes no
 /// reading for the rest. The one asked is the latest reading over that
 /// content, [`Store::latest_over`]'s: the scope's file, or a line of the
 /// log, which is where a retired worktree's pass is when its branch is
@@ -210,10 +211,13 @@ impl Standing {
             }
         }
         let index = git::Index::read(root)?;
-        let trees: BTreeMap<String, String> = scopes
-            .iter()
-            .filter_map(|scope| Some((scope.clone(), index.hash(&manifest.scope_path(scope)?))))
-            .collect();
+        let mut trees = BTreeMap::new();
+        for scope in scopes {
+            if let Some(path) = manifest.scope_path(scope) {
+                let key = key::of(root, &path, key::Content::Index(&index))?;
+                trees.insert(scope.clone(), key);
+            }
+        }
         let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness
@@ -570,6 +574,52 @@ mod tests {
         );
         let measured = super::for_commit(&tree, &manifest, &store, "test").unwrap();
         assert!(measured.is_empty(), "cargo test runs over {measured:?}");
+    }
+
+    /// Pre-commit's standing readings are keyed on each crate's closure
+    /// (#1318, `xtask/fixtures/closure`): a staged change to `ext/ctype`
+    /// alone leaves every other crate's pass standing, and one to
+    /// `php_engine` leaves standing no crate built from it.
+    #[test]
+    fn a_staged_change_voids_the_readings_of_the_crates_built_from_it() {
+        let tree = crate::key::fixture("standing");
+        let manifest = Manifest::load(&built_root()).unwrap();
+        let store = Store::at(tree.join("target/harness"));
+        let scopes: Vec<String> = ["php_engine", "php_ext", "ext/reflection", "ext/ctype"]
+            .map(str::to_owned)
+            .to_vec();
+        for name in &scopes {
+            let krate = manifest.crate_named(name).unwrap();
+            let mut reading = Reading::for_crate("clippy", krate, &tree).unwrap();
+            reading.status = Status::Pass;
+            store.record(&[reading]).unwrap();
+        }
+        let standing = || {
+            let standing =
+                Standing::for_commit(&tree, &manifest, &store, "clippy", &scopes).unwrap();
+            scopes
+                .iter()
+                .filter(|s| standing.get(s).is_some())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(standing(), scopes);
+
+        fs::write(
+            tree.join("ext/ctype/src/lib.rs"),
+            "pub fn ctype_digit() {}\n",
+        )
+        .unwrap();
+        git(&tree, &["add", "--", "ext/ctype"], None).unwrap();
+        assert_eq!(standing(), ["php_engine", "php_ext", "ext/reflection"]);
+
+        fs::write(
+            tree.join("crates/php_engine/src/lib.rs"),
+            "pub fn execute() { }\n",
+        )
+        .unwrap();
+        git(&tree, &["add", "--", "crates/php_engine"], None).unwrap();
+        assert!(standing().is_empty(), "{:?}", standing());
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# The fixture of #1318: a workspace whose extensions are built from
+# php_ext, which is built from php_engine, so a change to php_engine moves
+# every crate's key and a change to ext/ctype moves ext/ctype's alone.
+[workspace]
+resolver = "3"
+members = ["crates/php_engine", "crates/php_ext", "ext/reflection", "ext/ctype"]

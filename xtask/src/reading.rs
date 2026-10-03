@@ -47,9 +47,10 @@ pub struct Reading {
     pub message: String,
     /// From the manifest when the rule names one, else empty.
     pub adr: String,
-    /// The git tree hash of the scope's sources at the time: what `done`
-    /// holds against the scope's hash now to call the reading fresh
-    /// (harness-design.md §4.2, §13 D.18). Private, and set by the
+    /// The key of the scope's sources at the time, [`crate::key::of`]: the
+    /// tree hash of the scope's files and, for a crate, of its workspace
+    /// dependency closure's (#1318); what `done` holds against the scope's
+    /// key now to call the reading fresh (harness-design.md §4.2, §13 D.18). Private, and set by the
     /// constructors alone: a reading made through [`Reading::for_crate`]
     /// or [`Reading::for_scope`] is hashed over the manifest's mapping of
     /// its scope, [`Manifest::scope_path`], the path `done` hashes; one
@@ -173,8 +174,8 @@ impl Reading {
     }
 
     /// Whether the reading was taken over the content `hash` names: the
-    /// scope's [`crate::git::tree_hash`] now, `done`'s question, or the
-    /// index's hash of it, pre-commit's (#1143); and, for an instrument of
+    /// scope's key now ([`crate::key::of`]), `done`'s question, or the
+    /// index's key of it, pre-commit's (#1143); and, for an instrument of
     /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin` (#1387).
     /// The one statement of fresh (harness-design.md §4.2, §4.5 condition 1).
     pub fn fresh_for(&self, hash: &str, pin: &str) -> bool {
@@ -535,8 +536,8 @@ impl Store {
     /// over, whatever its status or recipe: the scope's file, then every
     /// line of the log, where a retired worktree's readings are. What
     /// `permit`'s `unless` reads as evidence that an instrument measured a
-    /// commit's content, by the tree hash a commit's objects give
-    /// ([`crate::git::tracked_hash`], #1448). An empty hash names no
+    /// commit's content, by the key a commit's objects give
+    /// ([`crate::key::of`] over the commit, #1448). An empty hash names no
     /// content and is never found.
     pub(crate) fn measured_over(
         &self,
