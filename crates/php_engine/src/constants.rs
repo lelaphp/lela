@@ -33,7 +33,7 @@ pub(crate) const PHP_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/p
 
 /// `PHP_SHLIB_SUFFIX`: `dll` on Windows and `so` everywhere else, macOS
 /// included, as php's `configure` sets it.
-const SHLIB_SUFFIX: &str = if cfg!(windows) { "dll" } else { "so" };
+pub(crate) const SHLIB_SUFFIX: &str = if cfg!(windows) { "dll" } else { "so" };
 
 /// `PHP_OS_STR`, the system `configure` ran on as `uname -s` names it,
 /// and `WINNT` on Windows.

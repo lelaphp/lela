@@ -1593,6 +1593,16 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+    loads: Loads,
+}
+
+/// php's `extension_lists`: the names `zend_extension=` and
+/// `extension=` lines set outside a `[PATH=]` or `[HOST=]` section, which
+/// never reach the table, each list in the order written.
+#[derive(Default)]
+struct Loads {
+    engine: Vec<Vec<u8>>,
+    functions: Vec<Vec<u8>>,
 }
 
 /// One row of php's `configuration_hash`, what `cfg_get_entry` finds
@@ -1631,6 +1641,7 @@ impl Configuration {
             table: Vec::new(),
             special: false,
             diverted: false,
+            loads: Loads::default(),
         };
         let stderr = match crate::ini_syntax::parse(entries, IniScanner::Normal, &mut startup) {
             Ok(Ok(())) => String::new(),
@@ -1640,6 +1651,7 @@ impl Configuration {
         Configuration {
             table: startup.table,
             stderr,
+            loads: startup.loads,
         }
     }
 
@@ -1664,6 +1676,7 @@ struct Startup<'c> {
     /// `active_ini_hash` is such a section's array, which a CLI never
     /// reads, so the entries after it reach no directive.
     diverted: bool,
+    loads: Loads,
 }
 
 /// `zend_get_constant` for the INI grammar: the declared value as a
@@ -1766,7 +1779,15 @@ impl Startup<'_> {
                 let label = ini_text(&label);
                 let loads = label.eq_ignore_ascii_case(b"extension")
                     || label.eq_ignore_ascii_case(b"zend_extension");
-                if self.diverted || (loads && !self.special) {
+                if loads && !self.special {
+                    let list = if label.len() == 9 {
+                        &mut self.loads.functions
+                    } else {
+                        &mut self.loads.engine
+                    };
+                    return list.push(ini_text(&value));
+                }
+                if self.diverted {
                     return;
                 }
                 let value = Configured::Str(ini_text(&value));
@@ -1968,6 +1989,69 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         }
         _ => Vec::new(),
     }
+}
+
+/// `php_ini_register_extensions` (`Z/main/php_ini.c:741-749`) with no
+/// loader behind it (§7.1): each `zend_extension=` name, then each
+/// `extension=` name, through php's path building for its kind, and the
+/// `dlopen` this engine cannot make failing with "dynamic modules are not
+/// supported" (`trace:ini-extension-no-loader`). An absolute Zend
+/// extension is `zend_load_extension`'s line on `stderr`, the answer.
+///
+/// ```php
+/// // The parentheses carry the host's dlerror text, the paths php's.
+/// $tried = '/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m';
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-v'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.9 (cli)") ? "version\n" : $out;
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
+/// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
+/// ```
+/// ```expect process
+/// 0
+/// PHP Startup: Unable to load dynamic library 'x': /nope/x, /nope/x.so
+/// version
+/// Failed loading /a/z.so
+/// 0
+/// Failed loading Zend extension 'y': /z/y, /z/y.so
+/// PHP Startup: Unable to load dynamic library '/a/q.so': /a/q.so, /z///a/q.so.so
+/// ran
+/// ```
+fn register_extensions(req: &mut Request, loads: &Loads) -> String {
+    const NO_LOADER: &str = "dynamic modules are not supported";
+    let dir = req.ini_get(b"extension_dir").unwrap_or_default().to_vec();
+    let dir = String::from_utf8_lossy(&dir);
+    let sep = if dir.ends_with('/') { "" } else { "/" };
+    let so = crate::constants::SHLIB_SUFFIX;
+    let mut stderr = String::new();
+    for name in &loads.engine {
+        let name = String::from_utf8_lossy(name);
+        if name.starts_with('/') {
+            let _ = writeln!(stderr, "Failed loading {name}:  {NO_LOADER}");
+            continue;
+        }
+        let message = format!(
+            "Failed loading Zend extension '{name}' (tried: {dir}{sep}{name} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
+        );
+        crate::api::raising::raise_at(req, Level::CoreWarning, &message, b"Unknown", 0);
+    }
+    for name in &loads.functions {
+        let name = String::from_utf8_lossy(name);
+        let first = if name.contains('/') {
+            name.to_string()
+        } else if dir.is_empty() {
+            continue;
+        } else {
+            format!("{dir}{sep}{name}")
+        };
+        let sep = if name.contains('/') { "/" } else { sep };
+        let message = format!(
+            "Unable to load dynamic library '{name}' (tried: {first} ({NO_LOADER}), {dir}{sep}{name}.{so} ({NO_LOADER}))"
+        );
+        crate::api::raising::docref(req, Level::CoreWarning, &message);
+    }
+    stderr
 }
 
 /// `zend_disable_function`'s refusal of `exit`, `die` and `clone`: a
@@ -2446,7 +2530,7 @@ impl EngineBuilder {
                 started: OnceLock::new(),
             }),
         };
-        engine.register_ini(held, self.sapi_name);
+        engine.register_ini(held, &configuration.loads, self.sapi_name);
         engine
     }
 }
@@ -2808,7 +2892,12 @@ impl Engine {
     /// pin's `session-startup` regime holds it, with the test below for
     /// a refused value, and `ext/date`'s `date.timezone` is the one the
     /// phpt corpus reads.
-    fn register_ini(&mut self, mut held: Vec<(Vec<u8>, Vec<u8>, bool)>, sapi_name: &str) {
+    fn register_ini(
+        &mut self,
+        mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+        loads: &Loads,
+        sapi_name: &str,
+    ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
@@ -2835,6 +2924,7 @@ impl Engine {
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
+        let failed = register_extensions(&mut req, loads);
         for (name, value, activate) in held {
             req.set_ini_stage(if activate {
                 IniStage::Activate
@@ -2872,6 +2962,7 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
+        shared.startup_errors.push_str(&failed);
         shared.script_encodings = script_encodings;
         shared
             .startup_errors
