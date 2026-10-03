@@ -27,6 +27,8 @@
 //! - What `steer` wrote: a call whose words run `xtask steer` is the
 //!   sanctioned writer, and a file it moved stands where steer's own
 //!   reading of that call says it wrote exactly that ([`steered`]).
+//! - A file the rule's `exempt` covers: `.claude/skills/**` is an ordinary
+//!   file (#626), so a `Bash` write there stands as an `Edit` there does.
 //!
 //! Each session keeps its records in a directory of its own, a file per
 //! call, so two sessions in one checkout, or two calls of one session side
@@ -336,17 +338,24 @@ fn reached(root: &Path, call: &Call) -> Vec<PathBuf> {
     checkouts
 }
 
-/// The rule's text and the blob of every tracked file it scopes in
-/// `checkout`; `None` where the manifest carries no such rule. A file
+/// The rule's text and the blob of every tracked file it scopes and does
+/// not exempt in `checkout`; `None` where the manifest carries no such
+/// rule. A file
 /// whose blob the object database may not hold, one edited and not
 /// staged, is written into it, so the record can always put it back.
 fn guard(checkout: &Path) -> Result<Option<Guarded>> {
-    let Some((text, scope)) = rule_of(checkout)? else {
+    let Some(Row {
+        text,
+        scope,
+        exempt,
+    }) = rule_of(checkout)?
+    else {
         return Ok(None);
     };
     let mut args = vec!["ls-files".to_owned(), "-s".to_owned(), "-z".to_owned()];
     args.push("--".to_owned());
     args.extend(scope.iter().map(|s| format!(":(glob){s}")));
+    args.extend(exempt.iter().map(|s| format!(":(exclude,glob){s}")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let listing = git::git(checkout, &args, None)?;
     let mut blobs = BTreeMap::new();
@@ -378,9 +387,17 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     }))
 }
 
-/// `harness.self`'s text and scope in the manifest at `checkout`, read as
-/// plain TOML so a build older or newer than the manifest still finds them.
-fn rule_of(checkout: &Path) -> Result<Option<(String, Vec<String>)>> {
+/// What the sensor reads of `harness.self`'s row.
+struct Row {
+    text: String,
+    scope: Vec<String>,
+    exempt: Vec<String>,
+}
+
+/// `harness.self`'s text, scope and exempt in the manifest at `checkout`,
+/// read as plain TOML so a build older or newer than the manifest still
+/// finds them.
+fn rule_of(checkout: &Path) -> Result<Option<Row>> {
     let path = checkout.join(manifest::FILE);
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(None);
@@ -398,21 +415,29 @@ fn rule_of(checkout: &Path) -> Result<Option<(String, Vec<String>)>> {
     let Some(rule) = rule else {
         return Ok(None);
     };
-    let scope: Vec<String> = match rule.get("scope") {
-        Some(toml::Value::String(one)) => vec![one.clone()],
-        Some(toml::Value::Array(many)) => many
-            .iter()
-            .filter_map(toml::Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
+    let paths = |key: &str| -> Vec<String> {
+        match rule.get(key) {
+            Some(toml::Value::String(one)) => vec![one.clone()],
+            Some(toml::Value::Array(many)) => many
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
     };
+    let scope = paths("scope");
+    let exempt = paths("exempt");
     let text = rule
         .get("text")
         .and_then(toml::Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    Ok((!scope.is_empty()).then_some((text, scope)))
+    Ok((!scope.is_empty()).then_some(Row {
+        text,
+        scope,
+        exempt,
+    }))
 }
 
 /// The blob id of the file at `path` as it is on disk, `None` where there
