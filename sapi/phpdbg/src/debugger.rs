@@ -125,7 +125,17 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             if let Some(command) = session.job.take() {
                 prompt::idle_job(&mut session, req, &command);
             } else {
+                // A cycle after the first compiles a context that does not
+                // compile under `PHPDBG_DISCARD_OUTPUT` once php is fully
+                // started, so its log stands at a prompt that writes
+                // nothing (`Z/sapi/phpdbg/phpdbg.c:1540-1553`).
+                let compiles = session.init_due && session.context == Context::Refused;
                 crate::init::run(&mut session, &mut Here::Idle { req });
+                if compiles && session.stopped.is_none() {
+                    out::discarded(|| {
+                        prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                    });
+                }
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             }
             session::put(session);

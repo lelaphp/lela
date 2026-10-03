@@ -249,6 +249,14 @@ pub struct Session {
     /// them, which a yes to the question after it has php's next cycle
     /// resubmit at its startup run (`first_command`) instead of `run`.
     pub read_after_run: bool,
+    /// A yes to a `run` the init files read after their run, php's
+    /// `phpdbg_startup_run++`: the cycle's startup run asks after them.
+    pub startup_run: bool,
+    /// The last cycle's init files read a line after their run, which
+    /// php keeps as `first_command` for this cycle's startup run.
+    pub resubmit: bool,
+    /// A refusal inside the log's prompt bailed out of it.
+    pub left_log: bool,
     /// The request the init files run in holds the execution context's
     /// program at its first opline, which a `run` among them runs.
     pub program_held: bool,
@@ -320,6 +328,9 @@ impl Session {
             init_cleaning: false,
             inline_run: false,
             read_after_run: false,
+            startup_run: false,
+            resubmit: false,
+            left_log: false,
             program_held: false,
             ran_code: None,
             init_due: true,

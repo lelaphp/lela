@@ -247,7 +247,8 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
 /// What follows a `run` in the init files once the program it ran is
 /// over: its `phpdbg_clean` has the cycle cleaned, so the init files'
 /// lines after it are read under that ([`crate::init::resume`]); then a
-/// cycle that began with a run finds `in_execution` set and asks before
+/// cycle that began with a run, or whose init files said yes to a `run`
+/// after theirs, finds `in_execution` set and asks before
 /// it restarts, `-rr` quitting whatever the answer, and else the cycle's
 /// compile after the init files writes its notice, the first cycle's
 /// alone, and the prompt bails out at once, which ends the cycle. php
@@ -260,7 +261,10 @@ fn inline_ran(s: &mut Session, plan: Plan) {
     if s.stopped.is_some() {
         return;
     }
-    if plan == Plan::Run {
+    // A startup run the init files counted resubmits the line the last
+    // cycle kept, which bails out at once, where it kept one.
+    let counted = std::mem::take(&mut s.startup_run);
+    if plan == Plan::Run || counted && !s.resubmit {
         // `-rr` quits whatever the answer. Else a yes asks for the run
         // again and a no does not; the input's end bails out quitting,
         // which the cycle being cleaned turns into its end, so the
@@ -282,7 +286,9 @@ fn inline_ran(s: &mut Session, plan: Plan) {
         }
         return;
     }
-    crate::debugger::announce(s);
+    if !counted {
+        crate::debugger::announce(s);
+    }
     cycle_notice();
 }
 
