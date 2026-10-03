@@ -15,6 +15,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
+pub(crate) mod every;
+mod parity;
+pub(crate) use every::PerReading;
+
 use crate::api_check;
 use crate::cli::{Format, Section};
 use crate::crosscheck;
@@ -69,6 +73,7 @@ pub fn render(
     session_id: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
+    let format = Table::of(format)?;
     if week.is_some() && section != Section::Week {
         bail!("--week picks a row of the week section; use --section week");
     }
@@ -99,8 +104,8 @@ pub fn render(
                 .collect();
             let rows = fold_uncreated(rows, "scope")?;
             match format {
-                Format::Md => (compared(outermost(rows)), PHPT),
-                Format::Json => (rows, INSTRUMENT),
+                Table::Md => (compared(outermost(rows)), PHPT),
+                Table::Json => (rows, INSTRUMENT),
             }
         }
         Section::Witness => (
@@ -136,17 +141,38 @@ pub fn render(
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Parity => return parity::render(manifest, store, root, format),
     };
     Ok(match format {
-        Format::Json => {
+        Table::Json => {
             serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
-        Format::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Format::Md => match settled_rows(section).filter(|_| !uncut) {
+        Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
+        Table::Md => match settled_rows(section).filter(|_| !uncut) {
             Some((name, settled)) => folded(columns, rows, name, settled),
             None => table(columns, &rows),
         },
     })
+}
+
+/// The two formats a section's standing rows render in; `--format
+/// jsonl` is `--every`'s, one line per reading ([`every`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Table {
+    Md,
+    Json,
+}
+
+impl Table {
+    /// The table format `format` asks for; `jsonl` is refused here, being
+    /// `--every`'s.
+    fn of(format: Format) -> Result<Table> {
+        match format {
+            Format::Md => Ok(Table::Md),
+            Format::Json => Ok(Table::Json),
+            Format::Jsonl => bail!("--format jsonl renders one row per reading; add --every"),
+        }
+    }
 }
 
 /// The sections that grow by a row per crate, each with its name on the
@@ -254,6 +280,7 @@ pub fn session(
     session_id: Option<&str>,
     format: Format,
 ) -> Result<String> {
+    let format = Table::of(format)?;
     let mut map = fs::read_to_string(root.join(MAP)).with_context(|| format!("reading {MAP}"))?;
     if !map.ends_with('\n') {
         map.push('\n');
@@ -297,8 +324,8 @@ pub fn session(
         }
     }
     Ok(match format {
-        Format::Json => serde_json::to_string(&json!({ "map": map, "facts": facts }))?,
-        Format::Md => format!("{map}\n{facts}"),
+        Table::Json => serde_json::to_string(&json!({ "map": map, "facts": facts }))?,
+        Table::Md => format!("{map}\n{facts}"),
     })
 }
 
@@ -578,14 +605,14 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// alone, since `done` fails while one touches the scope, followed by the
 /// command that reads the rest: the local facts carry this, and it grows
 /// with the kinds and not with each accepted row (#821).
-fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String> {
+fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String> {
     let counts = registry.counts();
     let kinds = Kind::ALL
         .into_iter()
         .filter(|k| counts.by_kind.contains_key(k));
     let of = |status: Status| counts.by_status.get(&status).copied().unwrap_or(0);
     match format {
-        Format::Json => {
+        Table::Json => {
             let rows: Vec<Value> = registry
                 .rows()
                 .iter()
@@ -618,7 +645,7 @@ fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String
                 "counts": by_kind,
             }))?)
         }
-        Format::Md => {
+        Table::Md => {
             let mut out = String::new();
             let shown: Vec<_> = registry
                 .rows()
@@ -839,7 +866,7 @@ fn permits(
     manifest: &Manifest,
     readings: &[Reading],
     log: &Log,
-    format: Format,
+    format: Table,
     this: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
@@ -847,15 +874,15 @@ fn permits(
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
     let instruments = instruments(&log.readings, window)?;
     Ok(match format {
-        Format::Json => serde_json::to_string_pretty(&json!({
+        Table::Json => serde_json::to_string_pretty(&json!({
             "session": this,
             "silent_days": window,
             "unreadable": log.unreadable,
             "rules": rules.iter().map(Row::json).collect::<Result<Vec<_>>>()?,
             "instruments": instruments.iter().map(InstrumentLine::json).collect::<Vec<_>>(),
         }))?,
-        Format::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
-        Format::Md => {
+        Table::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
+        Table::Md => {
             let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules);
             let _ = writeln!(out);
             let (head, rule) = if window.is_some() {
@@ -1062,7 +1089,7 @@ fn week_section(
     manifest: &Manifest,
     readings: &[Reading],
     week: Option<usize>,
-    format: Format,
+    format: Table,
 ) -> Result<String> {
     let weeks: Vec<(usize, &Week)> = match week {
         Some(n) => {
@@ -1089,7 +1116,7 @@ fn week_section(
         .map(|(n, w)| (n, w, w.reads.iter().map(|r| judge(r, readings)).collect()))
         .collect();
     Ok(match format {
-        Format::Json => serde_json::to_string_pretty(
+        Table::Json => serde_json::to_string_pretty(
             &rows
                 .iter()
                 .map(|(n, w, reads)| {
@@ -1103,8 +1130,8 @@ fn week_section(
                 })
                 .collect::<Vec<_>>(),
         )?,
-        Format::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Format::Md => {
+        Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
+        Table::Md => {
             let mut out = String::new();
             let _ = writeln!(out, "| week | days | reading | bar | readings |");
             let _ = writeln!(out, "|---|---|---|---|---|");
@@ -1268,19 +1295,19 @@ const STATUS_LINES: usize = 20;
 /// the working tree, as git prints them, cut after [`STATUS_LINES`] paths
 /// with the number left out named. The JSON's `status` is cut the same
 /// way, the number beside it as `status_omitted`.
-fn git_section(root: &Path, format: Format) -> Result<String> {
+fn git_section(root: &Path, format: Table) -> Result<String> {
     let log = git(root, &["log", "--oneline", "-10"], None)?;
     let status = git(root, &["status", "--short", "--branch"], None)?;
     let mut lines: Vec<&str> = status.lines().collect();
     let omitted = lines.len().saturating_sub(STATUS_LINES + 1);
     lines.truncate(STATUS_LINES + 1);
     Ok(match format {
-        Format::Json => serde_json::to_string_pretty(&json!({
+        Table::Json => serde_json::to_string_pretty(&json!({
             "log": log.lines().collect::<Vec<_>>(),
             "status": lines,
             "status_omitted": omitted,
         }))?,
-        Format::Md => {
+        Table::Md => {
             let kept = lines.join("\n");
             let more = match omitted {
                 0 => String::new(),
@@ -1301,7 +1328,7 @@ fn git_section(root: &Path, format: Format) -> Result<String> {
 /// pin's, or the absence it named. CI reads the two names off the JSON,
 /// `tree.variable` and `promise.variable`, and sets them under those
 /// names, so the workflow spells neither.
-fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
+fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
@@ -1315,7 +1342,7 @@ fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
     let set = |is: bool| if is { "set" } else { "unset" };
     let display = |p: Option<&Path>| p.map(|p| p.display().to_string());
     Ok(match format {
-        Format::Json => serde_json::to_string_pretty(&json!({
+        Table::Json => serde_json::to_string_pretty(&json!({
             "tree": {
                 "variable": TREE_VARIABLE,
                 "value": display(named),
@@ -1336,7 +1363,7 @@ fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
                 "error": found.as_ref().err().map(|e| format!("{e:#}")),
             },
         }))?,
-        Format::Md => {
+        Table::Md => {
             let mut out = String::new();
             let _ = writeln!(out, "| fact | variable | value | state |");
             let _ = writeln!(out, "|---|---|---|---|");
@@ -1387,7 +1414,7 @@ fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
 /// Beside the checkout, `targets`: where a workspace keeps the targets
 /// under the pin, relative to its root, which CI keeps between runs so an
 /// engine's reading is held to its subset's target (#1733).
-fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
+fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
     let mut digest = sha1_smol::Sha1::new();
@@ -1396,7 +1423,7 @@ fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
     let key = format!("php-src-{}-{}", source.commit, &digest[..12]);
     let targets = phpt::target::kept_under(pin).display().to_string();
     Ok(match format {
-        Format::Json => serde_json::to_string_pretty(&json!({
+        Table::Json => serde_json::to_string_pretty(&json!({
             "tag": source.tag,
             "commit": source.commit,
             "phpt_files": source.phpt_files,
@@ -1404,7 +1431,7 @@ fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
             "key": key,
             "targets": targets,
         }))?,
-        Format::Md => {
+        Table::Md => {
             let mut out = String::new();
             let _ = writeln!(out, "| fact | value |");
             let _ = writeln!(out, "|---|---|");

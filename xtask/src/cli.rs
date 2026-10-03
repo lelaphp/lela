@@ -60,6 +60,19 @@ pub(crate) enum Command {
         /// every row of the other four, and every session of `permits`.
         #[arg(long)]
         uncut: bool,
+        /// Every reading of a section that keeps one per scope, in the
+        /// log's order, rather than the one that stands, as
+        /// `--format jsonl`: one line per reading carrying `v`, the version
+        /// of its shape, which a reader refuses when it does not know it.
+        /// Built for phpt (harness-design.md §4.6).
+        #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "uncut"])]
+        every: bool,
+        /// The log `--every` renders in place of the store's: another
+        /// store's `log.jsonl` or the published history, whose lean rows
+        /// `{i,s,t,a,c,n}` read too; `-` is the standard input. A line that
+        /// is no reading is counted on stderr and skipped.
+        #[arg(long, value_name = "FILE", requires = "every")]
+        log: Option<PathBuf>,
         /// Print AGENTS.md and .claude/harness.local.md for the function
         /// hook's `prompt.context`: as one text, or with `--format json` as
         /// the two blocks `map` and `facts`, each under the engine's cap on
@@ -721,12 +734,20 @@ pub enum Section {
     /// are kept. CI reads them here and writes no directory of the corpus
     /// (#1713, #1733).
     Corpus,
+    /// Met-of-target per suite and in total, from the phpt reading that
+    /// stands for each suite parity counts, and the suites outside parity
+    /// with the ruling that put them there or as not built (design §1,
+    /// §12; #1761).
+    Parity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Md,
     Json,
+    /// One JSON line per reading, each carrying `v`, the version of its
+    /// shape; `--every`'s alone.
+    Jsonl,
 }
 
 /// The subcommands `xtask` has, by name: what a reading's `instrument`

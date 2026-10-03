@@ -142,16 +142,7 @@ fn command_line() -> Result<()> {
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
     match cli.command {
-        Command::Status {
-            section,
-            format,
-            week,
-            session_id,
-            uncut,
-            session: _,
-        } => status_command(
-            &manifest, &store, &root, section, format, week, session_id, uncut,
-        ),
+        ask @ Command::Status { .. } => status_command(&manifest, &store, &root, ask),
         // The judge itself returned above; what is left of `permit` are the
         // two callers that read the manifest as a whole.
         Command::Permit {
@@ -521,34 +512,43 @@ fn track_command(root: &Path, branch: Option<&str>, json: bool) -> Result<()> {
 }
 
 /// `xtask status`: one section, or with no section the map and the local
-/// facts for the session-start hook, whose stdin head names the session.
-#[allow(clippy::too_many_arguments)]
-fn status_command(
-    manifest: &Manifest,
-    store: &Store,
-    root: &Path,
-    section: Option<cli::Section>,
-    format: cli::Format,
-    week: Option<usize>,
-    session_id: Option<String>,
-    uncut: bool,
-) -> Result<()> {
-    let text = if let Some(section) = section {
-        let registry = Registry::load(root)?;
-        status::render(
-            manifest,
-            &registry,
-            store,
-            root,
-            section,
-            format,
-            week,
-            session_id.as_deref(),
-            uncut,
-        )?
-    } else {
-        let id = session_id.or_else(status::session_of_stdin);
-        status::session(manifest, store, root, id.as_deref(), format)?
+/// facts for the session-start hook, whose stdin head names the session;
+/// with `--every`, one row per reading of the section, from the store's
+/// log or the one `--log` hands it (harness-design.md §4.6).
+fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command) -> Result<()> {
+    let Command::Status {
+        section,
+        format,
+        week,
+        session_id,
+        uncut,
+        every,
+        log,
+        session: _,
+    } = ask
+    else {
+        bail!("status: handed another command");
+    };
+    let text = match section {
+        Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
+        Some(section) => {
+            let registry = Registry::load(root)?;
+            status::render(
+                manifest,
+                &registry,
+                store,
+                root,
+                section,
+                format,
+                week,
+                session_id.as_deref(),
+                uncut,
+            )?
+        }
+        None => {
+            let id = session_id.or_else(status::session_of_stdin);
+            status::session(manifest, store, root, id.as_deref(), format)?
+        }
     };
     std::io::stdout().write_all(text.as_bytes())?;
     Ok(())

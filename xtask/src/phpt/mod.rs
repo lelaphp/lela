@@ -145,6 +145,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
+pub(crate) mod row;
 pub(crate) mod server;
 mod sysv;
 pub(crate) mod target;
@@ -174,13 +175,28 @@ use target::{Measure, Target};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "phpt";
+/// The keys of a phpt reading's `numbers` that its rendering reads back,
+/// beside the verdicts' ([`Judgement::key`]), the target's
+/// ([`target::Measure`]) and the tally's `run` ([`tally::RUN`]): the run
+/// writes each under its name here (#1745).
+pub(crate) mod numbers {
+    /// The tests the subset holds.
+    pub(crate) const TESTS: &str = "tests";
+    /// The corpus's files the subset holds (#1589).
+    pub(crate) const FILES: &str = "files";
+    /// 1 where nothing ran because the engine has no binary (#132).
+    pub(crate) const ENGINE_ABSENT: &str = "engine_absent";
+    /// 1 where nothing ran because the tree moved past the binary (#475).
+    pub(crate) const ENGINE_STALE: &str = "engine_stale";
+}
 /// The first segment of a phpt divergence key, so a row names the corpus
 /// and not the path this machine keeps it at.
 pub(crate) const CORPUS: &str = "php-src";
 /// The compiled tier's lane (jit-design.md §7): the engine runs with the
 /// `jit.mode` directive set and the corpus's expectations must hold
 /// unchanged under it, which is G5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Lane {
     /// Every eligible root is compiled at its first execution.
     Force,
@@ -527,10 +543,36 @@ pub(crate) enum Judgement {
 }
 
 impl Judgement {
+    /// Every verdict, in the order the reading counts them.
+    pub(crate) const ALL: [Judgement; 7] = [
+        Judgement::Pass,
+        Judgement::Fail,
+        Judgement::Skip,
+        Judgement::Bork,
+        Judgement::XFail,
+        Judgement::Diverged,
+        Judgement::Unread,
+    ];
+
     /// Whether the test missed and keeps why: it fails the reading, or the
     /// compiler refused it. Each such verdict carries a [`miss::Miss`].
     pub(crate) fn misses(self) -> bool {
         matches!(self, Judgement::Fail | Judgement::Bork | Judgement::Unread)
+    }
+
+    /// The key of a reading's `numbers` that counts the verdict: the one
+    /// place it is named, for the run that writes the count and the
+    /// rendering that reads it back (#1745).
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Judgement::Pass => "passed",
+            Judgement::Diverged => "diverged",
+            Judgement::Fail => "failed",
+            Judgement::Skip => "skipped",
+            Judgement::Bork => "borked",
+            Judgement::XFail => "xfailed",
+            Judgement::Unread => "unread",
+        }
     }
 }
 
@@ -671,7 +713,7 @@ pub(crate) fn reading(
         &outcome,
         message,
     )?;
-    reading.count("tests", tally.found as u64)?;
+    reading.count(numbers::TESTS, tally.found as u64)?;
     // The corpus's files the subset holds, which are its tests but where a
     // `--REDIRECTTEST--` ran a set in its place: a PDO driver's reading
     // judges `ext/pdo/tests` beside its own, which `ext/pdo`'s reading holds
@@ -682,24 +724,21 @@ pub(crate) fn reading(
     } else {
         0
     };
-    reading.count("files", files as u64)?;
-    reading.count("passed", tally.count(Judgement::Pass))?;
-    reading.count("failed", tally.count(Judgement::Fail))?;
-    reading.count("skipped", tally.count(Judgement::Skip))?;
-    reading.count("borked", tally.count(Judgement::Bork))?;
-    reading.count("xfailed", tally.count(Judgement::XFail))?;
-    reading.count("diverged", tally.count(Judgement::Diverged))?;
-    // The tests the compiler refused with its own parse error before any
-    // test code ran: a skip of the compiler's, held to that cause alone,
-    // and the one `done` meets beside `engine_absent` when it is every
-    // test of the subset (harness §4.5 condition 1, #319).
-    reading.count("unread", tally.count(Judgement::Unread))?;
+    reading.count(numbers::FILES, files as u64)?;
+    // A count per verdict. `unread` is the tests the compiler refused with
+    // its own parse error before any test code ran: a skip of the
+    // compiler's, held to that cause alone, and the one `done` meets
+    // beside `engine_absent` when it is every test of the subset (harness
+    // §4.5 condition 1, #319).
+    for judgement in Judgement::ALL {
+        reading.count(judgement.key(), tally.count(judgement))?;
+    }
     // Why nothing ran, where nothing did: the engine has no binary yet,
     // which is the one cause `done` excuses (#132). A subset of a crate
     // not yet created, and a subset whose every test skipped, are the
     // other two ways this lane skips and are not this number.
     reading.count(
-        "engine_absent",
+        numbers::ENGINE_ABSENT,
         u64::from(!uncreated && matches!(runner, Runner::Absent(_))),
     )?;
     // The other way nothing ran: a binary is built and the tree has moved
@@ -708,7 +747,7 @@ pub(crate) fn reading(
     // excuses, since the engine is there to be measured once it is rebuilt
     // (#475).
     reading.count(
-        "engine_stale",
+        numbers::ENGINE_STALE,
         u64::from(!uncreated && matches!(runner, Runner::Stale(_))),
     )?;
     // The burndown's number: what met its expectation, over the tests the
@@ -744,12 +783,7 @@ fn held_to(
         (Runner::Engine(_) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
             let verdicts = tally.judged.iter().map(|j| (j.id.as_str(), j.judgement));
             let measure = Measure::of(target, registry, verdicts);
-            reading.count("target", measure.target)?;
-            reading.count("met", measure.met)?;
-            reading.count("outside", measure.outside)?;
-            if measure.predated > 0 {
-                reading.count("predated", measure.predated)?;
-            }
+            measure.write(reading)?;
             measure.words(&keeps)
         }
         (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(

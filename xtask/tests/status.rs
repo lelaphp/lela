@@ -853,6 +853,251 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
     );
 }
 
+/// `--every --log` renders every phpt reading of a log it is handed, one
+/// versioned line each, in the log's order (harness-design.md §4.6,
+/// #1745): a whole line with a field this build does not know, a lean row
+/// of the published history, a torn line counted on stderr and skipped, a
+/// scope outside the grammar, and the other instruments' lines left out.
+#[test]
+fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
+    let root = scratch("every-log");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status-phpt");
+    let log = fixture.join("log.jsonl");
+    let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
+    let every = ["--section", "phpt", "--format", "jsonl", "--every", "--log"];
+
+    let (ok, lines, err) = status(&root, &[&every[..], &[log.to_str().unwrap()]].concat());
+    assert!(ok, "{err}");
+    assert_eq!(lines, expected);
+    assert!(err.contains("1 line unreadable at 4"), "{err}");
+    for line in lines.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(row["v"], 1, "{line}");
+    }
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let (ok, piped, err) = status_with_stdin(&root, &[&every[..], &["-"]].concat(), &text);
+    assert!(ok, "{err}");
+    assert_eq!(piped, expected, "the standard input reads as the file does");
+
+    let (ok, _, err) = status(&root, &[&every[..], &["no-such-log.jsonl"]].concat());
+    assert!(!ok && err.contains("no-such-log.jsonl"), "{err}");
+}
+
+/// Without `--log`, `--every` renders the store's own log, every reading
+/// and none picked, where the section without it renders the one that
+/// stands, as it did; and each flag is refused where it means nothing.
+#[test]
+fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
+    let root = scratch("every-store");
+    let store = Store::of_workspace(&root);
+    let phpt = |commit: &str, at: &str, passed: i64| {
+        let mut r = Reading::new("phpt", "ext/date");
+        r.status = Status::Pass;
+        r.commit = commit.into();
+        r.at = at.parse().unwrap();
+        r.numbers.insert("passed".into(), passed.into());
+        r.numbers.insert("tests".into(), passed.into());
+        r.numbers.insert("run".into(), passed.into());
+        r
+    };
+    store
+        .record(&[
+            phpt("", "2026-09-24T16:44:00Z", 400),
+            phpt("", "2026-09-24T16:50:00Z", 613),
+        ])
+        .unwrap();
+
+    let (ok, lines, err) = status(
+        &root,
+        &["--section", "phpt", "--format", "jsonl", "--every"],
+    );
+    assert!(ok, "{err}");
+    let passed: Vec<i64> = lines
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["p"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(passed, [400, 613], "{lines}");
+
+    let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(rows[0]["reading"]["numbers"]["passed"], 613, "{json}");
+
+    for (args, says) in [
+        (&["--section", "phpt", "--format", "jsonl"][..], "--every"),
+        (&["--section", "phpt", "--every"][..], "--format jsonl"),
+        (
+            &["--section", "budget", "--format", "jsonl", "--every"][..],
+            "budget",
+        ),
+        (&["--section", "phpt", "--log", "-"][..], "--every"),
+    ] {
+        let (ok, _, err) = status(&root, args);
+        assert!(!ok && err.contains(says), "{args:?}: {err}");
+    }
+}
+
+/// A scratch workspace whose store holds the phpt readings the parity
+/// tests read.
+fn parity_store(name: &str) -> Tree {
+    let root = scratch(name);
+    let phpt = |scope: &str, counts: &[(&str, i64)]| {
+        let mut r = Reading::new("phpt", scope);
+        r.status = Status::Pass;
+        r.at = "2026-10-03T12:00:00Z".parse().unwrap();
+        for (key, n) in counts {
+            r.numbers.insert((*key).into(), (*n).into());
+        }
+        r
+    };
+    let held = |n: i64, met: i64| {
+        [
+            ("tests", n + 10),
+            ("run", n + 10),
+            ("target", n),
+            ("met", met),
+            ("outside", 10),
+        ]
+    };
+    Store::of_workspace(&root)
+        .record(&[
+            phpt("Zend/tests", &held(100, 90)),
+            phpt(
+                "ext/ctype",
+                &[&held(48, 47)[..], &[("predated", 2)]].concat(),
+            ),
+            phpt("ext/json", &[("tests", 88), ("run", 88), ("passed", 88)]),
+            phpt("ext/ctype@control", &[("tests", 50), ("run", 50)]),
+            phpt("ext/ctype@against", &[("held", 47)]),
+            phpt("ext/ctype@force", &held(1000, 1000)),
+            phpt("ext/standard/tests/serialize", &held(500, 500)),
+            phpt("ext/pgsql", &held(3, 3)),
+            phpt("ext/enchant", &held(20, 20)),
+            phpt("sapi/cli", &held(99, 99)),
+            phpt("ext/lexbor", &[("tests", 0), ("run", 0)]),
+            phpt(
+                "ext/pcre",
+                &[("tests", 165), ("run", 0), ("engine_absent", 1)],
+            ),
+        ])
+        .unwrap();
+    root
+}
+
+/// The `parity` section (design §1, #1761): each suite parity counts with
+/// met-of-target off the phpt reading that stands for it, the total over
+/// the suites held to a target, and the suites outside parity with the
+/// ruling that put them there or as not built; a control, a lane, a
+/// comparison and a narrower run are no suite's own, and a reading held to
+/// no target is in no total.
+#[test]
+fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
+    let root = parity_store("parity");
+    let (ok, json, err) = status(&root, &["--section", "parity", "--format", "json"]);
+    assert!(ok, "{err}");
+    let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let suite = |name: &str| {
+        parity["suites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["suite"] == name)
+            .unwrap_or_else(|| panic!("no suite {name}: {json}"))
+            .clone()
+    };
+    assert_eq!(
+        suite("Zend/tests")["target"],
+        serde_json::json!({ "n": 100, "met": 90, "outside": 10, "predated": 0 })
+    );
+    assert_eq!(
+        suite("ext/ctype")["target"],
+        serde_json::json!({ "n": 48, "met": 47, "outside": 10, "predated": 2 })
+    );
+    assert_eq!(suite("ext/ctype")["state"], "held");
+    assert_eq!(
+        suite("sapi/cli")["target"],
+        serde_json::json!({ "n": 99, "met": 99, "outside": 10, "predated": 0 }),
+        "a host's suite is its row's name, the scope its reading is taken under"
+    );
+    for (name, state) in [
+        ("ext/json", "untargeted"),
+        ("ext/pcre", "unmeasured"),
+        ("ext/lexbor", "empty"),
+        ("sapi/cgi", "missing"),
+    ] {
+        assert_eq!(suite(name)["state"], state, "{name}: {json}");
+        assert_eq!(suite(name)["target"], serde_json::Value::Null, "{name}");
+    }
+    assert_eq!(suite("ext/json")["reading"]["status"], "pass");
+    assert_eq!(suite("sapi/cgi")["reading"], serde_json::Value::Null);
+    let suites = parity["suites"].as_array().unwrap();
+    assert!(
+        suites
+            .iter()
+            .all(|s| !s["suite"].as_str().unwrap().contains('@')
+                && s["suite"] != "ext/standard/tests/serialize"
+                && s["suite"] != "ext/pgsql"),
+        "{json}"
+    );
+    assert_eq!(
+        parity["total"],
+        serde_json::json!({ "suites": suites.len(), "held": 3, "met": 236, "target": 247 })
+    );
+    let outside = parity["outside"].as_array().unwrap();
+    assert!(
+        outside.contains(
+            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": 1167 })
+        ),
+        "{json}"
+    );
+    assert!(
+        outside
+            .contains(&serde_json::json!({ "suite": "ext/ldap", "why": "ruling", "ruling": 1167 })),
+        "a suite ruled out is named whether or not a reading measured it: {json}"
+    );
+    assert!(
+        outside.contains(&serde_json::json!({ "suite": "ext/enchant", "why": "unbuilt" })),
+        "{json}"
+    );
+    assert_eq!(
+        outside.len(),
+        8,
+        "the seven under #1167 and ext/enchant: {json}"
+    );
+}
+
+/// The same section as Markdown: a row per suite, the total, and the
+/// suites outside parity by ruling and as not built.
+#[test]
+fn parity_renders_as_markdown_for_a_session() {
+    let root = parity_store("parity-md");
+    let (ok, md, err) = status(&root, &["--section", "parity"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| ext/ctype | held | 47 | 48 | 10 | 2 | pass |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| ext/json | untargeted |  |  |  |  | pass |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| sapi/cgi | missing |  |  |  |  | no reading |"),
+        "{md}"
+    );
+    assert!(md.contains("236 of 247 target tests met"), "{md}");
+    assert!(
+        md.contains("#1167") && md.contains("not built by the pinned php: ext/enchant"),
+        "{md}"
+    );
+}
+
 /// `--session` is the map plus the local facts in one block, for the
 /// session-start hook; the local file is laid down from its template when
 /// the clone has none, and an unrendered region is said to be one.
