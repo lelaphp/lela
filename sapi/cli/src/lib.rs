@@ -126,9 +126,9 @@ pub fn main() -> ExitCode {
     let engine = |ini: &[(String, String)]| engine(ini, found(NAME));
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => started(&options.ini, version),
+        Ask::Version => started(&engine(&options.ini), version),
         Ask::Info => request::info(&engine(&options.ini)),
-        Ask::Extensions => started(&options.ini, php_sapi::modules),
+        Ask::Extensions => started(&engine(&options.ini), php_sapi::modules),
         Ask::Server(server) => {
             let engine = server_engine(&options.ini, found(server::NAME));
             match request::started(&engine, server::NAME) {
@@ -222,10 +222,9 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 ///
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
 /// ```
-fn started(ini: &[(String, String)], text: fn(&Engine) -> String) -> i32 {
-    let engine = engine(ini);
-    match request::started(&engine, NAME) {
-        0 => print(&text(&engine)),
+fn started(engine: &Engine, text: fn(&Engine) -> String) -> i32 {
+    match request::started(engine, NAME) {
+        0 => print(&text(engine)),
         failed => failed,
     }
 }
