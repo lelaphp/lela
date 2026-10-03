@@ -721,6 +721,7 @@ text = "`computed run --force` discards a hand edit; a person decides that."
 id = "harness.self"
 tool = ["Edit", "Write"]
 scope = [".claude/**", "harness-plugins/hooks/hooks.json", "harness-plugins/.claude-plugin/plugin.json", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+exempt = [".claude/skills/**"] # a skill is an ordinary file, held by review and the [budget] harness ceiling (#626)
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
 
