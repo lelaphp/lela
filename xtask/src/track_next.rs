@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use crate::census_weight::Weights;
 use crate::reading::Store;
 use crate::ticket::{Gh, Open};
-use crate::track::{self, Ticket, Track};
+use crate::track::{self, MAIN, Ticket, Track};
 use toml::value::Datetime;
 
 /// The label a ticket an agent may take carries. The frontier reads it
@@ -191,6 +191,16 @@ pub(crate) fn is_tracks(ticket: &Open, track: &str) -> bool {
         .filter_map(|name| name.strip_prefix(TRACK_LABEL))
         .peekable();
     named.peek().is_none() || named.any(|name| name == track)
+}
+
+/// The track a ticket's labels put it on: the name of its `track:`
+/// label, the first where it carries several, and [`MAIN`] where it
+/// carries none (ADR-0009). A close holds a successor to it.
+pub(crate) fn track_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> &'a str {
+    labels
+        .into_iter()
+        .find_map(|name| name.strip_prefix(TRACK_LABEL))
+        .unwrap_or(MAIN)
 }
 
 /// `xtask track next`: the track named, or the branch's, and the answer

@@ -1642,7 +1642,6 @@ fn ticket_act(root: &Path, number: u64, body: &str, act: xtask::ticket::Act) -> 
         act,
         xtask::track::Ticket::new(number),
         None,
-        "main",
     )
     .unwrap();
     Store::of_workspace(root)

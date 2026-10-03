@@ -325,7 +325,6 @@ fn ticket_command(
         act,
         ticket,
         session_id.as_deref(),
-        &track::Track::of(root, None)?.name,
     )?;
     record(store, std::slice::from_ref(&reading))
 }
