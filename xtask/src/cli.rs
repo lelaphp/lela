@@ -54,10 +54,12 @@ pub(crate) enum Command {
         /// divergence section is the counts and the `open` rows alone, their
         /// reasons cut to the message width, `budget`, `phpt`, `witness`
         /// and `mutants` render the rows a session acts on and count the
-        /// passing rest in one line, and `permits` names a rule's newest
-        /// sessions and counts the rest. With it, every divergence row with
-        /// its reason whole, as `docs/divergence.md` shows the registry,
-        /// every row of the other four, and every session of `permits`.
+        /// passing rest in one line, `permits` names a rule's newest
+        /// sessions and counts the rest, and `rules` leaves out the text a
+        /// rule's failure prints, as the map carries it. With it, every
+        /// divergence row with its reason whole, as `docs/divergence.md`
+        /// shows the registry, every row of the other four, every session of
+        /// `permits` and every rule's text.
         #[arg(long)]
         uncut: bool,
         /// Every reading of a section that keeps one per scope, in the
@@ -679,7 +681,9 @@ pub(crate) enum UsageCommand {
 /// The sections of harness-design.md §4.6 that have a renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Section {
-    /// The manifest's rules with ADR numbers and failure text.
+    /// The manifest's rules, each with its ADR number, the predicate that
+    /// judges it and its reading; the text its failure prints is under
+    /// `--uncut` and in JSON (#1772).
     Rules,
     /// Each lock's width against `api_items`.
     Locks,

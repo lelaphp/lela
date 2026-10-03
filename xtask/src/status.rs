@@ -90,7 +90,10 @@ pub fn render(
     }
     let readings = files.readings;
     let (rows, columns): (Vec<Row>, Columns) = match section {
-        Section::Rules => (rules(manifest, &readings), RULES),
+        Section::Rules => (
+            rules(manifest, &readings),
+            if uncut { RULES_UNCUT } else { RULES },
+        ),
         Section::Locks => (locks(manifest, &readings), LOCKS),
         Section::Budget => (
             fold_uncreated(budget(manifest, &readings), "crate")?,
@@ -1471,7 +1474,15 @@ fn latest_of(readings: &[Reading], instrument: &str, scope: &str) -> Option<Read
 /// A Markdown table's columns: the header, and the cells of one row.
 type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
 
-const RULES: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
+/// The rules as the map carries them: rule, ADR, predicate and reading.
+/// The text a rule's failure prints is [`RULES_UNCUT`]'s and JSON's, so the
+/// map holds its room under the engine's cap with every row at "no
+/// reading" (harness-design.md §4.6, #1772).
+const RULES: Columns = (&["rule", "adr", "predicate", "reading"], |r| {
+    vec![r.fact("id"), r.fact("adr"), r.fact("predicate"), r.status()]
+});
+
+const RULES_UNCUT: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
     vec![
         r.fact("id"),
         r.fact("adr"),
