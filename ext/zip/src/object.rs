@@ -511,6 +511,8 @@ fn close_with_hooks(
         )
     });
     let umask = req.umask();
+    let mut file = file(req, object.native::<Intern>(req).map_or(0, |i| i.id));
+    archive.lend(&mut file);
     let mut hooks = PhpHooks {
         req,
         progress,
