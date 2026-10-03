@@ -48,25 +48,40 @@ fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, 
     )
 }
 
+/// The rules section in Markdown is each rule's id, ADR, predicate and
+/// reading; the text its failure prints is under `--uncut` and in JSON, so
+/// the map carries the rules without it (#1772).
 #[test]
-fn rules_prints_each_rule_with_its_adr_and_failure_text() {
+fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
     let root = scratch("rules");
+    let text = "Extension state is request-scoped or immutable";
     let (ok, md, err) = status(&root, &["--section", "rules"]);
     assert!(ok, "{err}");
-    assert!(md.contains("ext.no-locks"), "{md}");
-    assert!(md.contains("ADR-0005"), "{md}");
     assert!(
-        md.contains("Extension state is request-scoped or immutable"),
+        md.starts_with("| rule | adr | predicate | reading |\n"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| ext.no-locks | ADR-0005 | deny_types | no reading |\n"),
         "{md}"
     );
     assert!(md.contains("harness.self"), "{md}");
     assert!(
-        md.contains("no reading"),
-        "a rule nothing has measured says so: {md}"
+        !md.contains(text),
+        "the failure's text is not the map's: {md}"
     );
+
+    let (ok, uncut, err) = status(&root, &["--section", "rules", "--uncut"]);
+    assert!(ok, "{err}");
+    assert!(
+        uncut.starts_with("| rule | adr | predicate | reading | text |\n"),
+        "{uncut}"
+    );
+    assert!(uncut.contains(text), "{uncut}");
 
     let (ok, json, _) = status(&root, &["--section", "rules", "--format", "json"]);
     assert!(ok);
+    assert!(json.contains(text), "{json}");
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = rows
         .as_array()
