@@ -241,7 +241,7 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
 /// ```php
 /// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(metaphone("AGN\xe9"), metaphone("\xe9TH")); }
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// string(2) "AN"
 /// string(1) "0"
 /// string(3) "AKN"

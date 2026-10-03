@@ -145,7 +145,7 @@ pub(crate) fn zend_dirname(path: &[u8]) -> Vec<u8> {
 /// ```php
 /// foreach (['C', 'ja_JP.SJIS'] as $l) { setlocale(LC_CTYPE, $l); var_dump(bin2hex(basename("a/\x95/")), bin2hex(basename("\x95/b\x95/", "/")), bin2hex(pathinfo("d/\x95/", PATHINFO_BASENAME))); }
 /// ```
-/// ```expect
+/// ```expect locale=ja_JP.SJIS
 /// string(2) "95"
 /// string(4) "6295"
 /// string(2) "95"

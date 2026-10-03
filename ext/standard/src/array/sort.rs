@@ -287,7 +287,7 @@ fn rsort(
 /// $c = $t; asort($c, SORT_LOCALE_STRING); echo implode(" ", array_keys($c)), "\n";
 /// setlocale(LC_ALL, "fr_FR.ISO8859-1", "fr_FR"); asort($t, SORT_LOCALE_STRING); echo implode(" ", array_keys($t)), "\n";
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// MB NS ON QB QC AB PE
 /// AB PE MB NS ON QC QB
 /// ```
@@ -550,7 +550,7 @@ fn natsort(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
 /// ```php
 /// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); $a = ["\xe9a", "\xc9b", "Ea"]; natcasesort($a); echo implode(' ', array_map('bin2hex', $a)), "\n"; }
 /// ```
-/// ```expect
+/// ```expect locale=fr_FR.ISO8859-1
 /// 4561 c962 e961
 /// 4561 e961 c962
 /// ```
