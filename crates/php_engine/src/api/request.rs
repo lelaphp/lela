@@ -18285,6 +18285,19 @@ impl Request {
     /// left pending in the diagnostic's place. With a throwable already
     /// pending, php's `zend_call_function` returns before the call and
     /// the diagnostic is dropped, handled by nobody.
+    ///
+    /// The file it is handed is the op array's file name, one more owner
+    /// of the interned string, so a handler's call, and a throw from it,
+    /// peaks where php's does whatever the path's length:
+    ///
+    /// ```php
+    /// set_error_handler(function ($n, $s) { throw new Exception($s); });
+    /// function f() { try { trigger_error('Use of "parent" in callables is deprecated', E_USER_DEPRECATED); } catch (Exception $e) {} }
+    /// f(); $s = memory_get_usage(); memory_reset_peak_usage(); f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
+    /// ```
+    /// ```expect
+    /// 2312 32
+    /// ```
     fn user_error_handler(
         &mut self,
         level: Level,
@@ -18313,7 +18326,9 @@ impl Request {
             return false;
         };
         let arguments = (|| -> Result<[Value; 4], Thrown> {
-            let file = Value::string(PhpString::new(self, file)?);
+            // `ZVAL_STR_COPY(&params[2], error_filename)`: the op array's
+            // file name, interned as a trace row's is, not a copy.
+            let file = Value::string(self.interned(file)?);
             // `ZVAL_STR_COPY(&params[1], message)`.
             self.addref(&Value::string(message));
             Ok([
