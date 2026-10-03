@@ -258,17 +258,6 @@ pub fn blob_id(content: &[u8]) -> String {
     hash.digest().to_string()
 }
 
-/// Whether `ancestor` is an ancestor of `commit`, or the same commit:
-/// `merge-base --is-ancestor`, whose exit is the answer.
-pub(crate) fn is_ancestor(root: &Path, ancestor: &str, commit: &str) -> bool {
-    git(
-        root,
-        &["merge-base", "--is-ancestor", ancestor, commit],
-        None,
-    )
-    .is_ok()
-}
-
 /// Whether `root` has the ref `name` (`refs/heads/x`, `refs/remotes/origin/x`).
 pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
     git(root, &["rev-parse", "--verify", "--quiet", name], None).is_ok()

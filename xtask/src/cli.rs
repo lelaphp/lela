@@ -125,8 +125,7 @@ pub(crate) enum Command {
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
     /// branch of this clone; `chains` prints every open ticket of the
-    /// track under the one that blocks it. `sync` catches the track up
-    /// with main.
+    /// track under the one that blocks it.
     /// `work --model <name>` takes that ticket from start to retire
     /// without a person.
     #[command(args_conflicts_with_subcommands = true)]
@@ -530,22 +529,13 @@ pub(crate) enum TrackCommand {
         #[arg(long)]
         json: bool,
     },
-    /// The track caught up with main: from inside the track's clone,
-    /// `origin/main` merged into the track's branch, the branch pushed
-    /// to origin, the clone re-detached at the new tip and `xtask` built
-    /// there, so the track never runs a harness older than main's; one
-    /// line says what moved. A merge that conflicts refuses, names the
-    /// conflict, and changes neither the branch nor the clone. Writes
-    /// no reading.
-    Sync,
     /// The frontier until it empties, without a person, from main's
     /// checkout: for each ticket `next` names on `--track`, its worktree
     /// laid down on `t<n>` off `main`, a headless session in it on
     /// `--model`, and when the session ends with the ticket closed, the
-    /// branch it was taken off fast-forwarded to the worktree's tip,
-    /// pushed to origin and the worktree retired. A session that ends
-    /// with the ticket open, or closed with the branch not ahead, leaves
-    /// the worktree standing for a person and the run goes on; a failure
+    /// worktree retired and the branch left for /specs to merge; `main`
+    /// is never moved or pushed. A session that ends with the ticket open
+    /// leaves the worktree standing for a person and the run goes on; a failure
     /// of the harness itself stops it, named. With `--fill`, "none" from
     /// `next` starts a `/frontier` session in the checkout and the run
     /// goes on with what it filed; a frontier still empty after it ends

@@ -65,7 +65,6 @@ pub mod ticket;
 pub mod track;
 pub mod track_chains;
 pub mod track_next;
-pub mod track_sync;
 pub mod track_work;
 pub mod unsafe_audit;
 pub mod usage;
@@ -478,10 +477,6 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             krate.as_deref(),
             *json,
         )),
-        Command::Track {
-            command: Some(TrackCommand::Sync),
-            ..
-        } => Some(track_sync::command(root)),
         Command::Track {
             command: Some(TrackCommand::Work { one, run }),
             ..

@@ -218,7 +218,7 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
 
     seed(&dir, root);
     let mut ready = true;
-    ready &= build(ADD, &dir);
+    ready &= build(&dir);
     ready &= lay_local(&dir);
     trust(&dir, &homes);
     carried_over(ADD, &dir);
@@ -403,9 +403,9 @@ fn seed(dir: &Path, root: &Path) {
 /// `xtask` built here, so the first `Edit` is judged rather than waiting
 /// on a build; whether it was, with what the build compiled on the line:
 /// the workspace's own crates, which a seeded worktree compiles, and the
-/// dependencies, which it does not. `whose` prefixes the lines, since
-/// `track sync` builds through this too.
-pub(crate) fn build(whose: &str, dir: &Path) -> bool {
+/// dependencies, which it does not.
+fn build(dir: &Path) -> bool {
+    let whose = ADD;
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])
         .current_dir(dir)

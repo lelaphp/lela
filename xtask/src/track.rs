@@ -32,8 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::git::{git, has_ref, is_ancestor};
-use crate::worktree::say;
+use crate::git::git;
 
 /// The track a branch with no track of its own is on.
 pub(crate) const MAIN: &str = "main";
@@ -426,80 +425,6 @@ pub(crate) fn worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
         }
     }
     Ok(found)
-}
-
-/// Why `tip` is no fast-forward of the track, `None` when it is one: the
-/// track's own commit, or a commit that does not descend from it.
-pub(crate) fn not_ahead(root: &Path, track: &Track, tip: &str) -> Result<Option<String>> {
-    let old = rev(root, &track.at)?;
-    if old == *tip {
-        return Ok(Some(format!(
-            "the branch is the track's own commit, {}",
-            short(&old)
-        )));
-    }
-    if !is_ancestor(root, &old, tip) {
-        return Ok(Some(format!(
-            "the track is at {}, which the branch does not descend from",
-            short(&old)
-        )));
-    }
-    Ok(None)
-}
-
-/// The track's branch moved to `tip` and pushed, by fast-forward alone:
-/// `origin/<name>` through the push first, since a push refused leaves
-/// nothing moved, then the clone's own branch where it has one, through
-/// `merge --ff-only` where it is checked out and `update-ref` where it is
-/// not; a detached `HEAD` at the old tip follows, since a track's clone
-/// is detached at its track. `whose` prefixes the lines: `track work`
-/// moves a track to a ticket's tip and `track sync` to main's.
-pub(crate) fn fast_forward(whose: &str, root: &Path, track: &Track, tip: &str) -> Result<()> {
-    let old = rev(root, &track.at)?;
-    if let Some(why) = not_ahead(root, track, tip)? {
-        bail!("{why}");
-    }
-    let name = &track.name;
-    git(
-        root,
-        &["push", "-q", "origin", &format!("{tip}:refs/heads/{name}")],
-        None,
-    )
-    .with_context(|| format!("git push refused origin/{name}"))?;
-    if has_ref(root, &format!("refs/heads/{name}")) {
-        if head_branch(root).as_deref() == Some(name.as_str()) {
-            git(root, &["merge", "-q", "--ff-only", tip], None)
-                .with_context(|| format!("{name} is checked out here and did not fast-forward"))?;
-        } else {
-            git(
-                root,
-                &["update-ref", &format!("refs/heads/{name}"), tip, &old],
-                None,
-            )
-            .with_context(|| format!("{name} did not move"))?;
-        }
-    }
-    say(
-        whose,
-        &format!(
-            "{name} fast-forwarded {} to {} and pushed to origin",
-            short(&old),
-            short(tip)
-        ),
-    );
-    if head_branch(root).is_none() && rev(root, "HEAD").is_ok_and(|head| head == old) {
-        match git(root, &["checkout", "-q", "--detach", tip], None) {
-            Ok(_) => say(
-                whose,
-                &format!("HEAD, detached at the track, follows it to {}", short(tip)),
-            ),
-            Err(err) => say(
-                whose,
-                &format!("HEAD stays detached at {}: {err:#}", short(&old)),
-            ),
-        }
-    }
-    Ok(())
 }
 
 /// The full id of `name`.
