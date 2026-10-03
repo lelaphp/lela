@@ -11550,6 +11550,28 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// Attempt to assign property "p" on int
 /// int(0)
 /// ```
+///
+/// A VAR container's object is held across an undefined value's read
+/// and given back after the write, so the write lands in a live object
+/// whatever a handler of the warning gave up, and its destructor is
+/// served at the release. The fence pins the engine's side of the row
+/// `trace:assign-obj-entry-container-under-a-handler` and is held to the
+/// engine alone.
+///
+/// ```php
+/// class C { public $p = 1; function __destruct() { echo "dtor ", $this->p ?? "NULL", "\n"; } }
+/// set_error_handler(function ($code, $msg) use (&$a) { echo "Error: $msg\n"; $a = 0; });
+/// $a = [new C];
+/// $a[0]->p = $y;
+/// var_dump($a);
+/// echo "DONE\n";
+/// ```
+/// ```expect
+/// Error: Undefined variable $y
+/// dtor NULL
+/// int(0)
+/// DONE
+/// ```
 pub(crate) fn assign_obj<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -11573,8 +11595,22 @@ pub(crate) fn assign_obj<T: Tier>(
     let early = (op.op1_type != OperandKind::Cv)
         .then(|| fetch(req))
         .transpose()?;
+    // An undefined value's handler can free the table a VAR's INDIRECT
+    // slot stands in, and the object with it: the object is held across
+    // the read and given back after the write, as php guards a container
+    // its handlers can free (`trace:assign-obj-entry-container-under-a-handler`).
+    let guard = early
+        .filter(|_| {
+            op.op1_type == OperandKind::Var
+                && data.op1_type == OperandKind::Cv
+                && req.slot(frame, data.op1).tag() == TypeTag::Undef
+        })
+        .map(|container| req.take_hold(container.deref()));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    let container = early.map_or_else(|| fetch(req), Ok)?.deref();
+    let container = match &guard {
+        Some(held) => held.value(),
+        None => early.map_or_else(|| fetch(req), Ok)?.deref(),
+    };
     let mut member = exec::Member::default();
     let written = match (
         member.name(req, frame, code, op),
@@ -11600,6 +11636,9 @@ pub(crate) fn assign_obj<T: Tier>(
     };
     member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Some(held) = guard {
+        req.release_hold(held);
+    }
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
@@ -22646,6 +22685,21 @@ mod tests {
         );
         req.release(cell.as_value());
         assert_eq!(req.memory_usage(false), start - 40 - 32);
+    }
+
+    /// #1514: the program #1511 ruled on, which is held to the engine
+    /// alone, so no witness pins it (`trace:assign-obj-entry-container-under-a-handler`).
+    #[test]
+    fn the_object_a_handler_frees_with_its_array_is_held_across_the_write() {
+        let served = Engine::builder().build().serve_capture(
+            "<?php class C { public $p = 1; function __destruct() { echo \"dtor \", $this->p ?? \"NULL\", \"\\n\"; } }\nset_error_handler(function($code, $msg) use (&$a) { echo \"Error: $msg\\n\"; $a = 0; });\n$a = [new C];\n$a[0]->p = $y;\nvar_dump($a);\necho \"DONE\\n\";",
+            crate::test::Capture::default(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "Error: Undefined variable $y\ndtor NULL\nint(0)\nDONE\n"
+        );
+        assert_eq!(served.fatal, None);
     }
 
     /// #367, the first acceptance: a `foreach` by value over a plain
