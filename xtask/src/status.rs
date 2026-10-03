@@ -697,8 +697,10 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 
 /// The `phpt` section: per subset, the reading off the log that stands
 /// for the track `root` is on, [`reading::Chain::standing`], and never a
-/// retired branch's appended after it (#787). The dashboard's data step
-/// reads this rendering as JSON rather than taking the log's last line.
+/// retired branch's appended after it (#787). This is xtask's rule; the
+/// dashboard keeps one of its own, the latest reading in time on the
+/// chain, read off `log.jsonl` itself and not off this section, as its
+/// README says (#845, #1717).
 fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
     let log = store.log()?;
     let chain = reading::Chain::of_head(root)?;
