@@ -618,8 +618,16 @@ pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
 /// Every witness in a crate's sources, and every kernel or native the
 /// coverage rule's scope covers there: the natives the attributes declare
 /// where the crate's covered sources carry one, less those `target`'s
-/// `#[cfg]` compiles out ([`anchor`]), and [`fence::Subject`]'s count
-/// where they carry none.
+/// `#[cfg]` compiles out ([`anchor`]), beside the crate's kernels; and
+/// [`fence::Subject`]'s count where they carry none.
+///
+/// **A kernel is a function of the crate's `ops` module** (design §8,
+/// `php_engine::ops`): [`fence::Subject`]'s count over `src/ops.rs` and
+/// `src/ops/**`, which is what the rule's scope read for `php_engine`
+/// before the anchor (#1264). An anchored crate keeps its kernels as
+/// subjects beside its natives, since the anchor replaced the count of a
+/// crate's other functions and not of its kernels; a native the attributes
+/// declare in `ops` is counted once, as a native.
 pub(crate) fn extract(
     root: &Path,
     krate: &Crate,
@@ -647,8 +655,13 @@ pub(crate) fn extract(
     }
     anchored.settle();
     // A crate whose natives stand on the attributes is counted by them,
-    // once the fences have run.
+    // once the fences have run, and by its kernels.
     if anchored.declares() {
+        let ops = krate.path().join("src/ops");
+        out.subjects.retain(|subject| {
+            (subject.file.starts_with(&ops) || subject.file == ops.with_extension("rs"))
+                && !anchored.declares_at(&subject.file, subject.line)
+        });
         out.anchored = Some(anchor::Coverage {
             package: krate.package(),
             anchored,
@@ -751,8 +764,14 @@ pub(crate) fn judge(
         })?
     };
     let entered = entered.into_inner().unwrap_or_else(PoisonError::into_inner);
-    let subjects = match &found.anchored {
-        Some(coverage) => coverage.subjects(&entered),
+    // An anchored crate's natives, by what the fences entered, and its
+    // kernels, by the witness in their own doc block ([`extract`]).
+    let subjects: Vec<fence::Subject> = match &found.anchored {
+        Some(coverage) => coverage
+            .subjects(&entered)
+            .into_iter()
+            .chain(found.subjects.iter().cloned())
+            .collect(),
         None => found.subjects.clone(),
     };
     // Captured in the order the threads finished; written and printed in

@@ -271,7 +271,8 @@ pub struct Extracted {
     pub problems: Vec<Problem>,
     /// The natives the attributes declare, where the crate's covered
     /// sources carry one: coverage is then what the fences' runs entered
-    /// (harness §4.5 condition 2, revision 58), and `subjects` is not read.
+    /// (harness §4.5 condition 2, revision 58), and `subjects` holds the
+    /// crate's kernels alone (#1264).
     pub(crate) anchored: Option<super::anchor::Coverage>,
 }
 
