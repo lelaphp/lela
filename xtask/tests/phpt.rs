@@ -90,6 +90,10 @@ struct Scratch {
     /// by the design, `ext/fixture/tests`, resolves there.
     manifest: Manifest,
     engine: PathBuf,
+    /// Where its run holds the conflict keys as locks: a directory of its
+    /// own, not the machine's temporary directory, so a real run beside it
+    /// holding `all` makes it wait for nothing (#1675).
+    locks: Tree,
 }
 
 impl Scratch {
@@ -129,14 +133,22 @@ impl Scratch {
             root,
             manifest,
             engine,
+            locks: Tree::new(&format!("phpt-{name}-locks")).unwrap(),
         }
     }
 
     /// The one reading of the fixture's subset, run through `engine`.
     fn run(&self, registry: &Registry, engine: &Path) -> Reading {
+        self.run_among(registry, engine, self.locks.path())
+    }
+
+    /// The one reading of the fixture's subset, its keys held as locks in
+    /// `locks`: where two scratch runs meet as two runs on the machine do.
+    fn run_among(&self, registry: &Registry, engine: &Path, locks: &Path) -> Reading {
         let ask = Ask {
             subset: Some("ext/fixture".to_owned()),
             engine: Some(engine.to_path_buf()),
+            locks: Some(locks.to_path_buf()),
             ..Ask::default()
         };
         let readings = phpt::run(&self.root, &self.manifest, registry, &ask).unwrap();
@@ -1122,9 +1134,12 @@ fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
         Scratch::new("port-one", &files),
         Scratch::new("port-two", &files),
     );
+    let locks = Tree::new("phpt-across-locks").unwrap();
+    let locks = locks.path();
     let readings = std::thread::scope(|scope| {
-        let runs = [&first, &second]
-            .map(|scratch| scope.spawn(move || scratch.run(&registry(""), &scratch.engine)));
+        let runs = [&first, &second].map(|scratch| {
+            scope.spawn(move || scratch.run_among(&registry(""), &scratch.engine, locks))
+        });
         runs.map(|run| run.join().unwrap())
     });
     for reading in &readings {
@@ -1191,9 +1206,12 @@ fn a_test_naming_all_runs_beside_no_other_runs_keyed_test() {
         Scratch::new("all-alone", &borrowed(&alone)),
         Scratch::new("all-keyed", &borrowed(&keyed)),
     );
+    let locks = Tree::new("phpt-across-locks").unwrap();
+    let locks = locks.path();
     let readings = std::thread::scope(|scope| {
-        let runs = [&first, &second]
-            .map(|scratch| scope.spawn(move || scratch.run(&registry(""), &scratch.engine)));
+        let runs = [&first, &second].map(|scratch| {
+            scope.spawn(move || scratch.run_among(&registry(""), &scratch.engine, locks))
+        });
         runs.map(|run| run.join().unwrap())
     });
     for reading in &readings {

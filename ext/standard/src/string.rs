@@ -35,7 +35,7 @@ use php_ext_random::Rng;
 use crate::ffi::locale::{self as c, Class};
 
 /// The request state `string.c` keeps: `BG(strtok_string)` and its
-/// cursor, and each locale category's name.
+/// cursor, and the request's `locale_t` once `setlocale()` built one.
 #[derive(Default)]
 pub(super) struct State {
     strtok: Option<(Vec<u8>, usize)>,
