@@ -152,7 +152,7 @@ One `xtask` subcommand that measures or judges something and ends by writing a r
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
-One `xtask` subcommand that acts or answers and writes no reading: `track` and its `new`, `next` and `sync`, `worktree`, `regions`, `new-ext`, `generate`, `status`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+One `xtask` subcommand that acts or answers and writes no reading: `track` and its `next` and `chains`, `worktree`, `regions`, `new-ext`, `generate`, `status`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
 _Avoid_: helper, utility, subtool
 
 **Tally**:
@@ -168,8 +168,8 @@ The one-shaped value an instrument writes after a run: instrument, scope, rule, 
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
 **Track**:
-The branch a set of branches is worked above, named by being a proper path prefix of theirs: `t-opus-5` for `t-opus-5/witness`. What `done` measures a turn since when it is given no base; a branch that is a prefix of none is on `main`. Git's ref store keeps a track and its branches from both being the clone's own, so a track a worktree is not on is the remote's.
-_Avoid_: parent branch, base branch, fork point
+The tickets that carry one `track:<name>` label, worked toward the destination of the one `frontier:chart` issue that carries the same label: `track:parity-compiler` and #1178. A ticket with no `track:` label is `main`'s, so every ticket is exactly one track's. A track has no branch, clone or store: each ticket is worked on its own branch cut from `main`, and `xtask track next --track <name>` names the next.
+_Avoid_: workstream, experiment branch, a track's branch (ADR-0009)
 
 **Ticket**:
 One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, the decision a design revision states. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places.
@@ -180,7 +180,7 @@ _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it
 _Avoid_: context file, system prompt, a track's map (the chart is that, and the two were one word until revision 22)
 
 **Frontier**:
-What a track has left to work, as the tracker has it: the open tickets labelled `ready-for-agent` that no open ticket blocks, carry no `track:` label naming another track, and no branch of the clone records. `xtask track next` names the oldest by number, `xtask track work` runs them until none is named, and the frontier is empty when `next` says `none`, which is when `/frontier work` fills it again. It is a state of the tracker read fresh each time, never a list a session keeps.
+What a track has left to work, as the tracker has it: the open tickets labelled `ready-for-agent` that no open ticket blocks, carry no `track:` label naming another track, and that no branch of the repository records. `xtask track next --track <name>` names the widest by the census, the number breaking a tie, `xtask track work` runs them until none is named, and the frontier is empty when `next` says `none`, which is when `/frontier work` fills it again. It is a state of the tracker read fresh each time, never a list a session keeps.
 _Avoid_: backlog (everything not yet done; a frontier is what is workable now), sprint, milestone
 
 **Chart**:
