@@ -741,6 +741,11 @@ pub enum Section {
     /// which of the two places the tree was found at. CI reads the names
     /// here and spells them nowhere (#36).
     Oracle,
+    /// The corpus CI checks out at the pin: the tag, the commit, the
+    /// `.phpt` files the pin counts, the sparse patterns the subsets need
+    /// and the cache key they make. CI reads them here and writes no
+    /// directory of the corpus (#1713).
+    Corpus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

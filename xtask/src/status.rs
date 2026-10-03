@@ -135,6 +135,7 @@ pub fn render(
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
+        Section::Corpus => return corpus_section(&manifest.pin, format),
     };
     Ok(match format {
         Format::Json => {
@@ -1367,6 +1368,41 @@ fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
             let _ = writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state));
+            out
+        }
+    })
+}
+
+/// The `corpus` section: what CI checks out of the pinned php-src (#1713),
+/// from the pin and [`phpt::ROOTS`] alone. The tag and the commit to clone
+/// at, the `.phpt` files the pin counts in the whole tree, which a
+/// checkout holding fewer has narrowed, git's sparse patterns for the
+/// roots, and the cache key, the commit and a digest of the patterns, so a
+/// change to the roots never restores a checkout made by the old ones.
+fn corpus_section(pin: &Pin, format: Format) -> Result<String> {
+    let source = &pin.source;
+    let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
+    let mut digest = sha1_smol::Sha1::new();
+    digest.update(patterns.join("\n").as_bytes());
+    let digest = digest.digest().to_string();
+    let key = format!("php-src-{}-{}", source.commit, &digest[..12]);
+    Ok(match format {
+        Format::Json => serde_json::to_string_pretty(&json!({
+            "tag": source.tag,
+            "commit": source.commit,
+            "phpt_files": source.phpt_files,
+            "patterns": patterns,
+            "key": key,
+        }))?,
+        Format::Md => {
+            let mut out = String::new();
+            let _ = writeln!(out, "| fact | value |");
+            let _ = writeln!(out, "|---|---|");
+            let _ = writeln!(out, "| tag | {} |", cell(&source.tag));
+            let _ = writeln!(out, "| commit | {} |", cell(&source.commit));
+            let _ = writeln!(out, "| phpt_files | {} |", source.phpt_files);
+            let _ = writeln!(out, "| patterns | {} |", cell(&patterns.join(" ")));
+            let _ = writeln!(out, "| key | {key} |");
             out
         }
     })

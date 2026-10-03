@@ -514,6 +514,50 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
     );
 }
 
+/// The corpus CI checks out (#1713): the pin's tag, commit and count of
+/// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
+/// key of the commit and a digest of the patterns, the same on every call;
+/// the Markdown carries the same facts, and nothing is written.
+#[test]
+fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
+    let root = scratch("corpus");
+    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let (ok, json, err) = status(&root, &["--section", "corpus", "--format", "json"]);
+    assert!(ok, "{err}");
+    let corpus: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(corpus["tag"], source.tag.as_str());
+    assert_eq!(corpus["commit"], source.commit.as_str());
+    assert_eq!(corpus["phpt_files"], source.phpt_files);
+    let patterns: Vec<&str> = corpus["patterns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    for pattern in ["/Zend/tests/", "/tests/", "/ext/*/", "/sapi/*/tests/"] {
+        assert!(patterns.contains(&pattern), "{pattern}: {patterns:?}");
+    }
+    let key = corpus["key"].as_str().unwrap();
+    let digest = key
+        .strip_prefix(&format!("php-src-{}-", source.commit))
+        .unwrap_or_else(|| panic!("{key} names the commit"));
+    assert!(
+        digest.len() == 12 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+        "{key}"
+    );
+    let (_, again, _) = status(&root, &["--section", "corpus", "--format", "json"]);
+    assert_eq!(again, json, "the key is the patterns', not the call's");
+
+    let (ok, md, err) = status(&root, &["--section", "corpus"]);
+    assert!(ok, "{err}");
+    assert!(md.contains(&format!("| key | {key} |")), "{md}");
+    assert!(md.contains("/sapi/*/tests/"), "{md}");
+    assert!(
+        !root.join("target").exists(),
+        "status ran nothing and wrote nothing"
+    );
+}
+
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");

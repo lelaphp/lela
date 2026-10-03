@@ -94,19 +94,22 @@ jobs:
       # (#36). The name is stated in the harness alone: the step below
       # reads it off `xtask status --section oracle`, whose JSON carries
       # the two variables by name, and sets the tree under it through
-      # `$GITHUB_ENV`, so this file spells neither name. The tag and the
-      # commit are the pin's, read off `oracle.toml` by a parse and never
-      # copied here, so a person's bump moves the checkout and the cache
-      # key with it. The checkout is sparse and shallow: one commit at the
-      # tag, and of the tree only `Zend/tests`, `tests`, `sapi/cli/tests`
-      # and every `ext/*/tests`, the directories a `[[crate]]` row can
-      # own, stated once in `CORPUS_DIRS`; cached by the pinned commit and
-      # a digest of that list, so a second run restores it rather than
-      # cloning again and a narrower list never restores a wider tree's
-      # cache, or the reverse. What holds the tree to `[source].commit`
-      # is `Source::tree()`, which refuses a checkout at another commit
-      # naming both revisions; the one-test step fails the job there,
-      # before the suite, and the suite reads the same tree. The promise
+      # `$GITHUB_ENV`, so this file spells neither name. What is checked
+      # out is `xtask status --section corpus`'s (#1713): the pin's tag,
+      # the sparse patterns of the corpus's roots, the table the nightly
+      # lane walks and every `[[crate]]` row's subset stands under, and
+      # the cache key, the pinned commit and a digest of the patterns. So
+      # a person's bump moves the checkout and the key with it, a subset
+      # the manifest adds is checked out without an edit here, and a
+      # changed set of patterns never restores another set's tree. The
+      # checkout is sparse and shallow: one commit at the tag, the
+      # patterns handed to git on stdin. What holds the tree to the pin
+      # is two tests: `Source::tree()` refuses a checkout at another
+      # commit naming both revisions, and the tree must hold every `.phpt`
+      # `[source].phpt_files` counts, so a checkout narrower than the
+      # corpus names both numbers; the one step running both fails the
+      # job there, before the suite, and the suite reads the same tree.
+      # The promise
       # (#38): `oracle::PROMISE_VARIABLE`, read off the same section and
       # set beside the tree's variable, lists what of the pin this
       # runner has, so a test
@@ -118,39 +121,31 @@ jobs:
       # until the pin names a binary the runner can have, which is a
       # person's.
       # The wall-clock, measured on the dev machine (2026-09-10, M-series,
-      # residential link): the shallow clone 9.6 s and the sparse checkout
-      # 2.4 s, 132 MB in the tree and 31 MB under `.git`, 21414 `.phpt`
-      # files; with `--filter=blob:none` the clone is 1.0 s and the
-      # checkout 13.3 s, so the plain shallow clone is the one taken. The
-      # runner's figures, cold and from cache, are read off the first two
-      # runs.
-      - name: the pin's tag and commit, and the sparse set's digest
+      # residential link), for the narrower set before #1713: the shallow
+      # clone 9.6 s and the sparse checkout 2.4 s, 132 MB in the tree and
+      # 31 MB under `.git`, 21414 `.phpt` files; with `--filter=blob:none`
+      # the clone is 1.0 s and the checkout 13.3 s, so the plain shallow
+      # clone is the one taken. Every `ext/<name>` whole holds 21655, the
+      # pin's count; the runner's figures for it, cold and from cache, are
+      # read off the first two runs.
+      - name: the corpus the subsets need, named by the harness
         id: pin
-        env:
-          CORPUS_DIRS: /Zend/tests/ /tests/ /sapi/cli/tests/ /ext/*/tests/
         run: |
-          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
-          import hashlib, os, tomllib
-          with open("oracle.toml", "rb") as pin:
-              source = tomllib.load(pin)["source"]
-          dirs = hashlib.sha256(os.environ["CORPUS_DIRS"].encode()).hexdigest()[:12]
-          print(f"tag={source['tag']}\ncommit={source['commit']}\ndirs={dirs}")
-          EOF
+          cargo xtask status --section corpus --format json > "$RUNNER_TEMP/corpus.json"
+          jq -r '"tag=\(.tag)", "key=\(.key)"' "$RUNNER_TEMP/corpus.json" >> "$GITHUB_OUTPUT"
       - name: the pinned php-src, from the cache
         id: corpus
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/php-src
-          key: php-src-${{ steps.pin.outputs.commit }}-${{ steps.pin.outputs.dirs }}
+          key: ${{ runner.os }}-${{ steps.pin.outputs.key }}
       - name: the pinned php-src, checked out sparse and shallow at the tag
         if: steps.corpus.outputs.cache-hit != 'true'
         env:
           TAG: ${{ steps.pin.outputs.tag }}
-          CORPUS_DIRS: /Zend/tests/ /tests/ /sapi/cli/tests/ /ext/*/tests/
         run: |
-          set -f # the patterns are git's, not the shell's
           git clone --quiet --no-checkout --depth 1 --branch "$TAG" https://github.com/php/php-src.git "$RUNNER_TEMP/php-src"
-          git -C "$RUNNER_TEMP/php-src" sparse-checkout set --no-cone $CORPUS_DIRS
+          jq -r '.patterns[]' "$RUNNER_TEMP/corpus.json" | git -C "$RUNNER_TEMP/php-src" sparse-checkout set --no-cone --stdin
           git -C "$RUNNER_TEMP/php-src" checkout --quiet
       - name: the tree's variable and the promise's, named by the harness and set for the steps below
         run: |
@@ -159,8 +154,8 @@ jobs:
           promise=$(jq -r .promise.variable "$RUNNER_TEMP/oracle.json")
           echo "$tree=$RUNNER_TEMP/php-src" >> "$GITHUB_ENV"
           echo "$promise=tree" >> "$GITHUB_ENV"
-      - name: the tree is at the pin's commit
-        run: cargo test -p xtask --test oracle a_tree_the_variable_names_is_at_the_pin
+      - name: the tree is at the pin's commit and holds every test the pin counts
+        run: cargo test -p xtask --test oracle a_tree_the_variable_names_
       # The crate's own tests as the reading `done`'s condition 1 asks
       # every touched crate for (#191): the workspace here, the touched
       # crates at pre-commit. The harness's own tests run here once, under

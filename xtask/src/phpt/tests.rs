@@ -742,6 +742,109 @@ fn the_corpus_holds_each_extension_whole_as_a_row_derives_it() {
     assert_eq!(names, ["tests/c.phpt", "uchar/tests/d.phpt"]);
 }
 
+/// The patterns CI checks the corpus out by (#1713) take every subset the
+/// manifest's rows hold, `sapi/cgi/tests`, `sapi/fpm/tests`,
+/// `sapi/phpdbg/tests` and the nested `ext/intl/uchar/tests` among them,
+/// and every subset of the nightly lane's corpus, as git itself reads
+/// them: a fixture repository with one test in each is checked out sparse
+/// by the patterns, as the workflows check out php-src, and the negative
+/// control is a test outside every root, which stays out.
+#[test]
+fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold() {
+    use crate::git::git;
+    let patterns: Vec<String> = ROOTS.iter().map(|root| root.pattern()).collect();
+    assert_eq!(
+        patterns,
+        ["/Zend/tests/", "/tests/", "/ext/*/", "/sapi/*/tests/"],
+        "every .phpt under ext/<name> is the extension's, as Mitchell ruled on #1713"
+    );
+
+    let mut held: Vec<PathBuf> = manifest().crates.iter().flat_map(Crate::subsets).collect();
+    for host in ["sapi/cgi/tests", "sapi/fpm/tests", "sapi/phpdbg/tests"] {
+        assert!(
+            held.contains(&PathBuf::from(host)),
+            "the tracked rows hold {host}: {held:?}"
+        );
+    }
+    held.extend(["Zend/tests", "tests/lang", "ext/intl/uchar/tests"].map(PathBuf::from));
+    let outside = [
+        "main/streams/outside.phpt",
+        "Zend/outside.phpt",
+        "sapi/cli/outside.phpt",
+    ];
+
+    let origin = Tree::new("phpt-sparse-origin").unwrap();
+    git(&origin, &["init", "-q", "-b", "main"], None).unwrap();
+    for under in &held {
+        fs::create_dir_all(origin.join(under)).unwrap();
+        fs::write(origin.join(under).join("held.phpt"), "").unwrap();
+    }
+    for file in outside {
+        let file = origin.join(file);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "").unwrap();
+    }
+    git(&origin, &["add", "-A"], None).unwrap();
+    git(
+        &origin,
+        &[
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "commit",
+            "-q",
+            "-m",
+            "corpus",
+        ],
+        None,
+    )
+    .unwrap();
+
+    let clone = Tree::new("phpt-sparse-clone").unwrap();
+    let from = origin.path().to_string_lossy().into_owned();
+    git(
+        &clone,
+        &["clone", "-q", "--no-checkout", &from, "php-src"],
+        None,
+    )
+    .unwrap();
+    let checkout = clone.join("php-src");
+    let stdin = patterns.join("\n") + "\n";
+    git(
+        &checkout,
+        &["sparse-checkout", "set", "--no-cone", "--stdin"],
+        Some(&stdin),
+    )
+    .unwrap();
+    git(&checkout, &["checkout", "-q"], None).unwrap();
+
+    for under in &held {
+        assert!(
+            checkout.join(under).join("held.phpt").is_file(),
+            "{} is not checked out by {patterns:?}",
+            under.display()
+        );
+    }
+    for file in outside {
+        assert!(
+            !checkout.join(file).exists(),
+            "{file} is outside every root and was checked out"
+        );
+    }
+    let scopes = |tree: &Path| -> Vec<String> {
+        Subset::corpus(tree)
+            .into_iter()
+            .map(|subset| subset.scope)
+            .collect()
+    };
+    assert_eq!(
+        scopes(&checkout),
+        scopes(&origin),
+        "the checkout holds every subset of the corpus the whole tree does"
+    );
+}
+
 /// Every `.phpt` of the pinned tree is in exactly one subset of the
 /// nightly lane's corpus, `ext/intl/uchar/tests` among them, so the lane
 /// holds the whole corpus and nothing twice (#1598).
