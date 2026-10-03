@@ -11,7 +11,7 @@ The coordinator keeps the builder **slots** full and merges what they finish. A 
 - Main's checkout (`~/Projects/dax-php`, on the branch `main`) is where every merge happens, and its `target/harness` is the store. Builders work in worktrees `cargo xtask worktree add` lays beside it, each on a branch `t<n>` cut from `main`, so `done` measures each since `main`; `cargo xtask track` in a worktree says so. A track is a label, never a branch (ADR-0009). Start each batch from the pushed tip: `git pull --ff-only`.
 - The checkout is the coordinator's while `/specs` runs: other sessions work in worktrees, since a merge commit takes the whole index. A person's uncommitted edit in it (a `.gitignore` line) stays theirs: nothing here stages it, and every reset is `--keep`, which refuses where it would overwrite one.
 - `git worktree list` and `git config --get-regexp 'branch\..*\.ticket'` show the slots laid and each one's ticket. A builder this session didn't dispatch is gone; its branch's commits show how far it got.
-- The route is [phpt parity](https://github.com/mitchellvanw/dax-php/issues/1160): parity is the engine's verdict equal to the oracle's on every test the oracle runs, worked in six tracks, each a chart labelled `frontier:chart` with a `track:parity-<track>` label on its tickets (instruments, compiler, runtime, hosts, streams, extensions). A track has no branch, clone or store; this loop is what works them.
+- The route is [phpt parity](https://github.com/mitchellvanw/dax-php/issues/1160): parity is the engine's verdict equal to the oracle's on every test the oracle runs, worked in six tracks, each a chart labelled `frontier:chart` with a `track:parity-<name>` label on its tickets (instruments, compiler, runtime, hosts, streams, extensions). A track has no branch, clone or store; this loop is what works them.
 - `gh issue list --label ready-for-agent --state open` holds the open specs and blockers, and `--label for-a-person` the person's tickets; `--label track:parity-<track>` narrows to one track. A ticket labelled `superseded` was replaced by the parity route and is no spec, no blocker and no coverage. `df -h` shows the disk.
 - `$S` is your scratchpad. Runs and message files there are named for their commit, branch or ticket.
 
@@ -51,7 +51,7 @@ The body is the user-level `to-spec` skill's template (Problem Statement, Soluti
 
 - The Problem Statement carries the measured counts and the commit. Out of Scope names the neighbouring spec. Further Notes names the branch the spec is laid on, when it isn't `main`.
 - The boxes cover every cause of the group, each met and witnessed or named and filed; the before and after counts in the closing comment; and `cargo xtask done` listing nothing unmet for the crates touched. Regressions are the merge check's, so no box asks the builder for them.
-- File it with the labels `ready-for-agent` and its track's `track:parity-<track>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the track. A spec that absorbs a track's tickets names them, and each gets a comment linking the spec.
+- File it with the labels `ready-for-agent` and its track's `track:parity-<name>`, and no parent: a chart takes no sub-issues (#619), and the label is what groups the track. A spec that absorbs a track's tickets names them, and each gets a comment linking the spec.
 - Anything a person must rule on first (a manifest row, a ceiling, a porting key, a design line) is its own `for-a-person` ticket, wired with `gh issue edit <spec> --add-blocked-by <n>`. A blocked spec waits, and the slot takes the next cut.
 
 The spec is written when `cargo xtask ticket read <n>` prints its boxes.
@@ -61,7 +61,7 @@ The spec is written when `cargo xtask ticket read <n>` prints its boxes.
 - Laid on `main`: `cargo xtask worktree add t<n> --ticket <n>`, after `git pull --ff-only` so it branches from the pushed tip. While the checkout holds a staged merge the workspace doesn't build, so run its built `target/release/xtask --root <checkout> worktree add …` instead.
 - Laid on an unmerged branch, which `worktree add` can't do because it branches only from `main`:
   ```
-  git worktree add -b t<n> .claude/worktrees/t<n> t<m>
+  git worktree add -b t<n> ~/Projects/dax-php-worktrees/t<n> t<m>
   git config branch.t<n>.ticket <n>
   ```
 
