@@ -157,6 +157,24 @@ impl Mysqlnd {
         Mysqlnd(Handle::alloc(req, persistent))
     }
 
+    /// A persistent connection given back as the request that holds it
+    /// ends: taken out of the request's table, this owner gone, and kept
+    /// by the engine with its socket under the key answered, which the
+    /// owner's pool entry holds in place of the connection php's holds;
+    /// `None` where it is no persistent connection that connected.
+    pub fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
+        self.0.give_back(req)
+    }
+
+    /// The persistent connection kept under `key` taken up by the request,
+    /// one owner counted: `None` where the engine keeps none under it.
+    /// Its socket is the one kept under the key where that one is alive;
+    /// otherwise every command over it fails as one over a dead link
+    /// does, as the `mysqlnd_ping` its owner sends first finds.
+    pub fn take_up(req: &mut Request, key: &[u8]) -> Result<Option<Mysqlnd>, Thrown> {
+        Ok(Handle::take_up(req, key)?.map(Mysqlnd))
+    }
+
     /// `get_reference`: one more owner, for a statement or a set of rows
     /// read over the connection.
     #[must_use]

@@ -90,6 +90,10 @@ pub(crate) struct Net {
     pub(crate) cmd_buffer: usize,
     /// `pfc->data->sha256_server_public_key`.
     pub(crate) sha256_server_public_key: Option<Vec<u8>>,
+    /// The `persistent_id` a persistent connection's stream is opened
+    /// under, php's `"%p"` of the `MYSQLND_VIO`: the key the engine keeps
+    /// the socket by between the requests that take the connection up.
+    pub(crate) persistent_id: Option<Vec<u8>>,
 }
 
 impl Net {
@@ -148,7 +152,7 @@ impl Net {
             Xport::Client {
                 timeout,
                 connect: true,
-                persistent: None,
+                persistent: self.persistent_id.clone(),
                 // `post_connect_set_opt`'s `mysqlnd_set_sock_no_delay`
                 // on a TCP stream, set as the socket connects.
                 socket: SocketOptions {
@@ -172,7 +176,43 @@ impl Net {
         };
         self.stream = Some(stream);
         self.unix = unix;
-        // `post_connect_set_opt`.
+        self.post_connect(req, stream);
+        Ok(true)
+    }
+
+    /// The stream of a persistent connection taken up by a request: the
+    /// socket the engine kept under the connection's `persistent_id`, a
+    /// live one, with the options `post_connect_set_opt` gave it; a stream
+    /// holding no socket where none was kept, over which every command
+    /// fails as one over a dead link does.
+    pub(crate) fn take_up(&mut self, req: &mut Request, scheme: &[u8]) -> Result<(), Thrown> {
+        self.stream = None;
+        let made = req.xport_create(
+            scheme,
+            Xport::Client {
+                timeout: None,
+                connect: false,
+                persistent: self.persistent_id.clone(),
+                socket: SocketOptions::default(),
+                context: None,
+            },
+        )?;
+        if let Ok(stream) = made {
+            self.stream = Some(stream);
+            self.post_connect(req, stream);
+        }
+        Ok(())
+    }
+
+    /// The stream of a persistent connection let go as the request gives
+    /// the connection back: the request's end keeps its socket under the
+    /// connection's `persistent_id`, and nothing of the request's is left.
+    pub(crate) fn give_back(&mut self) {
+        self.stream = None;
+    }
+
+    /// `post_connect_set_opt` and the error suppression php sets beside it.
+    fn post_connect(&self, req: &mut Request, stream: Stream) {
         if self.options.timeout_read > 0 {
             let wait = Duration::from_secs(u64::from(self.options.timeout_read));
             stream.set_option(req, StreamOption::ReadTimeout(wait));
@@ -185,7 +225,6 @@ impl Net {
         // that fails is the connection's error in mysqlnd's words, not
         // the socket's notice.
         stream.set_option(req, StreamOption::SuppressErrors(true));
-        Ok(true)
     }
 
     /// `mysqlnd_vio::close_stream`.
