@@ -168,7 +168,7 @@ impl std::ops::Deref for Repository {
 /// `xtask` a worktree of it builds is this one and the manifest, the pin,
 /// the registry, the map, the tracked settings and the hooks are the
 /// real ones; one commit on `main`; and `origin/t-x` as the track a
-/// worktree is taken off, which is where a track's branch lives in a
+/// worktree is taken off, which is where a track lives in a
 /// repository that has worktrees on it (harness-design.md ledger 14).
 fn repository(name: &str) -> Repository {
     let tree = Tree::new(&format!("worktree-{name}")).unwrap();
