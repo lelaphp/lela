@@ -128,7 +128,7 @@ pub struct Server {
 /// Whether the engine the line's ini entries build has a shell, as
 /// `do_cli` asks `cli_shell_callbacks.cli_shell_run` once php's modules
 /// have started.
-pub type HasShell = dyn Fn(&[(String, String)]) -> bool;
+pub type HasShell = dyn Fn(&[(Vec<u8>, Vec<u8>)]) -> bool;
 
 /// The command line, read: the engine's switches and what is asked of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,8 +139,9 @@ pub struct Options {
     /// a `-d name` is `name=1`, as `php_ini_builder_define` writes it.
     /// The value is the text the engine's builder writes as the define's
     /// line and reads with the INI grammar (`EngineBuilder::ini`), so
-    /// `UTC;` stands here and is `UTC` once read.
-    pub ini: Vec<(String, String)>,
+    /// `UTC;` stands here and is `UTC` once read; both are the
+    /// argument's bytes, as php's argv is.
+    pub ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `--repeat <count>`: the request served this many times, php's
     /// `num_repeats`, `atoi` of the value.
     pub repeat: i64,
@@ -381,8 +382,7 @@ impl Options {
                         continue;
                     }
                     b'd' => {
-                        self.ini
-                            .push(define(&String::from_utf8_lossy(&value.unwrap_or_default())));
+                        self.ini.push(define(&value.unwrap_or_default()));
                         continue;
                     }
                     b'S' => {
@@ -737,8 +737,8 @@ mod tests {
                 repeat: 1,
                 interactive: false,
                 ini: vec![
-                    ("precision".to_owned(), "10".to_owned()),
-                    ("foo".to_owned(), "1".to_owned())
+                    (b"precision".to_vec(), b"10".to_vec()),
+                    (b"foo".to_vec(), b"1".to_vec())
                 ],
                 ask: Ask::Serve(
                     file("a.php"),

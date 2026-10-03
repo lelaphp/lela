@@ -625,7 +625,7 @@ pub(crate) struct Shared {
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
     /// wrote there over the host's values, as opcache's handlers log a
     /// refused setting: for the host to write before it serves.
-    startup_errors: String,
+    startup_errors: Vec<u8>,
     /// What the extensions' `on_modify` raised as the engine registered
     /// their ini entries ([`Engine::register_ini`]), which php shows once
     /// `php_module_startup` is done and before any request's `RINIT`,
@@ -1567,17 +1567,16 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
 /// where it opens with a byte that is neither alphanumeric nor a quote,
 /// so that ` off` and `;x` stand as written while `off ` is the boolean
 /// and `UTC;` is `UTC` before a comment.
-fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
+fn define_line(entries: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     let quoted = value
-        .bytes()
-        .next()
-        .is_some_and(|first| !first.is_ascii_alphanumeric() && first != b'"' && first != b'\'');
-    entries.extend_from_slice(name.as_bytes());
+        .first()
+        .is_some_and(|first| !first.is_ascii_alphanumeric() && *first != b'"' && *first != b'\'');
+    entries.extend_from_slice(name);
     entries.push(b'=');
     if quoted {
         entries.push(b'"');
     }
-    entries.extend_from_slice(value.as_bytes());
+    entries.extend_from_slice(value);
     if quoted {
         entries.push(b'"');
     }
@@ -1595,7 +1594,7 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 /// `stderr`, naming the file, or `Unknown` for the entries.
 struct Configuration {
     table: Vec<(Vec<u8>, Configured)>,
-    stderr: String,
+    stderr: Vec<u8>,
     sections: [bool; 2],
     loads: Loads,
 }
@@ -1655,7 +1654,7 @@ impl Configuration {
             table,
             special: false,
             section: None,
-            stderr: String::new(),
+            stderr: Vec::new(),
             sections: [false; 2],
             loads: Loads::default(),
         };
@@ -1700,7 +1699,7 @@ struct Startup<'c> {
     /// entries go to, which a CGI applies per request and a CLI never.
     section: Option<Vec<u8>>,
     /// What `ini_error` wrote.
-    stderr: String,
+    stderr: Vec<u8>,
     /// `has_per_dir_config` and `has_per_host_config`.
     sections: [bool; 2],
     loads: Loads,
@@ -1795,8 +1794,11 @@ impl Startup<'_> {
         match crate::ini_syntax::parse(text, IniScanner::Normal, self) {
             Ok(Ok(())) => true,
             Ok(Err((message, line))) => {
-                let file = String::from_utf8_lossy(file);
-                let _ = writeln!(self.stderr, "PHP:  {message} in {file} on line {line}");
+                self.stderr
+                    .extend_from_slice(format!("PHP:  {message} in ").as_bytes());
+                self.stderr.extend_from_slice(file);
+                self.stderr
+                    .extend_from_slice(format!(" on line {line}\n").as_bytes());
                 false
             }
             Err(never) => match never {},
@@ -2100,6 +2102,10 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
 /// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
+/// // A directory and a name that are not UTF-8 are written as their bytes.
+/// $p = proc_open([PHP_BINARY, '-n', '-d', "extension_dir=a/\xE4/w", '-d', 'extension=x', '-d', "zend_extension=/a/\xE4.so", '-r', ''], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $out = stream_get_contents($pipes[1]); echo addcslashes(strstr(stream_get_contents($pipes[2]), ':  ', true), "\200..\377"), "\n", proc_close($p), "\n";
+/// preg_match('/^Warning: (.+) \(tried: (\S+) \(.+?\), (a\S+) \(.+\)\) in Unknown on line 0$/m', $out, $m); echo addcslashes("$m[1]: $m[2], $m[3]", "\200..\377"), "\n";
 /// ```
 /// ```expect process
 /// 0
@@ -2110,8 +2116,11 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// Failed loading Zend extension 'y': /z/y, /z/y.so
 /// PHP Startup: Unable to load dynamic library '/a/q.so': /a/q.so, /z///a/q.so.so
 /// ran
+/// Failed loading /a/\344.so
+/// 0
+/// PHP Startup: Unable to load dynamic library 'x': a/\344/w/x, a/\344/w/x.so
 /// ```
-fn register_extensions(req: &mut Request, loads: &Loads) -> String {
+fn register_extensions(req: &mut Request, loads: &Loads) -> Vec<u8> {
     const NO_LOADER: &str = "dynamic modules are not supported";
     // php's messages are bytes throughout: a directory or a name that is
     // not UTF-8 is written as it was set.
@@ -2137,11 +2146,10 @@ fn register_extensions(req: &mut Request, loads: &Loads) -> String {
         ]
         .concat()
     };
-    let mut stderr = String::new();
+    let mut stderr = Vec::new();
     for name in &loads.engine {
         if name.starts_with(b"/") {
-            let name = String::from_utf8_lossy(name);
-            let _ = writeln!(stderr, "Failed loading {name}:  {NO_LOADER}");
+            stderr.extend_from_slice(&[&b"Failed loading "[..], name, b":  ", no, b"\n"].concat());
             continue;
         }
         let first = [&dir, sep, name].concat();
@@ -2416,8 +2424,8 @@ impl EngineBuilder {
     /// string(3) "UTC"
     /// ```
     #[must_use]
-    pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
-        define_line(&mut self.ini_entries, name, value);
+    pub fn ini(mut self, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> EngineBuilder {
+        define_line(&mut self.ini_entries, name.as_ref(), value.as_ref());
         self
     }
 
@@ -3162,11 +3170,9 @@ impl Engine {
             shared.ini.push((name, value));
         }
         shared.startup_raised = raised;
-        shared.startup_errors.push_str(&failed);
+        shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
-        shared
-            .startup_errors
-            .push_str(&String::from_utf8_lossy(&written));
+        shared.startup_errors.extend_from_slice(&written);
         let startup = StartupIni {
             entries: shared.ini.clone(),
         };
@@ -3181,9 +3187,10 @@ impl Engine {
     /// What php writes to the process's `stderr` while it starts up and
     /// this engine kept for its host, since it owns no stream: the line
     /// `ini_error` writes for a syntax error in the host's ini entries,
-    /// or nothing. A host writes it before anything else it serves.
+    /// or nothing, as bytes, a name that is not UTF-8 written as it was
+    /// set. A host writes it before anything else it serves.
     #[must_use]
-    pub fn startup_errors(&self) -> &str {
+    pub fn startup_errors(&self) -> &[u8] {
         &self.shared.startup_errors
     }
 
@@ -4664,7 +4671,7 @@ mod tests {
             .ini("t.second", "2")
             .ini("t.first", "1")
             .build();
-        assert!(engine.startup_errors().ends_with("1 then 2\n"));
+        assert!(engine.startup_errors().ends_with(b"1 then 2\n"));
     }
 
     /// Two extensions that intercept one native stack in bundle order,
@@ -4752,7 +4759,7 @@ mod tests {
         );
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
-            .ini("t.preload", &script.to_string_lossy())
+            .ini("t.preload", script.as_os_str().as_encoded_bytes())
             .build();
         let program = format!(
             "<?php echo pre_f(), (new PreB)->m(), (new PreC) instanceof PreI ? 'y' : 'n', \
@@ -4821,7 +4828,7 @@ mod tests {
         let engine = || {
             Engine::cli_builder()
                 .extensions(&[file_caching(&dir)])
-                .ini("t.file_cache", &cache.to_string_lossy())
+                .ini("t.file_cache", cache.as_os_str().as_encoded_bytes())
                 .build()
         };
         let program = format!("<?php echo include '{}';", script.display());

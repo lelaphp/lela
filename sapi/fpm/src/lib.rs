@@ -60,6 +60,10 @@ use php_sapi::{Engine, IniFiles, RequestDescription};
 
 use crate::master::{Args, Became, EXIT_CONFIG, EXIT_OK, EXIT_USAGE, Fpm, Init};
 
+/// One `-d` of the line, its name and value as the argument's bytes
+/// ([`define`]).
+type Define = (Vec<u8>, Vec<u8>);
+
 /// `OPTIONS`, `fpm_main.c:121-140`, row for row.
 const OPTIONS: &[Opt] = &[
     opt(b'c', 1, "php-ini"),
@@ -136,7 +140,7 @@ fn usage(argv0: &[u8]) -> String {
 /// `-c` and `-n` onto `search`, and what is asked, `-m`, `-v`, `-h` and a
 /// refused switch answered where they stand, as php answers them before
 /// it reads what follows.
-fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<(String, String)>, Ask) {
+fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
     let mut ini = Vec::new();
     let mut asked = Args {
         argv: Vec::new(),
@@ -156,7 +160,7 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<(String, String)>, Ask) 
             Ok(Taken::Switch(code, value)) => {
                 let value = value.unwrap_or_default();
                 match code {
-                    b'd' => ini.push(define(&String::from_utf8_lossy(&value))),
+                    b'd' => ini.push(define(&value)),
                     b'y' => asked.config = Some(value),
                     b'p' => asked.prefix = Some(value),
                     b'g' => asked.pid = Some(value),
@@ -188,7 +192,7 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<(String, String)>, Ask) 
 
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
 /// and `cgi-fcgi` after them, over the `files` found and `-d`'s entries.
-fn engine(ini: &[(String, String)], files: &IniFiles) -> Engine {
+fn engine(ini: &[Define], files: &IniFiles) -> Engine {
     php_sapi::start(builder(files), ini)
 }
 
@@ -232,7 +236,7 @@ pub fn main() -> ExitCode {
     let mut search = Search::default();
     let (ini, ask) = parse(words.get(1..).unwrap_or_default(), &mut search);
     let files = php_sapi::ini::search(worker::NAME, &search, true);
-    let engine = |ini: &[(String, String)]| engine(ini, &files);
+    let engine = |ini: &[Define]| engine(ini, &files);
     let status = match ask {
         Ask::Usage(code) => {
             let _ = engine(&ini);
@@ -269,7 +273,7 @@ pub fn main() -> ExitCode {
 
 /// `fpm_init` and `fpm_run`, and a child's requests once this process
 /// is one.
-fn run(ini: &[(String, String)], files: &IniFiles, args: Args) -> u8 {
+fn run(ini: &[Define], files: &IniFiles, args: Args) -> u8 {
     let engine = engine(ini, files);
     let mut fpm = match Fpm::init(&engine, args) {
         Init::Continue(fpm) => fpm,

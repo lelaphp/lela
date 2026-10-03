@@ -63,11 +63,9 @@ pub mod tier {
 /// that reading wrote for `stderr` written there, as php's `ini_error`
 /// writes it during startup.
 #[must_use]
-pub fn start(builder: EngineBuilder, ini: &[(String, String)]) -> Engine {
+pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> Engine {
     let engine = prepare(builder, ini).build();
-    let _ = std::io::stderr()
-        .lock()
-        .write_all(engine.startup_errors().as_bytes());
+    let _ = std::io::stderr().lock().write_all(engine.startup_errors());
     engine
 }
 
@@ -76,7 +74,7 @@ pub fn start(builder: EngineBuilder, ini: &[(String, String)]) -> Engine {
 /// and writes the startup errors once, as php-fpm's children build theirs
 /// after the master has started.
 #[must_use]
-pub fn prepare(builder: EngineBuilder, ini: &[(String, String)]) -> EngineBuilder {
+pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder {
     let mut builder = builder;
     #[cfg(feature = "witness-trace")]
     if let Some(path) = std::env::var_os(TRACE) {

@@ -376,8 +376,8 @@ pub(crate) fn init(
     fpm: &mut Fpm,
     pool: usize,
     slot: usize,
-    ini: (&[(String, String)], &php_sapi::IniFiles),
-    started: &str,
+    ini: (&[crate::Define], &php_sapi::IniFiles),
+    started: &[u8],
 ) -> Worker {
     let failed = |name: &str| -> ! {
         zlog!(Error @ fpm_child_init:202, "[pool {name}] child failed to initialize");
@@ -478,9 +478,9 @@ fn truth(value: &[u8]) -> bool {
 /// `php_value`s and `php_admin_value`s as `fpm_php_apply_defines` sets
 /// them, each one php does not know logged.
 fn build(
-    (ini, files): (&[(String, String)], &php_sapi::IniFiles),
+    (ini, files): (&[crate::Define], &php_sapi::IniFiles),
     config: &PoolConfig,
-    started: &str,
+    started: &[u8],
 ) -> Engine {
     let mut builder = php_sapi::prepare(crate::builder(files), ini);
     for (name, value) in &config.php_values {
@@ -496,7 +496,7 @@ fn build(
         .startup_errors()
         .strip_prefix(started)
         .unwrap_or_default();
-    let _ = std::io::stderr().write_all(own.as_bytes());
+    let _ = std::io::stderr().write_all(own);
     for (kind, values, line) in [
         ("php_value", &config.php_values, 110),
         ("php_admin_value", &config.php_admin_values, 119),

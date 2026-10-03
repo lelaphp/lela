@@ -513,7 +513,7 @@ mod tests {
         engine.command_line(description, CommandLine::Direct(code.clone()), &mut sink);
         (
             String::from_utf8_lossy(&sink.0).into_owned(),
-            engine.startup_errors().to_owned(),
+            String::from_utf8_lossy(engine.startup_errors()).into_owned(),
         )
     }
 

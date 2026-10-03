@@ -81,7 +81,7 @@ const HARDCODED: [(&str, &str); 8] = [
 /// What the line asked for.
 #[derive(Debug, Default)]
 struct Line {
-    ini: Vec<(String, String)>,
+    ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `-c` and `-n`.
     search: php_sapi::ini::Search,
     /// `-r` once runs at start, twice runs and quits.
@@ -102,7 +102,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
     let mut line = Line {
         ini: HARDCODED
             .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
         init_default: true,
         ..Line::default()
@@ -117,9 +117,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                 let value = value.unwrap_or_default();
                 match code {
                     b'r' => line.run += 1,
-                    b'd' => line
-                        .ini
-                        .push(php_sapi::ini::define(&String::from_utf8_lossy(&value))),
+                    b'd' => line.ini.push(php_sapi::ini::define(&value)),
                     b's' => line.stdin_delimiter = Some(value),
                     b'I' => line.init_default = false,
                     b'c' => line.search.path = Some(value),
