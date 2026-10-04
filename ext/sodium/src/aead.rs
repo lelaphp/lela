@@ -3,7 +3,7 @@
 //! IETF form, and XChaCha20-Poly1305, each an `_encrypt`, a `_decrypt`
 //! and a `_keygen`. The six differ only in their lengths and in the
 //! bounds php holds a message to, which [`Guard`] names. The two AEGIS
-//! constructions are [`aegis`], which exists only where the linked
+//! constructions are `aead::aegis`, which exists only where the linked
 //! libsodium has them.
 
 use php_ext::abi::{OrFalse, Raw};

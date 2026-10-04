@@ -9,14 +9,14 @@
 //! release Ubuntu ships, has none of them.
 
 /// The first release with AEGIS-128L and AEGIS-256.
-const AEGIS: (u32, u32, u32) = (1, 0, 19);
+const AEGIS_ADDED: (u32, u32, u32) = (1, 0, 19);
 
 /// Whether the libsodium of `version`, as `pkg-config --modversion`
 /// prints it (`1.0.18`), has AEGIS-128L and AEGIS-256. A version this
 /// cannot read is taken as the 1.0.18 floor `build.rs` holds the library
 /// to, which has neither.
 pub(crate) fn has_aead_aegis(version: &str) -> bool {
-    release(version).is_some_and(|release| release >= AEGIS)
+    release(version).is_some_and(|release| release >= AEGIS_ADDED)
 }
 
 /// The leading `major.minor.patch` of a version string.
