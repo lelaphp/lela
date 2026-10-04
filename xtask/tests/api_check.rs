@@ -305,6 +305,179 @@ fn a_bundle_order_that_is_not_topological_fails() {
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
+/// The tracked manifest with `php_bundle`'s edge read as
+/// `order = "registration"`, the value #1778 ruled and a person writes.
+fn under_registration() -> Manifest {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    let edge = manifest
+        .edges
+        .iter_mut()
+        .find(|e| e.from == "php_bundle")
+        .unwrap();
+    edge.order = Some("registration".to_owned());
+    manifest
+}
+
+/// `order = "registration"`: each extension's feature switches on the
+/// features of every extension it links (#1882). standard's feature
+/// omits random, which ext/standard requires, and fails; session's
+/// switches on standard and passes; standard's dev-dependency on session
+/// requires nothing; and standard listed before random is no failure.
+#[test]
+fn a_bundle_feature_that_does_not_switch_on_what_its_extension_requires_fails() {
+    let readings = api_check::hold(&under_registration(), &fixture("registration"), false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        bundle.message.contains(
+            "the feature standard registers ext/standard but does not switch on random, the feature that registers ext/random, which ext/standard requires (design §4.10)"
+        ),
+        "{}",
+        bundle.message
+    );
+    assert!(
+        !bundle.message.contains("ext/session"),
+        "session's feature switches on standard, and a dev-dependency requires nothing: {}",
+        bundle.message
+    );
+    assert!(
+        !bundle.message.contains("topological"),
+        "{}",
+        bundle.message
+    );
+    assert_eq!(bundle.numbers["extensions"], 3.into());
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
+/// Under `order = "registration"` the order written is no longer held to
+/// the crate graph: the `bundle` fixture, whose extensions are behind no
+/// feature, passes where the topological order fails it.
+#[test]
+fn the_registration_order_does_not_hold_the_order_written() {
+    let readings = api_check::hold(&under_registration(), &fixture("bundle"), false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
+}
+
+/// The `registration` fixture with the bundle's `src/lib.rs` replaced by
+/// `enabled`, in a scratch workspace, held under `order = "registration"`:
+/// the variants of the fixture's one rule that each need a bundle of
+/// their own.
+fn bundle_reading(scratch: &str, enabled: &str) -> Reading {
+    let root = Tree::new(scratch).unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let from = fixture("registration");
+    for file in [
+        "crates/php_bundle/Cargo.toml",
+        "ext/standard/Cargo.toml",
+        "ext/standard/src/lib.rs",
+        "ext/random/Cargo.toml",
+        "ext/random/src/lib.rs",
+        "ext/session/Cargo.toml",
+        "ext/session/src/lib.rs",
+    ] {
+        fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+        fs::copy(from.join(file), root.join(file)).unwrap();
+    }
+    fs::create_dir_all(root.join("crates/php_bundle/src")).unwrap();
+    fs::write(root.join("crates/php_bundle/src/lib.rs"), enabled).unwrap();
+    let readings = api_check::hold(&under_registration(), &root, false).unwrap();
+    of(&readings, "php_bundle").clone()
+}
+
+/// An extension the bundle does not register at all, required by one it
+/// does, fails.
+#[test]
+fn a_required_extension_the_bundle_does_not_register_fails() {
+    let bundle = bundle_reading(
+        "api-check-unregistered",
+        "pub fn enabled() -> &'static [fn()] {\n    &[\n        #[cfg(feature = \"standard\")]\n        php_ext_standard::extension,\n    ]\n}\n",
+    );
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        bundle
+            .message
+            .contains("the bundle registers ext/standard but not ext/random, which it requires"),
+        "{}",
+        bundle.message
+    );
+}
+
+/// A `cfg` the instrument does not read fails closed: random behind
+/// `cfg(all(...))` is named, never taken for registered in every build.
+#[test]
+fn a_registration_behind_a_cfg_api_check_does_not_read_fails() {
+    let bundle = bundle_reading(
+        "api-check-unread-cfg",
+        "pub fn enabled() -> &'static [fn()] {\n    &[\n        #[cfg(all(feature = \"random\", unix))]\n        php_ext_random::extension,\n    ]\n}\n",
+    );
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        bundle
+            .message
+            .contains("the bundle registers ext/random behind cfg(all")
+            && bundle.message.contains("which api-check does not read"),
+        "{}",
+        bundle.message
+    );
+}
+
+/// Every registration is read, a second one of the same extension
+/// included: random registered behind standard's own feature as well as
+/// its own is switched on by standard, and session, registered twice,
+/// is held at both places.
+#[test]
+fn each_registration_of_one_extension_is_read() {
+    let bundle = bundle_reading(
+        "api-check-twice",
+        "pub fn enabled() -> &'static [fn()] {\n    &[\n        #[cfg(feature = \"random\")]\n        php_ext_random::extension,\n        #[cfg(feature = \"standard\")]\n        php_ext_random::extension,\n        #[cfg(feature = \"standard\")]\n        php_ext_standard::extension,\n        #[cfg(feature = \"session\")]\n        php_ext_session::extension,\n        php_ext_session::extension,\n    ]\n}\n",
+    );
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        !bundle.message.contains("the feature standard"),
+        "random's second registration is behind standard: {}",
+        bundle.message
+    );
+    assert!(
+        bundle.message.contains(
+            "the bundle registers ext/session behind no feature but ext/standard behind standard, which ext/session requires (design §4.10)"
+        ),
+        "{}",
+        bundle.message
+    );
+    assert_eq!(bundle.numbers["extensions"], 3.into());
+}
+
+/// An order the instrument does not know is refused, never read as one
+/// it knows.
+#[test]
+fn an_order_api_check_does_not_know_fails() {
+    let mut manifest = under_registration();
+    for edge in manifest.edges.iter_mut().filter(|e| e.from == "php_bundle") {
+        edge.order = Some("alphabetical".to_owned());
+    }
+    let readings = api_check::hold(&manifest, &fixture("clean"), false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        bundle
+            .message
+            .contains("order = \"alphabetical\" is not an order api-check knows"),
+        "{}",
+        bundle.message
+    );
+}
+
+/// The tracked workspace passes under `order = "registration"` as under
+/// the manifest's own value, so a person's flip of the row fails nothing
+/// (#1882, #1778).
+#[test]
+fn the_workspace_today_passes_under_the_registration_order() {
+    let readings = api_check::hold(&under_registration(), workspace(), false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
+}
+
 /// The tracked workspace: every seam whose lock has no home present yet,
 /// or that is generated from a file the harness renders no lock from, is
 /// a skip, `tier.lock`, diffed per section, among those measured (#1369);
