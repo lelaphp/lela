@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=19390bc73556b163f31127dc5276e5df9b60b5dc8c98ad8afcf5dd031bcd5e3d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2cbc82c248ab0e6a8826c6b297eb41a31fcadc9e47d2d9963e75d4cd00db4774 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -101,12 +101,13 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 
-<!-- /computed in=3e0e525902a4ccf204d464e5b1f087a41ed1c332bc0da0cf009709ba79089600 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
+<!-- /computed in=701543e0aec9934a9389646d58563c7b6363faaabc538ff88fc79c951e41a906 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 378 |  | pass |
+| heap | heap.lock | 365 |  | pass |
+| process | process.lock | 17 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
 | api | api.lock | 1045 | 1500 | pass |
@@ -114,7 +115,7 @@ third-engine-design.md
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=801713b4daab9ffa7889227bdac8811a8be0a5108952de084993f3cbc228aaa0 out=76ba15cc3650d4bb02fe306979cd2ddde1154968119f9e8a5f41a90ef7ee9823 -->
+<!-- /computed in=95d6d4b043e417be5aa6cbdbf38812209d8cd1906b494782d92e6a2a613cbcfa out=e6116a4a0efa7702fb7f609d5b0bcd43bcf906ac7aa7ab599a9b9a3f2d8d1fc3 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -122,6 +123,7 @@ third-engine-design.md
 | ext.no-locks | ADR-0005 | deny_types | no reading |
 | unsafe.homes | ADR-0006 | allow | pass |
 | unsafe.one-op |  | deny_lints | no reading |
+| fork.home |  | deny_pattern | no reading |
 | lints.no-panic |  | deny_lints | no reading |
 | engine.reentry-signature |  | check | no reading |
 | api.no-hot |  | deny_pattern | no reading |
@@ -130,7 +132,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
@@ -142,10 +144,10 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | no reading |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=b272df389fb2298ac4fd95a5a8bdfda86834405667c6aee3bf9dab201ba038b7 out=d5f81f7d69969798d6ed2ed9df663f8b5f04ae17c3a7a419ac05ba3e8c8ccc26 -->
+<!-- /computed in=df4ef8d1861d951d1693c3890a8eae75afbeb6c582590247b5f7d6e18f7c5f5e out=8e25202209972437eed62063a6e2dcedbb48075f7878c7883894d5d06826d344 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -193,12 +195,13 @@ Options:
 ├── php_ext
 ├── php_heap
 ├── php_macros
+├── php_process
 ├── php_proto
 ├── php_sapi
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=05dc4b683adea2b1120d270298d33fe48777aab9e12d3445f17df73ab7b701dd out=6ec60b32a5cbec77b584126a718b74bc14d8ba4d5e87c9c43ecaab34f8efe9ba -->
+<!-- /computed in=68226964e2930c664a6a367ae93a01fd3dcceecbfc908618c63e60f5850bfac1 out=07b5311d18dfeb52445eafa9e5387e861d0f0d4d85589aae15289fafe1320e32 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

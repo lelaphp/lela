@@ -3124,7 +3124,7 @@ impl Engine {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
-        php_heap::reset_lc_ctype_locale();
+        php_process::reset_lc_ctype_locale();
         // `zend_register_ini_entries_ex` walks each module's entries in
         // its `PHP_INI_BEGIN()` order, the modules in startup order, and
         // finds the host's value for each: the handlers meet the values
