@@ -206,14 +206,15 @@ fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
 
 /// The repository's branch records as the frontier reads them, once per
 /// `track next` (#1850): the branch recording each ticket, and the
-/// tickets recorded by a branch `main` does not contain yet. Containment
+/// tickets recorded by a branch `main` does not contain yet, each with
+/// that branch, which a held ticket waits on (#1857). Containment
 /// is git's own reachability, the test `merge-base --is-ancestor` makes,
 /// asked of every branch in one `for-each-ref --no-merged`; a record
 /// whose branch is gone names no branch `main` could lack.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Records {
     branches: BTreeMap<Ticket, String>,
-    unmerged: BTreeSet<Ticket>,
+    unmerged: BTreeMap<Ticket, String>,
 }
 
 impl Records {
@@ -241,13 +242,16 @@ impl Records {
 
     /// Each branch of `pairs` with the ticket it records, the branches in
     /// `unmerged` being the ones `main` does not contain; the first branch
-    /// recording a ticket is the one named for it, and any one not in
-    /// `main` holds it.
+    /// recording a ticket is the one named for it, and the first not in
+    /// `main` holds it and is the one named for that.
     pub(crate) fn of(pairs: Vec<(String, Ticket)>, unmerged: &BTreeSet<&str>) -> Records {
         let mut records = Records::default();
         for (branch, ticket) in pairs {
             if unmerged.contains(branch.as_str()) {
-                records.unmerged.insert(ticket);
+                records
+                    .unmerged
+                    .entry(ticket)
+                    .or_insert_with(|| branch.clone());
             }
             records.branches.entry(ticket).or_insert(branch);
         }
@@ -259,9 +263,10 @@ impl Records {
         self.branches.get(&ticket).map(String::as_str)
     }
 
-    /// Whether a branch records `ticket` and `main` does not contain it.
-    pub(crate) fn unmerged(&self, ticket: Ticket) -> bool {
-        self.unmerged.contains(&ticket)
+    /// The branch recording `ticket` that `main` does not contain, if one
+    /// does.
+    pub(crate) fn unmerged(&self, ticket: Ticket) -> Option<&str> {
+        self.unmerged.get(&ticket).map(String::as_str)
     }
 }
 

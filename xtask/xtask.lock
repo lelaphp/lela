@@ -302,11 +302,14 @@ track_chains::Chains
 track_chains::Chains::render
 track_chains::Row
 track_chains::command
+track_next::Frontier
+track_next::Held
 track_next::Next
 track_next::Next::render
 track_next::Next::to_json
 track_next::command
 track_next::for_a_person
+track_next::frontier
 track_next::next
 track_work::Landed
 track_work::Run
