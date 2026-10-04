@@ -1089,10 +1089,13 @@ impl ExtensionBuilder {
     /// (`phar_intercept_functions_init`): the declaration stays the
     /// native's, what a call serves is `entry`, and the entry it
     /// replaced is kept for [`crate::api::call::passthrough`]. Two
-    /// extensions that intercept one native stack in bundle order, the
-    /// later over the earlier, as opcache's handler is saved over
-    /// phar's. A name no extension declares, or one `disable_functions`
-    /// took out, is intercepted by nothing.
+    /// extensions that intercept one native stack in the order php
+    /// installs them, the later over the earlier: each extension's at
+    /// its `MINIT` in bundle order, then each Zend extension's, so
+    /// opcache's handler is saved over phar's whatever their bundle
+    /// order. A name
+    /// no extension declares, or one `disable_functions` took out, is
+    /// intercepted by nothing.
     #[must_use]
     pub fn intercept(
         mut self,
