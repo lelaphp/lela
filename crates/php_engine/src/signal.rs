@@ -1,10 +1,10 @@
 //! The process's signal record and the rules over it (design §5.8, revision 38;
 //! #1062): what the engine keeps of the signals an extension's handler
 //! posts, which of them a request takes, and how a request's interrupt
-//! is raised by one. The mechanism is `php_heap::post`'s, which knows no
+//! is raised by one. The mechanism is `php_process::post`'s, which knows no
 //! signal; the handler that writes is the extension's, in its `src/ffi/`,
 //! beside `sigaction`. Nothing here runs in a signal handler: the handler
-//! calls [`SIGNAL_POST`]'s `post`, which is `php_heap`'s, with a closure
+//! calls [`SIGNAL_POST`]'s `post`, which is `php_process`'s, with a closure
 //! of its own, and what is here runs at a request's interrupt check or
 //! at a dispatch the program called.
 //!
@@ -17,7 +17,7 @@
 //!
 //! Beside the record is [`Reentry`], one per request whose FFI made a
 //! callback: how a function C calls back reaches the request (#1638).
-//! Its operations are atomic operations and `php_heap::post`'s, so
+//! Its operations are atomic operations and `php_process::post`'s, so
 //! ext/ffi's `zend_ffi_callback_trampoline` may make them from a
 //! signal handler too; what it defers runs at the interrupt check.
 
@@ -25,7 +25,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use php_heap::post::{Pool, Poster, Registered, WakeSet};
+use php_process::post::{Pool, Poster, Registered, WakeSet};
 
 use crate::api::request::Interrupt;
 
