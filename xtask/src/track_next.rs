@@ -208,14 +208,26 @@ impl Held {
         })
     }
 
-    /// The branches it waits on, `t20`, or `t20 and t22`.
-    pub(crate) fn behind(&self) -> String {
-        self.branches.join(" and ")
-    }
-
-    /// The ticket and what it waits on, `#21 waiting on t20`.
+    /// The ticket and the branches it waits on, `#21 waiting on t20`, or
+    /// `t20 and t22` where it waits on two.
     pub(crate) fn waiting(&self) -> String {
         format!("{} waiting on {}", self.ticket, self.behind())
+    }
+
+    /// The same with its title, as the held ticket's own line reads:
+    /// `#21 ticket 21, waiting on t20`.
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "{} {}, waiting on {}",
+            self.ticket,
+            self.title,
+            self.behind()
+        )
+    }
+
+    /// The branches joined by "and".
+    fn behind(&self) -> String {
+        self.branches.join(" and ")
     }
 }
 
@@ -497,6 +509,7 @@ mod tests {
             branches: vec!["t2".to_owned()],
         };
         assert_eq!(held.waiting(), "#9 waiting on t2");
+        assert_eq!(held.line(), "#9 ticket 9, waiting on t2");
         assert_eq!(
             Frontier::of(&open, "main", &none, &records(&[2], &["t2"])),
             Frontier::Held(vec![held])

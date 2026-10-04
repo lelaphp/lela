@@ -1,7 +1,7 @@
 //! The frontier until it empties, one ticket at a time from start to
 //! retire without a person (#77, #78; harness-design.md §4.4, §4.5, §5):
 //! `xtask track work`. From main's checkout it asks
-//! [`track_next::next`] for the ticket of the track `--track` names, a
+//! [`track_next::frontier`] for the ticket of the track `--track` names, a
 //! `track:<name>` label and `main` by default (ADR-0009), lays the
 //! ticket's worktree down on the branch `t<n>`, cut from `main` and
 //! recording the ticket, as `worktree add --ticket` does, and starts a
@@ -26,7 +26,7 @@
 //! with its record for the /specs coordinator to merge through its merge
 //! check (#1749, ADR-0009): the loop never moves `main` and pushes
 //! nothing, so a ticket the closed one blocks is not named until `main`
-//! contains that branch ([`track_next::waits_on`], #1850). The close is
+//! contains that branch ([`track_next::waits`], #1850). The close is
 //! the one signal, so a ticket closed with nothing committed, as a
 //! withdrawn one is, is retired the same way. When the
 //! session ends with the ticket open, the worktree is left standing for a
@@ -343,14 +343,7 @@ impl Worked {
         let under: Vec<String> = match self {
             Worked::Held { held, .. } => held
                 .iter()
-                .map(|held| {
-                    format!(
-                        "  {} {}, waiting on {}\n",
-                        held.ticket,
-                        held.title,
-                        held.behind()
-                    )
-                })
+                .map(|held| format!("  {}\n", held.line()))
                 .collect(),
             Worked::StillEmpty { waits_on, .. } => waits_on
                 .iter()
@@ -391,12 +384,10 @@ impl Worked {
             }
             Worked::Held { track, held } => {
                 let tickets = match held.len() {
-                    1 => "1 ticket".to_owned(),
-                    n => format!("{n} tickets"),
+                    1 => "1 ticket held until main contains the branch it waits on".to_owned(),
+                    n => format!("{n} tickets held until main contains the branches they wait on"),
                 };
-                format!(
-                    "none: the frontier of {track} is empty, {tickets} held until main contains the branch it waits on; nothing laid down:"
-                )
+                format!("none: the frontier of {track} is empty, {tickets}; nothing laid down:")
             }
             Worked::StillEmpty { track, waits_on } => {
                 let waits = match waits_on.len() {
@@ -611,8 +602,9 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
         Frontier::Ready(next) => next,
         Frontier::Held(held) => return Ok(Worked::Held { track, held }),
         Frontier::Empty if run.fill => match fill(root, gh, &run.session, &track)? {
-            Some(next) => next,
-            None => {
+            Frontier::Ready(next) => next,
+            Frontier::Held(held) => return Ok(Worked::Held { track, held }),
+            Frontier::Empty => {
                 return Ok(Worked::StillEmpty {
                     waits_on: track_next::for_a_person(root, gh, &track)?,
                     track,
@@ -656,10 +648,9 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 }
 
 /// The frontier of `track` filled by a `/frontier` session in the
-/// checkout (#85), and the ticket `next` names once it ends, `None` for a
-/// frontier still empty; the session's exit is said, not judged, as a
-/// ticket's is.
-fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<Next>> {
+/// checkout (#85), and the frontier as it is read once the session ends;
+/// the session's exit is said, not judged, as a ticket's is.
+fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Frontier> {
     say(WORK, &format!("the frontier of {track} is empty"));
     session.announce(root, FRONTIER_PROMPT);
     let status = session.run(root, FRONTIER_PROMPT)?;
@@ -667,7 +658,7 @@ fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<N
         WORK,
         &format!("the {FRONTIER_PROMPT} session ended: {status}"),
     );
-    track_next::next(root, gh, track)
+    track_next::frontier(root, gh, track)
 }
 
 /// How a run ended: the words its closing reading opens with, and the
