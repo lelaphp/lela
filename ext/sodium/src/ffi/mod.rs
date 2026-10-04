@@ -325,52 +325,6 @@ mod sys {
             npub: *const u8,
             k: *const u8,
         ) -> c_int;
-        pub(super) fn crypto_aead_aegis128l_encrypt(
-            c: *mut u8,
-            clen_p: *mut Ull,
-            m: *const u8,
-            mlen: Ull,
-            ad: *const u8,
-            adlen: Ull,
-            nsec: *const u8,
-            npub: *const u8,
-            k: *const u8,
-        ) -> c_int;
-        pub(super) fn crypto_aead_aegis128l_decrypt(
-            m: *mut u8,
-            mlen_p: *mut Ull,
-            nsec: *mut u8,
-            c: *const u8,
-            clen: Ull,
-            ad: *const u8,
-            adlen: Ull,
-            npub: *const u8,
-            k: *const u8,
-        ) -> c_int;
-        pub(super) fn crypto_aead_aegis128l_keygen(k: *mut u8);
-        pub(super) fn crypto_aead_aegis256_encrypt(
-            c: *mut u8,
-            clen_p: *mut Ull,
-            m: *const u8,
-            mlen: Ull,
-            ad: *const u8,
-            adlen: Ull,
-            nsec: *const u8,
-            npub: *const u8,
-            k: *const u8,
-        ) -> c_int;
-        pub(super) fn crypto_aead_aegis256_decrypt(
-            m: *mut u8,
-            mlen_p: *mut Ull,
-            nsec: *mut u8,
-            c: *const u8,
-            clen: Ull,
-            ad: *const u8,
-            adlen: Ull,
-            npub: *const u8,
-            k: *const u8,
-        ) -> c_int;
-        pub(super) fn crypto_aead_aegis256_keygen(k: *mut u8);
         pub(super) fn crypto_aead_chacha20poly1305_encrypt(
             c: *mut u8,
             clen_p: *mut Ull,
@@ -491,6 +445,60 @@ mod sys {
         pub(super) fn crypto_core_ristretto255_scalar_sub(z: *mut u8, x: *const u8, y: *const u8);
         pub(super) fn crypto_core_ristretto255_scalar_mul(z: *mut u8, x: *const u8, y: *const u8);
         pub(super) fn crypto_core_ristretto255_scalar_reduce(r: *mut u8, s: *const u8);
+    }
+
+    // AEGIS-128L and AEGIS-256, which libsodium has from 1.0.19: declared
+    // where `build.rs` finds them, the cfg `libsodium_aegis`, as php
+    // compiles them under `#ifdef crypto_aead_aegis128l_KEYBYTES`.
+    #[cfg(libsodium_aegis)]
+    #[link(name = "sodium")]
+    unsafe extern "C" {
+        pub(super) fn crypto_aead_aegis128l_encrypt(
+            c: *mut u8,
+            clen_p: *mut Ull,
+            m: *const u8,
+            mlen: Ull,
+            ad: *const u8,
+            adlen: Ull,
+            nsec: *const u8,
+            npub: *const u8,
+            k: *const u8,
+        ) -> c_int;
+        pub(super) fn crypto_aead_aegis128l_decrypt(
+            m: *mut u8,
+            mlen_p: *mut Ull,
+            nsec: *mut u8,
+            c: *const u8,
+            clen: Ull,
+            ad: *const u8,
+            adlen: Ull,
+            npub: *const u8,
+            k: *const u8,
+        ) -> c_int;
+        pub(super) fn crypto_aead_aegis128l_keygen(k: *mut u8);
+        pub(super) fn crypto_aead_aegis256_encrypt(
+            c: *mut u8,
+            clen_p: *mut Ull,
+            m: *const u8,
+            mlen: Ull,
+            ad: *const u8,
+            adlen: Ull,
+            nsec: *const u8,
+            npub: *const u8,
+            k: *const u8,
+        ) -> c_int;
+        pub(super) fn crypto_aead_aegis256_decrypt(
+            m: *mut u8,
+            mlen_p: *mut Ull,
+            nsec: *mut u8,
+            c: *const u8,
+            clen: Ull,
+            ad: *const u8,
+            adlen: Ull,
+            npub: *const u8,
+            k: *const u8,
+        ) -> c_int;
+        pub(super) fn crypto_aead_aegis256_keygen(k: *mut u8);
     }
 }
 
@@ -1407,6 +1415,7 @@ pub(crate) const AES256GCM: Aead = Aead {
     abytes: 16,
 };
 
+#[cfg(libsodium_aegis)]
 pub(crate) const AEGIS128L: Aead = Aead {
     encrypt: sys::crypto_aead_aegis128l_encrypt,
     decrypt: sys::crypto_aead_aegis128l_decrypt,
@@ -1415,6 +1424,7 @@ pub(crate) const AEGIS128L: Aead = Aead {
     abytes: 32,
 };
 
+#[cfg(libsodium_aegis)]
 pub(crate) const AEGIS256: Aead = Aead {
     encrypt: sys::crypto_aead_aegis256_encrypt,
     decrypt: sys::crypto_aead_aegis256_decrypt,
@@ -1519,6 +1529,7 @@ impl Aead {
 
 /// `crypto_aead_aegis128l_keygen` or `crypto_aead_aegis256_keygen` into
 /// `k`, whose length names the construction.
+#[cfg(libsodium_aegis)]
 pub(crate) fn aegis_keygen(k: &mut [u8]) -> Result<(), Failed> {
     let f = match k.len() {
         16 => sys::crypto_aead_aegis128l_keygen,

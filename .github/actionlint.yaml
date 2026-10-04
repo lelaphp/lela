@@ -1,0 +1,8 @@
+# actionlint's configuration. GitHub's hosted `ubuntu-26.04` runner, which
+# the jobs that build the workspace run on (#1724, #1859), is newer than
+# the labels actionlint 1.7.12 knows, so it is named here; this list is
+# the one actionlint reads for a label beyond its own. Drop the entry once
+# an actionlint release lists the runner.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
