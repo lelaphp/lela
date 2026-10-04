@@ -43,10 +43,11 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// What a check that found the interrupt raised does
 /// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
-/// raised it, or serves each extension's interrupt hook in bundle order,
-/// which is php's `zend_interrupt_function` and the chain each `MINIT`
-/// that sets it keeps (pcntl's dispatches the signals delivered to their
-/// PHP handlers). With no hook it does nothing, as php does.
+/// raised it, or serves each extension's interrupt hook from the top of
+/// php's `zend_interrupt_function` chain, the last `MINIT` to set it
+/// first and each link then the one it saved (pcntl's dispatches the
+/// signals delivered to their PHP handlers). With no hook it does
+/// nothing, as php does.
 ///
 /// The text and the plural are `zend_timeout`'s
 /// (`Z/Zend/zend_execute_API.c:1441`), over the seconds the timer was

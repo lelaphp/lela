@@ -34,14 +34,15 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
-    /// Render one section from the manifest, the registry, the store and
-    /// the pinned tree's layout; computes nothing else.
+    /// Render one section from the manifest, registry, store, repository
+    /// and pinned tree; computes nothing else.
     ///
     /// What it reads is harness-design.md §4.6's: the manifest, the
-    /// divergence registry, the store, and the pinned tree's layout where
-    /// it is present, which the `oracle` and `parity` sections read; the
-    /// `git` section reads the repository. With `--session` it prints the
-    /// map and the local facts in place of a section.
+    /// divergence registry and the store, and what the repository and the
+    /// pinned tree hold on this machine (the `git`, `oracle` and `parity`
+    /// sections), only ever reading them: never the tracker or the network,
+    /// never a build or a run. With `--session` it prints the map and the
+    /// local facts in place of a section.
     Status {
         #[arg(long, required_unless_present = "session", conflicts_with = "session")]
         section: Option<Section>,
