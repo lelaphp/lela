@@ -7,6 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// The binary under test, let run as root with `-R`: as root php-fpm
+/// refuses a pool with no `user` directive unless `--allow-to-run-as-root`
+/// lets it, as the oracle's does, and a container's tests run as root.
+fn php_fpm() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_php-fpm"));
+    command.arg("-R");
+    command
+}
+
 /// A directory of the test's own.
 fn tree(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sapi-fpm-{name}-{}", std::process::id()));
@@ -42,7 +51,7 @@ fn socket(dir: &Path) -> PathBuf {
 fn a_configuration_test_says_the_file_is_sound() {
     let dir = tree("test");
     let path = conf(&dir, "127.0.0.1:9");
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let out = php_fpm()
         .args(["-n", "-t", "-y"])
         .arg(&path)
         .output()
@@ -62,10 +71,7 @@ fn a_configuration_test_says_the_file_is_sound() {
 /// or not.
 #[test]
 fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
-        .args(["-n", "-t"])
-        .output()
-        .unwrap();
+    let out = php_fpm().args(["-n", "-t"]).output().unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     let expected = format!("{}/php-fpm.conf", php_sapi::PHP_SYSCONFDIR);
     assert!(said.contains(&expected), "{out:?}");
@@ -149,7 +155,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     let path = conf(&dir, &socket.display().to_string());
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php echo PHP_SAPI, ' ', $_GET['q'];").unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .args(["-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -262,7 +268,7 @@ fn quit_at_debug(dir: &Path, ports: impl IntoIterator<Item = u16>) -> String {
             ),
         )
         .unwrap();
-        let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        let mut master = php_fpm()
             .args(["-n", "-F", "-y"])
             .arg(&path)
             .stdin(Stdio::null())
@@ -347,7 +353,7 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     .unwrap();
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php echo 'ran';").unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .args(["-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -410,7 +416,7 @@ fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
     let program = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n";
     std::fs::write(dir.join("www/sub/t.php"), program).unwrap();
     std::fs::write(dir.join("www/t.php"), program).unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .env("PHP_INI_SCAN_DIR", dir.join("scan"))
         .arg("-c")
         .arg(&ini)
