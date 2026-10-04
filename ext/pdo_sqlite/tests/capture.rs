@@ -91,3 +91,30 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
         "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"
     );
 }
+
+/// A persistent connection held in a static with its transaction open at
+/// the end of one request is rolled back before the next is lent it:
+/// php's `pdo_dbh_free_storage` rolls back what the object leaves open.
+/// The second request prints the oracle's bytes for the same two
+/// requests under its built-in web server, `bool(false)` and `int(0)`
+/// (#1784).
+#[test]
+fn a_persistent_connection_s_open_transaction_is_rolled_back_at_the_request_end() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_pdo::extension(), php_ext_pdo_sqlite::extension()])
+        .build();
+    let open = "function db() { static $db; return $db ??= new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]); } $db = db();";
+    let first = format!(
+        "<?php {open} $db->exec('CREATE TABLE t (a)'); $db->beginTransaction(); $db->exec('INSERT INTO t VALUES (1)'); var_dump($db->inTransaction());"
+    );
+    let served = engine.serve_capture(&first, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "bool(true)\n");
+    let second = format!(
+        "<?php {open} var_dump($db->inTransaction(), $db->query('SELECT COUNT(*) FROM t')->fetchColumn());"
+    );
+    let served = engine.serve_capture(&second, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(false)\nint(0)\n"
+    );
+}

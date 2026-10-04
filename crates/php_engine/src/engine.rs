@@ -41,7 +41,7 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
 use crate::streams::Standard;
-use crate::supplied::{Keyed, Last, Resolved};
+use crate::supplied::{Keyed, Last, Phase, Resolved};
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -2329,11 +2329,12 @@ fn at_stub_places(
 }
 
 /// `phar_intercept_functions_init` and opcache's
-/// `zend_accel_override_file_functions` for every extension, in bundle
-/// order: each native an extension intercepts has its entry replaced,
-/// and the entry it replaced goes in front of its row of what this
-/// answers, so a later interception stands over an earlier one, as
-/// opcache's handler is saved over phar's.
+/// `zend_accel_override_file_functions` for every extension, in the
+/// order php installs them ([`Phase`]): each native an extension
+/// intercepts has its entry replaced, and the entry it replaced goes in
+/// front of its row of what this answers, so a later interception
+/// stands over an earlier one, as opcache's handler is saved over
+/// phar's.
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
@@ -2573,13 +2574,15 @@ impl EngineBuilder {
         extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // Each extension's supplies taken out of it, by its number in
-        // `module_registry`, which numbers Core 0 and the bundle from 1.
-        let mut supplied = Resolved::resolve(
-            extensions
-                .iter_mut()
-                .zip(1u32..)
-                .map(|(e, at)| (ExtensionId(at), std::mem::take(&mut e.supplies))),
-        );
+        // `module_registry`, which numbers Core 0 and the bundle from 1,
+        // and installed by the phase it starts in.
+        let mut supplied = Resolved::resolve(extensions.iter_mut().zip(1u32..).map(|(e, at)| {
+            (
+                ExtensionId(at),
+                Phase::of(e),
+                std::mem::take(&mut e.supplies),
+            )
+        }));
         if !self.cli_shell {
             supplied.shell = Last::default();
         }
@@ -4698,7 +4701,7 @@ mod tests {
     }
 
     /// Two extensions that intercept one native stack in bundle order,
-    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// each at its `MINIT`: the later serves
     /// first and passes through to the earlier, the earlier to the
     /// native, and each hands on the call's own arguments.
     #[test]

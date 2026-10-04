@@ -633,7 +633,8 @@ impl ObjectHandlers for OpaqueHandlers {
     }
 }
 
-/// `Soap\Url`: final, opaque, not serializable.
+/// `Soap\Url`: final, opaque, not serializable, no dynamic property
+/// (`@strict-properties`).
 ///
 /// ```php
 /// try { new Soap\Url; } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -649,14 +650,80 @@ impl ObjectHandlers for OpaqueHandlers {
 /// bool(false)
 /// Class Soap\Url is an internal class marked as final that cannot be instantiated without invoking its constructor
 /// ```
-#[php_class(namespace(Soap), final, not_serializable, payload = UrlPayload, handlers = URL_HANDLERS)]
+///
+/// The one a request kept, read off a client whose server never answered:
+///
+/// ```php
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// ini_set('default_socket_timeout', 0);
+/// $c = new SoapClient(null, ['location' => 'http://' . stream_socket_get_name($srv, false) . '/', 'uri' => 'urn:t', 'connection_timeout' => 5, 'exceptions' => false]);
+/// echo $c->f()->getMessage(), "\n";
+/// $u = (new ReflectionProperty($c, 'httpurl'))->getValue($c);
+/// echo get_class($u), "\n";
+/// try { $u->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($u->x), $u->y);
+/// try { clone $u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { serialize($u); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error Fetching http headers
+/// Soap\Url
+/// Cannot create dynamic property Soap\Url::$x
+///
+/// Warning: Undefined property: Soap\Url::$y in %s on line 9
+/// bool(false)
+/// NULL
+/// Trying to clone an uncloneable object of class Soap\Url
+/// Serialization of 'Soap\Url' is not allowed
+/// ```
+#[php_class(
+    namespace(Soap),
+    final,
+    not_serializable,
+    payload = UrlPayload,
+    handlers = URL_HANDLERS,
+    dynamic_properties = forbidden
+)]
 pub(crate) struct Url;
 
 #[php_class]
 impl Url {}
 
-/// `Soap\Sdl`: final, opaque, not serializable.
-#[php_class(namespace(Soap), final, not_serializable, payload = SdlPayload, handlers = SDL_HANDLERS)]
+/// `Soap\Sdl`: final, opaque, not serializable, no dynamic property
+/// (`@strict-properties`).
+///
+/// ```php
+/// $w = "<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' xmlns:soap='http://schemas.xmlsoap.org/wsdl/soap/' targetNamespace='urn:t'><portType name='P'/><binding name='B' type='P'><soap:binding transport='http://schemas.xmlsoap.org/soap/http'/></binding><service name='S'><port name='Q' binding='B'><soap:address location='http://localhost/'/></port></service></definitions>";
+/// $c = new SoapClient('data://text/plain,' . urlencode($w), ['cache_wsdl' => WSDL_CACHE_NONE]);
+/// $s = (new ReflectionProperty($c, 'sdl'))->getValue($c);
+/// echo get_class($s), "\n";
+/// try { $s->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($s->x), $s->y);
+/// try { clone $s; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { serialize($s); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// $r = new ReflectionClass($s);
+/// var_dump($r->isFinal(), $r->isCloneable());
+/// ```
+/// ```expect
+/// Soap\Sdl
+/// Cannot create dynamic property Soap\Sdl::$x
+///
+/// Warning: Undefined property: Soap\Sdl::$y in %s on line 7
+/// bool(false)
+/// NULL
+/// Trying to clone an uncloneable object of class Soap\Sdl
+/// Serialization of 'Soap\Sdl' is not allowed
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_class(
+    namespace(Soap),
+    final,
+    not_serializable,
+    payload = SdlPayload,
+    handlers = SDL_HANDLERS,
+    dynamic_properties = forbidden
+)]
 pub(crate) struct Sdl;
 
 #[php_class]

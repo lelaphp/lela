@@ -343,6 +343,51 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
     }
 }
 
+/// A regime that carries `args` reaches a binary's command line and
+/// neither the linked engine nor a request host (#1780, #1887), so a
+/// fence naming one is a block the lane cannot run unless it is marked
+/// `process`, read off the pin before anything runs: the line names the
+/// regime, its arguments and the mark that serves it. Marked `process`,
+/// the fence stands under the regime, whose arguments the binary's run
+/// and the oracle's are both handed.
+#[test]
+fn a_fence_under_a_regime_of_args_is_served_by_the_binary_or_not_at_all() {
+    let mut pin = manifest().pin;
+    pin.regime.insert(
+        "extended-info".to_owned(),
+        crate::oracle::Regime {
+            args: vec!["-e".to_owned()],
+            ..crate::oracle::Regime::default()
+        },
+    );
+    let witness = |fences: &str| {
+        let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &block(fences));
+        assert_eq!(found.witnesses.len(), 1, "{found:#?}");
+        found.witnesses.into_iter().next().unwrap()
+    };
+    let linked = witness("/// ```expect regime=extended-info\n/// 1\n/// ```\n");
+    let request = witness(
+        "/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime=extended-info\n/// 1\n/// ```\n",
+    );
+    assert_eq!(request.served, fence::Served::Cgi);
+    for unmarked in [&linked, &request] {
+        let refused = super::under(&pin, unmarked).unwrap_err();
+        assert!(
+            refused.contains("ext/fixture/src/lib.rs:1")
+                && refused.contains("[regime.extended-info]")
+                && refused.contains("\"-e\"")
+                && refused.contains("`process`"),
+            "{refused}"
+        );
+    }
+    let process = witness("/// ```expect process regime=extended-info\n/// 1\n/// ```\n");
+    let regime = super::under(&pin, &process).unwrap().unwrap();
+    assert_eq!(regime.args, ["-e"]);
+    // A regime of ini alone is the linked engine's as it was.
+    let short_tags = witness("/// ```expect regime=short-tags\n/// 1\n/// ```\n");
+    assert!(super::under(&pin, &short_tags).unwrap().is_some());
+}
+
 #[test]
 fn a_witness_that_differs_notes_the_difference_under_each_run_that_missed() {
     if oracle().is_none() {

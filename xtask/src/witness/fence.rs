@@ -26,7 +26,9 @@
 //!
 //! A `regime=<name>` names one `[regime.<name>]` of the pin, whose ini
 //! stands after the recipe's for the oracle run and for the linked engine
-//! alike (harness-design.md §8, ledger 55): the way to pin a behaviour the
+//! alike (harness-design.md §8, ledger 55), and whose arguments, where it
+//! carries any, stand after the recipe's on a binary's command line and
+//! so serve only a fence marked `process` (#1780): the way to pin a behaviour the
 //! recipe's own ini holds off, such as what `<?` opens while
 //! `short_open_tag` is on. The name is all a fence carries; the values are
 //! the pin's, written by a person, so a fence that would set an ini of its
@@ -169,8 +171,8 @@ pub struct Witness {
     /// The pinned second stream; `None` asserts an empty one.
     pub stderr: Option<String>,
     pub exit: Exit,
-    /// The `[regime.<name>]` of the pin the fence names, whose ini stands
-    /// after the recipe's for both runs; nothing where it names none, and
+    /// The `[regime.<name>]` of the pin the fence names, whose ini and
+    /// arguments stand after the recipe's for both runs; nothing where it names none, and
     /// then the recipe alone is what the snippet runs under.
     pub regime: Option<String>,
     /// The declared duration, disclosure only; the instrument sums them.

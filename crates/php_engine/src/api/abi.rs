@@ -981,7 +981,8 @@ impl ExtensionBuilder {
     /// `hook` is handed the file's full path, resolved, and answers
     /// whether the file is kept out of the cache and, where it is held,
     /// how a hit is found and validated ([`Admission`]). The last
-    /// extension in bundle order with a hook answers, as opcache's
+    /// extension to install a hook answers, in bundle order and a Zend
+    /// extension's after every other's, as opcache's
     /// `persistent_compile_file` stands over what it saved; with none,
     /// every file is held and validated on every hit.
     #[must_use]
@@ -1006,7 +1007,8 @@ impl ExtensionBuilder {
     /// path, on the request that compiled it (design §6.3): where php's
     /// `cache_script_in_shared_memory` has persisted a file, and opcache
     /// logs `Cached script` at `ACCEL_LOG_INFO`. Every extension with a
-    /// hook is told, in bundle order.
+    /// hook is told, in bundle order and a Zend extension after every
+    /// other.
     #[must_use]
     pub fn cached(mut self, hook: fn(&mut Request, &[u8])) -> ExtensionBuilder {
         self.supplies.cached = Some(hook);
@@ -1144,9 +1146,11 @@ impl ExtensionBuilder {
     /// (`phar_intercept_functions_init`): the declaration stays the
     /// native's, what a call serves is `entry`, and the entry it
     /// replaced is kept for [`crate::api::call::passthrough`]. Two
-    /// extensions that intercept one native stack in bundle order, the
-    /// later over the earlier, as opcache's handler is saved over
-    /// phar's. A name no extension declares, or one `disable_functions`
+    /// extensions that intercept one native stack in the order php
+    /// installs them, the later over the earlier: each extension's at
+    /// its `MINIT` in bundle order, then each Zend extension's, so
+    /// opcache's handler is saved over phar's whatever their bundle
+    /// order. A name no extension declares, or one `disable_functions`
     /// took out, is intercepted by nothing.
     #[must_use]
     pub fn intercept(

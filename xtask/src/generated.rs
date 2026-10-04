@@ -2,7 +2,9 @@
 //! rule each is derived from (harness-design.md §4.1, §13 D.19). Today that
 //! is `ext/clippy.toml` from `ext.no-locks`: the `disallowed-types` list
 //! with the rule's text as each reason, wildcards expanded from
-//! `Cargo.lock`. The committed copy is held to the rendering by `budget`.
+//! `Cargo.lock`, and the `disallowed-macros` list from the rule's
+//! `deny_macros` where it carries one (#1781). The committed copy is held
+//! to the rendering by `budget`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -50,7 +52,8 @@ pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str, from: &str) -
     }
 }
 
-/// `clippy.toml` with `disallowed-types` from a `deny_types` rule.
+/// `clippy.toml` with `disallowed-types` from a `deny_types` rule, and
+/// `disallowed-macros` from its `deny_macros` when it has them.
 fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
     let types = rule.predicate.deny_types.as_ref().with_context(|| {
         format!(
@@ -94,16 +97,28 @@ fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
             None => vec![ty.clone()],
         };
         for path in expanded {
-            let _ = writeln!(
-                out,
-                "    {{ path = {}, reason = {} }},",
-                toml_string(&path),
-                toml_string(&reason)
-            );
+            entry(&mut out, &path, &reason);
         }
     }
     out.push_str("]\n");
+    if let Some(macros) = &rule.predicate.deny_macros {
+        out.push_str("disallowed-macros = [\n");
+        for path in macros {
+            entry(&mut out, path, &reason);
+        }
+        out.push_str("]\n");
+    }
     Ok(out)
+}
+
+/// One `{ path, reason }` row of a `disallowed-*` list.
+fn entry(out: &mut String, path: &str, reason: &str) {
+    let _ = writeln!(
+        out,
+        "    {{ path = {}, reason = {} }},",
+        toml_string(path),
+        toml_string(reason)
+    );
 }
 
 fn toml_string(s: &str) -> String {

@@ -90,7 +90,12 @@
 //! behaviour the recipe's own ini holds off. The values are the pin's and
 //! a person writes them, so a fence carries the name alone; a name the pin
 //! does not carry is read before anything runs, and the block is one the
-//! lane cannot run, named beside the regimes the pin has.
+//! lane cannot run, named beside the regimes the pin has. A regime's
+//! `args` stand after the recipe's on a binary's command line (#1780), the
+//! oracle's and, for a fence marked `process`, the engine's; the linked
+//! engine and the request hosts take none, so any other fence under such
+//! a regime is a block the lane cannot run, read before anything runs as
+//! an unknown name is.
 //!
 //! **What `locale=<name>` is.** A locale the snippet needs the host to
 //! know, as a `.phpt`'s `--SKIPIF--` asks `setlocale` for one (#1678).
@@ -831,15 +836,27 @@ pub(crate) fn judge(
 /// The regime one witness stands under, by the name its fence carries;
 /// nothing where it carries none, and where it names one the pin does not
 /// have, the line a person reads, at the fence and beside the regimes the
-/// pin does have.
+/// pin does have. A regime that carries `args` reaches a binary's command
+/// line (#1780): a fence marked `process` hands them to the engine's
+/// binary as the oracle's run hands them to php, and the linked engine
+/// and the request hosts take none, so a fence they serve under one is
+/// the same kind of line, naming the mark that serves it.
 fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime>, String> {
     let Some(name) = witness.regime.as_deref() else {
         return Ok(None);
     };
-    match pin.regime(name) {
-        Ok(regime) => Ok(Some(regime)),
-        Err(why) => Err(format!("{}: {why:#}", witness.at())),
+    let regime = pin
+        .regime(name)
+        .map_err(|why| format!("{}: {why:#}", witness.at()))?;
+    if witness.served != fence::Served::Binary
+        && let Err(why) = regime.linked_ini()
+    {
+        return Err(format!(
+            "{}: `[regime.{name}]` {why:#}; only a fence marked `process` stands under it",
+            witness.at()
+        ));
     }
+    Ok(Some(regime))
 }
 
 /// Write the fence lines a run captured: each file under `root` read, the

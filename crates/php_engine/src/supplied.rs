@@ -17,11 +17,14 @@
 //! - [`Keyed`]: rows under a key, each key's in supplier order (a
 //!   native's interception, `pdo_driver_hash`).
 //!
-//! Suppliers are taken in the order their extensions start, the host's
-//! own extension last, as php starts a host's `additional_module` after
-//! the bundle; [`Resolved::resolve`] is handed that order with each
-//! supplier's extension beside it, so a kind added later, or an order
-//! that also weighs when php installs a supplier, changes no read site.
+//! Suppliers are taken in the order php installs them ([`Phase`]):
+//! every extension's at its `MINIT`, in the order the extensions start,
+//! the host's own extension last among them, as php starts a host's
+//! `additional_module` after the bundle; then every Zend extension's,
+//! in that same order. [`Resolved::resolve`] is handed the start order
+//! with each supplier's extension and phase beside it, so the start
+//! order has one source, the caller's, and a kind added later changes
+//! no read site.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -29,7 +32,7 @@ use std::sync::Arc;
 use php_unit::decl::Name;
 
 use crate::api::abi::{
-    AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, FatalLoggedHook,
+    AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, Extension, FatalLoggedHook,
     InputFilterHook, InterruptHook, PostStartupHook, ResolvePathHook, Shell, TicksHook,
     TreatDataHook, UploadHook,
 };
@@ -38,6 +41,46 @@ use crate::api::request::{ExtensionId, Request};
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
 pub(crate) type Registered = Arc<dyn Any + Send + Sync>;
+
+/// When php installs what an extension supplies, the phases in the
+/// order `php_module_startup` runs them (`Z/main/main.c:2353-2356`):
+/// every extension's `MINIT` in `zend_startup_modules`, then every Zend
+/// extension's startup in `zend_startup_extensions`.
+///
+/// A Zend extension's phase is the extension's, every kind it installs
+/// together, as opcache, the bundle's one Zend extension, installs
+/// nothing at its `MINIT`, which runs among the other extensions' and
+/// only registers its `zend_extension` (`start_accel_extension`,
+/// `Z/ext/opcache/ZendAccelerator.c:3168-3171`;
+/// `Z/ext/opcache/zend_accelerator_module.c:448-453`). It installs its
+/// `zend_post_startup_cb` link at `accel_startup` (`:3220-3221`) and the
+/// rest, `zend_compile_file`, `zend_resolve_path` and its three
+/// interceptions, at `accel_post_startup` (`:3403-3434`): two moments,
+/// both after every other extension's `MINIT`, which differ only to a
+/// Zend extension started after opcache, and the bundle has none. What
+/// an extension registers into another's table is registered at its
+/// `MINIT` by definition, so [`Resolved::resolve`] keeps those rows in
+/// start order whatever the phase.
+///
+/// Declared in the order php runs the phases, which the sort reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Phase {
+    /// An extension's `MINIT`.
+    Minit,
+    /// A Zend extension's startup, and its `zend_post_startup_cb` after.
+    ZendExtension,
+}
+
+impl Phase {
+    /// The phase `extension` installs what it supplies in.
+    pub(crate) fn of(extension: &Extension) -> Phase {
+        if extension.zend.is_some() {
+            Phase::ZendExtension
+        } else {
+            Phase::Minit
+        }
+    }
+}
 
 /// One extension's supplied behaviour as its builder took it, each
 /// slot what the builder method of its name was handed.
@@ -113,8 +156,8 @@ pub(crate) struct Resolved {
     /// overwrites them.
     pub(crate) encodings: Last<EncodingsHook>,
     /// Each native intercepted, by its name, each name's entries
-    /// stacked later over earlier, as opcache saves its handler over
-    /// phar's.
+    /// stacked later over earlier, as opcache saves its handler at
+    /// `accel_post_startup` over phar's of its `MINIT`.
     pub(crate) intercepts: Keyed<Name, Entry>,
     /// What each `MINIT` registered into another extension's table, by
     /// the value's type.
@@ -122,15 +165,23 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// The bundle's supplied behaviour from each supplier's own, in the
-    /// order php installs them, each beside the extension it is of: the
-    /// order is the caller's alone, so one that also weighs the phase
-    /// php installs a supplier in reorders this and names no other.
+    /// The bundle's supplied behaviour from each supplier's own, handed
+    /// in the order the extensions start, each beside the extension it
+    /// is of and the phase it installs in: installed phase by phase,
+    /// each phase's in start order ([`Phase`]), and what each `MINIT`
+    /// registered in start order alone.
     pub(crate) fn resolve(
-        suppliers: impl IntoIterator<Item = (ExtensionId, Supplies)>,
+        suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>,
     ) -> Resolved {
         let mut table = Resolved::default();
-        for (by, own) in suppliers {
+        let mut suppliers: Vec<_> = suppliers.into_iter().collect();
+        for (_, _, own) in &mut suppliers {
+            table
+                .registered
+                .install(std::mem::take(&mut own.registered));
+        }
+        suppliers.sort_by_key(|&(_, phase, _)| phase);
+        for (by, _, own) in suppliers {
             table.interrupt.install(own.interrupt);
             table.compile_file.install(own.compile_file);
             table.resolve_path.install(own.resolve_path);
@@ -146,7 +197,6 @@ impl Resolved {
             table.treat_data.install(by, own.treat_data);
             table.encodings.install(by, own.encodings);
             table.intercepts.install(own.intercepts);
-            table.registered.install(own.registered);
         }
         table
     }
@@ -469,5 +519,114 @@ mod tests {
         assert_eq!(drivers, [&Driver("earlier"), &Driver("later")]);
         let others: Vec<_> = req.registered::<Other>().collect();
         assert_eq!(others, [&Other(1)]);
+    }
+
+    /// `builder` built as a Zend extension too, opcache's shape.
+    fn zend(builder: ExtensionBuilder, name: &str) -> crate::api::abi::Extension {
+        builder
+            .zend_extension(crate::api::abi::ZendExtension {
+                name: name.to_owned(),
+                version: String::new(),
+                author: String::new(),
+                url: String::new(),
+                copyright: String::new(),
+            })
+            .build(name)
+    }
+
+    /// A Zend extension's interception stands over another extension's
+    /// whatever their bundle order, as opcache's `file_exists`,
+    /// installed at `accel_post_startup`
+    /// (`Z/ext/opcache/ZendAccelerator.c:3434`), is saved over phar's,
+    /// installed at phar's `MINIT`: the Zend extension serves first and
+    /// passes through to the other's.
+    #[test]
+    fn a_zend_extension_s_interception_stands_over_a_minit_s_in_either_order() {
+        let opcache: crate::api::abi::Entry = |req| {
+            req.write(b"opcache ");
+            crate::api::call::passthrough(req, None)
+        };
+        let phar: crate::api::abi::Entry = |req| {
+            req.write(b"phar ");
+            crate::api::call::passthrough(req, None)
+        };
+        let serve = |extensions: &[crate::api::abi::Extension]| {
+            let served = Engine::cli_builder()
+                .extensions(extensions)
+                .build()
+                .serve_capture(
+                    "<?php $f = 'strlen'; echo $f('abcd');",
+                    crate::test::Capture::default(),
+                );
+            String::from_utf8_lossy(&served.stdout).into_owned()
+        };
+        let mut extensions = [
+            zend(
+                ExtensionBuilder::default().intercept(b"strlen", opcache),
+                "opcache",
+            ),
+            ExtensionBuilder::default()
+                .intercept(b"strlen", phar)
+                .build("phar"),
+        ];
+        assert_eq!(serve(&extensions), "opcache phar 4");
+        extensions.reverse();
+        assert_eq!(serve(&extensions), "opcache phar 4");
+    }
+
+    /// What a Zend extension registers is its `MINIT`'s, which runs
+    /// among the other extensions', so its rows keep their start order
+    /// though what it installs moves after every other extension's.
+    #[test]
+    fn a_zend_extension_s_registrations_keep_their_start_order() {
+        #[derive(Debug, PartialEq)]
+        struct Driver(&'static str);
+        let extensions = [
+            zend(ExtensionBuilder::default().register(Driver("zend")), "zend"),
+            ExtensionBuilder::default()
+                .register(Driver("minit"))
+                .build("minit"),
+        ];
+        let engine = Engine::cli_builder().extensions(&extensions).build();
+        let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let drivers: Vec<_> = req.registered::<Driver>().collect();
+        assert_eq!(drivers, [&Driver("zend"), &Driver("minit")]);
+    }
+
+    /// A Zend extension installs its `zend_post_startup_cb` link after
+    /// every other extension's `MINIT`, as opcache's `accel_startup`
+    /// saves ffi's (`Z/ext/opcache/ZendAccelerator.c:3220-3221`), so
+    /// ffi's link is beneath it and asked first: its refusal ends
+    /// startup and the Zend extension's preload is never asked for,
+    /// though it stands first in the bundle (#1797).
+    #[test]
+    fn a_minit_s_post_startup_link_is_asked_before_a_zend_extension_s() {
+        let extensions = [
+            zend(
+                ExtensionBuilder::default().post_startup(|req| {
+                    req.write_stderr(b"preloading\n");
+                    crate::api::abi::PostStartup::Preload(b"/nowhere".to_vec())
+                }),
+                "opcache",
+            ),
+            ExtensionBuilder::default()
+                .post_startup(|req| {
+                    req.write_stderr(b"refused\n");
+                    crate::api::abi::PostStartup::Refuse { status: -2 }
+                })
+                .build("ffi"),
+        ];
+        let served = Engine::cli_builder()
+            .extensions(&extensions)
+            .build()
+            .serve_capture("<?php echo 1;", crate::test::Capture::default());
+        assert_eq!(
+            (
+                served.stdout.as_slice(),
+                served.stderr.as_slice(),
+                served.exit_code
+            ),
+            (&b""[..], &b"refused\n"[..], -2)
+        );
     }
 }
