@@ -33,6 +33,12 @@ pub struct Dep {
     /// The identifier the code uses for it: the dependency key, with `-`
     /// as `_`.
     pub alias: String,
+    /// Whether the crate's library links it: a `[dependencies]` entry,
+    /// plain or under a target. A crate that only dev- or build-depends
+    /// on another does not need it at run time. An `optional = true`
+    /// entry counts as linked, since which of the crate's own features a
+    /// dependent turns on is not read here; no `ext/*` crate has one.
+    pub linked: bool,
 }
 
 impl Present {
@@ -137,31 +143,39 @@ impl Crates {
     }
 }
 
-/// The workspace dependencies of one `Cargo.toml`, of every kind.
+/// The workspace dependencies of one `Cargo.toml`, of every kind, one
+/// entry per crate depended on: linked when any of its entries is.
 fn deps(table: &toml::Table, dir: &Path, root: &Path) -> Vec<Dep> {
-    let mut sections: Vec<&toml::Table> = Vec::new();
-    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        sections.extend(table.get(key).and_then(Value::as_table));
-    }
-    if let Some(targets) = table.get("target").and_then(Value::as_table) {
-        for target in targets.values() {
-            for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
-                sections.extend(target.get(key).and_then(Value::as_table));
-            }
+    const KINDS: [(&str, bool); 3] = [
+        ("dependencies", true),
+        ("dev-dependencies", false),
+        ("build-dependencies", false),
+    ];
+    let targets = table
+        .get("target")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flat_map(|targets| targets.values().filter_map(Value::as_table));
+    let mut sections: Vec<(&toml::Table, bool)> = Vec::new();
+    for at in std::iter::once(table).chain(targets) {
+        for (key, linked) in KINDS {
+            sections.extend(at.get(key).and_then(Value::as_table).map(|s| (s, linked)));
         }
     }
     let mut out: Vec<Dep> = Vec::new();
-    for section in sections {
+    for (section, linked) in sections {
         for (key, value) in section {
             let Some(name) = dep_crate(key, value, dir, root) else {
                 continue;
             };
-            let dep = Dep {
-                name,
-                alias: key.replace('-', "_"),
-            };
-            if !out.contains(&dep) {
-                out.push(dep);
+            let alias = key.replace('-', "_");
+            match out.iter_mut().find(|d| d.name == name && d.alias == alias) {
+                Some(dep) => dep.linked |= linked,
+                None => out.push(Dep {
+                    name,
+                    alias,
+                    linked,
+                }),
             }
         }
     }

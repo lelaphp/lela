@@ -1,0 +1,17 @@
+[package]
+name = "php_bundle"
+version = "0.0.0"
+edition = "2024"
+
+# standard's feature omits random, which ext/standard requires; session's
+# switches on standard, which ext/session requires.
+[features]
+default = ["standard", "random", "session"]
+random = ["dep:php_ext_random"]
+standard = ["dep:php_ext_standard"]
+session = ["dep:php_ext_session", "standard"]
+
+[dependencies]
+php_ext_random = { path = "../../ext/random", optional = true }
+php_ext_standard = { path = "../../ext/standard", optional = true }
+php_ext_session = { path = "../../ext/session", optional = true }

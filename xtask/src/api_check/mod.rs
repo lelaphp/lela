@@ -21,13 +21,18 @@
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the instrument does for each crate. A `use` path across a `deny = true`
 //!   module edge fails; a `reexports_only` crate may define nothing.
-//! - `php_bundle`'s registration order, read as the order of
-//!   `php_ext_<name>::extension()` in its sources, is held topological over
-//!   the `ext/*` dependency graph (`order = "topological"`).
+//! - `php_bundle`'s registrations, read as the `php_ext_<name>::extension`
+//!   paths in its sources and the features they stand behind, are held to
+//!   the `ext/*` dependency graph as its row's `order` says: under
+//!   `"topological"` the order written lists each extension after those it
+//!   depends on; under `"registration"`, the order #1778 ruled, the order
+//!   written is php's and free, and each extension's feature switches on
+//!   the features of every extension it links ([`bundle`]).
 //!
 //! An extension's `pub` items beyond `extension()` are printed in its
 //! reading, as the manifest's `ext.pub-beyond-extension` note asks.
 
+mod bundle;
 mod inventory;
 pub(crate) mod lock;
 mod ops;
@@ -44,7 +49,7 @@ use crate::manifest::{Edge, Manifest, Seam, Section};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::Standing;
 
-use inventory::{Inventory, Leaf, extension_calls, uses};
+use inventory::{Inventory, Leaf, uses};
 use lock::{Block, Diff, Lock, list};
 use workspace::{Crates, Present};
 
@@ -542,18 +547,20 @@ fn crate_reading(
         }
     }
 
-    // The bundle's order over the ext/* graph.
+    // The bundle's order, held to the ext/* graph as the row's `order`
+    // says.
     if let Some(order) = rows.iter().find_map(|e| e.order.as_deref()) {
-        if order == "topological" {
-            let listed = bundle_order(krate)?;
-            reading
-                .numbers
-                .insert(numbers::EXTENSIONS.to_owned(), count(listed.len()));
-            problems.extend(not_topological(crates, &listed));
-        } else {
-            problems.push(format!(
+        match bundle::Order::named(order) {
+            Some(order) => {
+                let read = bundle::Bundle::read(krate)?;
+                reading
+                    .numbers
+                    .insert(numbers::EXTENSIONS.to_owned(), count(read.names().len()));
+                problems.extend(order.problems(crates, &read));
+            }
+            None => problems.push(format!(
                 "order = \"{order}\" is not an order api-check knows"
-            ));
+            )),
         }
     }
 
@@ -679,53 +686,6 @@ fn module_of(krate: &Present, file: &Path) -> Option<Vec<String>> {
         parts.pop();
     }
     Some(parts)
-}
-
-/// The extensions `php_bundle` registers: every `php_ext_<name>::extension`
-/// path in its `src/` files, in the order written, files in path order.
-fn bundle_order(krate: &Present) -> Result<Vec<String>> {
-    let mut listed: Vec<String> = Vec::new();
-    for file in krate.sources()? {
-        if module_of(krate, &file).is_none() {
-            continue;
-        }
-        for name in extension_calls(&file)? {
-            if !listed.contains(&name) {
-                listed.push(name);
-            }
-        }
-    }
-    Ok(listed)
-}
-
-/// Why `listed` is not a topological order of the `ext/*` graph: an
-/// extension before one it depends on, or one whose dependency is absent.
-fn not_topological(crates: &Crates, listed: &[String]) -> Vec<String> {
-    let position: BTreeMap<&str, usize> = listed
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.as_str(), i))
-        .collect();
-    let mut out = Vec::new();
-    for name in listed {
-        let Some(krate) = crates.named(name) else {
-            continue;
-        };
-        for dep in krate.deps.iter().filter(|d| d.name.starts_with("ext/")) {
-            match position.get(dep.name.as_str()) {
-                None => out.push(format!(
-                    "the bundle lists {name} but not {}, which it depends on",
-                    dep.name
-                )),
-                Some(&at) if at > position[name.as_str()] => out.push(format!(
-                    "the bundle lists {name} before {}, which it depends on; the order is not topological (design §4.10)",
-                    dep.name
-                )),
-                Some(_) => {}
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------- shared
