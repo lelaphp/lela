@@ -110,8 +110,8 @@
 //! the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
-//! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
-//! rule; the per-commit lane and one subset are an agent's to run. A
+//! and the tier's lanes are CI's, under the manifest's
+//! `lanes.nightly-flags` rule; the per-commit lane and one subset are an agent's to run. A
 //! `--PHPDBG--` test runs through the debugger host beside the binary, the
 //! phpdbg `[sapi]` pins for the control and the engine's own `phpdbg`,
 //! `sapi/phpdbg`'s binary, for the engine, as the `phpdbg` module has it

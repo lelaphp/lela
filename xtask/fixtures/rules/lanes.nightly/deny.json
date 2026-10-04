@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"cargo run -q -p xtask -- phpt --full","description":"Run the whole corpus"}}
+{"tool_name":"Bash","tool_input":{"command":"php run-tests.php -p target/release/php","description":"Run upstream's runner over the engine"}}
