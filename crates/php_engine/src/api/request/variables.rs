@@ -898,12 +898,10 @@ impl Request {
     /// `php_default_treat_data`'s.
     fn treated(&mut self, input: Input, source: &[u8], into: PhpArray) -> Result<bool, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
-        let hook = shared
-            .extensions
-            .iter()
-            .rev()
-            .find_map(|extension| extension.treat_data);
-        let Some(variables) = hook
+        let Some(variables) = shared
+            .supplied
+            .treat_data
+            .get()
             .map(|hook| hook(self, input, source))
             .transpose()?
             .flatten()
@@ -929,12 +927,7 @@ impl Request {
         value: &[u8],
     ) -> Result<Option<Value>, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
-        let hook = shared
-            .extensions
-            .iter()
-            .rev()
-            .find_map(|extension| extension.input_filter);
-        match hook {
+        match shared.supplied.input_filter.get() {
             Some(hook) => hook(self, input, name, value),
             None => Ok(Some(Value::string(PhpString::new(self, value)?))),
         }

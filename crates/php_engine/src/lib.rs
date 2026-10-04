@@ -46,6 +46,7 @@ mod probe;
 mod rfc1867;
 mod signal;
 mod streams;
+mod supplied;
 #[cfg(test)]
 mod tests;
 // The test face is on for an extension's dev-dependency, and for this

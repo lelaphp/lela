@@ -24,6 +24,7 @@ use crate::api::request::Request;
 use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
 };
+use crate::supplied::{Keyed, Registered, Supplies};
 
 mod class;
 mod marshal;
@@ -334,7 +335,7 @@ pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 /// What [`ExtensionBuilder::constants_with`] was handed: the declared
 /// constants rewritten with every value the bundle registered.
 pub(crate) type ConstantsLink =
-    Arc<dyn Fn(Vec<ConstDecl>, &[Arc<dyn Any + Send + Sync>]) -> Vec<ConstDecl> + Send + Sync>;
+    Arc<dyn Fn(Vec<ConstDecl>, &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
 /// Builds one extension's engine state from the startup ini, once.
 pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
@@ -399,8 +400,9 @@ pub struct Shell {
 /// serves its first request (design §6.3): php's `zend_post_startup_cb`,
 /// which opcache's `accel_post_startup` is. The engine is built before
 /// any host names itself, so it asks once, on the first request's
-/// host, and the first extension in bundle order that does not answer
-/// [`PostStartup::Serve`] decides.
+/// host, and the first link from the bottom of the chain that does not
+/// answer [`PostStartup::Serve`] decides, as each of php's links calls
+/// the one it saved before its own work and fails where it failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostStartup {
     /// Serve as built.
@@ -632,39 +634,12 @@ pub struct Extension {
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     /// What [`ExtensionBuilder::deactivate`] was handed.
     pub(crate) deactivate: Option<fn(&mut Request)>,
-    pub(crate) interrupt: Option<InterruptHook>,
-    pub(crate) ticks: Option<TicksHook>,
-    pub(crate) compile_file: Option<CompileFileHook>,
-    /// What [`ExtensionBuilder::admission`] was handed.
-    pub(crate) admission: Option<AdmissionHook>,
-    /// What [`ExtensionBuilder::post_startup`] was handed.
-    pub(crate) post_startup: Option<PostStartupHook>,
-    /// What [`ExtensionBuilder::cached`] was handed.
-    pub(crate) cached: Option<CachedHook>,
-    /// What [`ExtensionBuilder::fatal_logged`] was handed.
-    pub(crate) fatal_logged: Option<FatalLoggedHook>,
-    /// What [`ExtensionBuilder::program_ended`] was handed.
-    pub(crate) program_ended: Option<fn(&mut Request)>,
-    /// What [`ExtensionBuilder::shell`] was handed.
-    pub(crate) shell: Option<Shell>,
-    /// What [`ExtensionBuilder::input_filter`] was handed.
-    pub(crate) input_filter: Option<InputFilterHook>,
-    /// What [`ExtensionBuilder::treat_data`] was handed.
-    pub(crate) treat_data: Option<TreatDataHook>,
-    /// What [`ExtensionBuilder::upload`] was handed.
-    pub(crate) upload: Option<UploadHook>,
-    /// What [`ExtensionBuilder::resolve_path`] was handed.
-    pub(crate) resolve_path: Option<ResolvePathHook>,
-    /// What [`ExtensionBuilder::encodings`] was handed.
-    pub(crate) encodings: Option<EncodingsHook>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
-    /// What [`ExtensionBuilder::intercept`] was handed: each native of
-    /// another extension this one replaces, by name, with its entry.
-    pub(crate) intercepts: Vec<(Name, Entry)>,
+    /// What the builder methods of the supplied kinds were handed
+    /// ([`crate::supplied`]), taken out as the engine is built.
+    pub(crate) supplies: Supplies,
     pub(crate) info: Option<Info>,
-    /// What [`ExtensionBuilder::register`] was handed, in its order.
-    pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
     /// What [`ExtensionBuilder::constants_with`] was handed.
     pub(crate) constants_link: Option<ConstantsLink>,
     /// What [`ExtensionBuilder::class_constants`] was handed: each
@@ -701,24 +676,9 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
     deactivate: Option<fn(&mut Request)>,
-    interrupt: Option<InterruptHook>,
-    ticks: Option<TicksHook>,
-    compile_file: Option<CompileFileHook>,
-    admission: Option<AdmissionHook>,
-    post_startup: Option<PostStartupHook>,
-    cached: Option<CachedHook>,
-    fatal_logged: Option<FatalLoggedHook>,
-    program_ended: Option<fn(&mut Request)>,
-    shell: Option<Shell>,
-    input_filter: Option<InputFilterHook>,
-    treat_data: Option<TreatDataHook>,
-    upload: Option<UploadHook>,
-    resolve_path: Option<ResolvePathHook>,
-    encodings: Option<EncodingsHook>,
     zend: Option<ZendExtension>,
-    intercepts: Vec<(Name, Entry)>,
+    supplies: Supplies,
     info: Option<Info>,
-    registered: Vec<Arc<dyn Any + Send + Sync>>,
     constants_link: Option<ConstantsLink>,
     class_constants: Vec<(Name, Vec<ClassConstDecl>)>,
     trampolines: Vec<(Name, MethodDecl, Entry)>,
@@ -924,11 +884,12 @@ impl ExtensionBuilder {
     /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
     /// by something other than the execution timer (design §5.8). What
     /// it throws is left pending where the loop stands, as
-    /// `zend_interrupt_helper`
-    /// leaves `EG(exception)`.
+    /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
+    /// hooks chain as php's saved pointer does: the later is served
+    /// first, then the earlier.
     #[must_use]
     pub fn interrupt(mut self, hook: InterruptHook) -> ExtensionBuilder {
-        self.interrupt = Some(hook);
+        self.supplies.interrupt = Some(hook);
         self
     }
 
@@ -941,7 +902,7 @@ impl ExtensionBuilder {
     /// opline stands.
     #[must_use]
     pub fn ticks(mut self, hook: TicksHook) -> ExtensionBuilder {
-        self.ticks = Some(hook);
+        self.supplies.ticks = Some(hook);
         self
     }
 
@@ -951,11 +912,12 @@ impl ExtensionBuilder {
     /// its path and may answer the source to compile under that path in
     /// place of the file's own, which the engine compiles as the
     /// request's own unit and publishes nowhere; `None` leaves the file
-    /// to the unit cache. Hooks are asked in bundle order and the first
-    /// source answered is compiled.
+    /// to the unit cache. Two extensions' hooks chain as php's saved
+    /// pointer does: the later is asked first, and what it leaves goes
+    /// to the earlier.
     #[must_use]
     pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
-        self.compile_file = Some(hook);
+        self.supplies.compile_file = Some(hook);
         self
     }
 
@@ -963,12 +925,13 @@ impl ExtensionBuilder {
     /// revision 45), what opcache's `persistent_compile_file` decides:
     /// `hook` is handed the file's full path, resolved, and answers
     /// whether the file is kept out of the cache and, where it is held,
-    /// how a hit is found and validated ([`Admission`]). The first
-    /// extension in bundle order with a hook answers; with none, every
-    /// file is held and validated on every hit.
+    /// how a hit is found and validated ([`Admission`]). The last
+    /// extension in bundle order with a hook answers, as opcache's
+    /// `persistent_compile_file` stands over what it saved; with none,
+    /// every file is held and validated on every hit.
     #[must_use]
     pub fn admission(mut self, hook: fn(&mut Request, &[u8]) -> Admission) -> ExtensionBuilder {
-        self.admission = Some(hook);
+        self.supplies.admission = Some(hook);
         self
     }
 
@@ -980,7 +943,7 @@ impl ExtensionBuilder {
     /// anything the engine serves.
     #[must_use]
     pub fn post_startup(mut self, hook: fn(&mut Request) -> PostStartup) -> ExtensionBuilder {
-        self.post_startup = Some(hook);
+        self.supplies.post_startup = Some(hook);
         self
     }
 
@@ -991,7 +954,7 @@ impl ExtensionBuilder {
     /// hook is told, in bundle order.
     #[must_use]
     pub fn cached(mut self, hook: fn(&mut Request, &[u8])) -> ExtensionBuilder {
-        self.cached = Some(hook);
+        self.supplies.cached = Some(hook);
         self
     }
 
@@ -1001,12 +964,13 @@ impl ExtensionBuilder {
     /// with the request standing where the fatal was raised and before
     /// `php_error_cb` displays it, writes the status and bails out, so
     /// what the hook serves runs on the frames the fatal left standing.
-    /// Hooks are asked in bundle order until one answers
-    /// [`AfterLog::BailedOut`]. An extension a host declares for itself
-    /// is the one that hands it (ADR-0008, #1348).
+    /// The host's table has one slot, so the last extension with a hook
+    /// is the log, and the host's own extension starts last. An
+    /// extension a host declares for itself is the one that hands it
+    /// (ADR-0008, #1348).
     #[must_use]
     pub fn fatal_logged(mut self, hook: fn(&mut Request) -> AfterLog) -> ExtensionBuilder {
-        self.fatal_logged = Some(hook);
+        self.supplies.fatal_logged = Some(hook);
         self
     }
 
@@ -1020,7 +984,7 @@ impl ExtensionBuilder {
     /// the one that hands it (ADR-0008, #1348).
     #[must_use]
     pub fn program_ended(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.program_ended = Some(hook);
+        self.supplies.program_ended = Some(hook);
         self
     }
 
@@ -1030,7 +994,7 @@ impl ExtensionBuilder {
     /// as the last `MINIT` to write the table wins.
     #[must_use]
     pub fn shell(mut self, shell: Shell) -> ExtensionBuilder {
-        self.shell = Some(shell);
+        self.supplies.shell = Some(shell);
         self
     }
 
@@ -1045,7 +1009,7 @@ impl ExtensionBuilder {
     /// filter; with none, every value is registered as it came.
     #[must_use]
     pub fn input_filter(mut self, hook: InputFilterHook) -> ExtensionBuilder {
-        self.input_filter = Some(hook);
+        self.supplies.input_filter = Some(hook);
         self
     }
 
@@ -1061,7 +1025,7 @@ impl ExtensionBuilder {
     /// bundle order with a hook treats the data.
     #[must_use]
     pub fn treat_data(mut self, hook: TreatDataHook) -> ExtensionBuilder {
-        self.treat_data = Some(hook);
+        self.supplies.treat_data = Some(hook);
         self
     }
 
@@ -1069,11 +1033,12 @@ impl ExtensionBuilder {
     /// `phar_resolve_path`: a path an include or an open along the
     /// `include_path` names is handed to `hook` first, which may answer
     /// where it stands, a `phar://` URL inside the archive being served;
-    /// `None` leaves it to the engine's own resolution. Hooks are asked in
-    /// bundle order and the first answer is taken.
+    /// `None` leaves it to the engine's own resolution. Two extensions'
+    /// hooks chain as php's saved pointer does: the later is asked first,
+    /// and what it leaves goes to the earlier.
     #[must_use]
     pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
-        self.resolve_path = Some(hook);
+        self.supplies.resolve_path = Some(hook);
         self
     }
 
@@ -1089,7 +1054,7 @@ impl ExtensionBuilder {
     /// which nothing is fetched or converted.
     #[must_use]
     pub fn encodings(mut self, bind: EncodingsHook) -> ExtensionBuilder {
-        self.encodings = Some(bind);
+        self.supplies.encodings = Some(bind);
         self
     }
 
@@ -1103,7 +1068,7 @@ impl ExtensionBuilder {
     /// in bundle order.
     #[must_use]
     pub fn upload(mut self, hook: UploadHook) -> ExtensionBuilder {
-        self.upload = Some(hook);
+        self.supplies.upload = Some(hook);
         self
     }
 
@@ -1134,7 +1099,7 @@ impl ExtensionBuilder {
         name: &[u8],
         entry: fn(&mut Request) -> Result<Value, Thrown>,
     ) -> ExtensionBuilder {
-        self.intercepts.push((Name(name.into()), entry));
+        self.supplies.intercepts.push((Name(name.into()), entry));
         self
     }
 
@@ -1145,7 +1110,9 @@ impl ExtensionBuilder {
     /// order, which is `MINIT` order (ADR-0005).
     #[must_use]
     pub fn register<T: Send + Sync + 'static>(mut self, value: T) -> ExtensionBuilder {
-        self.registered.push(Arc::new(value));
+        self.supplies
+            .registered
+            .push((TypeId::of::<T>(), Arc::new(value)));
         self
     }
 
@@ -1164,7 +1131,7 @@ impl ExtensionBuilder {
     ) -> ExtensionBuilder {
         self.constants_link = Some(Arc::new(move |declared, registered| {
             let values: Vec<&T> = registered
-                .iter()
+                .under(TypeId::of::<T>())
                 .filter_map(|value| value.downcast_ref::<T>())
                 .collect();
             link(declared, &values)
@@ -1238,24 +1205,9 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             deactivate: self.deactivate,
-            interrupt: self.interrupt,
-            ticks: self.ticks,
-            compile_file: self.compile_file,
-            admission: self.admission,
-            post_startup: self.post_startup,
-            cached: self.cached,
-            fatal_logged: self.fatal_logged,
-            program_ended: self.program_ended,
-            shell: self.shell,
-            input_filter: self.input_filter,
-            treat_data: self.treat_data,
-            upload: self.upload,
-            resolve_path: self.resolve_path,
-            encodings: self.encodings,
             zend: self.zend,
-            intercepts: self.intercepts,
+            supplies: self.supplies,
             info: self.info,
-            registered: self.registered,
             constants_link: self.constants_link,
             class_constants: self.class_constants,
             trampolines: self.trampolines,

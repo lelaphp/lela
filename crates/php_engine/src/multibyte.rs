@@ -16,7 +16,7 @@ use crate::engine::Shared;
 /// `zend_multibyte_get_functions`: the functions the last extension in
 /// bundle order handed the engine, none where no extension did.
 pub(crate) fn provider(shared: &Shared) -> Option<EncodingsHook> {
-    shared.extensions.iter().rev().find_map(|e| e.encodings)
+    shared.supplied.encodings.get()
 }
 
 /// The functions bound to one request, with what the scanner reads
