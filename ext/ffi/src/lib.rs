@@ -235,7 +235,7 @@ pub fn extension() -> Extension {
         .class::<ctype::CType>()
         .class::<decls::instance::FFI>()
         .request_state::<State>()
-        .engine_state(preload::engine_state)
+        .engine_state(|start| Ok(preload::engine_state(start)))
         .post_startup(preload::post_startup)
         .rshutdown(call::release_callbacks)
         .interrupt(call::serve_deferred)

@@ -84,7 +84,7 @@ pub fn extension() -> Extension {
         ])
         .class::<Connection>()
         .request_state::<State>()
-        .engine_state(|_| Pooled(Pool::new(POOLED)))
+        .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
         .deactivate(deactivate)
         .ini(vec![IniDecl {
             name: Name(DEFAULT_HANDLER.into()),

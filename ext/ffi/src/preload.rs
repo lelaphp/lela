@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, PostStartup, StartupIni};
+use php_ext::abi::{Cache, PostStartup, Start};
 use php_ext::raising::{Level, startup, warning};
 use php_ext::request::Request;
 
@@ -287,11 +287,12 @@ pub(crate) struct Preloads {
 /// the list, `:`-separated, a glob where it has a `*`, `?` or `[`, loaded
 /// into its scope, `C` where the header names none; the first that fails
 /// ends the list, and its warnings wait for [`post_startup`].
-pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
+pub(crate) fn engine_state(start: &Start) -> Preloads {
     let mut types = Types::default();
     let mut scopes: Vec<(Vec<u8>, Scope)> = Vec::new();
     let mut refused = Vec::new();
-    let list = ini
+    let list = start
+        .ini()
         .entries
         .iter()
         .find(|(name, _)| name.as_slice() == PRELOAD.as_bytes())

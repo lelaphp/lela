@@ -15,8 +15,8 @@ mod test_ext;
 
 use test_ext::Event::{Ext, Mark};
 use test_ext::Phase::{
-    Deactivate, EngineStateBuilt, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit,
-    Rshutdown,
+    Deactivate, EngineStartRefused, EngineStateBuilt, RequestStateBuilt, RequestStateDropped,
+    ResourceClosed, Rinit, Rshutdown,
 };
 use test_ext::{Recording, TestExt};
 
@@ -61,5 +61,35 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
             Ext(0, ResourceClosed),
             Mark("served"),
         ]
+    );
+}
+
+/// An engine start declared through the facade that refuses, with the
+/// host's name it was handed in its warning: the extension after it
+/// never starts, and the one request asked for is the refusal, with no
+/// request phase handed to either extension.
+#[test]
+fn an_engine_start_declared_through_the_facade_refuses_the_engine() {
+    let rec = Recording::start();
+    let engine = Engine::builder()
+        .sapi_name("cli")
+        .ini("html_errors", "0")
+        .ini("fatal_error_backtraces", "0")
+        .extensions(&[TestExt::<0>::refusing(), TestExt::<1>::extension()])
+        .build();
+    rec.mark("built");
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    rec.mark("served");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "\nWarning: test_ext_0 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_0 module in Unknown on line 0\n"
+    );
+    assert_eq!(served.exit_code, -2);
+    assert_eq!(
+        rec.events()
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .0,
+        [Ext(0, EngineStartRefused), Mark("built"), Mark("served")]
     );
 }

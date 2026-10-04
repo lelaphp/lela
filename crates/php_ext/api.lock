@@ -206,7 +206,13 @@ abi::Ref::is_given
 abi::Ref::reference
 abi::Ref::separated
 abi::Ref::set
+abi::Refusal
+abi::Refusal::new
+abi::Refusal::raise
 abi::Shell
+abi::Start
+abi::Start::host
+abi::Start::ini
 abi::StartupIni
 abi::Static
 abi::Std
@@ -845,6 +851,7 @@ test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
 test::Engine::parse_ini
+test::Engine::refused
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as

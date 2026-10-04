@@ -335,7 +335,7 @@ pub fn extension() -> Extension {
             extension: "mysqli",
         })
         .request_state::<State>()
-        .engine_state(|_| Pooled(Pool::new(POOLED)))
+        .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
         .deactivate(link::deactivate)
         .info(mysqli_info)
         .build("mysqli")

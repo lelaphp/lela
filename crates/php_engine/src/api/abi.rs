@@ -19,7 +19,7 @@ use php_unit::decl::{
 
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Level, Thrown};
 use crate::api::request::Request;
 use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
@@ -63,6 +63,62 @@ pub trait Multibyte: Encodings {
 #[derive(Debug, Clone, Default)]
 pub struct StartupIni {
     pub entries: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+/// What an extension's engine start is handed, php's `MINIT` as it runs
+/// inside `php_module_startup` (ADR-0010): the startup ini and the
+/// host's name, `sapi_module.name`. Read through its accessors, so a
+/// later field is not a breaking change.
+#[derive(Debug)]
+pub struct Start {
+    pub(crate) ini: StartupIni,
+    pub(crate) host: &'static str,
+}
+
+impl Start {
+    /// The startup ini, as the engine's entries stand once every
+    /// handler has taken what the host set.
+    #[must_use]
+    pub fn ini(&self) -> &StartupIni {
+        &self.ini
+    }
+
+    /// The host's name, what `php_sapi_name()` answers: `cli`,
+    /// `cgi-fcgi`, `fpm-fcgi`, `phpdbg`, empty where no host named
+    /// itself.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        self.host
+    }
+}
+
+/// An engine start that failed, php's `MINIT` returning `FAILURE`
+/// (ADR-0010): what it raised before it failed, each diagnostic at its
+/// level. The engine starts no extension after it and serves nothing;
+/// it displays these as php displays a startup error, then
+/// `zend_startup_module_ex`'s `Unable to start %s module`
+/// (`Z/Zend/zend_API.c:2465`), and the host ends the process as
+/// `php_error_cb`'s `exit(-2)` does (`Z/main/main.c:1505-1507`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refusal {
+    pub(crate) raised: Vec<(Level, Vec<u8>)>,
+}
+
+impl Refusal {
+    /// A refusal that raised nothing before it.
+    #[must_use]
+    pub fn new() -> Refusal {
+        Refusal::default()
+    }
+
+    /// `message` raised at `level` before the failure, after what was
+    /// raised already, at `Unknown` on line 0 as php's `zend_error`
+    /// places a diagnostic raised while it starts.
+    #[must_use]
+    pub fn raise(mut self, level: Level, message: impl Into<Vec<u8>>) -> Refusal {
+        self.raised.push((level, message.into()));
+        self
+    }
 }
 
 /// What an ini entry's `on_modify` function says of a new value.
@@ -336,9 +392,10 @@ pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 /// constants rewritten with every value the bundle registered.
 pub(crate) type ConstantsLink =
     Arc<dyn Fn(Vec<ConstDecl>, &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
-/// Builds one extension's engine state from the startup ini, once.
+/// Builds one extension's engine state as the engine starts, once, or
+/// refuses to.
 pub(crate) type EngineStateBuilder =
-    Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
+    Arc<dyn Fn(&Start) -> Result<Box<dyn Any + Send + Sync>, Refusal> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 /// The interrupt hook, php's `zend_interrupt_function`.
@@ -837,15 +894,18 @@ impl ExtensionBuilder {
         self
     }
 
-    /// Declare engine state: built once in `Engine::new` from the startup
-    /// ini, immutable afterwards, shared by every request (ADR-0005).
+    /// Declare engine state, the engine start (ADR-0010): built once as
+    /// the engine is built, in bundle order, from what [`Start`] carries,
+    /// immutable afterwards and shared by every request (ADR-0005). A
+    /// [`Refusal`] is php's `MINIT` failing: no later extension starts and
+    /// the engine serves nothing. Declared twice, the later stands.
     #[must_use]
     pub fn engine_state<E: Send + Sync + 'static>(
         mut self,
-        build: fn(&StartupIni) -> E,
+        build: fn(&Start) -> Result<E, Refusal>,
     ) -> ExtensionBuilder {
-        self.engine_state = Some(Arc::new(move |ini: &StartupIni| {
-            Box::new(build(ini)) as Box<dyn Any + Send + Sync>
+        self.engine_state = Some(Arc::new(move |start: &Start| {
+            build(start).map(|state| Box::new(state) as Box<dyn Any + Send + Sync>)
         }));
         self
     }

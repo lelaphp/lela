@@ -28,8 +28,8 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::api::abi::{Extension, ExtensionBuilder, StartupIni};
-use super::api::raising::Thrown;
+use super::api::abi::{Extension, ExtensionBuilder, Refusal, Start};
+use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
 use super::api::values::Resource;
 
@@ -56,6 +56,8 @@ pub(crate) enum Phase {
     EngineStateBuilt(u32),
     /// The engine state of that number was dropped.
     EngineStateDropped(u32),
+    /// Its engine start refused, as [`TestExt::refusing`] declares it.
+    EngineStartRefused,
     /// Its `rinit` ran, and the number of the engine state the request
     /// reached, `None` where it reached none.
     Rinit(Option<u32>),
@@ -222,13 +224,29 @@ impl<const N: u8> TestExt<N> {
     pub(crate) fn builder() -> ExtensionBuilder {
         ExtensionBuilder::default()
             .request_state::<RequestSlot<N>>()
-            .engine_state(Self::engine_state)
+            .engine_state(|_| Ok(Self::engine_state()))
             .rinit(Self::rinit)
             .rshutdown(Self::rshutdown)
             .deactivate(Self::deactivate)
     }
 
-    fn engine_state(_: &StartupIni) -> EngineSlot<N> {
+    /// [`TestExt::builder`] with its engine start replaced by one that
+    /// refuses, a warning raised first that names the host it was
+    /// handed, as ffi's `MINIT` warns of the header it failed on before
+    /// it returns `FAILURE`.
+    pub(crate) fn refusing() -> Extension {
+        Self::builder()
+            .engine_state(Self::refuse)
+            .build(&format!("test_ext_{N}"))
+    }
+
+    fn refuse(start: &Start) -> Result<EngineSlot<N>, Refusal> {
+        record(N, Phase::EngineStartRefused);
+        let message = format!("test_ext_{N} refuses to start under '{}'", start.host());
+        Err(Refusal::new().raise(Level::Warning, message))
+    }
+
+    fn engine_state() -> EngineSlot<N> {
         let built = guard(&LOG)
             .iter()
             .filter(|e| matches!(e, Event::Ext(n, Phase::EngineStateBuilt(_)) if *n == N))

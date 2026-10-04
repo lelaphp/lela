@@ -259,7 +259,7 @@ pub(crate) fn rshutdown(req: &mut Request) {
 }
 
 /// `PHP_MINIT_FUNCTION(mb_regex)`'s `onig_init`, as the engine is built.
-pub(crate) fn startup(_: &php_ext::abi::StartupIni) -> Startup {
+pub(crate) fn startup() -> Startup {
     onig::init();
     Startup
 }

@@ -30,8 +30,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
-    Validation,
+    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, Refusal,
+    Start, StartupIni, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
@@ -639,6 +639,10 @@ pub(crate) struct Shared {
     startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
+    /// Where an extension's engine start refused: the host's name and
+    /// the [`Refusal`] with `Unable to start %s module` raised after what
+    /// the extension raised ([`Engine::refused`]).
+    refused: Option<(&'static str, Refusal)>,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -2712,6 +2716,7 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
+                refused: None,
                 configuration: configuration.table,
                 sections: configuration.sections,
                 ini_files,
@@ -3119,7 +3124,7 @@ impl Engine {
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         loads: &Loads,
-        sapi_name: &str,
+        sapi_name: &'static str,
     ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
@@ -3188,15 +3193,53 @@ impl Engine {
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
-        let startup = StartupIni {
-            entries: shared.ini.clone(),
+        let start = Start {
+            ini: StartupIni {
+                entries: shared.ini.clone(),
+            },
+            host: sapi_name,
         };
-        shared.engine_states = shared
-            .extensions
-            .iter()
-            .filter_map(|e| e.engine_state.as_ref())
-            .map(|build| build(&startup))
-            .collect();
+        // `zend_startup_modules`: each engine start in bundle order, and
+        // the first that fails ends the startup (`zend_startup_module_ex`).
+        for extension in &shared.extensions {
+            let Some(build) = &extension.engine_state else {
+                continue;
+            };
+            match build(&start) {
+                Ok(state) => shared.engine_states.push(state),
+                Err(refusal) => {
+                    let failed = format!("Unable to start {} module", extension.name);
+                    shared.refused = Some((sapi_name, refusal.raise(Level::CoreError, failed)));
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Where an extension's engine start refused ([`Refusal`]): what php
+    /// displays as its `MINIT` fails, written to `sink` as `php_error_cb`
+    /// writes a startup error, past the `php_output` layer and under the
+    /// startup ini's `display_errors`, `html_errors` and `log_errors`;
+    /// then the status php ends the process with, the `-2` of its
+    /// `exit(-2)` (`Z/main/main.c:1505-1507`), the same in every host.
+    /// What the extensions raised over the host's values comes first, as
+    /// php raised it earlier. `None` for an engine that started. Every
+    /// request a refused engine is asked for is refused so.
+    pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
+        let (host, refused) = self.shared.refused.as_ref()?;
+        let description = RequestDescription {
+            sapi_name: (*host).to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&self.shared), description);
+        if let Some(held) = sink.held() {
+            req.hold(held);
+        }
+        for (level, message) in self.shared.startup_raised.iter().chain(&refused.raised) {
+            req.note_startup_error(*level, message);
+        }
+        crate::preload::hand_over(&mut req, sink);
+        Some(-2)
     }
 
     /// What php writes to the process's `stderr` while it starts up and
@@ -3609,6 +3652,14 @@ impl Engine {
         sink: &mut dyn OutputSink,
         traced: bool,
     ) -> Result<Request, Observables> {
+        // php never reaches `zend_post_startup` past a failed `MINIT`.
+        if let Some(status) = self.refused(sink) {
+            return Err(Observables {
+                exit_code: status,
+                headers_sent: true,
+                ..Observables::default()
+            });
+        }
         if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
             return Err(Observables {
                 exit_code: status,

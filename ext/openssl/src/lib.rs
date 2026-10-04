@@ -45,9 +45,7 @@ mod xp_ssl;
 use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, IniStage, ObjectHandlers, OrFalse, StartupIni,
-};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, IniStage, ObjectHandlers, OrFalse};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
@@ -435,7 +433,7 @@ pub fn extension() -> Extension {
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
-        .engine_state(started)
+        .engine_state(|_| Ok(started()))
         .request_state::<State>()
         .rinit(rinit)
         .info(info)
@@ -478,8 +476,7 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
 /// once as the engine is built: nothing is kept but the mark of the call.
 struct Started;
 
-fn started(ini: &StartupIni) -> Started {
-    let _ = ini;
+fn started() -> Started {
     ffi::start();
     Started
 }

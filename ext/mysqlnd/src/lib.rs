@@ -134,7 +134,7 @@ pub fn extension() -> Extension {
                 .collect(),
         )
         .request_state::<State>()
-        .engine_state(|_| Idle(Pool::new(IDLE)))
+        .engine_state(|_| Ok(Idle(Pool::new(IDLE))))
         .info(mysqlnd_info)
         .version(VERSION)
         .build("mysqlnd")
