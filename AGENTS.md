@@ -113,7 +113,7 @@ third-engine-design.md
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=bccf00ade6028f64df60a1d18be3b003c332ffed9ab2101cfdac8ba6c58c5675 out=76ba15cc3650d4bb02fe306979cd2ddde1154968119f9e8a5f41a90ef7ee9823 -->
+<!-- /computed in=97a50462a50ab7448c44aece84ac6a47407cbc0ac3cb5974a5b7fa2cc8bf0aa5 out=76ba15cc3650d4bb02fe306979cd2ddde1154968119f9e8a5f41a90ef7ee9823 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -129,7 +129,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
@@ -144,7 +144,7 @@ third-engine-design.md
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=b272df389fb2298ac4fd95a5a8bdfda86834405667c6aee3bf9dab201ba038b7 out=d5f81f7d69969798d6ed2ed9df663f8b5f04ae17c3a7a419ac05ba3e8c8ccc26 -->
+<!-- /computed in=be436c1c8bdd8bfc64c6ebd1de7294e4cde71dd6b0b3c496a4f3d847f55cf2bc out=d15f4d24bedaf65987cf2ecc4cb295f2e99dda0ff12033693801861ce20219ee -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
