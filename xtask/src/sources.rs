@@ -379,7 +379,7 @@ mod tests {
     use crate::git::git;
     use crate::manifest::Manifest;
     use crate::reading::{Reading, Status, Store};
-    use crate::scratch::Tree;
+    use crate::scratch::{Tree, committing};
 
     /// A repository with `xtask` committed as one file and a manifest to
     /// map it, and a store beside it: what pre-commit stands on.
@@ -525,23 +525,6 @@ mod tests {
         fs::write(tree.join("Cargo.lock"), bumped).unwrap();
         git(&tree, &["add", "--", "Cargo.lock"], None).unwrap();
         assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
-    }
-
-    /// `git` in `dir` as a person commits there: named, unsigned and
-    /// unhooked, since the real pre-commit measuring a scratch is not the
-    /// test.
-    fn committing(dir: &std::path::Path, args: &[&str]) {
-        let unhooked = [
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        git(dir, &[&unhooked[..], args].concat(), None).unwrap();
     }
 
     /// A branch's worktree measures `xtask` and passes, is retired, and
