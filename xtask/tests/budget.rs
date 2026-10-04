@@ -1,13 +1,13 @@
 //! `xtask budget` over the tracked workspace and the generated
 //! `ext/clippy.toml` (harness-design.md §4.1, §6).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::budget;
 use xtask::manifest::{Manifest, Scripts};
 use xtask::reading::{Number, Status, Store};
 use xtask::scratch::Tree;
+use xtask::{budget, generated};
 
 mod common;
 
@@ -328,6 +328,130 @@ fn clippy_refuses_a_mutex_in_an_ext_crate_under_the_generated_file() {
         !stderr.contains("does not refer to a reachable type"),
         "every entry resolves: {stderr}"
     );
+}
+
+/// The fixture whose `ext.no-locks` row is the one #1781 ruled, word for
+/// word: the once types beside the locks and cells, and `deny_macros`.
+fn ruled_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clippy/once-and-thread-local")
+}
+
+/// The ruled row rendered into a scratch tree beside the fixture's
+/// `Cargo.lock`: the `ext/clippy.toml` it writes, and the rule.
+fn render_ruled(name: &str) -> (Tree, xtask::manifest::Rule) {
+    let fixture = ruled_fixture();
+    let manifest = Manifest::load(&fixture).unwrap();
+    let root = scratch(name);
+    std::fs::copy(fixture.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let written = generated::write_all(&root, &manifest).unwrap();
+    assert_eq!(written, [root.join("ext/clippy.toml")]);
+    (root, manifest.rule("ext.no-locks").unwrap().clone())
+}
+
+/// `deny_macros` renders to `disallowed-macros` beside `deny_types`'
+/// `disallowed-types`, each row with the rule's text and ADR as its
+/// reason (#1888): the ruled row's `std::thread_local`, which no type ban
+/// sees, and its once types among the types.
+#[test]
+fn deny_macros_renders_to_disallowed_macros_beside_the_types() {
+    let (root, rule) = render_ruled("deny-macros");
+    let text = std::fs::read_to_string(root.join("ext/clippy.toml")).unwrap();
+    let reason = format!("{} (ADR-0005)", rule.text);
+    let parsed: toml::Value = toml::from_str(&text).unwrap();
+    let rows = |key: &str| -> Vec<(String, String)> {
+        parsed[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is a list: {text}"))
+            .iter()
+            .map(|row| {
+                (
+                    row["path"].as_str().unwrap().to_owned(),
+                    row["reason"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        rows("disallowed-macros"),
+        [("std::thread_local".to_owned(), reason.clone())]
+    );
+    let types = rows("disallowed-types");
+    for denied in [
+        "std::sync::Once",
+        "std::sync::OnceLock",
+        "std::sync::LazyLock",
+        "std::cell::OnceCell",
+        "std::cell::LazyCell",
+        "std::sync::Mutex",
+        "std::sync::atomic::AtomicUsize",
+    ] {
+        assert!(
+            types.contains(&(denied.to_owned(), reason.clone())),
+            "{denied}: {text}"
+        );
+    }
+    assert!(
+        text.contains("# once_cell::*: once_cell is not a Cargo.lock package"),
+        "a package wildcard the lock lacks is said, not dropped: {text}"
+    );
+}
+
+/// The rendering does what the ruled row says: clippy, with every warning
+/// denied as the `clippy` instrument runs it, refuses the once type and
+/// the thread-local the fixture's calls write into an extension, each
+/// with the rule's text, and passes the neighbour, so no row of the file
+/// is itself a warning (#1888).
+#[test]
+fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
+    let (root, rule) = render_ruled("clippy-ruled");
+    std::fs::copy(
+        workspace().join("rust-toolchain.toml"),
+        root.join("rust-toolchain.toml"),
+    )
+    .unwrap();
+    for (call, refusal) in [
+        ("once.json", Some("disallowed type `std::sync::OnceLock`")),
+        (
+            "thread-local.json",
+            Some("disallowed macro `std::thread_local`"),
+        ),
+        ("allow.json", None),
+    ] {
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ruled_fixture().join(call)).unwrap())
+                .unwrap();
+        let name = call.trim_end_matches(".json").replace('-', "_");
+        let dir = root.join("ext").join(&name);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"php_ext_{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            json["tool_input"]["content"].as_str().unwrap(),
+        )
+        .unwrap();
+        let out = Command::new("cargo")
+            .args(["clippy", "-q", "--", "-D", "warnings"])
+            .current_dir(&dir)
+            .env("CARGO_TARGET_DIR", root.join("target"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match refusal {
+            Some(refusal) => {
+                assert!(!out.status.success(), "{call}: {stderr}");
+                assert!(stderr.contains(refusal), "{call}: {stderr}");
+                assert!(
+                    stderr.contains(&rule.text),
+                    "{call}: the reason prints: {stderr}"
+                );
+            }
+            None => assert!(out.status.success(), "{call}: {stderr}"),
+        }
+    }
 }
 
 #[test]

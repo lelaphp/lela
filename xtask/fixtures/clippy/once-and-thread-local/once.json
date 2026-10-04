@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/pcre/src/state.rs","content":"use std::sync::OnceLock;\n\n/// A table built at the first request and kept for the process: a second\n/// home beside the process scope.\npub static TABLE: OnceLock<Vec<u8>> = OnceLock::new();\n"}}

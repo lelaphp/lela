@@ -19,7 +19,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use php_heap::Fatal;
@@ -43,10 +43,11 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// What a check that found the interrupt raised does
 /// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
-/// raised it, or serves each extension's interrupt hook in bundle order,
-/// which is php's `zend_interrupt_function` and the chain each `MINIT`
-/// that sets it keeps (pcntl's dispatches the signals delivered to their
-/// PHP handlers). With no hook it does nothing, as php does.
+/// raised it, or serves each extension's interrupt hook from the top of
+/// php's `zend_interrupt_function` chain, the last `MINIT` to set it
+/// first and each link then the one it saved (pcntl's dispatches the
+/// signals delivered to their PHP handlers). With no hook it does
+/// nothing, as php does.
 ///
 /// The text and the plural are `zend_timeout`'s
 /// (`Z/Zend/zend_execute_API.c:1441`), over the seconds the timer was
@@ -101,77 +102,217 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 ///
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
 /// ```
+///
+/// **Its thread is never caught starting or ending.** Arming returns
+/// once the thread waits, and the drop returns once the thread has ended
+/// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, a
+/// timer's thread is parked in its wait holding nothing, and a dropped
+/// timer has no thread at all. A fork needs both halves (#1783). The
+/// standard library takes one process-wide mutex as a thread starts and
+/// again as it ends, its stack overflow handler's thread table
+/// (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`), and a child
+/// forked while a timer's thread stood in either copied it taken, with
+/// no thread to release it, and hung at exit, where its own main thread
+/// takes it. The drop wakes the thread rather than waiting out its
+/// deadline, so a join costs a wake and an exit, never the seconds left.
+/// That is what the engine's fork home stands on (#1807): a request
+/// whose timer is unset has no timer thread alive.
+///
+/// A timer dropped in a process forked from the one that armed it has no
+/// thread there, since a child copies its calling thread alone, as a
+/// child does not inherit php's interval timer either. It is forgotten,
+/// neither woken nor joined: the mutex waking takes may have been copied
+/// held, and there is nothing to join. So the child runs untimed, as
+/// php's does, until it sets a limit of its own.
+///
+/// ```php
+/// set_time_limit(1);
+/// if (($child = pcntl_fork()) === 0) {
+///     for ($until = microtime(true) + 2; microtime(true) < $until;) {}
+///     echo "the child ran past its parent's limit\n";
+///     exit(0);
+/// }
+/// set_time_limit(0);
+/// pcntl_waitpid($child, $status);
+/// var_dump(pcntl_wifexited($status), pcntl_wexitstatus($status));
+/// ```
+/// ```expect process wall=2s
+/// the child ran past its parent's limit
+/// bool(true)
+/// int(0)
+/// ```
+///
+/// The stress below forks a child straight after each `set_time_limit()`
+/// in eight workers at once. A child not gone within five seconds is
+/// hung, and killed; a fork that failed, or a child or a worker that did
+/// not end with status zero, is counted apart, so neither passes as a
+/// child that did not hang.
+///
+/// ```php
+/// $tally = [];
+/// for ($w = 0; $w < 8; $w++) {
+///     $tally[$w] = tempnam(sys_get_temp_dir(), 'timer');
+///     if (($workers[$w] = pcntl_fork()) !== 0) { continue; }
+///     $hung = $otherwise = 0;
+///     for ($forked = 0; $forked < 1875; $forked += 25) {
+///         $children = [];
+///         for ($i = 0; $i < 25; $i++) {
+///             set_time_limit(30);
+///             $child = pcntl_fork();
+///             if ($child === 0) { exit(0); }
+///             if ($child < 0) { $otherwise++; } else { $children[$child] = true; }
+///         }
+///         $deadline = microtime(true) + 5;
+///         while ($children && microtime(true) < $deadline) {
+///             $gone = pcntl_waitpid(-1, $status, WNOHANG);
+///             if ($gone <= 0) { usleep(1000); continue; }
+///             unset($children[$gone]);
+///             if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $otherwise++; }
+///         }
+///         foreach ($children as $child => $_) {
+///             posix_kill($child, SIGKILL);
+///             pcntl_waitpid($child, $status);
+///             $hung++;
+///         }
+///     }
+///     file_put_contents($tally[$w], "$hung $otherwise");
+///     exit(0);
+/// }
+/// $hung = $otherwise = $workers_otherwise = 0;
+/// foreach ($workers as $w => $worker) {
+///     pcntl_waitpid($worker, $status);
+///     if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $workers_otherwise++; }
+///     [$h, $o] = explode(' ', file_get_contents($tally[$w])) + [0, 0];
+///     $hung += (int) $h;
+///     $otherwise += (int) $o;
+///     unlink($tally[$w]);
+/// }
+/// echo "$hung of 15000 children hung, $otherwise did not fork or end with status 0\n";
+/// echo "$workers_otherwise of 8 workers did not end with status 0\n";
+/// ```
+/// ```expect process wall=30s
+/// 0 of 15000 children hung, 0 did not fork or end with status 0
+/// 0 of 8 workers did not end with status 0
+/// ```
 #[derive(Debug)]
 pub(crate) struct Timer {
     unset: Arc<Unset>,
     interrupt: Interrupt,
+    /// The thread, which the drop takes to join or forget.
+    thread: Option<JoinHandle<()>>,
+    /// The process that armed it, the only one its thread is in.
+    armed_in: Process,
 }
 
 impl Timer {
     /// Armed for `seconds` on `interrupt`, and again for `hard` seconds
     /// past each timeout where `hard` is above zero; nothing at all for
     /// a `seconds` that is zero or below, which is php's
-    /// `max_execution_time = 0` and the CLI's own default.
+    /// `max_execution_time = 0` and the CLI's own default. It returns
+    /// once the thread waits.
     pub(crate) fn arm(interrupt: &Interrupt, seconds: i64, hard: i64) -> Option<Timer> {
         let elapses = Duration::from_secs(u64::try_from(seconds).ok().filter(|s| *s > 0)?);
         let hard = u64::try_from(hard).ok().filter(|h| *h > 0);
         let unset = Arc::new(Unset::default());
         let waited = Arc::clone(&unset);
         let raised = interrupt.clone();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name(String::from("php-execution-timer"))
             .spawn(move || waited.elapse(&raised, elapses, seconds, hard))
             .ok()?;
+        unset.started();
         Some(Timer {
             unset,
             interrupt: interrupt.clone(),
+            thread: Some(thread),
+            armed_in: Process::current(),
         })
     }
 }
 
 impl Drop for Timer {
-    /// `zend_unset_timeout`: the thread told to raise nothing, and then
-    /// the timer's word cleared, in that order, since the thread holds
-    /// the mutex while it decides and raises, so what it raised before
-    /// the word is cleared is cleared with it.
+    /// `zend_unset_timeout`: the thread told to raise nothing and joined,
+    /// and then the timer's word cleared, in that order, since the thread
+    /// holds the mutex while it decides and raises, so what it raised
+    /// before it ended is cleared with it. In a forked child the thread
+    /// is forgotten instead (see [`Timer`]).
     fn drop(&mut self) {
-        self.unset.now();
+        if let Some(thread) = self.thread.take() {
+            if self.armed_in.is_current() {
+                self.unset.now();
+                // A thread that panicked has ended all the same.
+                let _ = thread.join();
+            } else {
+                std::mem::forget(thread);
+            }
+        }
         self.interrupt.timer_unset();
     }
 }
 
-/// What the timer's thread waits on: the word its drop sets, and the
-/// variable it is woken through.
+/// A process, by its id, `getpid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Process(u32);
+
+impl Process {
+    /// The process this runs in.
+    fn current() -> Process {
+        Process(std::process::id())
+    }
+
+    /// Whether this is the process it runs in, which a child forked from
+    /// it never is.
+    fn is_current(self) -> bool {
+        self == Process::current()
+    }
+}
+
+/// Where the timer's thread stands, which only ever moves forward.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Spawned, and not yet waiting: arming waits this out.
+    #[default]
+    Starting,
+    /// Waiting for its deadline or its drop.
+    Waiting,
+    /// Told by the drop to raise nothing and end.
+    Unset,
+}
+
+/// What the timer's thread and its owner share: the phase, and the
+/// variable each wakes the other through.
 #[derive(Debug, Default)]
 struct Unset {
-    set: Mutex<bool>,
+    phase: Mutex<Phase>,
     woken: Condvar,
 }
 
 impl Unset {
-    /// The thread's whole body: wait until the deadline or until the
-    /// timer is dropped, and raise the interrupt when the deadline is
-    /// what came first. `zend_timeout_handler` sets both words and
-    /// returns (`Z/Zend/zend_execute_API.c:1516-1518`); so does this,
-    /// and the loop's next check is what raises the fatal. Then, where
-    /// there is a `hard` wait, the same again after it: a deadline that
-    /// finds the last timeout still unread ends the process
+    /// The thread's whole body: say it waits, then wait until the
+    /// deadline or until the timer is dropped, and raise the interrupt
+    /// when the deadline is what came first. `zend_timeout_handler` sets
+    /// both words and returns (`Z/Zend/zend_execute_API.c:1516-1518`);
+    /// so does this, and the loop's next check is what raises the fatal.
+    /// Then, where there is a `hard` wait, the same again after it: a
+    /// deadline that finds the last timeout still unread ends the process
     /// ([`terminate`]), and one that finds it taken is a timeout of its
     /// own (`:1482`).
     fn elapse(&self, interrupt: &Interrupt, elapses: Duration, seconds: i64, hard: Option<u64>) {
+        let mut phase = self.held();
+        *phase = Phase::Waiting;
+        self.woken.notify_all();
         let mut deadline = Instant::now() + elapses;
-        let mut set = self.held();
         loop {
-            while !*set {
+            while *phase != Phase::Unset {
                 let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
-                set = match self.woken.wait_timeout(set, left) {
-                    Ok((set, _)) => set,
+                phase = match self.woken.wait_timeout(phase, left) {
+                    Ok((phase, _)) => phase,
                     Err(poisoned) => poisoned.into_inner().0,
                 };
             }
-            if *set {
+            if *phase == Phase::Unset {
                 return;
             }
             if let Some(hard) = hard
@@ -187,17 +328,31 @@ impl Unset {
         }
     }
 
+    /// Wait until the thread has started and waits: past that point the
+    /// standard library's start is behind it. Saying so is the first
+    /// thing the thread's body does, so nothing it runs can leave this
+    /// waiting.
+    fn started(&self) {
+        let mut phase = self.held();
+        while *phase == Phase::Starting {
+            phase = match self.woken.wait(phase) {
+                Ok(phase) => phase,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+    }
+
     /// Wake the thread and tell it not to raise anything.
     fn now(&self) {
-        *self.held() = true;
+        *self.held() = Phase::Unset;
         self.woken.notify_all();
     }
 
-    /// The word, whatever a panic on another thread left behind: what
-    /// this guards is a `bool` only ever set to true, so a poisoned
-    /// `MutexGuard` is as good as a clean one.
-    fn held(&self) -> MutexGuard<'_, bool> {
-        self.set.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The phase, whatever a panic on another thread left behind: what
+    /// this guards only ever moves forward, so a poisoned `MutexGuard` is
+    /// as good as a clean one.
+    fn held(&self) -> MutexGuard<'_, Phase> {
+        self.phase.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -342,6 +497,38 @@ mod tests {
             interrupt.taken(),
             None,
             "raised, and the timer's word cleared"
+        );
+    }
+
+    /// #1783: arming returns with the thread waiting, and dropping
+    /// returns with the thread's body done and its share of the timer
+    /// released, however often `set_time_limit()` replaces one; the drop
+    /// wakes it rather than waiting out the thirty seconds it was armed
+    /// for. That the thread has then ended, the standard library's exit
+    /// behind it too, is the join's, which nothing in the process can
+    /// observe short of counting its threads: the fork stress on
+    /// [`Timer`] is what holds it.
+    #[test]
+    fn a_timers_thread_waits_once_armed_and_is_done_once_dropped() {
+        let interrupt = Interrupt::default();
+        let began = Instant::now();
+        for _ in 0..200 {
+            let timer = Timer::arm(&interrupt, 30, 2);
+            assert_eq!(
+                timer.as_ref().map(|timer| *timer.unset.held()),
+                Some(Phase::Waiting),
+                "armed and waiting"
+            );
+            let shared = timer.as_ref().map(|timer| Arc::downgrade(&timer.unset));
+            drop(timer);
+            assert!(
+                shared.and_then(|shared| shared.upgrade()).is_none(),
+                "the thread let go of the timer before the drop returned"
+            );
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "each drop woke its thread rather than waiting out the deadline"
         );
     }
 

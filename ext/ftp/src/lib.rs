@@ -28,8 +28,6 @@
 
 mod ftp;
 
-use std::cmp::Ordering;
-
 use php_ext::abi::{
     CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, True,
     Union, Untyped,
@@ -189,7 +187,35 @@ pub(crate) struct Connection;
 impl Connection {}
 
 /// `ftp_object_handlers`: `get_constructor` refusing, `clone_obj` php's
-/// null slot, and `free_obj` closing the session.
+/// null slot, and `free_obj` closing the session. `compare` stays
+/// `std_object_handlers`' `zend_std_compare_objects`: two connections
+/// hold no properties, so they are equal, open or closed, and
+/// uncomparable with an object of another class.
+///
+/// ```php
+/// $s = stream_socket_server("tcp://127.0.0.1:0"); $p = (int) explode(":", stream_socket_get_name($s, false))[1];
+/// if (!pcntl_fork()) { foreach ([1, 2] as $_) { $c[] = $x = stream_socket_accept($s); fwrite($x, "220 hi\r\n"); } exit; }
+/// $a = ftp_connect("127.0.0.1", $p); $b = ftp_connect("127.0.0.1", $p);
+/// var_dump($a == $b, $a != $b, $a < $b, $a <=> $b, $a === $b, $a == $a, $a <=> $a, $a === $a);
+/// var_dump(in_array($b, [$a]), in_array($b, [$a], true), $a == new stdClass, $a <=> new stdClass);
+/// ftp_close($b); var_dump($a == $b, $a <=> $b);
+/// ```
+/// ```expect process
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// int(0)
+/// bool(false)
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// int(1)
+/// bool(true)
+/// int(0)
+/// ```
 pub(crate) struct Handlers;
 
 pub(crate) static FTP: Handlers = Handlers;
@@ -229,16 +255,6 @@ impl ObjectHandlers for Handlers {
                 visit(stream);
             }
         }
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

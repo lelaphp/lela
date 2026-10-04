@@ -1,8 +1,9 @@
 //! `xtask status`, the one renderer (harness-design.md §4.6). It reads the
-//! manifest, the divergence registry, the store and its log, the pinned
-//! tree's layout where it is present (the `oracle` and `parity` sections),
-//! and for the `git` section the repository, and computes nothing else; a
-//! section that needs a command of its own is a missing instrument.
+//! manifest, the divergence registry, the store and its log, and what the
+//! repository and the pinned tree hold on this machine (the `git`, `oracle`
+//! and `parity` sections), only ever reading them: never the tracker or the
+//! network, never a build or a run. It computes nothing else; a section
+//! that needs a command of its own is a missing instrument.
 //! `--session` prints the map and the local facts for the function hook's
 //! `prompt.context` (§5), as one text or, in JSON, as the two blocks the
 //! hook hands the engine, laying the local file down from its template

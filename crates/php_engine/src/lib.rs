@@ -45,6 +45,9 @@ mod preload;
 mod probe;
 mod rfc1867;
 mod signal;
+mod supplied;
+#[cfg(test)]
+mod tests;
 // The test face is on for an extension's dev-dependency, and for this
 // crate's own tests, which read a served request the same way.
 #[cfg(any(feature = "test", test))]

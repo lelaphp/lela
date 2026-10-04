@@ -1044,6 +1044,7 @@ dependencies = [
  "php_ext_mysqlnd",
  "php_ext_pdo",
  "php_ext_session",
+ "php_ext_spl",
  "php_ext_standard",
 ]
 

@@ -18,6 +18,7 @@ use crate::bp::At;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
 use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind, Session};
+use crate::shown;
 
 /// The tier the `phpdbg` binary binds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -690,7 +691,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     // the throwable nothing catches, which is checked first. php's `-rr`
     // flag is set when the startup run begins, after the init files.
     if session::with(|s| s.initializing).unwrap_or(false) {
-        let pending = tier::pending(req);
+        let pending = shown::pending(req);
         if !uncaught(req, at.frame, pending.as_ref()) {
             return None;
         }
@@ -706,7 +707,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         }
         return None;
     }
-    let pending = tier::pending(req);
+    let pending = shown::pending(req);
     // `zend_get_executed_lineno`: the raising opline's while a throwable
     // is pending, as `zend_clear_exception` puts it back.
     let shown = if pending.is_some() {
@@ -765,7 +766,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
 
 /// The uncaught throwable, reported once per throwable, outside what
 /// `ev` serves: whether the loop stops for it.
-fn uncaught(req: &mut Request, frame: FrameRef, pending: Option<&tier::Pending>) -> bool {
+fn uncaught(req: &mut Request, frame: FrameRef, pending: Option<&shown::Pending>) -> bool {
     let origin = session::with(|s| s.origin).unwrap_or(Origin::Program);
     let Some(thrown) = pending.filter(|_| origin == Origin::Program) else {
         return false;

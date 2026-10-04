@@ -26,3 +26,8 @@ witness-trace = ["test", "php_engine/witness-trace"]
 php_engine = { path = "../php_engine" }
 php_macros = { path = "../php_macros" }
 php_streams = { path = "../php_streams" }
+
+[dev-dependencies]
+# The lifecycle test hosts the recording extension on the test face's
+# engine, `php_ext::test` without this crate's own `test` feature.
+php_engine = { path = "../php_engine", features = ["test"] }

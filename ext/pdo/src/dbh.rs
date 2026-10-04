@@ -202,13 +202,45 @@ fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
     }
 }
 
+/// The first step of php's `pdo_dbh_free_storage` (`pdo_dbh.c:1588-1591`):
+/// a transaction the connection still has open rolled back, asked of the
+/// connector's `in_transaction` where it answers and of `in_txn` where it
+/// does not. True where the connector's `rollback` ran, failed or not,
+/// for the caller to clear `in_txn`; a connector whose slot is php's null
+/// one leaves it set, as php's `methods->rollback` test does.
+#[must_use]
+fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) -> bool {
+    if !conn.in_transaction(req).unwrap_or(in_txn) {
+        return false;
+    }
+    !matches!(
+        conn.rollback(req),
+        Err(Failure {
+            cause: Cause::Unsupported,
+            ..
+        })
+    )
+}
+
 /// What php's `shutdown_executor` does to pdo's persistent connections,
 /// after every extension's `RSHUTDOWN`, so a session save handler's
 /// `write` still has them: every persistent connection the request holds
 /// given back to the engine's pool, nothing of the request's left on it;
 /// one past the pool's bound is closed.
+///
+/// php frees each `PDO` there, and `pdo_dbh_free_storage` rolls back the
+/// transaction it left open before the connection waits in
+/// `EG(persistent_list)` for the next request. Here this runs before the
+/// request's objects are freed, so the rollback is taken here, before the
+/// connection is given back, and `free_obj` finds the connection gone.
 pub(crate) fn deactivate(req: &mut Request) {
     for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
+        let in_txn = dbh.in_txn;
+        if let Conn::Open(conn) = &mut dbh.conn
+            && roll_back_open(req, &mut **conn, in_txn)
+        {
+            dbh.in_txn = false;
+        }
         persistent_shutdown(req, &mut dbh);
         if let Conn::Open(conn) = &mut dbh.conn {
             conn.give_back(req);
@@ -245,15 +277,15 @@ impl ObjectHandlers for Handlers {
             let Some(tracked) = dbh_ref(req, object, |d| d.in_txn) else {
                 return;
             };
-            let _ = with_connection(req, object, |req, conn| {
-                if conn.in_transaction(req).unwrap_or(tracked) {
-                    let _ = conn.rollback(req);
-                }
+            let rolled = with_connection(req, object, |req, conn| {
+                let rolled = roll_back_open(req, conn, tracked);
                 conn.persistent_shutdown(req);
-                Ok(())
+                Ok(rolled)
             });
             let held = dbh_mut(req, object, |d| {
-                d.in_txn = false;
+                if rolled.unwrap_or(false) {
+                    d.in_txn = false;
+                }
                 d.query_stmt.take()
             });
             if let Some(stmt) = held.flatten() {
@@ -269,9 +301,7 @@ impl ObjectHandlers for Handlers {
         let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
-            if conn.in_transaction(req).unwrap_or(tracked) {
-                let _ = conn.rollback(req);
-            }
+            let _ = roll_back_open(req, &mut *conn, tracked);
             if let Some(stmt) = held.0 {
                 req.release(stmt.as_value());
             }
