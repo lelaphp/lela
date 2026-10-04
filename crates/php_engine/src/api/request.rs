@@ -7723,8 +7723,17 @@ impl Request {
         // `php_error_cb` marks the store before it bails out: no object
         // that stands now is destructed, one a shutdown function makes is.
         self.heap.mark_destructed();
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = self.current_line();
+        // `zend_error_va_list`'s site, as [`Request::note_error`] takes
+        // it: `Unknown` at line zero where nothing is executing, as in
+        // an extension's request-end function, which
+        // `zend_deactivate_modules` serves with
+        // `EG(current_execute_data)` emptied.
+        let (file, line) = if self.executing() {
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            (file, self.current_line())
+        } else {
+            (b"Unknown".to_vec(), 0)
+        };
         self.note_error_in(Level::Error, message, &file, line);
         self.end_at_level(Level::Error, message, &file, line);
     }

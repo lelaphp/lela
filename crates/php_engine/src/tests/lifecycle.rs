@@ -254,6 +254,34 @@ fn an_engine_drops_its_engine_state_in_reverse_bundle_order() {
     );
 }
 
+/// A request-end function that raises a fatal, as an extension's
+/// `RSHUTDOWN` may through `zend_error_noreturn`.
+fn fatal<const N: u8>(req: &mut Request) {
+    record(N, Rshutdown);
+    let _ = crate::api::raising::fatal(req, &format!("raised by {N}"));
+}
+
+/// php serves the request-end functions with nothing executing
+/// (`zend_deactivate_modules` empties `EG(current_execute_data)`), so a
+/// fatal raised in one is rendered at `Unknown` on line zero, with the
+/// trace `zend_fetch_debug_backtrace` takes from no frame, and the
+/// request ends in its status.
+#[test]
+fn a_fatal_in_a_request_end_function_is_raised_where_nothing_is_executing() {
+    let _rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .rshutdown(fatal::<0>)
+            .build("test_ext_0")])
+        .build();
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "ran\nFatal error: raised by 0 in Unknown on line 0\nStack trace:\n#0 {main}\n"
+    );
+    assert_eq!(served.exit_code, 255);
+}
+
 /// However a request ends, its request states drop in reverse: the
 /// request laid to ask `post_startup` when it answers serve, a program
 /// that calls `exit`, and one that ends in a fatal.
