@@ -173,10 +173,12 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
 }
 
 /// `openlog(3)` with `LOG_PID | LOG_CONS`, as `fpm_stdio_open_error_log`
-/// calls it. The C library keeps the ident's pointer and reads it on every
-/// `syslog(3)`, so the ident lives for the process; `nix` says so on Linux,
-/// where it takes the `&'static CStr` itself, and elsewhere takes an
-/// `OsStr` it copies.
+/// calls it. glibc keeps the ident's pointer and reads it on every
+/// `syslog(3)`, so on Linux `nix` takes the `&'static CStr` itself and hands
+/// libc that pointer. Elsewhere `nix` takes an `OsStr` and hands libc a copy
+/// that lives for the call alone, which holds where the C library copies the
+/// ident in turn, as Apple's does: an ident overwritten after `openlog`
+/// still names the process's `syslog` lines on macOS.
 fn openlog(ident: &'static CStr, facility: nix::syslog::Facility) {
     #[cfg(not(target_os = "linux"))]
     let ident = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(ident.to_bytes());
