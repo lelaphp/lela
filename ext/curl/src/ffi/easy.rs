@@ -32,7 +32,10 @@ struct Tag {
     /// The `CurlHandle` a callback is served for, `None` once it is being
     /// freed.
     object: Option<PhpObject>,
-    error: [c_char; ERROR_SIZE + 1],
+    /// `CURLOPT_ERRORBUFFER`, held as the bytes the library writes into
+    /// it: `char` is `i8` on some targets and `u8` on others, and the
+    /// text is bytes on all of them.
+    error: [u8; ERROR_SIZE + 1],
     stderr: Option<Arc<CFile>>,
     slists: Vec<(i64, Arc<Slist>)>,
     mimes: Vec<Arc<Mime>>,
@@ -434,8 +437,7 @@ impl Easy {
         // SAFETY: a live tag; the field is read, nothing held.
         let error = unsafe { &(*self.0.tag.as_ptr()).error };
         let end = error.iter().position(|b| *b == 0).unwrap_or(ERROR_SIZE);
-        #[allow(clippy::cast_sign_loss)]
-        error[..end].iter().map(|b| *b as u8).collect()
+        error[..end].to_vec()
     }
 
     /// `memset(ch->err.str, 0, CURL_ERROR_SIZE + 1)`.

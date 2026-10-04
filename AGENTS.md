@@ -111,9 +111,9 @@ third-engine-design.md
 | api | api.lock | 1045 | 1500 | pass |
 | sapi | sapi.lock | 31 |  | pass |
 | tier | tier.lock | 65 |  | pass |
-| harness | xtask.lock | 345 |  | pass |
+| harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=440bd8ad3f99f36dd5a0188048c23541940a5501c9a0c664da25adb36c10ce5d out=5043c134b517f12a9aad1a1306746cb56b2b9e9320a83b489cb2443db7548cbf -->
+<!-- /computed in=ae498b9044c786d574e28a5f6e0d90a8b68b1515bbf878890c44786827d40118 out=76ba15cc3650d4bb02fe306979cd2ddde1154968119f9e8a5f41a90ef7ee9823 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -124,26 +124,26 @@ third-engine-design.md
 | lints.no-panic |  | deny_lints | no reading |
 | engine.reentry-signature |  | check | no reading |
 | api.no-hot |  | deny_pattern | no reading |
-| ext.no-private |  | deny_pattern | fail |
+| ext.no-private |  | deny_pattern | no reading |
 | api.lock-line |  | on | pass |
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
-| witness.exit-authored |  | deny_pattern | fail |
-| witness.coverage |  | check | pass |
+| witness.exit-authored |  | deny_pattern | no reading |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | fail |
-| ticket.close |  | deny_argv | fail |
-| ticket.close-api |  | deny_pattern | fail |
-| ticket.reply-unfiled |  | deny_pattern | fail |
-| lanes.nightly |  | deny_pattern | fail |
-| lanes.builder-subset |  | deny_pattern | fail |
-| computed.force |  | deny_pattern | fail |
+| git.no-verify |  | deny_argv | no reading |
+| ticket.close |  | deny_argv | no reading |
+| ticket.close-api |  | deny_pattern | no reading |
+| ticket.reply-unfiled |  | deny_pattern | no reading |
+| lanes.nightly |  | deny_pattern | no reading |
+| lanes.builder-subset |  | deny_pattern | no reading |
+| computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
-| divergence.reason |  | check | pass |
+| divergence.reason |  | check | no reading |
 
-<!-- /computed in=682e8254e26743a95c43fc77f085c1b3c490cfa22b20cd453697d24c773523ee out=126a6d42d30c3ebc0a0c922112f51a36eabb13e626beeb56f0119cf1d2f86a8c -->
+<!-- /computed in=bda6f9955a47cabdba2e4305b7364c8e8bf1b31560e9531a5e09d4e2656b4785 out=8dfd87dce4a1230797ab28bb1fac495b26a0cac3d6db778648b77a7d2e9724a6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -152,7 +152,7 @@ Usage: xtask [OPTIONS] <COMMAND>
 
 Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
-  status             Render one section from the manifest and the store, or with `--session` the map and the local facts; computes nothing else
+  status             Render one section from the manifest, the registry, the store and the pinned tree's layout; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
@@ -181,7 +181,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=9db454eb47bc76a5a84d1da616bd53b1815be55aafc2f41648f2d8ba327e8508 out=f34f24ee2b3f0b818f066f99b6054d4e4de0e14bc81f0adfde0c9fd3b0a73265 -->
+<!-- /computed in=6017689b7efb42099c6d47672290774d021478e64f82f2b763b669718d25d4e4 out=8f952bca2d7bfb1ab00873ab998ab514d6003197da3ffb84f4dfc1fd9267bfd3 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
