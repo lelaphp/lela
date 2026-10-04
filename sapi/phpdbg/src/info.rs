@@ -2,12 +2,13 @@
 //! (`phpdbg_frame.c`): what the request holds, as phpdbg lists it, and
 //! the values in the short and flat forms phpdbg prints them in.
 
-use php_sapi::tier::{self, FrameRef, Key, Request, Shown};
+use php_sapi::tier::{self, FrameRef, Request};
 
 use crate::cmd::Param;
 use crate::out;
 use crate::prompt::{Here, Ret};
 use crate::session::Session;
+use crate::shown::{self, Key, Shown, TraceRow};
 
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -162,7 +163,7 @@ pub fn vars(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::error(b"No active op array!");
         return Ret::Success;
     };
-    let rows = tier::variables(req, frame);
+    let rows = shown::variables(req, frame);
     let title = match tier::serves(req, frame) {
         tier::Serves::Function {
             name,
@@ -200,7 +201,7 @@ pub fn globals(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::error(b"No active op array!");
         return Ret::Success;
     };
-    let rows = tier::superglobals(req);
+    let rows = shown::superglobals(req);
     out::notice(format!("Superglobal variables ({})", rows.len()).as_bytes());
     if !rows.is_empty() {
         out::out(b"Address            Refs    Type      Variable\n");
@@ -213,7 +214,7 @@ pub fn globals(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 
 /// `PHPDBG_INFO(constants)`.
 pub fn constants(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    let rows = here.request().map_or_else(Vec::new, tier::user_constants);
+    let rows = here.request().map_or_else(Vec::new, shown::user_constants);
     out::notice(format!("User-defined constants ({})", rows.len()).as_bytes());
     if !rows.is_empty() {
         out::out(b"Address            Refs    Type      Constant\n");
@@ -231,7 +232,7 @@ pub fn literal(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::error(b"Not executing!");
         return Ret::Success;
     };
-    let literals = tier::literals(req, frame);
+    let literals = shown::literals(req, frame);
     let count = literals.len().saturating_sub(1);
     let title = match tier::serves(req, frame) {
         tier::Serves::Function {
@@ -388,7 +389,7 @@ fn short(value: &Shown) -> String {
 }
 
 /// `phpdbg_dump_prototype`.
-fn prototype(row: &tier::TraceRow) -> String {
+fn prototype(row: &TraceRow) -> String {
     let mut text = match &row.class {
         Some((class, join)) => format!("{}{}{}(", lossy(class), lossy(join), lossy(&row.function)),
         None => format!("{}(", lossy(&row.function)),
@@ -402,7 +403,7 @@ fn prototype(row: &tier::TraceRow) -> String {
 /// `phpdbg_dump_backtrace`: a row per frame, each at the site the row
 /// before named, the first at the current one, and `{main}` last.
 pub fn backtrace(req: &mut Request, frame: FrameRef, limit: usize) {
-    let rows = tier::backtrace(req, i64::try_from(limit).unwrap_or(0));
+    let rows = shown::backtrace(req, i64::try_from(limit).unwrap_or(0));
     let position = tier::position(req, frame);
     let mut file = position.as_ref().map(|p| p.file.clone());
     let mut line = position.map_or(0, |p| i64::from(p.line));

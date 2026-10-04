@@ -16,8 +16,10 @@
 //! design §5.8, revision 51): its `safepoint` is where it stops the serving and [`step`]
 //! is its loop, as the recorder's, with [`unwind`] beside it for the
 //! frame a step left a throwable pending in, and the frame reads
-//! between the steps. `php_sapi` re-exports this face, so a host that
-//! binds a tier names none of `php_engine`.
+//! between the steps. A read hands out what the engine holds, a value
+//! as the [`Value`] the request holds and an op array as its [`Code`];
+//! how a debugger shows it is the host's (#1799). `php_sapi` re-exports
+//! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::sync::atomic::AtomicU32;
 
@@ -25,6 +27,7 @@ use crate::api::abi::Extension;
 use crate::{exec, interrupt};
 
 pub use crate::api::request::Request;
+pub use crate::api::values::{Key as ValueKey, TypeTag, Value};
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 pub use php_unit::Opcode;
@@ -37,14 +40,13 @@ pub use code::{
     user_classes, user_functions,
 };
 pub use frames::{
-    Argument, Aside, Called, Evaluated, Pending, Position, Serves, Under, below, call, caller,
+    Argument, Aside, Called, Evaluated, Position, Serves, Thrown, Under, below, call, caller,
     catches, entry, evaluate, evaluate_code, exit, exiting, function_exists, oplines, pending,
     position, restore, serves, set_aside,
 };
-pub(crate) use values::values_shown;
 pub use values::{
-    Identity, Key, Shown, TraceRow, Variable, backtrace, included_files, last_error, literals,
-    set_argv, set_stdin, superglobals, user_constants, variable, variables,
+    Identity, backtrace, class_of, included_files, last_error, literals, set_argv, set_stdin,
+    superglobals, user_constants, variable, variables,
 };
 
 /// The number of a safepoint within its op array; zero is the entry.

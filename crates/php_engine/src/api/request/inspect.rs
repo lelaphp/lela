@@ -729,54 +729,6 @@ impl Request {
             .unwrap_or_default()
     }
 
-    /// [`crate::tier::backtrace`]: the rows `debug_backtrace()` would
-    /// build from the innermost frame, read back into the face's shape.
-    pub(crate) fn backtrace_rows(&mut self, limit: i64) -> Vec<crate::tier::TraceRow> {
-        let Ok(trace) = self.fetch_debug_backtrace(false, 0, limit) else {
-            return Vec::new();
-        };
-        let mut rows = Vec::new();
-        for (_, row) in trace.snapshot() {
-            let Some(row) = row.as_array().copied() else {
-                continue;
-            };
-            let field = |name: &[u8]| {
-                row.snapshot()
-                    .into_iter()
-                    .find(|(key, _)| matches!(key, crate::api::values::Key::Str(s) if s.as_bytes() == name))
-                    .map(|(_, value)| value)
-            };
-            let bytes =
-                |value: Option<Value>| value.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
-            let function = bytes(field(b"function")).unwrap_or_default();
-            let class = bytes(field(b"class")).zip(bytes(field(b"type")));
-            let file = bytes(field(b"file"));
-            let line = field(b"line").and_then(|v| v.as_int());
-            let args = field(b"args")
-                .and_then(|v| v.as_array().copied())
-                .map(|args| {
-                    args.snapshot()
-                        .into_iter()
-                        .map(|(_, v)| v)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let args = args
-                .into_iter()
-                .map(|value| crate::tier::values_shown(self, value))
-                .collect();
-            rows.push(crate::tier::TraceRow {
-                function,
-                class,
-                file,
-                line,
-                args,
-            });
-        }
-        self.release(Value::array(trace));
-        rows
-    }
-
     /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`.
     pub(crate) fn last_error_row(&self) -> Option<(Vec<u8>, Vec<u8>, u32)> {
         self.last_error.map(|last| {
