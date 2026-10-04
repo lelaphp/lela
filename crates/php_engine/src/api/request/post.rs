@@ -409,16 +409,14 @@ impl Request {
         self.post.uploaded.push(path);
     }
 
-    /// `php_rfc1867_callback` over one step: every extension's upload hook,
-    /// in bundle order; `false` where one answered php's `FAILURE`.
+    /// `php_rfc1867_callback` over one step: every link of the chain from
+    /// the bottom, as session's calls the one it saved before its own
+    /// work (`Z/ext/session/session.c:3174-3176`); `false` where one
+    /// answered php's `FAILURE`.
     pub(crate) fn upload_event(&mut self, event: &Upload<'_>) -> Result<bool, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
         let mut went_on = true;
-        for hook in shared
-            .extensions
-            .iter()
-            .filter_map(|extension| extension.upload)
-        {
+        for hook in shared.supplied.upload.bottom_up() {
             went_on &= hook(self, event)?;
         }
         Ok(went_on)
