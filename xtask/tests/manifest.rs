@@ -201,6 +201,22 @@ fn a_qualifier_without_its_predicate_is_refused() {
     );
 }
 
+/// A macro is denied by its full path: clippy matches paths, and no
+/// table of a module's macros expands a wildcard, so the manifest refuses
+/// `deny_macros = ["std::*"]` rather than hand `generate` a row that denies
+/// nothing and `permit` a pattern that matches nothing (#1888).
+#[test]
+fn a_wildcard_of_macros_is_refused() {
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.macros\"\nscope = \"ext/*\"\ndeny_types = [\"std::sync::OnceLock\"]\ndeny_macros = [\"std::*\"]\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("x.macros") && err.contains("std::*") && err.contains("full path"),
+        "{err}"
+    );
+}
+
 #[test]
 fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
     let manifest = Manifest::load(workspace()).unwrap();

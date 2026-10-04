@@ -332,14 +332,14 @@ fn clippy_refuses_a_mutex_in_an_ext_crate_under_the_generated_file() {
 
 /// The fixture whose `ext.no-locks` row is the one #1781 ruled, word for
 /// word: the once types beside the locks and cells, and `deny_macros`.
-fn ruled() -> PathBuf {
+fn ruled_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clippy/once-and-thread-local")
 }
 
 /// The ruled row rendered into a scratch tree beside the fixture's
 /// `Cargo.lock`: the `ext/clippy.toml` it writes, and the rule.
 fn render_ruled(name: &str) -> (Tree, xtask::manifest::Rule) {
-    let fixture = ruled();
+    let fixture = ruled_fixture();
     let manifest = Manifest::load(&fixture).unwrap();
     let root = scratch(name);
     std::fs::copy(fixture.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
@@ -376,7 +376,7 @@ fn deny_macros_renders_to_disallowed_macros_beside_the_types() {
         [("std::thread_local".to_owned(), reason.clone())]
     );
     let types = rows("disallowed-types");
-    for once in [
+    for denied in [
         "std::sync::Once",
         "std::sync::OnceLock",
         "std::sync::LazyLock",
@@ -386,37 +386,13 @@ fn deny_macros_renders_to_disallowed_macros_beside_the_types() {
         "std::sync::atomic::AtomicUsize",
     ] {
         assert!(
-            types.contains(&(once.to_owned(), reason.clone())),
-            "{once}: {text}"
+            types.contains(&(denied.to_owned(), reason.clone())),
+            "{denied}: {text}"
         );
     }
     assert!(
         text.contains("# once_cell::*: once_cell is not a Cargo.lock package"),
         "a package wildcard the lock lacks is said, not dropped: {text}"
-    );
-}
-
-/// A macro is denied by its full path: clippy matches paths, and the
-/// generator has no table of a module's macros to expand a wildcard from,
-/// so `deny_macros = ["std::*"]` is refused rather than rendered to a row
-/// that denies nothing.
-#[test]
-fn a_wildcard_of_macros_is_refused_by_the_generator() {
-    let text = std::fs::read_to_string(ruled().join("seams.toml"))
-        .unwrap()
-        .replace(
-            r#"deny_macros = ["std::thread_local"]"#,
-            r#"deny_macros = ["std::*"]"#,
-        );
-    let manifest = Manifest::parse(&text).unwrap();
-    let root = scratch("deny-macros-wildcard");
-    std::fs::copy(ruled().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
-    let err = generated::write_all(&root, &manifest)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("ext.no-locks") && err.contains("std::*") && err.contains("full path"),
-        "{err}"
     );
 }
 
@@ -442,7 +418,8 @@ fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
         ("allow.json", None),
     ] {
         let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(ruled().join(call)).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(ruled_fixture().join(call)).unwrap())
+                .unwrap();
         let name = call.trim_end_matches(".json").replace('-', "_");
         let dir = root.join("ext").join(&name);
         std::fs::create_dir_all(dir.join("src")).unwrap();

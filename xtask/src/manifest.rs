@@ -523,8 +523,8 @@ impl Where {
 pub struct Predicates {
     pub deny_types: Option<Vec<String>>,
     /// The macros denied beside the types, each by its full path
-    /// (`std::thread_local`): what a type ban cannot see, since a macro
-    /// declares the state it hides (#1781). It renders to clippy's
+    /// (`std::thread_local`), a wildcard refused: what a type ban cannot
+    /// see, since a macro declares the state it hides (#1781). It renders to clippy's
     /// `disallowed-macros` beside `deny_types`' `disallowed-types`, and
     /// `permit` reads an invocation of one as it reads a mention of a type.
     pub deny_macros: Option<Vec<String>>,
@@ -942,6 +942,18 @@ impl Manifest {
                     "rule \"{}\" has `exempt_label` beside `{}`; a label is read off the issue a command names, so `exempt_label` qualifies a rule permit judges at the call",
                     rule.id,
                     named[0]
+                );
+            }
+            if let Some(wildcard) = rule
+                .predicate
+                .deny_macros
+                .iter()
+                .flatten()
+                .find(|m| m.ends_with("::*"))
+            {
+                bail!(
+                    "rule \"{}\" denies the macros {wildcard}; a macro is denied by its full path, since clippy matches paths and no table of a module's macros expands a wildcard",
+                    rule.id
                 );
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {

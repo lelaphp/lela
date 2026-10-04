@@ -104,13 +104,6 @@ fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
     if let Some(macros) = &rule.predicate.deny_macros {
         out.push_str("disallowed-macros = [\n");
         for path in macros {
-            if path.ends_with("::*") {
-                bail!(
-                    "rule {} denies the macros {path}; a macro is denied by its full path, \
-                     since clippy matches paths and a wildcard of macros has no table to expand from",
-                    rule.id
-                );
-            }
             entry(&mut out, path, &reason);
         }
         out.push_str("]\n");
