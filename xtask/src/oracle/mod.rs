@@ -423,12 +423,36 @@ pub struct Normalise {
     pub extension_number_token: Option<String>,
 }
 
-/// `[regime.<name>]`: the compiled tier's regimes, `-d` overrides added
-/// after the recipe's ini.
+/// `[regime.<name>]`: what a run under the regime is handed beyond the
+/// recipe, each after the recipe's own: `ini`, as `-d` after the recipe's
+/// ini, and `args`, after the recipe's args, for what no ini setting
+/// reaches, as php's `-e` reaches `ZEND_COMPILE_EXTENDED_INFO` (#1780). A
+/// regime names either or both, and one that names neither is the recipe.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Regime {
+    #[serde(default)]
     pub ini: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Regime {
+    /// The regime as an adapter with no command line takes it, the engine
+    /// linked into the harness: its ini, laid over the engine's defaults
+    /// as a host's `-d` lays it. A regime that carries `args` is refused,
+    /// since an argument reaches a binary's command line and nothing
+    /// else, and dropping it from one side of a comparison alone is the
+    /// flag swallowed silently #1780 rejects. The caller names the regime.
+    pub(crate) fn linked_ini(&self) -> Result<&[String]> {
+        if !self.args.is_empty() {
+            bail!(
+                "carries the arguments {:?}, which reach a binary's command line and no linked engine",
+                self.args
+            );
+        }
+        Ok(&self.ini)
+    }
 }
 
 impl Pin {
@@ -603,7 +627,8 @@ pub struct Invocation<'a> {
     /// lane, so that both run under one recipe.
     pub binary: &'a Path,
     pub program: Program<'a>,
-    /// A `[regime.<name>]` of the pin, its ini after the recipe's.
+    /// A `[regime.<name>]` of the pin, its args after the recipe's and
+    /// its ini after the recipe's.
     pub regime: Option<&'a str>,
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
     pub ini: &'a [String],
@@ -954,7 +979,7 @@ impl<'a> Oracle<'a> {
     }
 
     /// Run `program` under the pinned binary and the recipe, with
-    /// `regime`'s ini after it when one is named, and return what
+    /// `regime`'s args and ini after it when one is named, and return what
     /// it wrote, normalised. The digest is asserted before the first run
     /// through this value; the process runs with the recipe's environment
     /// alone, in the program's directory, under the recipe's timeout.
@@ -985,7 +1010,8 @@ impl<'a> Oracle<'a> {
             }
             None => Command::new(call.binary),
         };
-        cmd.args(&recipe.args);
+        cmd.args(&recipe.args)
+            .args(regime.into_iter().flat_map(|r| &r.args));
         for ini in recipe
             .ini
             .iter()
