@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -m \"dashboard.yml: the nightly step keeps xtask phpt --full behind the schedule\" -- .github/workflows/dashboard.yml","description":"Commit with a message that cites the nightly lane"}}

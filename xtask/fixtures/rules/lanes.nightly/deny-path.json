@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"target/release/xtask phpt --full > lane.out","description":"Run the nightly lane through the built binary's path"}}
