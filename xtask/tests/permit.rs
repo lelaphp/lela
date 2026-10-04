@@ -1776,11 +1776,12 @@ fn with_no_candidate_judging_a_write_is_denied_and_a_bash_call_is_handed_on() {
     }
 }
 
-/// The two halves of `lanes.nightly` the phpt runner asked for (#15): the
-/// flag is denied wherever it stands in the call, not only beside the
-/// subcommand, and upstream's runner is denied where it is run and not
-/// where it is cited. The rule denied `--subset x --full` on neither
-/// count before, and denied reading the file on the second.
+/// The two halves of the nightly lane the phpt runner asked for (#15):
+/// the flag is denied wherever it stands in the call, not only beside the
+/// subcommand, by `lanes.nightly-flags` (#1860), and upstream's runner is
+/// denied where it is run and not where it is cited, by `lanes.nightly`.
+/// The rule denied `--subset x --full` on neither count before, and denied
+/// reading the file on the second.
 #[test]
 fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1801,17 +1802,29 @@ fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
             .map(|f| f.rule.clone())
     };
 
-    for command in [
-        "cargo run -q -p xtask -- phpt --full",
-        "cargo run -p xtask -- phpt --subset Zend/tests --full",
-        "xtask phpt --subset Zend/tests --jit force",
-        "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
-        "php run-tests.php -p target/release/php",
-        "cd php-src && ./run-tests.php ext/pcre",
+    for (command, rule) in [
+        (
+            "cargo run -q -p xtask -- phpt --full",
+            "lanes.nightly-flags",
+        ),
+        (
+            "cargo run -p xtask -- phpt --subset Zend/tests --full",
+            "lanes.nightly-flags",
+        ),
+        (
+            "xtask phpt --subset Zend/tests --jit force",
+            "lanes.nightly-flags",
+        ),
+        (
+            "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
+            "lanes.nightly-flags",
+        ),
+        ("php run-tests.php -p target/release/php", "lanes.nightly"),
+        ("cd php-src && ./run-tests.php ext/pcre", "lanes.nightly"),
     ] {
         assert_eq!(
             denied(command).as_deref(),
-            Some("lanes.nightly"),
+            Some(rule),
             "the lane must be denied: {command}"
         );
     }
@@ -1872,7 +1885,7 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
             .denial()
             .map(|f| f.rule.clone())
             .as_deref(),
-        Some("lanes.nightly"),
+        Some("lanes.nightly-flags"),
         "the manifest on disk denies the lane"
     );
     assert!(
@@ -2683,9 +2696,11 @@ fn unless_pattern_allows_a_call_its_deny_pattern_matches() {
     );
 }
 
-/// `lanes.builder-subset`'s fixture (#1145, #1149): in a checkout whose
-/// branch records a ticket the lane without `--subset` is denied, and the
-/// subsets, an extension's and Zend/tests, pass; the merge check's call
+/// `lanes.builder-subset`'s fixture (#1145, #1149), as `require_argv =
+/// "--subset"` under `with = "xtask phpt"` reads it (#1860): in a
+/// checkout whose branch records a ticket the lane without `--subset` is
+/// denied, however xtask is run, and the subsets, an extension's and
+/// Zend/tests, as a word or after `=`, pass; the merge check's call
 /// passes in a checkout that records none, and is denied in one that
 /// does, so it is `where` that lets it through.
 #[test]
@@ -2704,9 +2719,15 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
     assert_eq!(rule(ticketed.path(), "allow-zend.json"), None);
     assert_eq!(rule(main.path(), "allow-main.json"), None);
     assert_eq!(rule(ticketed.path(), "allow-main.json"), denied);
-    // A heredoc message whose subject cites the instrument runs nothing:
-    // `\A` anchors the line-start alternative at the call's start (#790).
+    // Through `cargo run` on the package or a variable the line assigns,
+    // the lane is still run; the subset after `=` is still named.
+    assert_eq!(rule(ticketed.path(), "deny-run.json"), denied);
+    assert_eq!(rule(ticketed.path(), "deny-variable.json"), denied);
+    assert_eq!(rule(ticketed.path(), "allow-equals.json"), None);
+    // A message whose subject or body cites the instrument, under cargo
+    // or not, runs nothing (#790, #1771).
     assert_eq!(rule(ticketed.path(), "allow-heredoc.json"), None);
+    assert_eq!(rule(ticketed.path(), "allow-message-cargo.json"), None);
     // Reading the instrument's options runs no lane, and the exception is
     // the instrument's own flag, not a later `-h` (#1424).
     assert_eq!(rule(ticketed.path(), "allow-help.json"), None);
@@ -2716,7 +2737,7 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
 /// `lanes.nightly`'s heredoc fixtures (#790): a commit whose message has a
 /// line opening `run-tests.php:2950)` cites upstream's runner and runs
 /// nothing, so it passes; the runner first in the call, or after a
-/// separator, is still denied, and so are the fixture's lane runs.
+/// separator, is still denied, and so is its run under php.
 #[test]
 fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -2739,18 +2760,18 @@ fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
 
 /// A `Bash` rule judges what a command runs, not text quoted inside it
 /// (#1771, #1832): a heredoc that cites the nightly lane's command, as a
-/// ticket's draft or a program on python's stdin, passes `lanes.nightly`;
-/// the same command run after the heredoc closes, or in a body a shell
-/// reads as the commands it runs, is denied.
+/// ticket's draft or a program on python's stdin, passes
+/// `lanes.nightly-flags`; the same command run after the heredoc closes,
+/// or in a body a shell reads as the commands it runs, is denied.
 #[test]
 fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let dir = fixtures().join("rules/lanes.nightly");
+    let dir = fixtures().join("rules/lanes.nightly-flags");
     let rule = |file: &str| {
         let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
         judged.denial().map(|f| f.rule.clone())
     };
-    let denied = Some("lanes.nightly".to_owned());
+    let denied = Some("lanes.nightly-flags".to_owned());
     assert_eq!(rule("allow-heredoc-lane.json"), None);
     assert_eq!(rule("allow-heredoc-python.json"), None);
     assert_eq!(rule("deny-after-heredoc.json"), denied);
@@ -2758,24 +2779,34 @@ fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() 
     assert_eq!(rule("deny-heredoc-piped.json"), denied);
 }
 
-/// Every `deny_pattern` rule on `Bash` holds to each of its fixtures
-/// (#1832): every `deny*.json` is denied by the rule and every
-/// `allow*.json` let through. A rule scoped `where = "ticketed"` is judged
-/// in a checkout whose branch records a ticket, but for an `allow-main*`
-/// call, the merge check's, which passes in main's checkout alone.
+/// Every `Bash` rule judged at the call holds to each of its fixtures
+/// (#1832, #1860): every `deny*.json` is denied by the rule and every
+/// `allow*.json` let through, whether the rule reads the line as a
+/// `deny_pattern` or the command's argv as `deny_argv` or `require_argv`.
+/// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
+/// records a ticket, but for an `allow-main*` call, the merge check's,
+/// which passes in main's checkout alone. A rule with an `exempt_label`
+/// asks the tracker, which a walk does not, and is held by its own test.
 #[test]
-fn every_bash_deny_pattern_rule_holds_to_each_of_its_fixtures() {
+fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let ticketed = checkout("pattern-fixtures-ticketed", Some(1832));
-    let main = checkout("pattern-fixtures-main", None);
+    let ticketed = checkout("bash-fixtures-ticketed", Some(1832));
+    let main = checkout("bash-fixtures-main", None);
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
-        .filter(|r| r.predicate.deny_pattern.is_some() && r.tool.iter().any(|t| t == "Bash"))
+        .filter(|r| {
+            judged_at_the_call(r) && r.tool.iter().any(|t| t == "Bash") && r.exempt_label.is_empty()
+        })
         .collect();
-    // `ticket.close-api`, `lanes.nightly`, `lanes.builder-subset` and
-    // `computed.force` at #1832: a filter that finds fewer reads nothing.
-    assert!(rules.len() >= 4, "{rules:?}");
+    // `git.no-verify`, `ticket.close-api`, `lanes.nightly`,
+    // `lanes.nightly-flags`, `lanes.builder-subset` and `computed.force`
+    // at #1877: a filter that finds fewer reads nothing.
+    assert!(
+        rules.len() >= 6,
+        "{:?}",
+        rules.iter().map(|r| &r.id).collect::<Vec<_>>()
+    );
     for rule in rules {
         let dir = fixtures().join("rules").join(&rule.id);
         let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -2795,153 +2826,6 @@ fn every_bash_deny_pattern_rule_holds_to_each_of_its_fixtures() {
                 .iter()
                 .any(|f| f.rule == rule.id && f.kind == Kind::Deny);
             assert_eq!(fired, name.starts_with("deny"), "{}: {name}", rule.id);
-        }
-    }
-}
-
-// ------------------------------ the lane rules as argv rules (#1860)
-
-/// `lanes.nightly`'s first alternative as the tracked row carries it: the
-/// lane's flags under the instrument, where it is run.
-const NIGHTLY_FLAGS: &str = r"(\A\s*|[|;&(]\s*|cargo\s+|-p\s+|--package\s+|/)xtask\s+(--\s+)?(phpt|bench)\b[^|;&\n]*--(full|jit)|";
-
-/// The manifest with the lane rows #1860 proposes, built as they would
-/// read, before a person commits them: `lanes.nightly`'s flag alternative
-/// as `lanes.nightly-flags`, `deny_argv = ["--full", "--jit"]` under `with
-/// = ["xtask phpt", "xtask bench"]`, the rest of its pattern left as
-/// `lanes.nightly`; and `lanes.builder-subset` as `require_argv =
-/// "--subset"` under `with = "xtask phpt"`, its `where` kept. A row the
-/// tracked file carries already is left as it is.
-fn with_the_lane_argv_rules(mut manifest: Manifest) -> Manifest {
-    if manifest.rule("lanes.nightly-flags").is_none() {
-        let nightly = manifest
-            .rules
-            .iter_mut()
-            .find(|r| r.id == "lanes.nightly")
-            .unwrap();
-        let pattern = nightly.predicate.deny_pattern.as_mut().unwrap();
-        assert!(pattern.contains(NIGHTLY_FLAGS), "{pattern}");
-        *pattern = pattern.replacen(NIGHTLY_FLAGS, "", 1);
-        let text = nightly.text.clone();
-        let mut flags = Rule::named("lanes.nightly-flags", "");
-        flags.scope = OneOrMany::None;
-        flags.tool = OneOrMany::One("Bash".to_owned());
-        flags.predicate.deny = None;
-        flags.predicate.deny_argv = Some(vec!["--full".to_owned(), "--jit".to_owned()]);
-        flags.predicate.with =
-            OneOrMany::Many(vec!["xtask phpt".to_owned(), "xtask bench".to_owned()]);
-        flags.text = text;
-        manifest.rules.push(flags);
-    }
-    let builder = manifest
-        .rules
-        .iter_mut()
-        .find(|r| r.id == "lanes.builder-subset")
-        .unwrap();
-    if builder.predicate.require_argv.is_none() {
-        builder.predicate.deny_pattern = None;
-        builder.predicate.unless_pattern = None;
-        builder.predicate.require_argv = Some("--subset".to_owned());
-        builder.predicate.with = OneOrMany::One("xtask phpt".to_owned());
-    }
-    manifest
-}
-
-/// Every fixture under each directory, by name.
-fn fixtures_in(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = dirs
-        .iter()
-        .flat_map(|dir| std::fs::read_dir(dir).unwrap())
-        .map(|e| e.unwrap().path())
-        .collect();
-    files.sort();
-    files
-}
-
-/// The lane rows #1860 proposes hold their fixtures, under
-/// `xtask/fixtures/rules/proposed/`, and every fixture the tracked rows
-/// hold: each `deny*.json` denied by the lane's rows, each `allow*.json`
-/// let through by them. What the argv reading adds: a message or a ticket's
-/// body that cites the lane under `cargo` passes, which the tracked
-/// pattern denies (#1771's last case), and a lane run through a variable
-/// the line assigns is denied, which the tracked pattern passes.
-#[test]
-fn the_proposed_lane_argv_rules_hold_their_fixtures_and_the_tracked_ones() {
-    let tracked = Manifest::load(workspace()).unwrap();
-    let proposed = with_the_lane_argv_rules(tracked.clone());
-    let rules = fixtures().join("rules");
-    let fired = |manifest: &Manifest, root: &Path, file: &Path, ids: &[&str]| {
-        judge(manifest, root, &call(file))
-            .unwrap()
-            .findings
-            .iter()
-            .any(|f| ids.contains(&f.rule.as_str()) && f.kind == Kind::Deny)
-    };
-    let denied = |file: &Path| {
-        let name = file.file_name().unwrap().to_string_lossy();
-        name.starts_with("deny")
-    };
-
-    let nightly = ["lanes.nightly", "lanes.nightly-flags"];
-    let files = fixtures_in(&[
-        rules.join("lanes.nightly"),
-        rules.join("proposed/lanes.nightly-flags"),
-    ]);
-    assert!(files.len() >= 20, "{files:?}");
-    for file in &files {
-        let by_the_lane = fired(&proposed, workspace(), file, &nightly);
-        assert_eq!(by_the_lane, denied(file), "{}", file.display());
-    }
-
-    let builder = ["lanes.builder-subset"];
-    let ticketed = checkout("lane-argv-ticketed", Some(1860));
-    let main = checkout("lane-argv-main", None);
-    let files = fixtures_in(&[
-        rules.join("lanes.builder-subset"),
-        rules.join("proposed/lanes.builder-subset"),
-    ]);
-    assert!(files.len() >= 12, "{files:?}");
-    for file in &files {
-        let name = file.file_name().unwrap().to_string_lossy();
-        let root = if name.starts_with("allow-main") {
-            main.path()
-        } else {
-            ticketed.path()
-        };
-        let by_the_lane = fired(&proposed, root, file, &builder);
-        assert_eq!(by_the_lane, denied(file), "{}", file.display());
-    }
-
-    // What the tracked rows judge otherwise, until a person lands these.
-    let differs = [
-        (
-            "lanes.nightly-flags/allow-message-cargo.json",
-            &nightly[..],
-            true,
-        ),
-        (
-            "lanes.nightly-flags/allow-body-cargo.json",
-            &nightly[..],
-            true,
-        ),
-        (
-            "lanes.nightly-flags/deny-variable.json",
-            &nightly[..],
-            false,
-        ),
-        (
-            "lanes.builder-subset/allow-message-cargo.json",
-            &builder[..],
-            true,
-        ),
-        ("lanes.builder-subset/deny.json", &builder[..], false),
-    ];
-    if tracked.rule("lanes.nightly-flags").is_none() {
-        for (file, ids, tracked_denies) in differs {
-            let file = rules.join("proposed").join(file);
-            let at = ticketed.path();
-            let by_the_lane = fired(&tracked, at, &file, ids);
-            assert_eq!(by_the_lane, tracked_denies, "{}", file.display());
         }
     }
 }

@@ -562,20 +562,28 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
 #[test]
 fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
     // The rule's fixture is the negative control; this asserts the flag the
-    // rule names is the flag the runner has.
+    // rule names, among the instrument's argv (#1860), is the flag the
+    // runner has.
     let ask = Ask {
         full: true,
         ..Ask::default()
     };
     assert!(ask.full);
-    let rule = manifest()
-        .rule("lanes.nightly")
-        .expect("the manifest has the rule")
+    let manifest = manifest();
+    let rule = manifest
+        .rule("lanes.nightly-flags")
+        .expect("the manifest has the rule");
+    let flags = rule
         .predicate
-        .deny_pattern
-        .clone()
-        .expect("the rule denies a pattern");
-    assert!(rule.contains("phpt"), "{rule}");
+        .deny_argv
+        .as_ref()
+        .expect("the rule denies an argv");
+    assert!(flags.iter().any(|f| f == "--full"), "{flags:?}");
+    assert!(
+        rule.predicate.with.iter().any(|w| w == "xtask phpt"),
+        "{:?}",
+        rule.predicate.with
+    );
 }
 
 /// A binary standing where the engine's would that prints `__FILE__` as
