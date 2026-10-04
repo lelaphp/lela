@@ -10,6 +10,7 @@ use php_heap::FrameRef;
 use php_unit::{CacheSlot, Opcode};
 
 use crate::api::request::{Raised, Request};
+use crate::api::values::Value;
 use crate::exec;
 
 /// Where a frame stands: the file and line of the opline the loop
@@ -126,42 +127,27 @@ pub fn serves(req: &Request, frame: FrameRef) -> Serves {
     }
 }
 
-/// The throwable pending on the request as php's phpdbg reads it off
-/// the object (`phpdbg_prompt.c:1690-1696`): its class, and its `file`,
-/// `line` and `message` properties.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pending {
-    /// `spl_object_id`, which tells two throwables apart.
-    pub id: u32,
-    pub class: Vec<u8>,
-    pub file: Vec<u8>,
-    pub line: i64,
-    pub message: Vec<u8>,
+/// What stands pending on the request where a tier stops for it: a
+/// throwable, which phpdbg reads its class, `file`, `line` and
+/// `message` off (`phpdbg_prompt.c:1690-1696`), or the graceful exit a
+/// destroyed fiber is resumed with, which php makes an object of class
+/// `GracefulExit` with none of them and this engine makes no object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Thrown {
+    /// The throwable, a view.
+    Object(Value),
+    GracefulExit,
 }
 
-/// The throwable pending on the request; none while nothing is, or an
-/// exit is what stands. The graceful exit a destroyed fiber is resumed
-/// with is one, as php's is an object of class `GracefulExit` with no
-/// file, line or message.
+/// What stands pending on the request; none while nothing is, or an
+/// exit is what stands.
 #[must_use]
-pub fn pending(req: &Request) -> Option<Pending> {
+pub fn pending(req: &Request) -> Option<Thrown> {
     if req.raised() == Some(Raised::GracefulExit) {
-        return Some(Pending {
-            id: u32::MAX,
-            class: b"GracefulExit".to_vec(),
-            file: Vec::new(),
-            line: 0,
-            message: Vec::new(),
-        });
+        return Some(Thrown::GracefulExit);
     }
-    let object = req.pending()?;
-    Some(Pending {
-        id: object.index(),
-        class: req.class_name(object.class()).into_bytes(),
-        file: req.throwable_prop_bytes(object, b"file"),
-        line: req.throwable_prop_int(object, b"line"),
-        message: req.throwable_prop_bytes(object, b"message"),
-    })
+    req.pending()
+        .map(|object| Thrown::Object(object.as_value()))
 }
 
 /// Whether `frame` takes the throwable pending on the request, as
@@ -374,7 +360,26 @@ mod tests {
     use crate::api::request::Request;
     use crate::engine::Engine;
     use crate::test::Capture;
-    use crate::tier::{Flow, Site, Stepped, Tier};
+    use crate::tier::{Flow, Site, Stepped, Thrown, Tier};
+
+    /// The class of what stands pending, and the `file` and `line` a
+    /// throwable carries, as phpdbg reads them off it.
+    fn described(req: &Request, thrown: Thrown) -> (String, String, i64) {
+        let Thrown::Object(object) = thrown else {
+            return (String::from("GracefulExit"), String::new(), 0);
+        };
+        let prop = |name: &[u8]| object.as_object().and_then(|o| o.prop(req, name));
+        let class = crate::tier::class_of(req, object).unwrap_or_default();
+        let file = prop(b"file")
+            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+            .unwrap_or_default();
+        let line = prop(b"line").and_then(|v| v.as_int()).unwrap_or(0);
+        (
+            String::from_utf8_lossy(&class).into_owned(),
+            String::from_utf8_lossy(&file).into_owned(),
+            line,
+        )
+    }
 
     thread_local! {
         /// The line of every opline the tier stood at, and what it read.
@@ -395,12 +400,8 @@ mod tests {
                     return Flow::Resume(at);
                 };
                 let what = match super::pending(req) {
-                    Some(pending) if unwinding => {
-                        format!(
-                            "{} threw {}",
-                            position.line,
-                            String::from_utf8_lossy(&pending.class)
-                        )
+                    Some(thrown) if unwinding => {
+                        format!("{} threw {}", position.line, described(req, thrown).0)
                     }
                     _ => format!("{} {}", position.line, position.opcode.name()),
                 };
@@ -503,12 +504,8 @@ mod tests {
             for code in CODE.with_borrow_mut(std::mem::take) {
                 let evaluated = super::evaluate_code(req, b"phpdbginit code", code);
                 let pending = super::pending(req).map(|thrown| {
-                    format!(
-                        " {} in {}:{}",
-                        String::from_utf8_lossy(&thrown.class),
-                        String::from_utf8_lossy(&thrown.file),
-                        thrown.line
-                    )
+                    let (class, file, line) = described(req, thrown);
+                    format!(" {class} in {file}:{line}")
                 });
                 SEEN.with_borrow_mut(|seen| {
                     seen.push(format!("{evaluated:?}{}", pending.unwrap_or_default()));
