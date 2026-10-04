@@ -856,6 +856,43 @@ fn edit_of(file: &Path) -> Call {
     .unwrap()
 }
 
+/// The `ext.no-locks` row #1781 ruled, in the fixture that carries it word
+/// for word (#1888): permit denies the once type and the thread-local,
+/// each a write into an extension, and lets the neighbour through, whose
+/// prose names `thread_local` without invoking it. The thread-local is
+/// denied by `deny_macros` alone: under the same row without it, the type
+/// ban lets the write through. Once the tracked manifest carries the row,
+/// `ext.no-locks`' own fixture walk holds the rule as it holds it today.
+#[test]
+fn the_ruled_no_locks_row_denies_a_once_type_and_a_thread_local_and_not_their_neighbour() {
+    let root = fixtures().join("clippy/once-and-thread-local");
+    let manifest = Manifest::load(&root).unwrap();
+    let denied = |manifest: &Manifest, file: &str| {
+        judge(manifest, &root, &call(&root.join(file)))
+            .unwrap()
+            .denial()
+            .map(|f| f.rule.clone())
+    };
+    for file in ["once.json", "thread-local.json"] {
+        assert_eq!(
+            denied(&manifest, file).as_deref(),
+            Some("ext.no-locks"),
+            "{file}"
+        );
+    }
+    assert_eq!(denied(&manifest, "allow.json"), None);
+
+    let mut types_alone = manifest.clone();
+    for rule in &mut types_alone.rules {
+        rule.predicate.deny_macros = None;
+    }
+    assert_eq!(denied(&types_alone, "thread-local.json"), None);
+    assert_eq!(
+        denied(&types_alone, "once.json").as_deref(),
+        Some("ext.no-locks")
+    );
+}
+
 /// A fixture that carries a `seams.toml` is a workspace of its own, and a
 /// call into it is judged by that manifest and not the workspace's
 /// (#57): under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
