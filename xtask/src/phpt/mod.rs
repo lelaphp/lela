@@ -45,10 +45,11 @@
 //! **Held to the target.** The runner's control keeps the oracle's
 //! verdict on every test of a subset under the pin, and every engine's
 //! reading of the subset carries met-of-target, `target`, `met` and
-//! `outside`, with the target's misses named, and `predated` where the
-//! target was kept over another corpus than the subset holds now, with
-//! the command that keeps it again (#1644); the `target` module says what
-//! is in it (#1184).
+//! `outside`, with the target's misses named and `missed_skipped` counting
+//! those the engine skipped (#1834), and `predated` where the target was
+//! kept over another corpus than the subset holds now, with the command
+//! that keeps it again (#1644); the `target` module says what is in it
+//! (#1184).
 //!
 //! **Held against a commit.** Every run the engine judged whole is kept
 //! as its verdicts, and `--against <commit>` holds each subset to the run
@@ -771,12 +772,12 @@ pub(crate) fn reading(
 
 /// The reading held to the target of the subset `scope` names (#1184). A
 /// run of the engine that judged a test carries met-of-target, its numbers
-/// `target`, `met` and `outside` and the target's misses named, and
-/// `predated` with the command that keeps the target again where the kept
-/// target holds no verdict for some of the subset's tests (#1644), or says
-/// how to take a target where none is kept under the pin; the runner's
-/// control says it kept its verdicts as the target, where it judged every
-/// test.
+/// `target`, `met`, `outside` and `missed_skipped` and the target's misses
+/// named, and `predated` with the command that keeps the target again
+/// where the kept target holds no verdict for some of the subset's tests
+/// (#1644), or says how to take a target where none is kept under the
+/// pin; the runner's control says it kept its verdicts as the target,
+/// where it judged every test.
 fn held_to(
     reading: &mut Reading,
     (tally, scope): (&Tally, &str),

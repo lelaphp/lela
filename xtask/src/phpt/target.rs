@@ -131,6 +131,8 @@ pub(crate) struct Measure {
     pub predated: u64,
     /// The target's tests the engine missed, by divergence key.
     pub missed: Vec<String>,
+    /// Of `missed`, those the engine skipped (#1834).
+    pub missed_skipped: u64,
 }
 
 impl Measure {
@@ -143,6 +145,10 @@ impl Measure {
     /// The key that counts the subset's tests the kept target predates,
     /// written only where there are any (#1644).
     pub(crate) const PREDATED: &str = "predated";
+    /// The key that counts the target's misses the engine skipped, written
+    /// on every reading held to a target from #1834 on, so a reading
+    /// without it is one from before the count was kept.
+    pub(crate) const MISSED_SKIPPED: &str = "missed_skipped";
 
     /// The measure written into the reading's numbers, under the keys
     /// above.
@@ -150,6 +156,7 @@ impl Measure {
         reading.count(Self::TARGET, self.target)?;
         reading.count(Self::MET, self.met)?;
         reading.count(Self::OUTSIDE, self.outside)?;
+        reading.count(Self::MISSED_SKIPPED, self.missed_skipped)?;
         if self.predated > 0 {
             reading.count(Self::PREDATED, self.predated)?;
         }
@@ -174,6 +181,9 @@ impl Measure {
                 Standing::Missed => {
                     measure.target += 1;
                     measure.missed.push(id.to_owned());
+                    if engine == Judgement::Skip {
+                        measure.missed_skipped += 1;
+                    }
                 }
             }
         }

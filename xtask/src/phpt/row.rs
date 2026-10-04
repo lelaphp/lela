@@ -15,8 +15,13 @@ use crate::status::PerReading;
 use crate::tally;
 
 /// The version of [`Row`]'s shape. It changes when the shape does, a
-/// field added, removed, renamed or read differently, and never for a
-/// new reading; a reader refuses a `v` it does not know.
+/// field removed, renamed or read differently, or one added that a reader
+/// of the earlier shape could not do without, and never for a new
+/// reading; a reader refuses a `v` it does not know. A field a row may
+/// omit, whose absence a reader of the earlier shape already reads right,
+/// is added under the same `v`: such a reader ignores it and keeps the
+/// answer it had, as `target.missed_skipped` (#1834) leaves a reader of
+/// `v = 1` its own estimate of the target's skipped misses.
 pub(crate) const V: u32 = 1;
 
 /// One phpt reading, in the shape the dashboard and any other reader of
@@ -102,6 +107,11 @@ pub(crate) struct Target {
     /// The subset's tests the kept target holds no verdict for, kept apart
     /// from `outside` (#1644); 0 where the reading counts none.
     pub(crate) predated: u64,
+    /// The target's tests the engine missed by skipping them, where the
+    /// reading counts them ([`Measure::MISSED_SKIPPED`]); omitted from the
+    /// line where it does not, as [`V`] allows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) missed_skipped: Option<u64>,
 }
 
 impl Row {
@@ -135,7 +145,8 @@ impl PerReading for Row {
 
     /// The facts of one reading: the rules, as a pure function of it.
     fn of(reading: &Reading) -> Row {
-        let count = |key: &str| reading.numbers.get(key).map_or(0, |n| whole(*n));
+        let counted = |key: &str| reading.numbers.get(key).map(|n| whole(*n));
+        let count = |key: &str| counted(key).unwrap_or(0);
         let sum = |which: fn(Judgement) -> bool| -> u64 {
             Judgement::ALL
                 .into_iter()
@@ -171,21 +182,19 @@ impl PerReading for Row {
             recipe: reading.recipe.clone(),
             measured: judged && !nothing_ran,
             tests,
-            files: reading
-                .numbers
-                .get(numbers::FILES)
-                .map_or(tests, |n| whole(*n)),
+            files: counted(numbers::FILES).unwrap_or(tests),
             p,
             d,
             f,
             u,
             s: tests.saturating_sub(p + d + f + u),
             met: sum(<Judgement as tally::Judgement>::met),
-            target: reading.numbers.get(Measure::TARGET).map(|n| Target {
-                n: whole(*n),
+            target: counted(Measure::TARGET).map(|n| Target {
+                n,
                 met: count(Measure::MET),
                 outside: count(Measure::OUTSIDE),
                 predated: count(Measure::PREDATED),
+                missed_skipped: counted(Measure::MISSED_SKIPPED),
             }),
         }
     }
@@ -320,8 +329,32 @@ mod tests {
                 n: 44,
                 met: 40,
                 outside: 4,
-                predated: 2
+                predated: 2,
+                missed_skipped: None
             })
+        );
+    }
+
+    /// A reading that counts the target's misses the engine skipped
+    /// carries the count in its target (#1834); one from before the count
+    /// was kept carries no such field at all, so its line is the shape it
+    /// always had under `v = 1`.
+    #[test]
+    fn a_row_carries_the_skipped_misses_where_the_reading_counts_them() {
+        let held = [FIRST, &[("target", 44), ("met", 40), ("outside", 6)]].concat();
+        let counted = [held.as_slice(), &[("missed_skipped", 3)]].concat();
+        let row = Row::of(&reading("ext/standard", &counted));
+        assert_eq!(row.target.and_then(|t| t.missed_skipped), Some(3));
+        let line = serde_json::to_value(&row).unwrap();
+        assert_eq!(line["target"]["missed_skipped"], 3);
+
+        let row = Row::of(&reading("ext/standard", &held));
+        assert_eq!(row.target.and_then(|t| t.missed_skipped), None);
+        let line = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            line["target"],
+            json!({ "n": 44, "met": 40, "outside": 6, "predated": 0 }),
+            "a reading from before the count renders as it did"
         );
     }
 
