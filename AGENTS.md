@@ -69,7 +69,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
-- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
+- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and `php_process` the process-wide mechanisms (`fork`, the signal pool, `LC_CTYPE`), the engine's only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
 - `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 
 ## Taste
@@ -101,7 +101,7 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 
-<!-- /computed in=701543e0aec9934a9389646d58563c7b6363faaabc538ff88fc79c951e41a906 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
+<!-- /computed in=f9deb336fc124976c7c6603cb750f2b6e33ca81070f9b82e3786fdaf2dbe2090 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
