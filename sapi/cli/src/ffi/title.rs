@@ -160,17 +160,17 @@ static ARGS: std::sync::OnceLock<(c_int, usize)> = std::sync::OnceLock::new();
 static CAPTURE: extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char) = capture;
 
 #[cfg(target_os = "linux")]
-extern "C" fn capture(argc: c_int, argv: *mut *mut c_char, _env: *mut *mut c_char) {
-    let _ = ARGS.set((argc, argv as usize));
+extern "C" fn capture(count: c_int, vector: *mut *mut c_char, _environment: *mut *mut c_char) {
+    let _ = ARGS.set((count, vector as usize));
 }
 
 #[cfg(target_os = "linux")]
 fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
-    let &(argc, argv) = ARGS.get()?;
+    let &(count, vector) = ARGS.get()?;
     // SAFETY: `environ` is the C library's, which nothing else writes: no
     // thread has started yet.
-    let env = unsafe { environ };
-    Some((argc, argv as *mut *mut c_char, env))
+    let environment = unsafe { environ };
+    Some((count, vector as *mut *mut c_char, environment))
 }
 
 #[cfg(target_os = "linux")]
