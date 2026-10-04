@@ -99,8 +99,9 @@ third-engine-design.md
 - ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
+- ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 
-<!-- /computed in=f8f6bf168e2a1a7bdef6fc589146f4c7ac811b83d2b6d32362d8921c3726c93f out=c60a7ddc7919c247348a721d7beb636ae2e857b348b7f756cfc87574ba269bd5 -->
+<!-- /computed in=3e0e525902a4ccf204d464e5b1f087a41ed1c332bc0da0cf009709ba79089600 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
