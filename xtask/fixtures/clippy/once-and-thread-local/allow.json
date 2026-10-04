@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/pcre/src/depth.rs","content":"/// The depth of one request, kept on the request and never thread_local.\npub struct Depth(pub u8);\n"}}
