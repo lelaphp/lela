@@ -461,6 +461,7 @@ request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
+request::Periodic
 request::PreloadStatistics
 request::Readiness
 request::RealpathEntry
@@ -598,6 +599,7 @@ request::Request::output_started_at
 request::Request::parse_body
 request::Request::parse_encoding_list
 request::Request::parse_query
+request::Request::periods_elapsed
 request::Request::phpinfo_as_text
 request::Request::plain_path
 request::Request::preloading
@@ -649,9 +651,11 @@ request::Request::set_shutdown_function
 request::Request::set_time_limit
 request::Request::set_umask
 request::Request::stack_overflowed
+request::Request::start_periodic
 request::Request::state
 request::Request::status_line
 request::Request::stdin
+request::Request::stop_periodic
 request::Request::stream_ctx
 request::Request::stream_filters
 request::Request::stream_from_fd

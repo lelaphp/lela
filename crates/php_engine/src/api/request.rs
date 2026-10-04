@@ -1555,9 +1555,10 @@ impl Resources {
 pub struct Interrupt(Arc<State>);
 
 impl Interrupt {
-    /// What signal delivery raises it with: the loop dispatches what was
-    /// delivered to its PHP handlers at its next check, which is php's
-    /// `zend_interrupt_function`.
+    /// What signal delivery and a periodic interrupt raise it with: the
+    /// loop serves each extension's interrupt hook at its next check,
+    /// which is php's `zend_interrupt_function`, and pcntl's dispatches
+    /// what was delivered to its PHP handlers.
     pub fn raise(&self) {
         self.0.raised.store(true, Ordering::Release);
     }
@@ -1640,6 +1641,8 @@ impl AsRef<AtomicBool> for State {
         &self.raised
     }
 }
+
+pub use crate::interrupt::Periodic;
 
 /// The process's signal record (design §5.8, revision 38), for the
 /// extension that installs signal handlers: [`SIGNAL_POST`] is what its
@@ -2240,8 +2243,9 @@ pub struct Request {
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
     /// The request's timer: the execution timer's deadline while
-    /// `max_execution_time` is not zero, and the one thread that waits
-    /// for it; dropping the request joins the thread.
+    /// `max_execution_time` is not zero, every periodic interrupt an
+    /// extension started, and the one thread that waits for them;
+    /// dropping the request joins the thread.
     timer: crate::interrupt::Timer,
     /// The thread's stack limit, php's `EG(stack_limit)`, worked out
     /// once at request start on the thread the request runs on
@@ -2940,6 +2944,49 @@ impl Request {
     /// handlers are done: nothing the request does after it is timed.
     pub(crate) fn unset_timer(&mut self) {
         self.timer.arm(&self.interrupt, 0, 0);
+    }
+
+    /// A periodic interrupt (#1806): this request's interrupt raised
+    /// `first` from now and every `every` after it, once where `every`
+    /// is zero, until [`Request::stop_periodic`] stops it or the request
+    /// ends. What a sampling profiler's own timer thread does under php,
+    /// Excimer's `timer_create` and its handler storing
+    /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
+    /// no thread (ADR-0005, ADR-0010): one thread per request serves the
+    /// execution timer and every periodic interrupt alike, and is joined
+    /// once none is left and when the request ends.
+    ///
+    /// It is served through the interrupt hook the extension supplies
+    /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
+    /// extension's hook is served, so a hook reads its own count with
+    /// [`Request::periods_elapsed`] and does nothing at zero, as Excimer's
+    /// `excimer_timer_interrupt` serves only the timers that fired. The
+    /// periods are wall-clock time, Excimer's `EXCIMER_REAL`; a child
+    /// forked from the request inherits none of them, as a child inherits
+    /// no POSIX timer. `None` where no thread could be started.
+    ///
+    /// [`ExtensionBuilder::interrupt`]: crate::api::abi::ExtensionBuilder::interrupt
+    #[must_use]
+    pub fn start_periodic(
+        &mut self,
+        first: std::time::Duration,
+        every: std::time::Duration,
+    ) -> Option<Periodic> {
+        self.timer.start_periodic(&self.interrupt, first, every)
+    }
+
+    /// The periods of `periodic` elapsed since the last time this was
+    /// asked, the ones the request was too busy to be interrupted for
+    /// among them, as Excimer hands its callback the event count, POSIX's
+    /// overruns plus one; zero for one stopped or of another request.
+    pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
+        self.timer.periods_elapsed(periodic)
+    }
+
+    /// `periodic` stopped, with the periods it had not been asked for,
+    /// as Excimer's `excimer_timer_stop` deletes its timer.
+    pub fn stop_periodic(&mut self, periodic: Periodic) {
+        self.timer.stop_periodic(&self.interrupt, periodic);
     }
 
     // -------------------------------------------------- crate-internal

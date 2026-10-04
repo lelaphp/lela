@@ -1,6 +1,7 @@
 //! The interrupt (design §5.6, §5.8; `CONTEXT.md`, Interrupt): the
-//! engine's half of the one thing on a request that the execution timer
-//! and signal delivery raise and nothing else touches. The interrupt
+//! engine's half of the one thing on a request that the execution timer,
+//! a periodic interrupt and signal delivery raise and nothing else
+//! touches. The interrupt
 //! itself is [`crate::api::request::Interrupt`], on the request, because
 //! signal delivery is an extension's and the compiled tier tests the
 //! same atomic once per loop iteration through its `ExitCtx`
@@ -13,7 +14,9 @@
 //! `ZEND_VM_FCALL_INTERRUPT_CHECK` in the call handlers; [`interrupted`],
 //! what a check that finds it raised does, which `call_function` also
 //! runs after a native a native called, as `zend_call_function` does;
-//! and [`Timer`], the execution timer `max_execution_time` arms.
+//! and [`Timer`], the request's one timer thread, which serves the
+//! execution timer `max_execution_time` arms and every periodic
+//! interrupt an extension starts (#1806).
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -210,6 +213,8 @@ pub(crate) struct Timer {
     thread: Option<JoinHandle<()>>,
     /// The process that started the thread, the only one it is in.
     started_in: Process,
+    /// How many periodic interrupts were started, which numbers the next.
+    periodics: u32,
 }
 
 impl Timer {
@@ -234,23 +239,64 @@ impl Timer {
         interrupt.timer_unset();
     }
 
+    /// [`Request::start_periodic`]: a deadline `first` from now and every
+    /// `every` after it, once where `every` is zero. `None` where no
+    /// thread could be started to serve it.
+    pub(crate) fn start_periodic(
+        &mut self,
+        interrupt: &Interrupt,
+        first: Duration,
+        every: Duration,
+    ) -> Option<Periodic> {
+        let of = Periodic(self.periodics);
+        self.periodics = self.periodics.checked_add(1)?;
+        let next = Some(Instant::now().checked_add(first)?);
+        let period = Period {
+            of,
+            next,
+            every,
+            elapsed: 0,
+        };
+        self.change(interrupt, |schedule| schedule.periodic.push(period));
+        if self.thread.is_none() {
+            self.stop_periodic(interrupt, of);
+            return None;
+        }
+        Some(of)
+    }
+
+    /// [`Request::periods_elapsed`]: the periods elapsed since the last
+    /// time this was asked, and none counted from here.
+    pub(crate) fn periods_elapsed(&mut self, of: Periodic) -> u64 {
+        self.here();
+        let mut schedule = self.shared.held();
+        let period = schedule.periodic.iter_mut().find(|period| period.of == of);
+        period.map_or(0, |period| std::mem::take(&mut period.elapsed))
+    }
+
+    /// [`Request::stop_periodic`]: its deadline gone and its count with it.
+    pub(crate) fn stop_periodic(&mut self, interrupt: &Interrupt, of: Periodic) {
+        self.change(interrupt, |schedule| {
+            schedule.periodic.retain(|period| period.of != of);
+        });
+    }
+
     /// `f` over the schedule, under the mutex, and the thread woken to
     /// read it again: started where it had no thread and now has a
     /// deadline, ended where it now has none.
-    fn change<R>(&mut self, interrupt: &Interrupt, f: impl FnOnce(&mut Schedule) -> R) -> R {
+    fn change(&mut self, interrupt: &Interrupt, f: impl FnOnce(&mut Schedule)) {
         self.here();
-        let (answer, idle) = {
+        let idle = {
             let mut schedule = self.shared.held();
-            let answer = f(&mut schedule);
+            f(&mut schedule);
             self.shared.woken.notify_all();
-            (answer, schedule.next().is_none())
+            schedule.next().is_none()
         };
         if idle {
             self.end();
         } else if self.thread.is_none() {
             self.start(interrupt);
         }
-        answer
     }
 
     /// Spawn the thread and return once it waits; a thread the system
@@ -337,6 +383,27 @@ struct Schedule {
     phase: Phase,
     /// The execution timer's deadline, while one is set.
     execution: Option<Execution>,
+    /// Every periodic interrupt started and not yet stopped.
+    periodic: Vec<Period>,
+}
+
+/// One periodic interrupt a request was asked for (#1806), by the number
+/// its request's timer gave it: what [`Request::start_periodic`] answers
+/// and the extension that asked keeps, in its request state, to read
+/// its periods with and to stop it by. It names nothing outside the
+/// request that started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Periodic(u32);
+
+/// A periodic interrupt, started.
+#[derive(Debug)]
+struct Period {
+    of: Periodic,
+    /// Its next deadline, `None` once a period of zero has raised its one.
+    next: Option<Instant>,
+    every: Duration,
+    /// The periods elapsed since the extension last read them.
+    elapsed: u64,
 }
 
 /// The execution timer, armed.
@@ -352,7 +419,12 @@ struct Execution {
 impl Schedule {
     /// The earliest deadline, `None` where none is set.
     fn next(&self) -> Option<Instant> {
-        self.execution.map(|execution| execution.deadline)
+        let periodic = self.periodic.iter().filter_map(|period| period.next);
+        self.execution
+            .map(|execution| execution.deadline)
+            .into_iter()
+            .chain(periodic)
+            .min()
     }
 
     /// What each deadline at or before `now` raises.
@@ -363,6 +435,13 @@ impl Schedule {
     /// `hard` wait the deadline moves past it: a deadline that finds the
     /// last timeout still unread ends the process ([`terminate`]), and
     /// one that finds it taken is a timeout of its own (`:1482`).
+    ///
+    /// A periodic interrupt's: every period elapsed by `now` counted, the
+    /// ones a late wake missed among them, as Excimer counts a POSIX
+    /// timer's overruns into its event count (`excimer_timer_handle`),
+    /// its next deadline kept on the grid `first` laid down, and the
+    /// interrupt raised, as Excimer's handler stores `EG(vm_interrupt)`.
+    /// The count waits for the extension's hook to read it.
     fn elapse(&mut self, interrupt: &Interrupt, now: Instant) {
         if let Some(execution) = &mut self.execution
             && execution.deadline <= now
@@ -377,6 +456,21 @@ impl Schedule {
                 Some(hard) => execution.deadline = now + Duration::from_secs(hard),
                 None => self.execution = None,
             }
+        }
+        for period in &mut self.periodic {
+            let Some(next) = period.next.filter(|next| *next <= now) else {
+                continue;
+            };
+            let late = (now - next).as_nanos().checked_div(period.every.as_nanos());
+            let periods = late.map_or(1, |late| {
+                u64::try_from(late).unwrap_or(u64::MAX).saturating_add(1)
+            });
+            period.elapsed = period.elapsed.saturating_add(periods);
+            let ahead = period
+                .every
+                .saturating_mul(u32::try_from(periods).unwrap_or(u32::MAX));
+            period.next = late.and_then(|_| next.checked_add(ahead));
+            interrupt.raise();
         }
     }
 }
@@ -655,6 +749,54 @@ mod tests {
         timer.arm(&interrupt, -1, 2);
         assert_eq!(serving(&timer), None);
         assert!(!interrupt.raised().load(Ordering::Relaxed));
+    }
+
+    /// #1806: a periodic interrupt counts every period elapsed, the ones
+    /// nobody read among them, and hands each count over once; the
+    /// periods are laid on the grid `first` began, so a late read loses
+    /// none.
+    #[test]
+    fn a_periodic_interrupt_counts_the_periods_nobody_read() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::default();
+        let every = Duration::from_millis(5);
+        let began = Instant::now();
+        let periodic = timer.start_periodic(&interrupt, every, every);
+        thread::sleep(every * 20);
+        let read = periodic.map_or(0, |periodic| timer.periods_elapsed(periodic));
+        let at_most = u64::try_from(began.elapsed().as_millis() / every.as_millis()).unwrap_or(0);
+        assert!(
+            (15..=at_most).contains(&read),
+            "{read} of at most {at_most}"
+        );
+        assert!(interrupt.raised().load(Ordering::Relaxed));
+        let again = periodic.map_or(9, |periodic| timer.periods_elapsed(periodic));
+        assert!(again <= 1, "each count is handed over once, not {again}");
+    }
+
+    /// A period of zero raises the interrupt once, `first` from now, as
+    /// Excimer's one-shot timer does; stopping the last periodic
+    /// interrupt ends the thread, and dropping a timer that still has
+    /// one joins it.
+    #[test]
+    fn a_periodic_interrupt_of_no_period_raises_once_and_its_thread_ends() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::default();
+        let once = timer.start_periodic(&interrupt, Duration::from_millis(5), Duration::ZERO);
+        assert!(serving(&timer).is_some(), "started, and served");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(once.map(|once| timer.periods_elapsed(once)), Some(1));
+        if let Some(once) = once {
+            timer.stop_periodic(&interrupt, once);
+        }
+        assert_eq!(serving(&timer), None, "stopped, and no thread");
+        assert_eq!(Arc::strong_count(&timer.shared), 1);
+
+        let every = timer.start_periodic(&interrupt, Duration::ZERO, Duration::from_secs(30));
+        assert!(every.is_some() && serving(&timer).is_some());
+        let shared = Arc::downgrade(&timer.shared);
+        drop(timer);
+        assert!(shared.upgrade().is_none(), "the drop joined the thread");
     }
 
     /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
