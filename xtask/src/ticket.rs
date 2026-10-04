@@ -777,14 +777,6 @@ impl Open {
     pub fn label_names(&self) -> impl Iterator<Item = &str> {
         self.labels.iter().map(|label| label.name.as_str())
     }
-
-    /// Whether an open ticket blocks this one; a closed blocker does not.
-    pub fn blocked(&self) -> bool {
-        self.blocked_by
-            .nodes
-            .iter()
-            .any(|blocker| blocker.state == State::Open)
-    }
 }
 
 /// One label, by name.

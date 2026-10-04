@@ -501,7 +501,7 @@ pub(crate) struct Identity {
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
     /// The ticket the track works next: the widest open `ready-for-agent`
-    /// ticket by the census that no open ticket blocks, that carries no
+    /// ticket by the census that no ticket blocks, that carries no
     /// `track:<name>` label naming another track, and that no branch of
     /// the repository records; "none" when the frontier is empty. Reads the tracker
     /// through the ticket module and writes no reading.
@@ -524,7 +524,7 @@ pub(crate) enum TrackCommand {
     /// first and named under the others, and the tickets with no edge
     /// follow on their own. Each line carries the ticket's standing as
     /// `next` judges it: `ready` or `a person's`, the branch recording
-    /// it, the open tickets it waits on. Reads the
+    /// it, the tickets it waits on. Reads the
     /// tracker through the ticket module and writes no reading.
     Chains {
         /// The track, by its `track:` label.
@@ -671,7 +671,9 @@ pub enum Section {
     /// judges it and its reading; the text its failure prints is under
     /// `--uncut` and in JSON (#1772).
     Rules,
-    /// Each lock's width against `api_items`.
+    /// Each lock's width against `api_items`: the api-check readings, of
+    /// which `--every` renders every one, a crate's edges among them.
+    #[value(alias = "api-check")]
     Locks,
     /// Each crate against its ceiling.
     Budget,

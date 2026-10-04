@@ -10,8 +10,9 @@ use serde::Serialize;
 
 use super::target::Measure;
 use super::{Comparison, Judgement, Lane, Scope, numbers};
-use crate::reading::{Number, Reading, Status};
+use crate::reading::Reading;
 use crate::status::PerReading;
+use crate::status::every::{Head, count};
 use crate::tally;
 
 /// The version of [`Row`]'s shape. It changes when the shape does, a
@@ -28,12 +29,9 @@ pub(crate) const V: u32 = 1;
 /// the corpus takes it in. The field order is the line's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Row {
-    /// [`V`], on every row.
-    v: u32,
-    /// `phpt`, the instrument that took the reading.
-    instrument: String,
-    /// The scope as the reading spells it.
-    scope: String,
+    /// [`V`], and where the reading was taken.
+    #[serde(flatten)]
+    head: Head,
     /// The subset the scope names; null for a scope outside the grammar
     /// [`Scope`] reads, which a reader takes for no subset's.
     subset: Option<String>,
@@ -42,17 +40,6 @@ pub(crate) struct Row {
     /// The compiled tier's lane the run was under; null for none, and
     /// where the subset is.
     lane: Option<Lane>,
-    /// The reading's own verdict.
-    status: Status,
-    /// When the reading was taken, RFC 3339.
-    at: String,
-    /// The commit it was taken at, as the reading records it; null where
-    /// it records none.
-    commit: Option<String>,
-    /// The digest of the oracle pin the run was taken under, where the
-    /// reading records one (#1387).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recipe: Option<String>,
     /// Whether anything ran: false for a binary absent or stale, a crate
     /// not yet created, a subset refused before it ran, and a comparison,
     /// which runs nothing of its own.
@@ -145,13 +132,12 @@ impl PerReading for Row {
 
     /// The facts of one reading: the rules, as a pure function of it.
     fn of(reading: &Reading) -> Row {
-        let counted = |key: &str| reading.numbers.get(key).map(|n| whole(*n));
-        let count = |key: &str| counted(key).unwrap_or(0);
+        let counted = |key: &str| count(reading, key).unwrap_or(0);
         let sum = |which: fn(Judgement) -> bool| -> u64 {
             Judgement::ALL
                 .into_iter()
                 .filter(|j| which(*j))
-                .map(|j| count(j.key()))
+                .map(|j| counted(j.key()))
                 .sum()
         };
         let scope: Option<Scope> = reading.scope.parse().ok();
@@ -160,53 +146,37 @@ impl PerReading for Row {
             Some((_, Comparison::Control)) => Role::Control,
             Some((_, Comparison::Against)) => Role::Against,
         });
-        let tests = count(numbers::TESTS);
+        let tests = counted(numbers::TESTS);
         let (p, d, u) = (
-            count(Judgement::Pass.key()),
-            count(Judgement::Diverged.key()),
-            count(Judgement::Unread.key()),
+            counted(Judgement::Pass.key()),
+            counted(Judgement::Diverged.key()),
+            counted(Judgement::Unread.key()),
         );
         let f = sum(<Judgement as tally::Judgement>::counts_against);
-        let nothing_ran = count(numbers::ENGINE_ABSENT) > 0 || count(numbers::ENGINE_STALE) > 0;
-        let judged = count(tally::RUN) > 0 || sum(|_| true) > 0;
+        let nothing_ran = counted(numbers::ENGINE_ABSENT) > 0 || counted(numbers::ENGINE_STALE) > 0;
+        let judged = counted(tally::RUN) > 0 || sum(|_| true) > 0;
         Row {
-            v: V,
-            instrument: reading.instrument.clone(),
-            scope: reading.scope.clone(),
+            head: Head::of(reading, V),
             subset: scope.as_ref().map(|scope| scope.subset.clone()),
             role,
             lane: scope.as_ref().and_then(|scope| scope.lane),
-            status: reading.status,
-            at: reading.at.to_string(),
-            commit: Some(reading.commit.clone()).filter(|commit| !commit.is_empty()),
-            recipe: reading.recipe.clone(),
             measured: judged && !nothing_ran,
             tests,
-            files: counted(numbers::FILES).unwrap_or(tests),
+            files: count(reading, numbers::FILES).unwrap_or(tests),
             p,
             d,
             f,
             u,
             s: tests.saturating_sub(p + d + f + u),
             met: sum(<Judgement as tally::Judgement>::met),
-            target: counted(Measure::TARGET).map(|n| Target {
+            target: count(reading, Measure::TARGET).map(|n| Target {
                 n,
-                met: count(Measure::MET),
-                outside: count(Measure::OUTSIDE),
-                predated: count(Measure::PREDATED),
-                missed_skipped: counted(Measure::MISSED_SKIPPED),
+                met: counted(Measure::MET),
+                outside: counted(Measure::OUTSIDE),
+                predated: counted(Measure::PREDATED),
+                missed_skipped: count(reading, Measure::MISSED_SKIPPED),
             }),
         }
-    }
-}
-
-/// A count as a whole number: a negative one, which no lane writes, is
-/// none, and a measurement is rounded.
-fn whole(n: Number) -> u64 {
-    match n {
-        Number::Int(n) => u64::try_from(n).unwrap_or(0),
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Number::Float(n) => n.max(0.0).round() as u64,
     }
 }
 
