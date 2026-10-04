@@ -55,10 +55,13 @@ pub fn fork() -> io::Result<Forked> {
     // SAFETY: `fork` takes no argument and writes no memory of this
     // process. In the child the calling thread alone runs, so nothing
     // this thread reaches there is written by another, and what another
-    // held stays held, which can stall the child and cannot race it; the
-    // async-signal-safe rule for the child of a process with other
-    // threads is stated on this function, for the engine, its one
-    // caller, to keep (#1807).
+    // held stays held, which can stall the child and cannot race it.
+    // POSIX's async-signal-safe rule for the child of a process with
+    // other threads is not one this function can see or enforce: no type
+    // here witnesses that the process has one thread, so it rests on the
+    // engine, the one consumer the `process` seam admits, forking with
+    // none of its own alive, which #1807 builds; until then nothing
+    // calls this function.
     let id = unsafe { libc::fork() };
     match id {
         -1 => Err(io::Error::last_os_error()),
@@ -83,8 +86,14 @@ mod tests {
             Forked::Parent { child } => child,
         };
         let mut status = 0;
-        // SAFETY: `status` is a live `c_int` that `waitpid` writes once.
-        let waited = unsafe { libc::waitpid(child.as_raw(), &raw mut status, 0) };
+        let waited = loop {
+            // SAFETY: `status` is a live `c_int` that `waitpid` writes once.
+            let waited = unsafe { libc::waitpid(child.as_raw(), &raw mut status, 0) };
+            let interrupted = std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR);
+            if waited != -1 || !interrupted {
+                break waited;
+            }
+        };
         assert_eq!(waited, child.as_raw());
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 7);

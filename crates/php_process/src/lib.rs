@@ -19,7 +19,8 @@
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
 )]
-// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+// The denials seams.toml's lints.no-panic holds php_heap to, declared here as
+// php_heap declares them; the rule's scope does not name this crate yet.
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
