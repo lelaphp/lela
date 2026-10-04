@@ -13,15 +13,20 @@
 //! its lines are the commands the shell runs, read as a line of their
 //! own. Leading assignments, reserved words (`if`, `{`, `!`) and a few
 //! programs that run the rest of their words (`env`, `command`, `nohup`)
-//! are peeled, so the argv is the program's that runs. What a shell can
-//! hide beyond that (a variable holding the program's name, an alias, a
-//! function) is not read; pre-push and CI run `done` behind it.
+//! are peeled, so the argv is the program's that runs; a variable the line
+//! assigned, standing as the program, is read as its words. xtask's argv
+//! is decoded once, however it is run (the cargo alias, `cargo run -p
+//! xtask`, a path), as its name and the words it receives, so `with =
+//! "xtask phpt"` names every form (#1860). What a shell can hide beyond
+//! that (a variable the line does not assign, an alias, a function) is
+//! not read; pre-push and CI run `done` behind it.
 //!
 //! The same reading gives a `deny_pattern` its text ([`Line::text`]): the
 //! line with the heredoc bodies it carries as text removed, so a pattern
 //! judges what a command runs and not what it quotes (#1771, #1832), as
 //! an argv rule does. One lexer decides what a body is for both.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use crate::manifest::OneOrMany;
@@ -161,6 +166,8 @@ struct Lexer {
     /// The heredoc body lines skipped as text, each with its line ending,
     /// as ranges of `chars` in order.
     text_bodies: Vec<Range<usize>>,
+    /// The variables the line has assigned so far ([`Assigned`]).
+    assigned: Assigned,
 }
 
 impl Lexer {
@@ -172,6 +179,7 @@ impl Lexer {
             heredocs: Vec::new(),
             line_start: 0,
             text_bodies: Vec::new(),
+            assigned: Assigned::new(),
         }
     }
 
@@ -337,7 +345,8 @@ impl Lexer {
         self.end_word(command);
         command.next = Next::Argument;
         let words = std::mem::take(&mut command.words);
-        if let Some(argv) = Argv::running(words) {
+        self.assigned.read(&words);
+        if let Some(argv) = Argv::running(words, &self.assigned) {
             let nested = argv.nested_line();
             self.commands.push(argv);
             if let Some(line) = nested {
@@ -404,6 +413,131 @@ impl Lexer {
     }
 }
 
+/// Builtins whose operands are assignments to the shell's own variables.
+const DECLARING: [&str; 5] = ["export", "readonly", "declare", "typeset", "local"];
+
+/// The variables a line assigns in a command of their own, `X=v` or
+/// `export X=v`, by name, each its last value: what `$X` or `${X}`
+/// standing as a later command's program runs. An assignment in front of
+/// a program is that program's environment and not the shell's, which
+/// expands the line before it assigns, so it is none of these. One made
+/// in a subshell or a substitution is read as the line's: the reading is
+/// then stricter than the shell, never looser.
+struct Assigned(BTreeMap<String, String>);
+
+impl Assigned {
+    fn new() -> Assigned {
+        Assigned(BTreeMap::new())
+    }
+
+    /// The assignments a command's words make, where they are the whole
+    /// command or a declaring builtin's operands.
+    fn read(&mut self, words: &[String]) {
+        let operands = match words.split_first() {
+            Some((first, rest)) if DECLARING.contains(&first.as_str()) => rest,
+            _ if words.iter().all(|w| is_assignment(w)) => words,
+            _ => return,
+        };
+        for (name, value) in operands.iter().filter_map(|w| w.split_once('=')) {
+            if is_name(name) {
+                self.0.insert(name.to_owned(), value.to_owned());
+            }
+        }
+    }
+
+    /// The words `$X` or `${X}` stands for, split as an unquoted expansion
+    /// is; `None` for any other word, or a variable the line never
+    /// assigned.
+    fn expand(&self, word: &str) -> Option<Vec<String>> {
+        let name = word.strip_prefix('$')?;
+        let name = name
+            .strip_prefix('{')
+            .and_then(|n| n.strip_suffix('}'))
+            .unwrap_or(name);
+        let value = self.0.get(name)?;
+        Some(value.split_whitespace().map(str::to_owned).collect())
+    }
+}
+
+/// Cargo's options that take the word after them as their value, before
+/// its subcommand and among `cargo run`'s own.
+const CARGO_VALUED: [&str; 18] = [
+    "--color",
+    "--explain",
+    "--config",
+    "-Z",
+    "-C",
+    "-p",
+    "--package",
+    "--bin",
+    "--example",
+    "-F",
+    "--features",
+    "-j",
+    "--jobs",
+    "--profile",
+    "--target",
+    "--target-dir",
+    "--manifest-path",
+    "--message-format",
+];
+
+/// Where the words xtask receives start, when `words` run it: after its
+/// own name, by any path; after cargo's `xtask` alias, past cargo's own
+/// options; or after `cargo run -p xtask`'s options and its `--`, if any
+/// (`cargo r`, `--bin xtask` alike).
+/// `None` where they run anything else. The alias is `run --package xtask
+/// --` (.cargo/config.toml).
+fn xtask_own(words: &[String]) -> Option<usize> {
+    match basename(words.first()?) {
+        "xtask" => Some(1),
+        "cargo" => {
+            let at = past_options(words, 1);
+            match words.get(at)?.as_str() {
+                "xtask" => Some(at + 1),
+                "run" | "r" => run_of_xtask(words, at + 1),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Past cargo's options standing from `at`, each with its value where it
+/// takes one ([`CARGO_VALUED`]), and a `+toolchain`; never past `--`.
+fn past_options(words: &[String], mut at: usize) -> usize {
+    while let Some(word) = words
+        .get(at)
+        .filter(|w| w.starts_with(['-', '+']) && *w != "--")
+    {
+        at += if CARGO_VALUED.contains(&word.as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    at.min(words.len())
+}
+
+/// Where the binary's words start in a `cargo run` whose own words start
+/// at `at`, when what it runs is xtask (`-p xtask`, or `--bin xtask`):
+/// after its `--`, or at its first operand, every word from which `run`
+/// hands the binary.
+fn run_of_xtask(words: &[String], at: usize) -> Option<usize> {
+    let end = past_options(words, at);
+    let options = &words[at.min(end)..end];
+    let xtask = options.iter().enumerate().any(|(i, w)| match w.as_str() {
+        "-p" | "--package" | "--bin" => options.get(i + 1).is_some_and(|p| p == "xtask"),
+        w => matches!(w, "--package=xtask" | "-pxtask" | "--bin=xtask"),
+    });
+    let args = if words.get(end).is_some_and(|w| w == "--") {
+        end + 1
+    } else {
+        end
+    };
+    xtask.then_some(args)
+}
+
 /// Words a command starts with that are the shell's and not the program's.
 const RESERVED: [&str; 10] = [
     "!", "{", "}", "if", "then", "elif", "else", "do", "while", "until",
@@ -433,23 +567,37 @@ fn basename(word: &str) -> &str {
 }
 
 fn is_assignment(word: &str) -> bool {
-    word.split_once('=').is_some_and(|(name, _)| {
-        name.chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
+    word.split_once('=').is_some_and(|(name, _)| is_name(name))
+}
+
+/// A shell variable's name: a letter or `_`, then letters, digits and `_`.
+fn is_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl Argv {
     /// The argv of the program a command's words run, past its leading
-    /// assignments, reserved words and wrappers; `None` when they run none.
-    fn running(mut words: Vec<String>) -> Option<Argv> {
+    /// assignments, reserved words and wrappers, with a variable the line
+    /// [`Assigned`] read as its words where it stands as the program, and
+    /// xtask's argv, its name and the words it receives, however it is run
+    /// ([`xtask_own`]); `None` when they run none.
+    fn running(mut words: Vec<String>, assigned: &Assigned) -> Option<Argv> {
         let mut at = 0;
+        // The shell expands a word once: what `$X` stands for is never
+        // expanded again, so `X='$X'; $X` runs the program `$X`.
+        let mut expanded = false;
         loop {
             let word = words.get(at)?;
             if RESERVED.contains(&word.as_str()) || is_assignment(word) {
                 at += 1;
+                continue;
+            }
+            if let Some(value) = assigned.expand(word).filter(|_| !expanded) {
+                words.splice(at..=at, value);
+                expanded = true;
                 continue;
             }
             let Some((_, valued)) = WRAPPERS.iter().find(|(w, _)| *w == basename(word)) else {
@@ -465,6 +613,9 @@ impl Argv {
             }
         }
         words.drain(..at);
+        if let Some(own) = xtask_own(&words) {
+            words.splice(..own, ["xtask".to_owned()]);
+        }
         Some(Argv(words))
     }
 
@@ -865,6 +1016,106 @@ mod tests {
         );
         assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
         assert_eq!(words("A=1"), Vec::<Vec<String>>::new());
+    }
+
+    /// Whether a command of the line is the one `phrase` names.
+    fn names(line: &str, phrase: &str) -> bool {
+        let with = OneOrMany::One(phrase.to_owned());
+        commands(line).iter().any(|argv| argv.invokes(&with))
+    }
+
+    /// Every way xtask is run names `xtask phpt` (#1860): the cargo alias,
+    /// `cargo run` on the package, the binary by any path, and a variable
+    /// the line assigned one of those, in an assignment of its own or an
+    /// `export`. Where the words are quoted text or another program's,
+    /// none does.
+    #[test]
+    fn an_xtask_invocation_is_read_however_xtask_is_run() {
+        for line in [
+            "cargo xtask phpt --full",
+            "cargo +nightly -q xtask phpt",
+            "cargo --color never xtask --root /tmp/x phpt",
+            "cargo run -p xtask -- phpt --full",
+            "cargo run -q --release --package xtask -- phpt",
+            "cargo run --package=xtask -- phpt",
+            "cargo -q run -pxtask -- phpt",
+            "cargo run -p xtask phpt --full",
+            "cargo run -j 4 -p xtask --bin xtask -- phpt",
+            "cargo r --bin xtask -- phpt",
+            "target/release/xtask phpt --full",
+            "./xtask phpt",
+            "cd x && /Users/m/dax-php/target/debug/xtask phpt > lane.out",
+            "XTASK=target/release/xtask; $XTASK phpt --full",
+            "X='cargo xtask'\n${X} phpt",
+            "export X=\"cargo run -q -p xtask --\" && A=1 $X phpt",
+            "X=target/debug/xtask Y=1; \"$X\" phpt",
+        ] {
+            assert!(names(line, "xtask phpt"), "{line}: {:?}", words(line));
+        }
+        for line in [
+            "git commit -m \"cargo xtask phpt --full\" -- a.yml",
+            "gh issue create --title t --body 'run cargo xtask phpt --full nightly'",
+            "echo cargo xtask phpt",
+            "cargo run -p other -- phpt",
+            "cargo test -p xtask phpt",
+            "cargo run -p xtask",
+            "cargo xtask bench",
+            "$XTASK phpt",
+            "X=target/release/xtask $X phpt",
+            "X='$X'; $X phpt",
+            "X='$Y'; Y='cargo xtask'; $X phpt",
+            "X=cargo; echo $X xtask phpt",
+            "rg 'xtask phpt' xtask/src",
+        ] {
+            assert!(!names(line, "xtask phpt"), "{line}: {:?}", words(line));
+        }
+        // xtask's argv is the words it receives, its own name first.
+        assert_eq!(
+            words("cargo run -q -p xtask -- phpt --subset ext/pcre"),
+            vec![vec!["xtask", "phpt", "--subset", "ext/pcre"]]
+        );
+        assert_eq!(
+            words("X='cargo xtask'; $X phpt"),
+            vec![vec!["xtask", "phpt"]]
+        );
+    }
+
+    /// `lanes.nightly`'s flags as `deny_argv` reads them: among the words
+    /// xtask's instrument receives, however xtask is run, and never where a
+    /// message cites them or another instrument carries them.
+    #[test]
+    fn the_nightly_flags_are_read_among_the_instruments_own_words() {
+        let with = "xtask phpt";
+        let lane = ["--full", "--jit"];
+        assert!(denies("cargo xtask phpt --full || true", &lane, with));
+        assert!(denies(
+            "cargo run -p xtask -- phpt --jit force",
+            &lane,
+            with
+        ));
+        assert!(denies(
+            "target/release/xtask phpt --jit=exit-fuzz",
+            &lane,
+            with
+        ));
+        assert!(denies(
+            "X=target/release/xtask; $X phpt --full",
+            &lane,
+            with
+        ));
+        assert!(!denies("cargo xtask phpt --subset ext/pcre", &lane, with));
+        assert!(!denies(
+            "git commit -m 'cargo xtask phpt --full' -- a.yml",
+            &lane,
+            with
+        ));
+        assert!(!denies("cargo xtask bench --full", &lane, with));
+        assert!(denies(
+            "cargo xtask bench --jit force",
+            &lane,
+            "xtask bench"
+        ));
+        assert!(!denies("cargo xtask phpt -- --full", &lane, with));
     }
 
     fn denies(line: &str, denied: &[&str], with: &str) -> bool {
