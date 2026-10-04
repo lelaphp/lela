@@ -27,8 +27,6 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # a persistent link in session's `RSHUTDOWN` (#1695).
 php_ext_session = { path = "../session" }
 php_ext_standard = { path = "../standard" }
-# spl, which php always has and pdo requires (`ZEND_MOD_REQUIRED("spl")`):
-# `PDOException` extends its `RuntimeException`, so an engine with pdo and
-# no spl throws one with no `message`, `file`, `line` or `trace` declared
-# (#1867).
+# spl, which php always has and pdo requires (`ZEND_MOD_REQUIRED("spl")`),
+# for the engines that carry pdo (tests/capture.rs says why; #1867).
 php_ext_spl = { path = "../spl" }

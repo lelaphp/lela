@@ -1,5 +1,10 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
-//! fresh engine with this crate alone, never the bundle.
+//! fresh engine with this crate and what a test needs beside it, never
+//! the bundle. An engine that carries pdo carries spl, which php always
+//! has and pdo requires: without it `PDOException` has no
+//! `RuntimeException` to extend, and a connect failure writes `message`,
+//! `file`, `line` and `trace` as dynamic properties, four deprecations
+//! before anything the request prints (#1867).
 
 use php_ext::test::{Capture, Engine};
 
@@ -18,18 +23,13 @@ fn the_extension_is_loaded() {
 /// variable still set on it; once the server has killed it, the ping the
 /// next request sends finds it dead and a new connection replaces it.
 /// Skipped where no server answers on `ci/mysql/compose.yaml`'s address.
-/// The engine carries spl, which php always has: without it
-/// `PDOException` has no `RuntimeException` to extend, and the connect
-/// failure that says there is no server writes `message`, `file`, `line`
-/// and `trace` as dynamic properties, four deprecations before the
-/// `no server` the skip reads (#1867).
 #[test]
 fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() {
     let engine = Engine::builder()
         .extensions(&[
             php_ext_spl::extension(),
-            php_ext_mysqlnd::extension(),
             php_ext_pdo::extension(),
+            php_ext_mysqlnd::extension(),
             php_ext_pdo_mysql::extension(),
         ])
         .build();
@@ -78,8 +78,8 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
     let engine = Engine::builder()
         .extensions(&[
             php_ext_standard::extension(),
-            php_ext_session::extension(),
             php_ext_spl::extension(),
+            php_ext_session::extension(),
             php_ext_pdo::extension(),
             php_ext_mysqlnd::extension(),
             php_ext_pdo_mysql::extension(),
