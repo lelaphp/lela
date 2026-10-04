@@ -11,9 +11,12 @@ use crate::reading::Reading;
 use crate::status::PerReading;
 use crate::status::every::{Head, count};
 
-/// The version of [`Row`]'s shape. It changes when the shape does, a
-/// field added, removed, renamed or read differently, and never for a
-/// new reading; a reader refuses a `v` it does not know.
+/// The version of [`Row`]'s shape, which changes only when the shape does
+/// and never for a new reading; a reader refuses a `v` it does not know
+/// (harness-design.md §4.6, revision 76). A field a row may omit, whose
+/// absence a reader of the earlier shape already handles correctly, is
+/// added under the same `v`; a field removed, renamed or retyped, or a
+/// meaning changed, is a new `v`.
 pub(crate) const V: u32 = 1;
 
 /// One budget reading: a crate's lines against its ceiling, `scripts/**`'s,

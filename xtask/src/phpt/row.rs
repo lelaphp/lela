@@ -15,14 +15,14 @@ use crate::status::PerReading;
 use crate::status::every::{Head, count};
 use crate::tally;
 
-/// The version of [`Row`]'s shape. It changes when the shape does, a
-/// field removed, renamed or read differently, or one added that a reader
-/// of the earlier shape could not do without, and never for a new
-/// reading; a reader refuses a `v` it does not know. A field a row may
-/// omit, whose absence a reader of the earlier shape already reads right,
-/// is added under the same `v`: such a reader ignores it and keeps the
-/// answer it had, as `target.missed_skipped` (#1834) leaves a reader of
-/// `v = 1` its own estimate of the target's skipped misses.
+/// The version of [`Row`]'s shape, which changes only when the shape does
+/// and never for a new reading; a reader refuses a `v` it does not know
+/// (harness-design.md §4.6, revision 76). A field a row may omit, whose
+/// absence a reader of the earlier shape already handles correctly, is
+/// added under the same `v`, as `target.missed_skipped` was (#1834): a
+/// reader of `v = 1` that never reads it keeps its own estimate of the
+/// target's skipped misses. A field removed, renamed or retyped, or a
+/// meaning changed, is a new `v`.
 pub(crate) const V: u32 = 1;
 
 /// One phpt reading, in the shape the dashboard and any other reader of
