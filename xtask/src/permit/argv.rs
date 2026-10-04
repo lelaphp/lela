@@ -1095,7 +1095,7 @@ mod tests {
         );
     }
 
-    /// `lanes.nightly`'s flags as `deny_argv` reads them: among the words
+    /// `lanes.nightly-flags` as `deny_argv` reads them: among the words
     /// xtask's instrument receives, however xtask is run, and never where a
     /// message cites them or another instrument carries them.
     #[test]
