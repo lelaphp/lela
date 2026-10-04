@@ -674,12 +674,11 @@ impl Worker {
 /// microseconds, what `times()` gives php.
 fn cpu_us() -> i64 {
     use nix::sys::resource::{UsageWho, getrusage};
-    use nix::sys::time::{TimeVal, TimeValLike as _};
-    let micro = |t: TimeVal| t.num_microseconds();
+    use nix::sys::time::TimeValLike as _;
     [UsageWho::RUSAGE_SELF, UsageWho::RUSAGE_CHILDREN]
         .into_iter()
         .filter_map(|who| getrusage(who).ok())
-        .map(|u| micro(u.user_time()) + micro(u.system_time()))
+        .map(|u| u.user_time().num_microseconds() + u.system_time().num_microseconds())
         .sum()
 }
 
