@@ -279,7 +279,6 @@ ticket::Gh::view
 ticket::Issue
 ticket::Label
 ticket::Open
-ticket::Open::blocked
 ticket::Open::label_names
 ticket::State
 ticket::SubIssues
@@ -300,7 +299,6 @@ track::Track::of
 track::Track::render
 track::Track::to_json
 track_chains::Chains
-track_chains::Chains::of
 track_chains::Chains::render
 track_chains::Row
 track_chains::command

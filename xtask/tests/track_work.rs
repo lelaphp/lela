@@ -775,6 +775,72 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
     );
 }
 
+/// A run that closes a blocker does not lay its dependent down in the
+/// same run (#1843, #1850): #21 is blocked by #20, the session closes
+/// #20 and the tracker then counts #20 closed, but `t20` waits for /specs
+/// and `main` does not contain it, so the run ends at "none" with #21
+/// never laid down. Once `main` holds `t20`, the next run names #21 and
+/// cuts `t21` from that `main`, which holds what it waited on.
+#[test]
+fn a_run_that_closes_a_blocker_does_not_lay_down_its_dependent() {
+    let scratch = Scratch::lay("blocker");
+    let ticket = |number: u64, state: &str| {
+        serde_json::json!({
+            "number": number,
+            "title": format!("ticket {number}"),
+            "url": format!("https://example.invalid/issues/{number}"),
+            "labels": [{"name": "ready-for-agent"}],
+            "blockedBy": if number == 21 {
+                serde_json::json!({"nodes": [{"number": 20, "state": state}], "totalCount": 1})
+            } else {
+                serde_json::json!({"nodes": [], "totalCount": 0})
+            },
+        })
+    };
+    let list = |rows: Vec<serde_json::Value>| serde_json::Value::Array(rows).to_string();
+    fs::write(
+        scratch.dir.join("list.json"),
+        list(vec![ticket(21, "OPEN"), ticket(20, "OPEN")]),
+    )
+    .unwrap();
+    fs::write(
+        scratch.dir.join("list.after.json"),
+        list(vec![ticket(21, "CLOSED")]),
+    )
+    .unwrap();
+    scratch.viewed(20);
+    scratch.viewed(21);
+    scratch.act_on(20, "commit close");
+    scratch.act_on(21, "commit");
+    scratch.session_then(&format!(
+        "cp '{}' '{}'",
+        scratch.dir.join("list.after.json").display(),
+        scratch.dir.join("list.json").display()
+    ));
+    let (code, out) = scratch.work(&[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("#20 closed at"), "{out}");
+    assert!(
+        !has_ref(&scratch.root, "refs/heads/t21"),
+        "#21 is not laid down off a main without t20: {out}"
+    );
+    assert!(
+        out.contains("the frontier of main is empty after 1 ticket: #20 closed"),
+        "{out}"
+    );
+
+    // /specs merges t20; the next run names #21 and cuts it from that main.
+    sh(&scratch.root, &["git", "merge", "-q", "--ff-only", "t20"]);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "#21 is left open: {out}");
+    assert!(out.contains("track work: #21 ticket 21: on t21"), "{out}");
+    assert_eq!(
+        rev(&scratch.root, "t21^"),
+        rev(&scratch.root, "t20"),
+        "cut from a main that holds t20: {out}"
+    );
+}
+
 /// A ticket labelled `frontier:research` starts the session on
 /// `/research <n>` (#81): the skill's line is the one thing that
 /// changes, the model, the mode and the effort as the flags set them,

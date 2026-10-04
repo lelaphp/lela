@@ -2,15 +2,18 @@
 //! plan): `xtask track chains` prints every open ticket that is this
 //! track's under the ticket that blocks it, so a session reads the whole
 //! frontier and what waits behind it in one call instead of walking
-//! `blockedBy` ticket by ticket. A chain starts at a ticket no open ticket
+//! `blockedBy` ticket by ticket. A ticket blocks as `track next` judges
+//! it, [`waits_on`]: while it is open, or while the branch recording it
+//! is not yet in `main` (#1850). A chain starts at a ticket no open ticket
 //! shown blocks and runs down through what it unblocks; a ticket with two
 //! blockers is written out under the first by number and named under the
 //! others. Tickets that block nothing and wait on nothing follow the
 //! chains, on their own. Every line carries the ticket's standing as
 //! `track next` judges it: `ready` for `ready-for-agent`, `a person's` for
-//! `for-a-person`, the branch of this clone that records it, and the open
+//! `for-a-person`, the branch of this clone that records it, and the
 //! tickets it waits on, this track's or not. Reads the tracker through
-//! [`Gh::open`], the ticket module's one list, and writes no reading.
+//! [`Gh::open`], the ticket module's one list, and the branch records
+//! once, and writes no reading.
 //!
 //! `--crate <name>` keeps the tickets whose title names the crate before
 //! its colon, the shape the frontier skill files them in (`php_engine,
@@ -24,9 +27,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::ticket::{Gh, Open, State};
-use crate::track::{self, Ticket};
-use crate::track_next::{PERSON, READY, is_tracks};
+use crate::ticket::{Gh, Open};
+use crate::track::{Records, Ticket};
+use crate::track_next::{PERSON, READY, is_tracks, waits_on};
 
 /// The `--crate` value that keeps the tickets naming no crate.
 const NO_CRATE: &str = "none";
@@ -40,7 +43,8 @@ pub struct Row {
     pub labels: Vec<String>,
     /// The branch of this clone that records the ticket, when one does.
     pub branch: Option<String>,
-    /// The open tickets blocking it, shown here or not.
+    /// The tickets blocking it as the frontier judges them, open or on a
+    /// branch not yet in `main`, shown here or not.
     pub waits_on: Vec<u64>,
     /// The tickets shown here that it blocks.
     pub blocks: Vec<u64>,
@@ -87,13 +91,13 @@ pub struct Chains {
 
 impl Chains {
     /// The rows of `track` among the open tickets, `krate` narrowing them
-    /// to the ones naming it, `recorded` answering which branch of the
-    /// clone records one; a function of the tracker's answer and that.
-    pub fn of(
+    /// to the ones naming it, `records` answering what the branches of
+    /// the clone record; a function of the tracker's answer and those.
+    pub(crate) fn of(
         open: Vec<Open>,
         track: &str,
         krate: Option<&str>,
-        recorded: impl Fn(u64) -> Option<String>,
+        records: &Records,
     ) -> Chains {
         let mut kept: Vec<Open> = open
             .into_iter()
@@ -104,26 +108,17 @@ impl Chains {
         let shown: BTreeSet<u64> = kept.iter().map(|ticket| ticket.number).collect();
         let mut blocks: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for ticket in &kept {
-            for blocker in &ticket.blocked_by.nodes {
-                if blocker.state == State::Open && shown.contains(&blocker.number) {
-                    blocks
-                        .entry(blocker.number)
-                        .or_default()
-                        .push(ticket.number);
-                }
+            for blocker in waits_on(ticket, records).filter(|n| shown.contains(n)) {
+                blocks.entry(blocker).or_default().push(ticket.number);
             }
         }
         let rows = kept
             .into_iter()
             .map(|ticket| Row {
-                branch: recorded(ticket.number),
-                waits_on: ticket
-                    .blocked_by
-                    .nodes
-                    .iter()
-                    .filter(|blocker| blocker.state == State::Open)
-                    .map(|blocker| blocker.number)
-                    .collect(),
+                branch: records
+                    .branch(Ticket::new(ticket.number))
+                    .map(str::to_owned),
+                waits_on: waits_on(&ticket, records).collect(),
                 blocks: blocks.remove(&ticket.number).unwrap_or_default(),
                 labels: ticket.label_names().map(str::to_owned).collect(),
                 number: ticket.number,
@@ -152,7 +147,7 @@ impl Chains {
             .filter(|row| row.labels.iter().any(|l| l == PERSON))
             .count();
         let mut out = format!(
-            "{}: {} open, {} no open ticket blocks, {waiting} waiting on an open ticket, {person} a person's\n",
+            "{}: {} open, {} no ticket blocks, {waiting} waiting on a blocker, {person} a person's\n",
             self.track,
             self.rows.len(),
             self.rows.len() - waiting,
@@ -267,9 +262,7 @@ fn is_crate(word: &str) -> bool {
 /// or as one JSON object; no reading.
 pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
     let open = Gh::on_path().open(root)?;
-    let chains = Chains::of(open, track, krate, |number| {
-        track::branch_of_ticket(root, Ticket::new(number))
-    });
+    let chains = Chains::of(open, track, krate, &Records::read(root)?);
     if json {
         println!("{}", serde_json::to_string_pretty(&chains)?);
     } else {
@@ -280,8 +273,11 @@ pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Res
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{Chains, names};
     use crate::ticket::{BlockedBy, Blocker, Label, Open, State};
+    use crate::track::{Records, Ticket};
 
     fn ticket(number: u64, title: &str, labels: &[&str], blocked_by: &[(u64, State)]) -> Open {
         Open {
@@ -308,8 +304,9 @@ mod tests {
 
     /// A chain runs from the blocker down; a ticket with two blockers is
     /// written out under the first and named under the second; a closed
-    /// blocker is no wait; a ticket with no edge stands on its own; a
-    /// blocker labelled another track is a wait but not a row.
+    /// blocker is no wait, unless the branch recording it is not yet in
+    /// `main` (#1850); a ticket with no edge stands on its own; a blocker
+    /// labelled another track is a wait but not a row.
     #[test]
     fn chains_are_written_from_the_blocker_down() {
         let open = vec![
@@ -328,23 +325,34 @@ mod tests {
             ),
             ticket(4, "xtask: d", &[], &[(7, State::Open)]),
             ticket(5, "ext/json: e", &["ready-for-agent"], &[]),
+            ticket(
+                6,
+                "ext/pcre: g",
+                &["ready-for-agent"],
+                &[(8, State::Closed)],
+            ),
             ticket(7, "php_heap: f", &["ready-for-agent", "track:other"], &[]),
         ];
-        let chains = Chains::of(open, "main", None, |number| {
-            (number == 5).then(|| "t5".to_owned())
-        });
+        let recorded = vec![
+            ("t5".to_owned(), Ticket::new(5)),
+            ("t8".to_owned(), Ticket::new(8)),
+            ("t9".to_owned(), Ticket::new(9)),
+        ];
+        let records = Records::of(recorded, &BTreeSet::from(["t5", "t8"]));
+        let chains = Chains::of(open, "main", None, &records);
         assert_eq!(
             chains.render(),
-            "main: 5 open, 2 no open ticket blocks, 3 waiting on an open ticket, 1 a person's\n\
+            "main: 6 open, 2 no ticket blocks, 4 waiting on a blocker, 1 a person's\n\
              \n\
              #1 php_engine: a [ready]\n\
              \x20 #2 php_compile: b [ready, waits on #1]\n\
              \x20   #3 seams.toml: c [a person's, waits on #1, #2]\n\
              \x20 #3, written out above under #2\n\
              \n\
-             2 on their own: no open ticket shown blocks them and they block nothing shown\n\
+             3 on their own: no open ticket shown blocks them and they block nothing shown\n\
              #4 xtask: d [no label, waits on #7]\n\
-             #5 ext/json: e [ready, on t5]\n"
+             #5 ext/json: e [ready, on t5]\n\
+             #6 ext/pcre: g [ready, waits on #8]\n"
         );
     }
 
