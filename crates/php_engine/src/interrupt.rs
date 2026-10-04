@@ -122,27 +122,52 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// thread there, since a child copies its calling thread alone, as a
 /// child does not inherit php's interval timer either. It is forgotten,
 /// neither woken nor joined: the mutex waking takes may have been copied
-/// held, and there is nothing to join.
-///
-/// The stress below forks a child straight after each `set_time_limit()`
-/// in eight workers at once, and counts as hung a child not gone within
-/// five seconds, which it kills.
+/// held, and there is nothing to join. So the child runs untimed, as
+/// php's does, until it sets a limit of its own.
 ///
 /// ```php
+/// set_time_limit(1);
+/// if (($child = pcntl_fork()) === 0) {
+///     for ($until = microtime(true) + 2; microtime(true) < $until;) {}
+///     echo "the child ran past its parent's limit\n";
+///     exit(0);
+/// }
+/// set_time_limit(0);
+/// pcntl_waitpid($child, $status);
+/// var_dump(pcntl_wifexited($status), pcntl_wexitstatus($status));
+/// ```
+/// ```expect process wall=2s
+/// the child ran past its parent's limit
+/// bool(true)
+/// int(0)
+/// ```
+///
+/// The stress below forks a child straight after each `set_time_limit()`
+/// in eight workers at once. A child not gone within five seconds is
+/// hung, and killed; a fork that failed, or a child or a worker that did
+/// not end with status zero, is counted apart, so neither passes as a
+/// child that did not hang.
+///
+/// ```php
+/// $tally = [];
 /// for ($w = 0; $w < 8; $w++) {
-///     if (($workers[] = pcntl_fork()) !== 0) { continue; }
-///     $hung = 0;
+///     $tally[$w] = tempnam(sys_get_temp_dir(), 'timer');
+///     if (($workers[$w] = pcntl_fork()) !== 0) { continue; }
+///     $hung = $otherwise = 0;
 ///     for ($forked = 0; $forked < 1875; $forked += 25) {
 ///         $children = [];
 ///         for ($i = 0; $i < 25; $i++) {
 ///             set_time_limit(30);
-///             if (($child = pcntl_fork()) === 0) { exit(0); }
-///             $children[$child] = true;
+///             $child = pcntl_fork();
+///             if ($child === 0) { exit(0); }
+///             if ($child < 0) { $otherwise++; } else { $children[$child] = true; }
 ///         }
 ///         $deadline = microtime(true) + 5;
 ///         while ($children && microtime(true) < $deadline) {
 ///             $gone = pcntl_waitpid(-1, $status, WNOHANG);
-///             if ($gone > 0) { unset($children[$gone]); } else { usleep(1000); }
+///             if ($gone <= 0) { usleep(1000); continue; }
+///             unset($children[$gone]);
+///             if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $otherwise++; }
 ///         }
 ///         foreach ($children as $child => $_) {
 ///             posix_kill($child, SIGKILL);
@@ -150,17 +175,24 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 ///             $hung++;
 ///         }
 ///     }
-///     exit(min($hung, 255));
+///     file_put_contents($tally[$w], "$hung $otherwise");
+///     exit(0);
 /// }
-/// $hung = 0;
-/// foreach ($workers as $worker) {
+/// $hung = $otherwise = $workers_otherwise = 0;
+/// foreach ($workers as $w => $worker) {
 ///     pcntl_waitpid($worker, $status);
-///     $hung += pcntl_wexitstatus($status);
+///     if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $workers_otherwise++; }
+///     [$h, $o] = explode(' ', file_get_contents($tally[$w])) + [0, 0];
+///     $hung += (int) $h;
+///     $otherwise += (int) $o;
+///     unlink($tally[$w]);
 /// }
-/// echo "$hung of 15000 children hung\n";
+/// echo "$hung of 15000 children hung, $otherwise did not fork or end with status 0\n";
+/// echo "$workers_otherwise of 8 workers did not end with status 0\n";
 /// ```
 /// ```expect process wall=30s
-/// 0 of 15000 children hung
+/// 0 of 15000 children hung, 0 did not fork or end with status 0
+/// 0 of 8 workers did not end with status 0
 /// ```
 #[derive(Debug)]
 pub(crate) struct Timer {
@@ -169,7 +201,7 @@ pub(crate) struct Timer {
     /// The thread, which the drop takes to join or forget.
     thread: Option<JoinHandle<()>>,
     /// The process that armed it, the only one its thread is in.
-    armed_in: u32,
+    armed_in: Process,
 }
 
 impl Timer {
@@ -193,7 +225,7 @@ impl Timer {
             unset,
             interrupt: interrupt.clone(),
             thread: Some(thread),
-            armed_in: std::process::id(),
+            armed_in: Process::current(),
         })
     }
 }
@@ -206,7 +238,7 @@ impl Drop for Timer {
     /// is forgotten instead (see [`Timer`]).
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
-            if std::process::id() == self.armed_in {
+            if self.armed_in.is_current() {
                 self.unset.now();
                 // A thread that panicked has ended all the same.
                 let _ = thread.join();
@@ -215,6 +247,23 @@ impl Drop for Timer {
             }
         }
         self.interrupt.timer_unset();
+    }
+}
+
+/// A process, by its id, `getpid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Process(u32);
+
+impl Process {
+    /// The process this runs in.
+    fn current() -> Process {
+        Process(std::process::id())
+    }
+
+    /// Whether this is the process it runs in, which a child forked from
+    /// it never is.
+    fn is_current(self) -> bool {
+        self == Process::current()
     }
 }
 
@@ -249,10 +298,10 @@ impl Unset {
     /// ([`terminate`]), and one that finds it taken is a timeout of its
     /// own (`:1482`).
     fn elapse(&self, interrupt: &Interrupt, elapses: Duration, seconds: i64, hard: Option<u64>) {
-        let mut deadline = Instant::now() + elapses;
         let mut phase = self.held();
         *phase = Phase::Waiting;
         self.woken.notify_all();
+        let mut deadline = Instant::now() + elapses;
         loop {
             while *phase != Phase::Unset {
                 let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -280,7 +329,9 @@ impl Unset {
     }
 
     /// Wait until the thread has started and waits: past that point the
-    /// standard library's start is behind it.
+    /// standard library's start is behind it. Saying so is the first
+    /// thing the thread's body does, so nothing it runs can leave this
+    /// waiting.
     fn started(&self) {
         let mut phase = self.held();
         while *phase == Phase::Starting {
@@ -450,11 +501,15 @@ mod tests {
     }
 
     /// #1783: arming returns with the thread waiting, and dropping
-    /// returns with it ended, its share of the timer released, however
-    /// often `set_time_limit()` replaces one; and the drop wakes it
-    /// rather than waiting out the thirty seconds it was armed for.
+    /// returns with the thread's body done and its share of the timer
+    /// released, however often `set_time_limit()` replaces one; the drop
+    /// wakes it rather than waiting out the thirty seconds it was armed
+    /// for. That the thread has then ended, the standard library's exit
+    /// behind it too, is the join's, which nothing in the process can
+    /// observe short of counting its threads: the fork stress on
+    /// [`Timer`] is what holds it.
     #[test]
-    fn no_thread_a_timer_started_outlives_its_drop() {
+    fn a_timers_thread_waits_once_armed_and_is_done_once_dropped() {
         let interrupt = Interrupt::default();
         let began = Instant::now();
         for _ in 0..200 {
