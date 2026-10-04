@@ -29,6 +29,17 @@
 //!   written is php's and free, and each extension's feature switches on
 //!   the features of every extension it links ([`bundle`]).
 //!
+//! An item lock's reading counts its lines by the module that defines each
+//! in its `groups`, a key per module, beside the total in `numbers` (#1795):
+//! a type whose methods are written in one file per area is counted per
+//! file, so a split of one module into several, or the growth of one, is
+//! read off the reading and not off `api.lock`, whose format it leaves as
+//! it is. The counts are held to no ceiling, a per-area ceiling having
+//! been ruled out on 2026-10-01; `status --section modules` renders them.
+//! Every line is counted, `__private`'s included, which all stand under
+//! `php_engine::api::__private` and so are that module's row; an import
+//! lock, sectioned or not, and a rendered lock keep no groups.
+//!
 //! An extension's `pub` items beyond `extension()` are printed in its
 //! reading, as the manifest's `ext.pub-beyond-extension` note asks.
 
@@ -156,6 +167,16 @@ impl LockKind {
             LockKind::Rendered => "opcode",
         }
     }
+
+    /// What the lines of such a lock at `home` are, for a reading's
+    /// message.
+    fn subject(self, home: &str, seam: &Seam) -> String {
+        match self {
+            LockKind::Items => format!("public items of {home}"),
+            LockKind::Imports => format!("imports from {}", seam.producer),
+            LockKind::Rendered => format!("{} of {}", ops::SUBJECT, seam.producer),
+        }
+    }
 }
 
 fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
@@ -224,7 +245,7 @@ fn seam_reading(
     let committed = path.is_file().then(|| Lock::read(&path)).transpose()?;
     let (blocks, mut problems) = if seam.sections.is_empty() {
         let lines = match kind {
-            LockKind::Items => inventory.public_items(krate)?,
+            LockKind::Items => lines_counted_by_module(inventory, krate, &mut reading)?,
             LockKind::Imports => imports(manifest, crates, seam)?
                 .into_values()
                 .flatten()
@@ -239,11 +260,7 @@ fn seam_reading(
     reading
         .numbers
         .insert(numbers::ITEMS.to_owned(), count(generated.len()));
-    let subject = match kind {
-        LockKind::Items => format!("public items of {home}"),
-        LockKind::Imports => format!("imports from {}", seam.producer),
-        LockKind::Rendered => format!("{} of {}", ops::SUBJECT, seam.producer),
-    };
+    let subject = kind.subject(&home, seam);
 
     problems.extend(hold_lock(
         seam, kind, &path, &shown, &subject, committed, &blocks, write,
@@ -251,6 +268,7 @@ fn seam_reading(
     if write {
         let mut rewritten = stamped()?;
         rewritten.numbers = std::mem::take(&mut reading.numbers);
+        rewritten.groups = std::mem::take(&mut reading.groups);
         reading = rewritten;
     }
     if let Some(ceiling) = manifest.lock_ceiling(seam) {
@@ -706,6 +724,24 @@ const PRIVATE: &str = "__private";
 fn private(line: &str) -> bool {
     line.strip_prefix(PRIVATE)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
+/// The public items of `krate` as lock lines; on the way, `reading` gains
+/// one group per module that defines any, its count of them (#1795).
+fn lines_counted_by_module(
+    inventory: &mut Inventory<'_>,
+    krate: &Present,
+    reading: &mut Reading,
+) -> Result<BTreeSet<String>> {
+    let modules = inventory.defining_modules(krate)?;
+    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    for module in modules.values() {
+        *counts.entry(module).or_default() += 1;
+    }
+    for (module, n) in counts {
+        reading.group(module, n)?;
+    }
+    Ok(modules.into_keys().collect())
 }
 
 /// A count as a reading's number.
