@@ -135,7 +135,7 @@ impl Request {
     /// The path under `STREAM_DISABLE_OPEN_BASEDIR`, what `mail.log` is
     /// opened by: the one open php makes past the guard, let through here
     /// so that it stands beside it.
-    pub(crate) fn unguarded_host_path(&self, path: &[u8]) -> HostPath {
+    pub fn unguarded_host_path(&self, path: &[u8]) -> HostPath {
         self.host_path(path)
     }
 
@@ -153,7 +153,7 @@ impl Request {
     /// `expand_filepath(path, buf)`: the path against the working
     /// directory under `CWD_FILEPATH`, links resolved where the file is
     /// there; `None` for the empty path and one too long.
-    pub(crate) fn expand_filepath(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+    pub fn expand_filepath(&mut self, path: &[u8]) -> Option<Vec<u8>> {
         let cwd = self.cwd().into_os_string().into_encoded_bytes();
         self.virtual_file_ex(&cwd, path, Resolve::FilePath)
     }

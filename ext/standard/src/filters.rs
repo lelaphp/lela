@@ -10,7 +10,9 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence};
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _, Whence,
+};
 use php_ext::values::Value;
 
 mod convert;

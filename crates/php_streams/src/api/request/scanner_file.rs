@@ -6,6 +6,7 @@ use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream, StreamOption};
 use crate::api::values::{Emalloc, PhpString, Value};
 use crate::streams::OpenOptions;
+use crate::streams::StreamLayer;
 
 /// `ZEND_MMAP_AHEAD`: the zero bytes `zend_stream_fixup` keeps past what
 /// it read, for the scanner's look-ahead.
@@ -62,7 +63,7 @@ impl ScannerFile {
             req,
             StreamOption::ReadBuffer {
                 buffered: false,
-                size: php_heap::BUFSIZ,
+                size: crate::api::net::BUFSIZ,
             },
         );
         Ok(Some(ScannerFile {

@@ -11,7 +11,7 @@ use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::archive::{self as za, Archive, Source};

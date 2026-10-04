@@ -64,7 +64,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg,
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Request, Resolve, Stream, Whence};
+use php_ext::request::{Request, Resolve, Stream, Streams, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
@@ -418,6 +418,7 @@ fn chdir(req: &mut Request, directory: PathArg) -> Result<bool, Thrown> {
     match target {
         Ok(_) => {
             req.set_cwd(&guarded)?;
+            req.forget_relative_stats();
             Ok(true)
         }
         Err(error) => {

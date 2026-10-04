@@ -18,7 +18,7 @@ use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{FormatDate, Request};
+use php_ext::request::{FormatDate, Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::basic_functions::c_string;

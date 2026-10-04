@@ -8,7 +8,7 @@
 use php_ext::abi::Callable;
 use php_ext::call::{call, closure_from_callable};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
-use php_ext::request::{Request, Stream, UrlStat};
+use php_ext::request::{Request, Stream, Streams as _, UrlStat};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::State;

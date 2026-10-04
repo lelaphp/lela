@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_null_deprecated, arg_type_error, argument_error, docref, fatal, throw,
     throw_error, throwing_warnings,
 };
-use php_ext::request::{Opening, Request};
+use php_ext::request::{Opening, Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::ffi::{self, Base, OptType, Status};

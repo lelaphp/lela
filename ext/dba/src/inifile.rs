@@ -6,7 +6,7 @@
 //! is a C string, so a line and a key end at their first NUL.
 
 use php_ext::raising::{Level, Thrown, docref, throw};
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 
 use crate::flatfile::gets;
 

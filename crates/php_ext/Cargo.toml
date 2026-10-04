@@ -1,6 +1,7 @@
 # php_ext: the facade every extension depends on (ADR-0004; design §4.1,
-# §7.1). Re-exports only: php_engine::api, php_engine::tier::Nop and the
-# attributes; api.lock is this crate's public surface.
+# §7.1). Re-exports only: php_engine::api with php_streams' share of it,
+# php_engine::tier::Nop and the attributes; api.lock is this crate's
+# public surface.
 [package]
 name = "php_ext"
 version = "0.0.0"
@@ -24,3 +25,4 @@ witness-trace = ["test", "php_engine/witness-trace"]
 [dependencies]
 php_engine = { path = "../php_engine" }
 php_macros = { path = "../php_macros" }
+php_streams = { path = "../php_streams" }

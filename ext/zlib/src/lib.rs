@@ -42,7 +42,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 
 /// `register_zlib_symbols`: the constants in `zlib.stub.php`'s order,
 /// `ZLIB_VERSION` and `ZLIB_VERNUM` read off the library the process

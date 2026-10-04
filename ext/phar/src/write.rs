@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request};
+use php_ext::request::{Opening, Request, Streams as _};
 
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,

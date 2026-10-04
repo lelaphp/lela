@@ -54,7 +54,7 @@ mod zip;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{InfoRow, Request};
+use php_ext::request::{InfoRow, Request, Streams as _};
 
 use crate::archive::Archives;
 

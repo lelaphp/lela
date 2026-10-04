@@ -19,7 +19,7 @@ use std::any::Any;
 use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
-pub use php_heap::Readiness;
+pub use crate::api::net::Readiness;
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream};
@@ -92,7 +92,7 @@ impl CryptoSocket<'_> {
     /// for `false`, and `blocked` with it where the call took; whether it
     /// took.
     pub fn set_blocking(&mut self, blocking: bool) -> bool {
-        if php_heap::set_fd_blocking(self.fd, blocking).is_err() {
+        if crate::api::net::set_fd_blocking(self.fd, blocking).is_err() {
             return false;
         }
         self.blocked = blocking;
@@ -105,7 +105,7 @@ impl CryptoSocket<'_> {
     #[must_use]
     pub fn wait(&self, want: Readiness, timeout: Option<Duration>) -> bool {
         loop {
-            match php_heap::poll_fd(self.fd, want, timeout) {
+            match crate::api::net::poll_fd(self.fd, want, timeout) {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Ok(ready) => return ready,
                 Err(_) => return false,

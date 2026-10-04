@@ -5,7 +5,7 @@
 //! and the small checks of `phar_internal.h`.
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 
 use crate::archive::{self, archives, expand_filepath};
 

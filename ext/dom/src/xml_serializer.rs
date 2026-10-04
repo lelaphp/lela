@@ -15,7 +15,7 @@
 use std::ffi::c_int;
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::PhpObject;
 use php_ext_libxml::ffi::{self as f, Dump, Kind, Name, Node, Ns};
 

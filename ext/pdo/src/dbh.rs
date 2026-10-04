@@ -14,7 +14,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
 };
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{

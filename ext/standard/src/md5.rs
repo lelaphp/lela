@@ -8,7 +8,7 @@
 use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::PhpString;
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block

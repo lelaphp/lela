@@ -34,7 +34,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw,
 };
-use php_ext::request::{Cast, Opening, Request, Resolve, Stream, Whence};
+use php_ext::request::{Cast, Opening, Request, Resolve, Stream, Streams as _, Whence};
 use php_ext::values::{PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::ffi::{Magic, Read};

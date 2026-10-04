@@ -45,7 +45,6 @@ mod preload;
 mod probe;
 mod rfc1867;
 mod signal;
-mod streams;
 // The test face is on for an extension's dev-dependency, and for this
 // crate's own tests, which read a served request the same way.
 #[cfg(any(feature = "test", test))]
@@ -55,7 +54,6 @@ mod trampoline;
 mod unit_cache;
 mod virtual_cwd;
 mod weakrefs;
-mod wrapper;
 
 pub use api::request::ini_files::IniFile;
 pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};
