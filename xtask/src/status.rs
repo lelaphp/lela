@@ -2,11 +2,11 @@
 //! manifest, the divergence registry, the store and its log, the pinned
 //! tree's layout where it is present (the `oracle` and `parity` sections),
 //! and for the `git` section the repository, and computes nothing else; a
-//! section that needs a command of its own is a missing instrument. `--session` prints
-//! the map and the local facts for the function hook's `prompt.context`
-//! (§5), as one text or, in JSON, as the two blocks the hook hands the
-//! engine, laying the local file down from its template when the clone
-//! has none.
+//! section that needs a command of its own is a missing instrument.
+//! `--session` prints the map and the local facts for the function hook's
+//! `prompt.context` (§5), as one text or, in JSON, as the two blocks the
+//! hook hands the engine, laying the local file down from its template
+//! when the clone has none.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
