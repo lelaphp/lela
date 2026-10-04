@@ -6,8 +6,8 @@
 //! answers with `xp_ssl.c` for `ssl`, `tls`, `tlsv1.0` to `tlsv1.3` and,
 //! over `standard`'s own, `tcp`.
 //!
-//! A registered `transport` is the engine's `tcp` socket kind with a
-//! [`Crypto`] layer beside it: the engine connects, binds, listens,
+//! A registered `transport` is the stream layer's `tcp` socket kind with
+//! a [`Crypto`] layer beside it: the layer connects, binds, listens,
 //! accepts, waits, names and shuts the socket down as `xp_socket.c`
 //! does, and hands a read or a write to the layer once the layer is
 //! active, as `php_openssl_sockop_io` hands one to

@@ -26,7 +26,7 @@ pub(crate) const RUNNING: Rank = Rank::MAX;
 
 /// One request's streams.
 pub(crate) struct State {
-    /// The resource types the layer registered on its first touch.
+    /// The resource types the layer registered as the state was built.
     pub(crate) types: Option<Types>,
     /// The operations of each wrapper an extension registered, which a
     /// [`crate::streams::Located::Ext`] row names by its place.
@@ -141,7 +141,7 @@ pub(crate) trait Layer {
     fn streams(&mut self) -> &mut State;
     /// The state, read; `None` before the request touched a stream.
     fn streams_ref(&self) -> Option<&State>;
-    /// The three resource types, registered on the first ask.
+    /// The three resource types, registered as the state is built.
     fn types(&mut self) -> Types;
     /// The [`Rank`] a row registered now takes.
     fn rank(&self) -> Rank;
@@ -156,7 +156,20 @@ pub(crate) trait Layer {
 }
 
 impl Layer for Request {
+    /// The state is built with the three resource types registered, as
+    /// `php_module_startup` registers them before any request, so
+    /// `get_resources('stream')` names a type once the extension that
+    /// registers the plain files wrapper has started.
     fn streams(&mut self) -> &mut State {
+        if self.state_ref::<State>().is_none() {
+            let (stream, pstream) = crate::streams::register(self.resources());
+            let filter = self.resources().register_type(b"stream filter", None);
+            self.state::<State>().types = Some(Types {
+                stream,
+                pstream,
+                filter,
+            });
+        }
         self.state::<State>()
     }
 

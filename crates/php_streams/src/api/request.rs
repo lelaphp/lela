@@ -34,7 +34,7 @@ pub use crate::zend::STREAM_HOOKS;
 /// reads back out with [`Stream::from_value`], `PHP_Z_PARAM_STREAM`'s
 /// fetch. The operations are `php_stream_read` and its siblings, each
 /// through the request that holds the stream; the layer under them is
-/// the engine's `streams` layer.
+/// the stream layer's ([`crate::streams`]).
 #[derive(Clone, Copy)]
 pub struct Stream(Resource);
 
