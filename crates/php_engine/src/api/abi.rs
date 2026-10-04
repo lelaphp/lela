@@ -667,7 +667,10 @@ impl std::fmt::Debug for Extension {
 /// request's states and an engine's are each one of these, so every
 /// request a state is built for, the startup one, a refused one or a
 /// served one, and every engine drops them in the one order written
-/// here.
+/// here. A request state no extension declared, built at first touch
+/// by [`Request::state`], is held after the rest and dropped first.
+/// Nothing reorders what is held: it is read as a slice and written
+/// one state at a time.
 pub(crate) struct States<T>(Vec<T>);
 
 impl<T> States<T> {
@@ -678,6 +681,11 @@ impl<T> States<T> {
     /// Hold `state` after every state held before it.
     pub(crate) fn push(&mut self, state: T) {
         self.0.push(state);
+    }
+
+    /// The state held `at` that place, to replace or change in place.
+    pub(crate) fn get_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.0.get_mut(at)
     }
 }
 
@@ -694,17 +702,11 @@ impl<T> std::ops::Deref for States<T> {
     }
 }
 
-impl<T> std::ops::DerefMut for States<T> {
-    fn deref_mut(&mut self) -> &mut [T] {
-        &mut self.0
-    }
-}
-
 impl<T> Drop for States<T> {
+    /// Reversed in place, so the vector's own drop, which goes on past a
+    /// state whose drop unwinds, drops them back to front.
     fn drop(&mut self) {
-        while let Some(state) = self.0.pop() {
-            drop(state);
-        }
+        self.0.reverse();
     }
 }
 

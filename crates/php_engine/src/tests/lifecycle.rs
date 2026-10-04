@@ -80,8 +80,8 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
 /// Building an engine lays the startup request first, on which php's
 /// `php_module_startup` registers the ini entries: it builds every
 /// request state in bundle order and drops each in reverse before any
-/// engine state exists. Then each engine state is built once, in bundle order, and
-/// nothing else is handed to an extension until a request.
+/// engine state exists. Then each engine state is built once, in bundle
+/// order, and nothing else is handed to an extension until a request.
 #[test]
 fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gone() {
     let rec = Recording::start();
@@ -201,8 +201,8 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
 /// serves nothing, and drops them in reverse, as a served one does.
 #[test]
 fn a_refused_request_drops_its_request_state_in_reverse() {
-    fn refuse(_: &mut Request) -> Answer {
-        record(2, PostStartup);
+    fn refuse<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
         Answer::Refuse { status: 3 }
     }
     let rec = Recording::start();
@@ -211,7 +211,7 @@ fn a_refused_request_drops_its_request_state_in_reverse() {
             TestExt::<0>::extension(),
             TestExt::<1>::extension(),
             TestExt::<2>::builder()
-                .post_startup(refuse)
+                .post_startup(refuse::<2>)
                 .build("test_ext_2"),
         ])
         .build();
@@ -251,5 +251,45 @@ fn an_engine_drops_its_engine_state_in_reverse_bundle_order() {
             Ext(1, EngineStateDropped(0)),
             Ext(0, EngineStateDropped(0)),
         ]
+    );
+}
+
+/// However a request ends, its request states drop in reverse: the
+/// request laid to ask `post_startup` when it answers serve, a program
+/// that calls `exit`, and one that ends in a fatal.
+#[test]
+fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
+    fn serve_on<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
+        Answer::Serve
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .post_startup(serve_on::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let exited = engine.serve_capture("<?php exit(4);", Capture::default());
+    rec.mark("exited");
+    let failed = engine.serve_capture("<?php undefined();", Capture::default());
+    rec.mark("failed");
+    assert_eq!((exited.exit_code, failed.exit_code), (4, 255));
+    let events = rec.events();
+    let asked_and_exited = events.between("built", "exited");
+    assert_eq!(asked_and_exited.handed(&PostStartup), [2]);
+    assert_eq!(
+        asked_and_exited.handed(&RequestStateDropped),
+        [2, 1, 0, 2, 1, 0]
+    );
+    assert_eq!(
+        events
+            .between("exited", "failed")
+            .handed(&RequestStateDropped),
+        [2, 1, 0]
     );
 }

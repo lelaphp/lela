@@ -20759,15 +20759,18 @@ impl Request {
             self.states.push((wanted, Box::new(T::default())));
             self.states.len() - 1
         };
-        if self.states[at].1.downcast_ref::<T>().is_none() {
-            self.states[at].1 = Box::new(T::default());
+        // Found or held at `at`, and written as a `T` where it is not
+        // one; each `else` is the type system's, not a path a request takes.
+        let Some((_, slot)) = self.states.get_mut(at) else {
+            return Box::leak(Box::new(T::default()));
+        };
+        if !slot.is::<T>() {
+            *slot = Box::new(T::default());
         }
-        match self.states[at].1.downcast_mut::<T>() {
-            Some(state) => state,
-            // Written as a `T` on the line above; this arm is the type
-            // system's, not a path a request takes.
-            None => Box::leak(Box::new(T::default())),
-        }
+        let Some(state) = slot.downcast_mut::<T>() else {
+            return Box::leak(Box::new(T::default()));
+        };
+        state
     }
 
     /// The engine state of the calling extension, `E` being the type its
