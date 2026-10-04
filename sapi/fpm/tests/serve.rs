@@ -2,11 +2,19 @@
 //! handed to it as `FastCGI` records under php-fpm's name.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// The binary under test, let run as root with `-R`: as root php-fpm
+/// refuses a pool with no `user` directive unless `--allow-to-run-as-root`
+/// lets it, as the oracle's does, and a container's tests run as root.
+fn php_fpm() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_php-fpm"));
+    command.arg("-R");
+    command
+}
 
 /// A directory of the test's own.
 fn tree(name: &str) -> PathBuf {
@@ -43,7 +51,7 @@ fn socket(dir: &Path) -> PathBuf {
 fn a_configuration_test_says_the_file_is_sound() {
     let dir = tree("test");
     let path = conf(&dir, "127.0.0.1:9");
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let out = php_fpm()
         .args(["-n", "-t", "-y"])
         .arg(&path)
         .output()
@@ -63,10 +71,7 @@ fn a_configuration_test_says_the_file_is_sound() {
 /// or not.
 #[test]
 fn with_no_file_named_the_configuration_is_the_builds_sysconfdirs() {
-    let out = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
-        .args(["-n", "-t"])
-        .output()
-        .unwrap();
+    let out = php_fpm().args(["-n", "-t"]).output().unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     let expected = format!("{}/php-fpm.conf", php_sapi::PHP_SYSCONFDIR);
     assert!(said.contains(&expected), "{out:?}");
@@ -150,7 +155,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     let path = conf(&dir, &socket.display().to_string());
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php echo PHP_SAPI, ' ', $_GET['q'];").unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .args(["-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -174,6 +179,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
 
 /// A log line with its time, the pids and a child's lifetime masked: the
 /// number after `pid`, `child` and `after` is `N`.
+#[cfg(target_os = "macos")]
 fn masked(line: &str) -> String {
     let line = line.split_once("] ").map_or(line, |(_, rest)| rest);
     let mut out: Vec<String> = Vec::new();
@@ -196,6 +202,7 @@ fn masked(line: &str) -> String {
 /// masked (#1382): the pin's php-fpm (`oracle.toml`'s `[sapi]`) run under
 /// the configuration `quit_at_debug` writes, its log put through
 /// [`masked`]. Captured again on #1502, byte for byte these lines.
+#[cfg(target_os = "macos")]
 const QUIT_AT_DEBUG: &str = "\
 DEBUG: pid N, fpm_scoreboard_init_main(), line 38: got clock tick '100'
 DEBUG: pid N, fpm_signals_init_main(), line 219: Unblocking all signals
@@ -222,12 +229,14 @@ NOTICE: pid N, fpm_pctl_exit(), line 69: exiting, bye-bye!
 ";
 
 /// How many loopback ports [`quit_at_debug`] tries before it gives up.
+#[cfg(target_os = "macos")]
 const TRIES: usize = 5;
 
 /// A loopback port the system found free, let go at once: free for anyone
 /// until the master binds it.
+#[cfg(target_os = "macos")]
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
+    std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
@@ -259,7 +268,7 @@ fn quit_at_debug(dir: &Path, ports: impl IntoIterator<Item = u16>) -> String {
             ),
         )
         .unwrap();
-        let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+        let mut master = php_fpm()
             .args(["-n", "-F", "-y"])
             .arg(&path)
             .stdin(Stdio::null())
@@ -313,7 +322,7 @@ fn a_static_pool_at_debug_sent_sigquit_writes_the_oracle_s_lines() {
 #[test]
 fn a_port_taken_before_the_master_binds_it_is_given_up_for_another() {
     let dir = tree("debug-taken");
-    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let held = taken.local_addr().unwrap().port();
     let ports = std::iter::once(held).chain(std::iter::repeat_with(free_port));
     let lines = quit_at_debug(&dir, ports);
@@ -344,7 +353,7 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     .unwrap();
     let script = dir.join("index.php");
     std::fs::write(&script, "<?php echo 'ran';").unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .args(["-n", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
@@ -407,7 +416,7 @@ fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
     let program = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n";
     std::fs::write(dir.join("www/sub/t.php"), program).unwrap();
     std::fs::write(dir.join("www/t.php"), program).unwrap();
-    let mut master = Command::new(env!("CARGO_BIN_EXE_php-fpm"))
+    let mut master = php_fpm()
         .env("PHP_INI_SCAN_DIR", dir.join("scan"))
         .arg("-c")
         .arg(&ini)

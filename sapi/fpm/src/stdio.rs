@@ -5,9 +5,11 @@
 //! `/dev/null` otherwise; the error log opened, and reopened on
 //! `SIGUSR1`.
 
+use std::ffi::{CStr, CString};
 use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
+use std::sync::OnceLock;
 
 use crate::conf;
 use crate::master::{Child, Fpm};
@@ -124,12 +126,8 @@ pub(crate) fn redirect_stderr_to_error_log(fpm: &Fpm) {
 pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
     let error_log = fpm.global.error_log.clone().unwrap_or_default();
     if error_log.eq_ignore_ascii_case(b"syslog") {
-        let ident =
-            String::from_utf8_lossy(fpm.global.syslog_ident.as_deref().unwrap_or(b"php-fpm"))
-                .into_owned();
-        let _ = nix::syslog::openlog(
-            Some(&*ident),
-            nix::syslog::LogFlags::LOG_PID | nix::syslog::LogFlags::LOG_CONS,
+        openlog(
+            syslog_ident(fpm.global.syslog_ident.as_deref()),
             facility(fpm.global.syslog_facility),
         );
         if use_error_log(fpm) {
@@ -172,6 +170,41 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
         crate::zlog::set_target(Target::File(file), is_stderr);
     }
     true
+}
+
+/// `openlog(3)` with `LOG_PID | LOG_CONS`, as `fpm_stdio_open_error_log`
+/// calls it. glibc keeps the ident's pointer and reads it on every
+/// `syslog(3)`, so on Linux `nix` takes the `&'static CStr` itself and hands
+/// libc that pointer. Elsewhere `nix` takes an `OsStr` and hands libc a copy
+/// that lives for the call alone, which holds where the C library copies the
+/// ident in turn, as Apple's does: an ident overwritten after `openlog`
+/// still names the process's `syslog` lines on macOS.
+fn openlog(ident: &'static CStr, facility: nix::syslog::Facility) {
+    #[cfg(not(target_os = "linux"))]
+    let ident = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(ident.to_bytes());
+    let _ = nix::syslog::openlog(
+        Some(ident),
+        nix::syslog::LogFlags::LOG_PID | nix::syslog::LogFlags::LOG_CONS,
+        facility,
+    );
+}
+
+/// `fpm_global_config.syslog_ident` as syslog holds it: the master's ident,
+/// `php-fpm` unless `syslog.ident` names one, up to its first NUL as C reads
+/// it, held for the life of the process. The master reads its
+/// configuration once per process image (a reload is `execvp`,
+/// `fpm_pctl_exec`), so the first ident asked for is the process's, and a
+/// reopen on `SIGUSR1` asks for the same one.
+fn syslog_ident(named: Option<&[u8]>) -> &'static CStr {
+    static IDENT: OnceLock<CString> = OnceLock::new();
+    IDENT.get_or_init(|| ident_bytes(named.unwrap_or(b"php-fpm")))
+}
+
+/// `bytes` up to the first NUL, as a C string; every byte after it is one
+/// C never reads.
+fn ident_bytes(bytes: &[u8]) -> CString {
+    let head = bytes.split(|&b| b == 0).next().unwrap_or_default();
+    CString::new(head).unwrap_or_default()
 }
 
 /// A `syslog.facility` number as `nix` names it; one it names not, the
@@ -398,4 +431,23 @@ fn said(
     }
     let _ = fd.as_raw_fd();
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ident_bytes, syslog_ident};
+
+    #[test]
+    fn the_ident_is_read_up_to_its_first_nul_as_c_reads_it() {
+        assert_eq!(ident_bytes(b"pool\0www").to_bytes(), b"pool");
+        assert_eq!(ident_bytes(b"\xffphp").to_bytes(), b"\xffphp");
+        assert_eq!(ident_bytes(b"").to_bytes(), b"");
+    }
+
+    #[test]
+    fn the_process_holds_one_ident_and_a_reopen_gets_it_again() {
+        let first = syslog_ident(None);
+        assert_eq!(first.to_bytes(), b"php-fpm");
+        assert!(std::ptr::eq(first, syslog_ident(Some(b"php-fpm"))));
+    }
 }

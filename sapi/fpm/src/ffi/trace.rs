@@ -8,8 +8,6 @@
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
-use crate::zlog;
-
 /// `fpm_trace_signal`: the child stopped for the master to read.
 #[cfg(target_os = "macos")]
 pub(crate) fn signal(pid: i32) -> bool {
@@ -65,7 +63,7 @@ pub(crate) fn ready(pid: i32) -> bool {
     } else {
         ""
     };
-    zlog!(Error @ fpm_trace_ready:65, "task_for_pid() failed: {text} ({kr}){hint}");
+    crate::zlog!(Error @ fpm_trace_ready:65, "task_for_pid() failed: {text} ({kr}){hint}");
     false
 }
 
