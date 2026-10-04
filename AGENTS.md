@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=5d3213b4b655460cf4af880e8133963b2d491fe02b5e0debaf8701c90918c37c out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=19390bc73556b163f31127dc5276e5df9b60b5dc8c98ad8afcf5dd031bcd5e3d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -154,7 +154,7 @@ Usage: xtask [OPTIONS] <COMMAND>
 
 Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
-  status             Render one section from the manifest, the registry, the store and the pinned tree's layout; computes nothing else
+  status             Render one section from the manifest, registry, store, repository and pinned tree; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: the conditions unmet since the base, and exit 1 while any is; the Stop hook, pre-push and CI read the list
   track              Say the branch, the commit it was taken off main at, the store and the branch's ticket; as text or as one object. Writes no reading
@@ -183,7 +183,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=6017689b7efb42099c6d47672290774d021478e64f82f2b763b669718d25d4e4 out=8f952bca2d7bfb1ab00873ab998ab514d6003197da3ffb84f4dfc1fd9267bfd3 -->
+<!-- /computed in=a7c1749e2850d01cdb1ad44922e22c782d784a51edc63329eb7577f73a8f6e15 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
