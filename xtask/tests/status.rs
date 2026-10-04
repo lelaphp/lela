@@ -959,9 +959,9 @@ fn every_renders_the_stores_log_and_the_section_without_it_is_unchanged() {
 }
 
 /// A scratch workspace whose store holds the phpt readings the parity
-/// tests read.
-fn parity_store(name: &str) -> Tree {
-    let root = scratch(name);
+/// tests read, and whose pin's path is `pin`.
+fn parity_store(name: &str, pin: &Path) -> Tree {
+    let root = scratch_with_pin_path(name, pin);
     let phpt = |scope: &str, counts: &[(&str, i64)]| {
         let mut r = Reading::new("phpt", scope);
         r.status = Status::Pass;
@@ -1013,8 +1013,13 @@ fn parity_store(name: &str) -> Tree {
 /// no target is in no total.
 #[test]
 fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
-    let root = parity_store("parity");
-    let (ok, json, err) = status(&root, &["--section", "parity", "--format", "json"]);
+    let root = parity_store("parity", Path::new(NO_TREE));
+    let (ok, json, err) = status_with_pin(
+        &root,
+        &["--section", "parity", "--format", "json"],
+        None,
+        None,
+    );
     assert!(ok, "{err}");
     let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
     let suite = |name: &str| {
@@ -1085,14 +1090,86 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
         8,
         "the seven under #1167 and ext/enchant: {json}"
     );
+    assert_eq!(
+        parity["unbuilt_from"], "readings",
+        "without the pinned tree, the unbuilt are the measured ones alone: {json}"
+    );
+}
+
+/// A pin's path where no tree stands, so a parity test reads as it would
+/// on a machine without the pinned php-src.
+const NO_TREE: &str = "/nowhere/pinned/php-src";
+
+/// With the pinned tree present (#1847), the section names as not built
+/// every `ext/*` and `sapi/*` suite of the tree that holds a `.phpt` and
+/// that no row owns or `[parity] out` rules out, whether or not a reading
+/// measured it; a suite a row owns, `sapi/embed`'s among them though its
+/// row owns no subset yet, one ruled out, a directory holding no test, and
+/// the core's suites are not.
+#[test]
+fn parity_names_every_unbuilt_suite_of_the_pinned_tree() {
+    let tree = fixture_tree("parity-tree");
+    for (under, file) in [
+        ("Zend/tests", "a.phpt"),
+        ("tests/lang", "a.phpt"),
+        ("ext/ctype/tests", "a.phpt"),
+        ("ext/pgsql/tests", "a.phpt"),
+        ("ext/enchant/tests", "a.phpt"),
+        ("ext/oci8/tests/nested", "a.phpt"),
+        ("ext/hollow/src", "hollow.c"),
+        ("sapi/cli/tests", "a.phpt"),
+        ("sapi/pi3web/tests", "a.phpt"),
+        ("sapi/embed/tests", "a.phpt"),
+        ("sapi/bare", "README"),
+    ] {
+        std::fs::create_dir_all(tree.join(under)).unwrap();
+        std::fs::write(tree.join(under).join(file), "").unwrap();
+    }
+    let root = parity_store("parity-tree", &tree);
+    let (ok, json, err) = status_with_pin(
+        &root,
+        &["--section", "parity", "--format", "json"],
+        None,
+        None,
+    );
+    assert!(ok, "{err}");
+    let parity: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parity["unbuilt_from"], "tree", "{json}");
+    let unbuilt: Vec<&str> = parity["outside"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["why"] == "unbuilt")
+        .map(|o| o["suite"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        unbuilt,
+        ["ext/enchant", "ext/oci8", "sapi/pi3web"],
+        "ext/oci8 and sapi/pi3web no reading measured: {json}"
+    );
+    assert!(
+        parity["outside"].as_array().unwrap().contains(
+            &serde_json::json!({ "suite": "ext/pgsql", "why": "ruling", "ruling": 1167 })
+        ),
+        "a suite ruled out stays under its ruling: {json}"
+    );
+
+    let (ok, md, err) = status_with_pin(&root, &["--section", "parity"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(
+            "Outside parity, not built by the pinned php: ext/enchant, ext/oci8, sapi/pi3web."
+        ),
+        "{md}"
+    );
 }
 
 /// The same section as Markdown: a row per suite, the total, and the
 /// suites outside parity by ruling and as not built.
 #[test]
 fn parity_renders_as_markdown_for_a_session() {
-    let root = parity_store("parity-md");
-    let (ok, md, err) = status(&root, &["--section", "parity"]);
+    let root = parity_store("parity-md", Path::new(NO_TREE));
+    let (ok, md, err) = status_with_pin(&root, &["--section", "parity"], None, None);
     assert!(ok, "{err}");
     assert!(
         md.contains("| ext/ctype | held | 47 | 48 | 10 | 2 | pass |"),
@@ -1110,6 +1187,10 @@ fn parity_renders_as_markdown_for_a_session() {
     assert!(
         md.contains("#1167") && md.contains("not built by the pinned php: ext/enchant"),
         "{md}"
+    );
+    assert!(
+        md.contains("named only where a reading measured them"),
+        "without the pinned tree the section says its unbuilt list is the measured ones: {md}"
     );
 }
 

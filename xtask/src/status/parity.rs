@@ -9,9 +9,12 @@
 //! `--every` hands the dashboard. A suite counts in the total only where
 //! its reading was held to a target; every other suite says which of the
 //! other states it is in. The suites outside parity are named apart: those
-//! `[parity] out` rules out, with the ruling, and those a reading measured
-//! that no row owns, which the pinned php does not build. The section
-//! writes no reading.
+//! `[parity] out` rules out, with the ruling, and those no row owns, which
+//! the pinned php does not build: every `ext/*` and `sapi/*` suite of the
+//! pinned tree that holds a test where the tree is on this machine
+//! (#1847), and every suite a reading measured, which is all a machine
+//! without the tree can name and the section says so. The section writes
+//! no reading.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -23,18 +26,31 @@ use serde::Serialize;
 use super::{Table, cell, outlived, standing};
 use crate::manifest::Manifest;
 use crate::phpt::row::{Row, Target};
-use crate::phpt::{self, Root};
+use crate::phpt::{self, Root, Subset};
 use crate::reading::Reading;
 use crate::reading::{self, Store};
 use crate::status::PerReading;
 
-/// The section: the suites inside parity, their total, and the suites
-/// outside it.
+/// The section: the suites inside parity, their total, the suites
+/// outside it, and where the unbuilt among those were named from.
 #[derive(Debug, Serialize)]
 struct Parity {
     suites: Vec<Suite>,
     total: Total,
     outside: Vec<Outside>,
+    unbuilt_from: UnbuiltFrom,
+}
+
+/// Where the suites outside parity as [`Why::Unbuilt`] were named from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum UnbuiltFrom {
+    /// The pinned tree, every `ext/*` and `sapi/*` suite of it that holds
+    /// a `.phpt`, and the readings beside it: the list is whole.
+    Tree,
+    /// The readings alone, since the pinned tree is not on this machine at
+    /// the pin's commit: a suite no reading measured is named nowhere.
+    Readings,
 }
 
 /// One suite inside parity and the reading that stands for it.
@@ -154,7 +170,8 @@ enum Why {
 }
 
 /// The section in `format`, from the readings that stand for the
-/// checkout at `root`.
+/// checkout at `root` and the corpus of the pinned tree where it is on
+/// this machine.
 pub(super) fn render(
     manifest: &Manifest,
     store: &Store,
@@ -167,16 +184,23 @@ pub(super) fn render(
         .filter(|row| !outlived(manifest, row))
         .filter_map(|row| row.reading.as_ref())
         .collect();
-    let parity = parity(manifest, &readings);
+    let corpus: Option<Vec<PathBuf>> = manifest.pin.source.tree().ok().map(|tree| {
+        Subset::corpus(&tree)
+            .into_iter()
+            .map(|subset| PathBuf::from(subset.scope))
+            .collect()
+    });
+    let parity = parity(manifest, &readings, corpus.as_deref());
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&parity)? + "\n",
         Table::Md => markdown(&parity),
     })
 }
 
-/// The section's rules, a function of the manifest and the readings that
-/// stand.
-fn parity(manifest: &Manifest, readings: &[&Reading]) -> Parity {
+/// The section's rules, a function of the manifest, the readings that
+/// stand and the places of the pinned tree's corpus, `None` where the tree
+/// is not on this machine.
+fn parity(manifest: &Manifest, readings: &[&Reading], corpus: Option<&[PathBuf]>) -> Parity {
     let inside = inside(manifest);
     let runs: Vec<(PathBuf, &Reading, Row)> = readings
         .iter()
@@ -201,11 +225,20 @@ fn parity(manifest: &Manifest, readings: &[&Reading]) -> Parity {
             }
         })
         .collect();
-    let outside = outside(manifest, &inside, runs.iter().map(|(subset, _, _)| subset));
+    let measured = runs.iter().map(|(subset, _, _)| subset);
+    let outside = outside(
+        manifest,
+        &inside,
+        measured.chain(corpus.unwrap_or_default()),
+    );
     Parity {
         total: Total::of(&suites),
         suites,
         outside,
+        unbuilt_from: match corpus {
+            Some(_) => UnbuiltFrom::Tree,
+            None => UnbuiltFrom::Readings,
+        },
     }
 }
 
@@ -231,14 +264,13 @@ fn inside(manifest: &Manifest) -> BTreeSet<PathBuf> {
 
 /// The suites outside parity: every one `[parity] out` names, under its
 /// ruling, whether a reading measured it or not; then the suite of each
-/// run no suite inside owns, by the suite its first two segments name
-/// under `ext/` or `sapi/`, as not built. A run inside or around a suite
-/// inside parity is that suite's, a narrower run or a scope it was once
-/// read under, and never outside.
+/// place nothing owns, a run a reading measured or a subset of the pinned
+/// tree's corpus, by the suite its first two segments name under `ext/` or
+/// `sapi/`, as not built.
 fn outside<'a>(
     manifest: &Manifest,
     inside: &BTreeSet<PathBuf>,
-    runs: impl Iterator<Item = &'a PathBuf>,
+    places: impl Iterator<Item = &'a PathBuf>,
 ) -> Vec<Outside> {
     let mut outside: BTreeMap<PathBuf, Why> = manifest
         .parity
@@ -251,11 +283,8 @@ fn outside<'a>(
             out.suites.iter().map(move |suite| (suite.clone(), why))
         })
         .collect();
-    for subset in runs {
-        let owned = inside
-            .iter()
-            .any(|suite| subset.starts_with(suite) || suite.starts_with(subset));
-        if let Some(suite) = built_suite(subset).filter(|_| !owned) {
+    for place in places {
+        if let Some(suite) = built_suite(place).filter(|_| !owned(manifest, inside, place)) {
             outside.entry(suite).or_insert(Why::Unbuilt);
         }
     }
@@ -266,6 +295,21 @@ fn outside<'a>(
             why,
         })
         .collect()
+}
+
+/// Whether a suite inside parity or a `[[crate]]` row owns `place`: the
+/// place is inside or around the suite, the row's name or a directory of
+/// its subset, as a narrower run, a scope a suite was once read under, a
+/// host's `tests` directory, or the suite of a row that owns no subset yet
+/// (`sapi/embed`) is. A row stands for what the pinned php builds, so a
+/// place a row owns is never one it does not build.
+fn owned(manifest: &Manifest, inside: &BTreeSet<PathBuf>, place: &Path) -> bool {
+    let overlaps = |owner: &Path| place.starts_with(owner) || owner.starts_with(place);
+    inside.iter().any(|suite| overlaps(suite))
+        || manifest.crates.iter().any(|krate| {
+            overlaps(Path::new(&krate.name))
+                || krate.subsets().iter().any(|subset| overlaps(subset))
+        })
 }
 
 /// The suite of an extension or a host that `subset` is in, `ext/<name>`
@@ -279,7 +323,9 @@ fn built_suite(subset: &Path) -> Option<PathBuf> {
 }
 
 /// The section as Markdown: one row per suite, the total, then the suites
-/// outside parity on one line per ruling and one for the unbuilt.
+/// outside parity on one line per ruling and one for the unbuilt, and
+/// where the tree was absent, a line saying the unbuilt are the measured
+/// ones alone.
 fn markdown(parity: &Parity) -> String {
     let mut out = String::from("| suite | state | met | target | outside | predated | reading |\n");
     out.push_str("|---|---|---|---|---|---|---|\n");
@@ -332,6 +378,12 @@ fn markdown(parity: &Parity) -> String {
             out,
             "\nOutside parity, not built by the pinned php: {}.",
             unbuilt.join(", ")
+        );
+    }
+    if parity.unbuilt_from == UnbuiltFrom::Readings {
+        let _ = writeln!(
+            out,
+            "\nWithout the pinned php-src at the pin's commit on this machine (`status --section oracle` says why), the suites not built are named only where a reading measured them."
         );
     }
     out
