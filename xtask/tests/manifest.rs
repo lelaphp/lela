@@ -169,6 +169,36 @@ fn a_qualifier_without_its_predicate_is_refused() {
     );
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(err.contains("x.orphan") && err.contains("unless"), "{err}");
+
+    // `deny_macros` qualifies `deny_types` (#1888): the macros a type ban
+    // cannot see, rendered beside the types, and nothing on their own or
+    // beside another predicate.
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.macros\"\nscope = \"ext/*\"\ndeny_macros = [\"std::thread_local\"]\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("x.macros") && err.contains("0 predicates"),
+        "{err}"
+    );
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.macros\"\nscope = \"ext/*\"\ndeny_pattern = \"thread_local\"\ndeny_macros = [\"std::thread_local\"]\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("x.macros") && err.contains("`deny_macros` qualifies deny_types"),
+        "{err}"
+    );
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.macros\"\nscope = \"ext/*\"\ndeny_types = [\"std::sync::OnceLock\"]\ndeny_macros = [\"std::thread_local\"]\ntext = \"t\"\n"
+    );
+    let parsed = Manifest::parse(&text).unwrap();
+    let rule = parsed.rule("x.macros").unwrap();
+    assert_eq!(rule.predicate.named(), ["deny_types"]);
+    assert_eq!(
+        rule.predicate.deny_macros.as_deref(),
+        Some(&["std::thread_local".to_owned()][..])
+    );
 }
 
 #[test]

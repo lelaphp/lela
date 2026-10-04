@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/pcre/src/depth.rs","content":"thread_local! {\n    /// A depth kept per thread, which no scope owns.\n    pub static DEPTH: u8 = const { 0 };\n}\n"}}

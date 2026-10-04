@@ -515,13 +515,19 @@ impl Where {
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
-/// its subcommand (`"git add"`); each is refused beside any other
-/// predicate.
+/// its subcommand (`"git add"`); `deny_macros` qualifies `deny_types`; each
+/// is refused beside any other predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Predicates {
     pub deny_types: Option<Vec<String>>,
+    /// The macros denied beside the types, each by its full path
+    /// (`std::thread_local`): what a type ban cannot see, since a macro
+    /// declares the state it hides (#1781). It renders to clippy's
+    /// `disallowed-macros` beside `deny_types`' `disallowed-types`, and
+    /// `permit` reads an invocation of one as it reads a mention of a type.
+    pub deny_macros: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
@@ -628,7 +634,8 @@ impl Predicates {
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without
-    /// `deny_pattern`, `with` without `deny_argv` or `require_argv`.
+    /// `deny_pattern`, `with` without `deny_argv` or `require_argv`,
+    /// `deny_macros` without `deny_types`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
@@ -636,6 +643,8 @@ impl Predicates {
             Some("unless_pattern")
         } else if !self.with.is_empty() && self.deny_argv.is_none() && self.require_argv.is_none() {
             Some("with")
+        } else if self.deny_macros.is_some() && self.deny_types.is_none() {
+            Some("deny_macros")
         } else {
             None
         }
@@ -937,7 +946,7 @@ impl Manifest {
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern and `with` qualifies deny_argv or require_argv",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv and `deny_macros` qualifies deny_types",
                     rule.id,
                     named[0]
                 );
