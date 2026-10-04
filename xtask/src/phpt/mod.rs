@@ -310,6 +310,11 @@ impl Root {
     }
 }
 
+/// Whether the file at `path` is a test of the corpus: a `.phpt`.
+fn is_phpt(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "phpt")
+}
+
 /// The subset of the host `name`: its `tests` directory, as the
 /// `[[crate]]` rows of `sapi/*` name it.
 fn host_tests(name: &str) -> PathBuf {
@@ -435,7 +440,8 @@ impl Subset {
 
     /// Every subset of the corpus at `source`: the nightly lane's, one per
     /// directory [`ROOTS`] places in the tree, in the table's order, each
-    /// where it holds a `.phpt`.
+    /// where it holds a `.phpt`. Whether one does is read up to the first
+    /// found, so naming the corpus costs no walk of its tests.
     pub(crate) fn corpus(source: &Path) -> Vec<Subset> {
         ROOTS
             .iter()
@@ -445,7 +451,12 @@ impl Subset {
                 dirs: vec![Dir::at(source, under)],
                 root: source.to_path_buf(),
             })
-            .filter(|subset| subset.tests().is_ok_and(|tests| !tests.is_empty()))
+            .filter(|subset| {
+                subset
+                    .dirs
+                    .iter()
+                    .any(|place| tally::any_file_under(&place.dir, is_phpt))
+            })
             .collect()
     }
 
@@ -456,7 +467,7 @@ impl Subset {
             let mut found = Vec::new();
             tally::files_under(&place.dir, &mut found)
                 .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
-            found.retain(|path| path.extension().is_some_and(|e| e == "phpt"));
+            found.retain(|path| is_phpt(path));
             found.sort();
             all.append(&mut found);
         }

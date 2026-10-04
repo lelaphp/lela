@@ -535,6 +535,22 @@ pub fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Whether a file `pick` takes stands anywhere under `dir`, walked as
+/// [`files_under`] walks it and read up to the first one found.
+pub(crate) fn any_file_under(dir: &Path, pick: fn(&Path) -> bool) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            any_file_under(&path, pick)
+        } else {
+            pick(&path)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
