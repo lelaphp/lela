@@ -533,11 +533,11 @@ from = "php_compile"
 to = ["php_syntax", "php_unit", "php_heap"]
 [[edge]]
 from = "php_engine"
-to = ["php_compile", "php_unit", "php_heap", "php_macros"]
+to = ["php_compile", "php_unit", "php_heap", "php_macros", "php_process"]
 adr = "0007"
 [[edge]]
 from = "php_ext"
-to = ["php_engine", "php_macros"]
+to = ["php_engine", "php_macros", "php_streams"]
 reexports_only = true
 [[edge]]
 from = "ext/*"
@@ -587,13 +587,13 @@ text = "Extension state is request-scoped or immutable; no lock or cell in ext/*
 
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
+allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted in six places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted in seven places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
-scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
+scope = ["crates/php_heap/**", "crates/php_process/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
 deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
 text = "Every unsafe block is one operation with a SAFETY comment."
 
@@ -637,7 +637,7 @@ text = "A new pub item in xtask needs its xtask.lock line in the same commit."
 id = "ext.pub-beyond-extension"
 scope = "ext/*"
 on = "pub"
-text = "api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12)."
+text = "api-check prints each ext crate's pub items beyond extension(); each must be a row of design §4.10's list of surfaces, and an unlisted one fails api-check (#1826)."
 
 [[rule]]
 id = "witness.exit-authored"
