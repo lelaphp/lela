@@ -46,7 +46,8 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// raised it, or serves each extension's interrupt hook from the top of
 /// php's `zend_interrupt_function` chain, the last `MINIT` to set it
 /// first and each link then the one it saved (pcntl's dispatches the
-/// signals delivered to their PHP handlers). With no hook it does nothing, as php does.
+/// signals delivered to their PHP handlers). With no hook it does
+/// nothing, as php does.
 ///
 /// The text and the plural are `zend_timeout`'s
 /// (`Z/Zend/zend_execute_API.c:1441`), over the seconds the timer was

@@ -75,17 +75,20 @@ pub(crate) struct Resolved {
     pub(crate) compile_file: Chain<CompileFileHook>,
     /// `zend_resolve_path`, from the top until a link answers, as
     /// phar's falls through to `phar_save_resolve_path`
-    /// (`Z/ext/phar/phar.c:3237-3246`).
+    /// (`Z/ext/phar/phar.c:3239-3246`).
     pub(crate) resolve_path: Chain<ResolvePathHook>,
     /// `zend_post_startup_cb`, from the bottom until a link does not
     /// serve, as opcache's calls the one it saved before its own work
-    /// and fails where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`).
+    /// and fails where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`);
+    /// ffi's serves its own first (`Z/ext/ffi/ffi.c:5461-5476`), work
+    /// that cannot fail, so one walk is both links'.
     pub(crate) post_startup: Chain<PostStartupHook>,
     /// `php_rfc1867_callback`, from the bottom, every link, as session's
     /// calls the one it saved first and keeps its answer
     /// (`Z/ext/session/session.c:3174-3176`).
     pub(crate) upload: Chain<UploadHook>,
-    /// `PG(tick_functions)`, as `php_add_tick_function` appends.
+    /// `PG(tick_functions)`, as `php_add_tick_function` appends and
+    /// `php_run_ticks` walks it (`Z/main/php_ticks.c:48-52`, `:66-69`).
     pub(crate) ticks: Listed<TicksHook>,
     /// Told of each file the unit cache holds.
     pub(crate) cached: Listed<CachedHook>,
@@ -303,7 +306,7 @@ mod tests {
 
     /// A chained kind whose link answers or passes, `zend_resolve_path`
     /// as phar's `phar_resolve_path` falls through to the one it saved
-    /// (`Z/ext/phar/phar.c:3237-3246`): the later extension answers
+    /// (`Z/ext/phar/phar.c:3239-3246`): the later extension answers
     /// what it takes, and what it leaves goes to the one beneath.
     #[test]
     fn a_chained_kind_falls_through_to_the_one_beneath() {
@@ -323,7 +326,7 @@ mod tests {
 
     /// A listed kind, `PG(tick_functions)` as `php_add_tick_function`
     /// appends to it and `php_run_ticks` walks it
-    /// (`Z/main/php_ticks.c`): every supplier's hook, in the order the
+    /// (`Z/main/php_ticks.c:48-69`): every supplier's hook, in the order the
     /// extensions started.
     #[test]
     fn a_listed_kind_serves_every_supplier_in_start_order() {
