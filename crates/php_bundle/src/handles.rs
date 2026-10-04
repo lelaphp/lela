@@ -1,29 +1,33 @@
 //! The family witness of the classes that refuse direct construction
-//! (#1770, #1790): every such class the bundle carries, held to the
-//! oracle on what php's handler table and class flags decide about it,
-//! which is whether it can be constructed, cloned, compared with another
-//! of its class and given a dynamic property. Here, in the bundle,
-//! because the family spans the enabled set: its classes come from
-//! twenty-three extensions and the engine, and this is the one crate
-//! below the hosts that links every one of them. And here because nothing
-//! the witness holds is written here: when the refusals move from
-//! hand-written handler tables to the engine's default handlers (#1791,
-//! #1792), this text stays as it is, and a handler pasted, dropped or
-//! defaulted wrongly is a line of it that moved. Compiled under
-//! `cfg(doc)` alone, a file of rustdoc and no item; `xtask witness
-//! --crate php_bundle` serves it.
+//! (design §5.4; #1770, #1790): every such class the bundle carries,
+//! held to the oracle on what php's handler table and class flags decide
+//! about it, which is whether it can be constructed, cloned, compared
+//! with another of its class and given a dynamic property. Here, in the
+//! bundle, because the family spans the enabled set: its classes come
+//! from twenty-three extensions and the engine, and this is the one
+//! crate below the hosts that links every one of them. And here because
+//! nothing the witness holds is written here: when the refusals move
+//! from hand-written handler tables to the engine's default handlers
+//! (#1791, #1792), this text stays as it is, and a handler pasted,
+//! dropped or defaulted wrongly is a line of it that moved. `done` asks
+//! for this crate's witness reading only when the crate changes, so a
+//! change to those handlers is held to it by `xtask witness --crate
+//! php_bundle`, by name. Compiled under `cfg(doc)` alone, a file of
+//! rustdoc and no item.
 //!
 //! The construction matrix: each class constructed by `new`, by
 //! `ReflectionClass::newInstance` and by `newInstanceWithoutConstructor`.
 //! The list is every class whose `new` with no argument throws other than
 //! for its arguments, under the oracle, less those of the three
-//! extensions the bundle does not carry (ldap, odbc, pgsql). Most refuse
+//! extensions the bundle does not carry (ldap, odbc, pgsql). Half refuse
 //! in a `get_constructor` handler or a constructor body: `Closure`,
-//! `Generator`, `WeakReference`, `FiberError` and the classes that took
-//! the place of a resource. The rest refuse by a private constructor:
-//! `Dom\Node` and its children, `HashContext`, `InternalIterator`,
-//! intl's factory-made classes, `mysqli_warning`, `tidyNode`, and two
-//! each of Reflection's and SQLite3's.
+//! `Generator`, `WeakReference`, `FiberError`, FFI's three, `PDORow`,
+//! and the classes that took the place of a resource or of gd's integer
+//! font. The other half refuse by a private constructor: `Dom\Node` and
+//! its children, `Dom\NamespaceInfo` and `Dom\TokenList`,
+//! `HashContext`, `InternalIterator`, intl's factory-made classes,
+//! `mysqli_warning`, `tidyNode`, and two each of Reflection's and
+//! SQLite3's.
 //!
 //! ```php
 //! $classes = [
@@ -51,10 +55,10 @@
 //!     'XMLParser',
 //!     'DeflateContext', 'InflateContext',
 //! ];
-//! $try = function ($f) { try { $o = $f(); return 'made ' . get_class($o); } catch (Throwable $e) { return get_class($e) . ': ' . $e->getMessage(); } };
+//! $build = function ($f) { try { $o = $f(); return 'made ' . get_class($o); } catch (Throwable $e) { return get_class($e) . ': ' . $e->getMessage(); } };
 //! foreach ($classes as $c) {
 //!     $r = new ReflectionClass($c);
-//!     echo $c, "\n  new: ", $try(fn() => new $c), "\n  newInstance: ", $try(fn() => $r->newInstance()), "\n  withoutConstructor: ", $try(fn() => $r->newInstanceWithoutConstructor()), "\n";
+//!     echo $c, "\n  new: ", $build(fn() => new $c), "\n  newInstance: ", $build(fn() => $r->newInstance()), "\n  withoutConstructor: ", $build(fn() => $r->newInstanceWithoutConstructor()), "\n";
 //! }
 //! ```
 //! ```expect
@@ -309,19 +313,21 @@
 //! ```
 //!
 //! The clone-and-compare matrix: two of each class that one process can
-//! make with no server, the first cloned, compared with the second by
-//! `==`, `<` and `<=>` both ways, with itself and with a `stdClass`, and
-//! given a dynamic property, each answer printed as its value or as the
-//! message it threw; a deprecation prints in brackets from the error
-//! handler. `Dom\Entity` takes no pair, since cloning one crashes the
-//! oracle itself, and `mysqli_warning` none, since only a `MySQL` server
-//! makes one and a `mysql` fence leaves the whole crate unjudged where
-//! none answers. The System V and shmop objects are made under
-//! `IPC_PRIVATE` and removed at the end, so nothing outlives the snippet.
+//! make with no server, 57 of the 62, the first cloned, compared with the
+//! second by `==`, `<` and `<=>` both ways, with itself and with a
+//! `stdClass`, and given a dynamic property, each answer printed as its
+//! value or as the message it threw; a deprecation prints in brackets
+//! from the error handler. No document makes an object of exactly
+//! `Dom\Node` or `Dom\CharacterData`, so neither has a pair; cloning a
+//! `Dom\Entity` crashes the oracle itself; and only a `MySQL` server
+//! makes a `mysqli_warning`, where a `mysql` fence would leave the whole
+//! crate unjudged when none answers. The System V and shmop objects are
+//! made under `IPC_PRIVATE` and removed at the end, so nothing outlives
+//! the snippet.
 //!
 //! ```php
 //! $font = tempnam(sys_get_temp_dir(), 'font');
-//! $x = Dom\XMLDocument::createFromString('<!DOCTYPE r [<!ENTITY e "v"><!NOTATION n SYSTEM "s">]><r xmlns:p="urn:p"/>');
+//! $x = Dom\XMLDocument::createFromString('<!DOCTYPE r [<!ENTITY e "v"><!NOTATION n SYSTEM "s">]><r xmlns:p="urn:p">&e;&e;</r>');
 //! $h = Dom\HTMLDocument::createEmpty();
 //! $db = new PDO('sqlite::memory:');
 //! $lite = new SQLite3(':memory:');
@@ -353,6 +359,7 @@
 //!     'Dom\DocumentFragment' => fn() => $x->createDocumentFragment(),
 //!     'Dom\DocumentType' => fn() => Dom\XMLDocument::createFromString('<!DOCTYPE r><r/>')->doctype,
 //!     'Dom\Element' => fn() => $x->createElement('e'),
+//!     'Dom\EntityReference' => function () use ($x) { static $i = 0; return $x->documentElement->childNodes[$i++]; },
 //!     'Dom\HTMLDocument' => fn() => Dom\HTMLDocument::createEmpty(),
 //!     'Dom\HTMLElement' => fn() => $h->createElement('p'),
 //!     'Dom\NamespaceInfo' => fn() => $x->documentElement->getInScopeNamespaces()[0],
@@ -478,6 +485,11 @@
 //!   clone: a Dom\Element
 //!   true false 0 0 true false
 //!   dynamic:   [Creation of dynamic property Dom\Element::$x is deprecated]
+//! true
+//! Dom\EntityReference (Dom\EntityReference)
+//!   clone: a Dom\EntityReference
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Dom\EntityReference::$x is deprecated]
 //! true
 //! Dom\HTMLDocument (Dom\HTMLDocument)
 //!   clone: a Dom\HTMLDocument
@@ -676,4 +688,205 @@
 //!   clone: Trying to clone an uncloneable object of class FTP\Connection
 //!   true false 0 0 true false
 //!   dynamic: Cannot create dynamic property FTP\Connection::$x
+//! ```
+//!
+//! The rest of the refusing handlers: classes that construct, but whose
+//! php handler table refuses cloning or answers that two of them do not
+//! compare, one class per table, held the same way. These are the
+//! refusing methods #1792 moves beside the whole tables.
+//!
+//! ```php
+//! enum Suit { case Hearts; case Spades; }
+//! $make = [
+//!     'Exception' => fn() => new Exception('e'),
+//!     'Fiber' => fn() => new Fiber(fn() => 1),
+//!     'Suit' => function () { static $i = 0; return Suit::cases()[$i++]; },
+//!     'Collator' => fn() => new Collator('en'),
+//!     'IntlListFormatter' => fn() => new IntlListFormatter('en'),
+//!     'Dom\Implementation' => fn() => Dom\XMLDocument::createEmpty()->implementation,
+//!     'Dom\NamedNodeMap' => fn() => Dom\XMLDocument::createEmpty()->createElement('e')->attributes,
+//!     'Dom\NodeList' => fn() => Dom\XMLDocument::createEmpty()->childNodes,
+//!     'Dom\HTMLCollection' => fn() => Dom\XMLDocument::createEmpty()->getElementsByTagName('e'),
+//!     'Dom\XPath' => fn() => new Dom\XPath(Dom\XMLDocument::createEmpty()),
+//!     'DOMNamedNodeMap' => fn() => (new DOMDocument)->createElement('e')->attributes,
+//!     'DOMNodeList' => fn() => (new DOMDocument)->childNodes,
+//!     'DOMXPath' => fn() => new DOMXPath(new DOMDocument),
+//!     'finfo' => fn() => new finfo,
+//!     'mysqli' => fn() => mysqli_init(),
+//!     'PDO' => fn() => new PDO('sqlite::memory:'),
+//!     'PDOStatement' => fn() => (new PDO('sqlite::memory:'))->prepare('SELECT 1'),
+//!     'Random\Engine\Secure' => fn() => new Random\Engine\Secure,
+//!     'Random\Randomizer' => fn() => new Random\Randomizer(new Random\Engine\Mt19937(1)),
+//!     'ReflectionClass' => fn() => new ReflectionClass('stdClass'),
+//!     'SoapServer' => fn() => new SoapServer(null, ['uri' => 'urn:t']),
+//!     'IteratorIterator' => fn() => new IteratorIterator(new ArrayIterator([])),
+//!     'RecursiveIteratorIterator' => fn() => new RecursiveIteratorIterator(new RecursiveArrayIterator([])),
+//!     'SplFileObject' => fn() => new SplFileObject('php://memory'),
+//!     'GlobIterator' => fn() => new GlobIterator(sys_get_temp_dir() . '/*.none'),
+//!     'SQLite3' => fn() => new SQLite3(':memory:'),
+//!     'tidy' => fn() => new tidy,
+//!     'XMLReader' => fn() => new XMLReader,
+//!     'XMLWriter' => fn() => new XMLWriter,
+//!     'XSLTProcessor' => fn() => new XSLTProcessor,
+//!     'ZipArchive' => fn() => new ZipArchive,
+//! ];
+//! $try = function ($f) { try { $r = $f(); return is_object($r) ? 'a ' . get_class($r) : var_export($r, true); } catch (Throwable $e) { return $e->getMessage(); } };
+//! set_error_handler(function ($no, $msg) { echo "  [$msg]\n"; return true; });
+//! foreach ($make as $class => $m) {
+//!     [$a, $b] = [$m(), $m()];
+//!     echo $class, ' (', get_debug_type($a), ")\n  clone: ", $try(fn() => clone $a), "\n";
+//!     echo '  ', implode(' ', array_map($try, [fn() => $a == $b, fn() => $a < $b, fn() => $a <=> $b, fn() => $b <=> $a, fn() => $a == $a, fn() => $a == new stdClass])), "\n";
+//!     echo '  dynamic: ', $try(function () use ($a) { $a->x = 1; return isset($a->x); }), "\n";
+//! }
+//! ```
+//! ```expect
+//! Exception (Exception)
+//!   clone: Trying to clone an uncloneable object of class Exception
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Exception::$x is deprecated]
+//! true
+//! Fiber (Fiber)
+//!   clone: Trying to clone an uncloneable object of class Fiber
+//!   true false 0 0 true false
+//!   dynamic: Cannot create dynamic property Fiber::$x
+//! Suit (Suit)
+//!   clone: Trying to clone an uncloneable object of class Suit
+//!   false false 1 1 true false
+//!   dynamic: Cannot create dynamic property Suit::$x
+//! Collator (Collator)
+//!   clone: Trying to clone an uncloneable object of class Collator
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Collator::$x is deprecated]
+//! true
+//! IntlListFormatter (IntlListFormatter)
+//!   clone: Trying to clone an uncloneable object of class IntlListFormatter
+//!   true false 0 0 true false
+//!   dynamic: Cannot create dynamic property IntlListFormatter::$x
+//! Dom\Implementation (Dom\Implementation)
+//!   clone: Trying to clone an uncloneable object of class Dom\Implementation
+//!   true false 0 0 true false
+//!   dynamic: Cannot create dynamic property Dom\Implementation::$x
+//! Dom\NamedNodeMap (Dom\NamedNodeMap)
+//!   clone: Trying to clone an uncloneable object of class Dom\NamedNodeMap
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Dom\NamedNodeMap::$x is deprecated]
+//! true
+//! Dom\NodeList (Dom\NodeList)
+//!   clone: Trying to clone an uncloneable object of class Dom\NodeList
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Dom\NodeList::$x is deprecated]
+//! true
+//! Dom\HTMLCollection (Dom\HTMLCollection)
+//!   clone: Trying to clone an uncloneable object of class Dom\HTMLCollection
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Dom\HTMLCollection::$x is deprecated]
+//! true
+//! Dom\XPath (Dom\XPath)
+//!   clone: Trying to clone an uncloneable object of class Dom\XPath
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property Dom\XPath::$x is deprecated]
+//! true
+//! DOMNamedNodeMap (DOMNamedNodeMap)
+//!   clone: Trying to clone an uncloneable object of class DOMNamedNodeMap
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property DOMNamedNodeMap::$x is deprecated]
+//! true
+//! DOMNodeList (DOMNodeList)
+//!   clone: Trying to clone an uncloneable object of class DOMNodeList
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property DOMNodeList::$x is deprecated]
+//! true
+//! DOMXPath (DOMXPath)
+//!   clone: Trying to clone an uncloneable object of class DOMXPath
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property DOMXPath::$x is deprecated]
+//! true
+//! finfo (finfo)
+//!   clone: Trying to clone an uncloneable object of class finfo
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property finfo::$x is deprecated]
+//! true
+//! mysqli (mysqli)
+//!   clone: Trying to clone an uncloneable object of class mysqli
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property mysqli::$x is deprecated]
+//! true
+//! PDO (PDO)
+//!   clone: Trying to clone an uncloneable object of class PDO
+//!   false false 1 1 true false
+//!   dynamic:   [Creation of dynamic property PDO::$x is deprecated]
+//! true
+//! PDOStatement (PDOStatement)
+//!   clone: Trying to clone an uncloneable object of class PDOStatement
+//!   false false 1 1 true false
+//!   dynamic:   [Creation of dynamic property PDOStatement::$x is deprecated]
+//! true
+//! Random\Engine\Secure (Random\Engine\Secure)
+//!   clone: Trying to clone an uncloneable object of class Random\Engine\Secure
+//!   true false 0 0 true false
+//!   dynamic: Cannot create dynamic property Random\Engine\Secure::$x
+//! Random\Randomizer (Random\Randomizer)
+//!   clone: Trying to clone an uncloneable object of class Random\Randomizer
+//!   true false 0 0 true false
+//!   dynamic: Cannot create dynamic property Random\Randomizer::$x
+//! ReflectionClass (ReflectionClass)
+//!   clone: Trying to clone an uncloneable object of class ReflectionClass
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property ReflectionClass::$x is deprecated]
+//! true
+//! SoapServer (SoapServer)
+//!   clone: Trying to clone an uncloneable object of class SoapServer
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property SoapServer::$x is deprecated]
+//! true
+//! IteratorIterator (IteratorIterator)
+//!   clone: Trying to clone an uncloneable object of class IteratorIterator
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property IteratorIterator::$x is deprecated]
+//! true
+//! RecursiveIteratorIterator (RecursiveIteratorIterator)
+//!   clone: Trying to clone an uncloneable object of class RecursiveIteratorIterator
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property RecursiveIteratorIterator::$x is deprecated]
+//! true
+//! SplFileObject (SplFileObject)
+//!   clone: Trying to clone an uncloneable object of class SplFileObject
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property SplFileObject::$x is deprecated]
+//! true
+//! GlobIterator (GlobIterator)
+//!   clone: Trying to clone an uncloneable object of class GlobIterator
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property GlobIterator::$x is deprecated]
+//! true
+//! SQLite3 (SQLite3)
+//!   clone: Trying to clone an uncloneable object of class SQLite3
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property SQLite3::$x is deprecated]
+//! true
+//! tidy (tidy)
+//!   clone: Trying to clone an uncloneable object of class tidy
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property tidy::$x is deprecated]
+//! true
+//! XMLReader (XMLReader)
+//!   clone: Trying to clone an uncloneable object of class XMLReader
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property XMLReader::$x is deprecated]
+//! true
+//! XMLWriter (XMLWriter)
+//!   clone: Trying to clone an uncloneable object of class XMLWriter
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property XMLWriter::$x is deprecated]
+//! true
+//! XSLTProcessor (XSLTProcessor)
+//!   clone: Trying to clone an uncloneable object of class XSLTProcessor
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property XSLTProcessor::$x is deprecated]
+//! true
+//! ZipArchive (ZipArchive)
+//!   clone: Trying to clone an uncloneable object of class ZipArchive
+//!   true false 0 0 true false
+//!   dynamic:   [Creation of dynamic property ZipArchive::$x is deprecated]
+//! true
 //! ```
