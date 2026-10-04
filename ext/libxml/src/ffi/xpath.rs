@@ -463,7 +463,7 @@ fn pop_args(ctxt: *mut sys::xmlXPathParserContext, n: usize, strings: bool) -> V
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         // SAFETY: a live parser context with at least `n` values stacked.
-        let obj = unsafe { sys::valuePop(ctxt) };
+        let obj = unsafe { sys::xmlXPathValuePop(ctxt) };
         if obj.is_null() {
             out.push(Operand::Str(Vec::new()));
             continue;
@@ -508,7 +508,7 @@ fn push(ctxt: *mut sys::xmlXPathParserContext, value: Returned) {
         Returned::Sentinel => unsafe { sys::xmlXPathNewString(c"".as_ptr().cast()) },
     };
     // SAFETY: a live parser context and a fresh value it takes.
-    unsafe { sys::valuePush(ctxt, obj) };
+    unsafe { sys::xmlXPathValuePush(ctxt, obj) };
 }
 
 /// The session of the evaluation in progress, from the evaluator's

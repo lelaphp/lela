@@ -1005,8 +1005,15 @@ unsafe extern "C" {
         uri: *const xmlChar,
         f: Option<xmlXPathFunction>,
     ) -> c_int;
-    pub(crate) fn valuePop(ctxt: *mut xmlXPathParserContext) -> *mut xmlXPathObject;
-    pub(crate) fn valuePush(ctxt: *mut xmlXPathParserContext, value: *mut xmlXPathObject) -> c_int;
+    // `valuePop` and `valuePush` before libxml2 2.14, which renamed them
+    // with the signatures unchanged; `build/libxml2.rs` says which.
+    #[cfg_attr(not(libxml_xpath_value_push), link_name = "valuePop")]
+    pub(crate) fn xmlXPathValuePop(ctxt: *mut xmlXPathParserContext) -> *mut xmlXPathObject;
+    #[cfg_attr(not(libxml_xpath_value_push), link_name = "valuePush")]
+    pub(crate) fn xmlXPathValuePush(
+        ctxt: *mut xmlXPathParserContext,
+        value: *mut xmlXPathObject,
+    ) -> c_int;
     pub(crate) fn xmlXPathNewString(val: *const xmlChar) -> *mut xmlXPathObject;
     pub(crate) fn xmlXPathNewFloat(val: c_double) -> *mut xmlXPathObject;
     pub(crate) fn xmlXPathNewBoolean(val: c_int) -> *mut xmlXPathObject;
