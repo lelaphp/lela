@@ -1,12 +1,12 @@
 ---
 status: accepted
 date: 2026-10-04
-supersedes: ADR-0005's `engine_state(fn(&StartupIni) -> E)` (engine start that cannot fail and sees only the ini), third-engine-design.md §4.4's state table where it calls engine-state construction `minit` and its drop `mshutdown`
+supersedes: ADR-0005's `engine_state(fn(&StartupIni) -> E)` (engine start that cannot fail and sees only the ini)
 ---
 
 # An extension's lifecycle is three scopes that start as values and end as phases
 
-php runs one engine per process, so `MINIT` means both "once per process" and "engine start", and `MSHUTDOWN` both "engine end" and "process end". Here a process may build several engines, and no phase means once per process. The architecture review of 2026-10-03 (#1770) found extensions improvising around that gap: C-library global initialisation runs inside `extension()` (libxml, sodium, xsl), inside engine state (openssl, mbstring) or not at all (curl). Engine start cannot fail: `ExtensionBuilder::engine_state` takes `fn(&StartupIni) -> E` (`crates/php_engine/src/api/abi.rs`), with ten builders under `ext/`, and sees no host name. Nothing corresponds to `MSHUTDOWN` or to `post_deactivate`: the end of a request is `rshutdown` and then `deactivate`, the last place php's `shutdown_executor` reaches before the request's objects and resources are freed, and a persistent cdb file and a pool entry past its bound have no request to be closed with. Request state and engine state drop in forward order where ADR-0005 says reverse, and a second fatal in a request-end function is swallowed where php guards each extension separately. ADR-0005 also names `api::Pool` and says the `api` group gains "no trait", which a lifecycle that closes pool entries has to confirm or change. Settled by Mitchell on #1774; what an error from `rinit` means was settled beside it on #1775.
+php runs one engine per process, so `MINIT` means both "once per process" and "engine start", and `MSHUTDOWN` both "engine end" and "process end". Here a process may build several engines, and no phase means once per process. The architecture review of 2026-10-03 (#1770) found extensions improvising around that gap: C-library global initialisation runs inside `extension()` (libxml, sodium, xsl), inside engine state (openssl, mbstring) or not at all (curl). Engine start cannot fail: `ExtensionBuilder::engine_state` takes `fn(&StartupIni) -> E` (`crates/php_engine/src/api/abi.rs`), with ten builders under `ext/`, and sees no host name. Nothing corresponds to `MSHUTDOWN` or to `post_deactivate`: the end of a request is `rshutdown` and then `deactivate`, served where php's `zend_deactivate` reaches `shutdown_executor`, before the request's objects and resources are freed, and a persistent cdb file and a pool entry past its bound have no request to be closed with. Request state and engine state drop in forward order where ADR-0005 says reverse, and a second fatal in a request-end function is swallowed where php guards each extension separately. ADR-0005 also names `api::Pool` and says the `api` group gains "no trait", which a lifecycle that closes pool entries has to confirm or change. Settled by Mitchell on #1774; what an error from `rinit` means was settled beside it on #1775.
 
 ## Decision
 
@@ -16,7 +16,7 @@ An extension's lifecycle is three scopes, process, engine and request, that star
 
 - **Process:** `process_state(fn() -> Result<P, Refusal>)`, `P: Send + Sync + 'static`, reached as `&'static P`. It is built at most once per process, the first time an engine carrying the extension is built, in bundle order, and held by a once in `php_engine`, never in the extension. It sees nothing an engine is configured with, no ini and no host name, so two engines with different configuration cannot race to define it. C-library global initialisation (libxml, sodium, xsl, openssl, curl) lives here.
 - **Engine:** `engine_state(fn(&Start) -> Result<E, Refusal>)`, fallible, as php's `MINIT` failure is. `Start` carries the startup ini, the host's name and the process states; its fields are private behind accessors, so a later field is not a breaking change.
-- **Request:** unchanged. What an error from `rinit` means is #1775's ruling: an `Err(Thrown)` from `rinit` is php's fatal inside `RINIT`, after which no later extension's `rinit` runs, the program does not run and no request-end phase runs; the request states drop.
+- **Request:** unchanged; what an error from `rinit` means is #1775's.
 
 **Ends are phases, in reverse bundle order, each extension guarded separately** (php's `zend_try` per module).
 
@@ -32,7 +32,7 @@ An extension's lifecycle is three scopes, process, engine and request, that star
 ## Considered options
 
 - **A process scope that sees the ini.** Rejected: two engines with different configuration would race to define a value built once per process.
-- **A host-called process end.** Rejected: `xmlCleanupParser` and `curl_global_cleanup` are documented unsafe while another thread may use the library, and nothing they release is observable (principle 2).
+- **A host-called process end.** Rejected: `xmlCleanupParser` and `curl_global_cleanup` are documented unsafe while another thread may use the library, and nothing they do is observable (principle 2).
 - **An explicit consuming `Engine::shutdown`.** Rejected: a host can forget to call it; `Drop` cannot be forgotten.
 - **`post_deactivate` as `Drop`.** Rejected: ADR-0005 says a state's `Drop` touches no engine, and libxml's and a tracer's work at `post_deactivate` does.
 - **A `Persistent` trait on pool entries.** Rejected: it would need every pool registered with the engine, when the extension already knows its own.

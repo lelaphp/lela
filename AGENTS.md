@@ -101,7 +101,7 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 
-<!-- /computed in=b9212a00eb6a7c4b28654162e8372ac190c771cf3676e940ff2616ff2073caec out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
+<!-- /computed in=3e0e525902a4ccf204d464e5b1f087a41ed1c332bc0da0cf009709ba79089600 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
