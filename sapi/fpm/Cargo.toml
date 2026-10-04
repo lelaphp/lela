@@ -53,3 +53,9 @@ php_ext = { path = "../../crates/php_ext" }
 # shared memory and the rest `nix` leaves unsafe (ADR-0008).
 nix = { workspace = true, features = ["process", "signal", "resource", "fs", "socket", "net", "poll", "event", "user", "time", "syslog", "feature"] }
 libc = { workspace = true }
+
+# `fpm_trace_ptrace.c`, the slow log's attach and detach everywhere but
+# macOS, where `fpm_trace_mach.c` asks for the task port instead
+# (`src/ffi/trace.rs`).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+nix = { workspace = true, features = ["ptrace"] }
