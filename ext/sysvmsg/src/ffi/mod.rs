@@ -155,7 +155,10 @@ pub(crate) fn set(id: i32, changes: &Changes) -> bool {
         perm.gid = gid as libc::gid_t;
     }
     if let Some(mode) = changes.mode {
-        perm.mode = mode as libc::mode_t;
+        // The member's own type, which is not `mode_t` everywhere: an
+        // `unsigned short` on x86_64 glibc, an `unsigned int` on aarch64
+        // glibc and a `mode_t` on macOS.
+        perm.mode = mode as _;
     }
     ds.msg_perm = perm;
     if let Some(qbytes) = changes.qbytes {
