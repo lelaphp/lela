@@ -10,9 +10,9 @@
 //! from, [`built_from`], and not the tree the subset's reading is stamped
 //! with: that one is the crate's own, which does not move when
 //! `php_engine` does, while the verdicts do. The same key is taken from a
-//! commit's objects, so the run a checkout of the merge base took is found
-//! from any worktree by the commit alone, and a run over sources that are
-//! no commit's is found by none.
+//! commit's objects, so the run a worktree at the merge base took is found
+//! by the commit alone from any worktree of the repository ([`roots`]),
+//! and a run over sources that are no commit's is found by none.
 //!
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
@@ -62,6 +62,7 @@ use crate::manifest::Manifest;
 use crate::oracle::{Pin, Runner};
 use crate::reading::{Reading, Status, listed};
 use crate::tally::Judgement as _;
+use crate::track;
 
 /// What the engine's binary is built from: the crates, extensions and
 /// hosts it links ([`crate::layout::CRATE_DIRS`]), the workspace's lock,
@@ -108,8 +109,8 @@ pub(crate) struct Diff {
 /// keys its own by, what names them, and the commit asked for.
 pub(crate) struct Runs {
     root: PathBuf,
-    /// The workspaces a target is looked for in: this one, then the main
-    /// worktree, whose store is the one store.
+    /// The workspaces a base's run and a target are looked for in,
+    /// [`roots`].
     roots: Vec<PathBuf>,
     tree: String,
     commit: String,
@@ -117,32 +118,18 @@ pub(crate) struct Runs {
     base: Option<Base>,
 }
 
-/// The commit a run is held against: its short id, the key its runs
-/// stand under, and the workspaces whose runs are looked in.
+/// The commit a run is held against: its short id and the key its runs
+/// stand under.
 struct Base {
     commit: String,
     tree: String,
-    roots: Vec<PathBuf>,
 }
 
 impl Runs {
     /// The runs of the workspace at `root`, held against `against` when
     /// one is named; a commit the repository does not have is refused.
     pub(crate) fn new(root: &Path, manifest: &Manifest, against: Option<&str>) -> Result<Runs> {
-        let base = match against {
-            None => None,
-            Some(named) => {
-                let spec = format!("{named}^{{commit}}");
-                let full = git::git(root, &["rev-parse", "--verify", "--quiet", &spec], None)
-                    .with_context(|| format!("--against {named}: no such commit"))?;
-                let full = full.trim();
-                Some(Base {
-                    commit: full.chars().take(7).collect(),
-                    tree: git::tracked_hash(root, &built_from(), Some(full))?,
-                    roots: roots(root),
-                })
-            }
-        };
+        let base = against.map(|named| Base::at(root, named)).transpose()?;
         let source = &manifest.pin.source;
         Ok(Runs {
             root: root.to_path_buf(),
@@ -157,8 +144,8 @@ impl Runs {
     /// The target of the subset `scope` names after its run, and whether
     /// this run kept it: where the runner's control judged every test,
     /// outside a tier lane, the oracle's verdicts kept under the pin
-    /// (#1184); otherwise the one kept under the pin here or in the main
-    /// worktree, if any is.
+    /// (#1184); otherwise the one kept under the pin in the first of
+    /// [`roots`] that keeps one, if any does.
     pub(crate) fn target_of(
         &self,
         pin: &Pin,
@@ -204,7 +191,7 @@ impl Runs {
         // A base with no run kept is a comparison that gives no verdict and
         // never a subset left unrun: the subset's own reading stands beside
         // it, and the skip says so with its counts (#1435).
-        let diff = match (base.run(scope)?, run) {
+        let diff = match (base.run(&self.roots, scope)?, run) {
             (Err(why), _) => Err(format!(
                 "{why}; the subset ran, and its own reading stands beside this one: {}",
                 subset.message
@@ -251,10 +238,20 @@ impl Runs {
 }
 
 impl Base {
-    /// The run of `scope` stored at the commit, from the first workspace
-    /// that keeps one, or why there is none.
-    fn run(&self, scope: &str) -> Result<Result<Run, String>> {
-        for root in &self.roots {
+    /// The commit `named` names in the repository at `root`, keyed by the
+    /// tree its engine is built from; a name that is no commit is refused.
+    fn at(root: &Path, named: &str) -> Result<Base> {
+        let full = track::rev(root, named).with_context(|| format!("--against {named}"))?;
+        Ok(Base {
+            commit: track::short(&full).to_owned(),
+            tree: git::tracked_hash(root, &built_from(), Some(&full))?,
+        })
+    }
+
+    /// The run of `scope` stored at the commit, from the first of `roots`
+    /// that keeps one, or why there is none, naming each root looked in.
+    fn run(&self, roots: &[PathBuf], scope: &str) -> Result<Result<Run, String>> {
+        for root in roots {
             let file = path(root, &self.tree, scope);
             if file.is_file() {
                 let text = fs::read_to_string(&file)
@@ -264,22 +261,36 @@ impl Base {
                 return Ok(Ok(run));
             }
         }
-        let looked: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
+        let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        let looked = looked.join(", ");
+        let Base { commit, tree } = self;
         Ok(Err(format!(
-            "no run of {scope} is kept at {} (the engine's tree {}) in {}; take one with `xtask phpt` in a checkout of {} with its engine built",
-            self.commit,
-            self.tree,
-            looked.join(" or "),
-            self.commit
+            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; take one with `xtask phpt` in a worktree of this repository at {commit}, `git worktree add --detach <dir> {commit}`, with its engine built"
         )))
     }
 }
 
-/// The workspaces a kept run or target is looked for in: `root`, then the
-/// main worktree, whose store is the one store (harness-design.md §4.2).
+/// Where a kept run or target is looked for from the workspace at `root`:
+/// `root`, then every worktree of its repository that stands on disk, as
+/// `git worktree list` names them, the main one first; each once, by its
+/// canonical path. The one rule for where a run lives: in the workspace
+/// that took it ([`Runs::after`]), keyed by the tree its engine is built
+/// from, so a run taken in a worktree at a base, as the skip of
+/// [`Base::run`] asks, is found by the commit from every other worktree
+/// while that one stands (#1869). The main worktree outlives the others,
+/// so `worktree retire` carries a branch worktree's runs into it
+/// ([`carry`]) before removing it.
 fn roots(root: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![root.to_path_buf()];
-    roots.extend(crate::track::main_worktree(root).ok());
+    let listed = track::worktrees(root).unwrap_or_default();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let standing = std::iter::once(root.to_path_buf())
+        .chain(listed.into_iter().map(|(tree, _)| tree))
+        .filter_map(|tree| fs::canonicalize(tree).ok());
+    for tree in standing {
+        if !roots.contains(&tree) {
+            roots.push(tree);
+        }
+    }
     roots
 }
 
@@ -302,8 +313,8 @@ pub(crate) struct Carried {
 /// the engine's binary is built from, so a run taken anywhere at that tree
 /// is the same run, and the one standing is as good as the one carried. What
 /// `worktree retire` keeps of a worktree before removing it, so a run
-/// taken in a checkout of a base, as the skip of [`Base::run`] asks, is
-/// still there for the comparison once the checkout is gone (#1268).
+/// taken there is still found, from the main worktree among [`roots`],
+/// once the worktree is gone (#1268).
 pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
     let runs = from.join(RUNS);
     let mut files = Vec::new();

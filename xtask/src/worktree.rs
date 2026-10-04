@@ -311,12 +311,11 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// The worktree's kept phpt runs carried into the main worktree's, where
-/// `phpt --against` looks for a base's run beside the checkout it runs in
-/// ([`against::carry`]): each one main keeps none of is copied, and one it
-/// keeps already stays as it stood. Before this a run taken in a worktree
-/// at the base, which is what the comparison's skip asks for, went with
-/// the worktree (#1268).
+/// The worktree's kept phpt runs carried into the main worktree's, which
+/// outlives it: `phpt --against` looks for a base's run in every worktree
+/// that stands ([`against::carry`]), so a run left here would go with the
+/// worktree (#1268). Each one main keeps none of is copied, and one it
+/// keeps already stays as it stood.
 fn carry_runs(dir: &Path) -> Result<()> {
     let main = track::main_worktree(dir)?;
     let carried = against::carry(dir, &main)?;

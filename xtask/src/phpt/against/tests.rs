@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use super::*;
+use crate::scratch::{Tree, committing};
 
 fn fixture(name: &str) -> Run {
     let file = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -145,4 +146,50 @@ fn a_kept_run_is_spelled_as_the_fixture_is() {
     let text = serde_json::to_string_pretty(&base).unwrap();
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/against/base.json");
     assert_eq!(text.trim(), fs::read_to_string(file).unwrap().trim());
+}
+
+/// A run kept in a linked worktree at the base, where the skip asks for one
+/// to be taken, is found by the commit from main's checkout (#1869). Before
+/// it is kept, the skip names each worktree it looked in once, the one it
+/// runs in first; from the linked one, main comes after it.
+#[test]
+fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
+    let main = Tree::new("against-main").unwrap();
+    let beside = Tree::new("against-beside").unwrap();
+    committing(&main, &["init", "-q", "-b", "main"]);
+    fs::write(main.join("Cargo.toml"), "[workspace]\n").unwrap();
+    committing(&main, &["add", "--", "Cargo.toml"]);
+    committing(&main, &["commit", "-q", "-m", "base"]);
+    let linked = beside.join("base");
+    let linked_str = linked.to_str().unwrap();
+    committing(
+        &main,
+        &["worktree", "add", "-q", "--detach", linked_str, "HEAD"],
+    );
+
+    let base = Base::at(&main, "HEAD").unwrap();
+    let looked = roots(&main);
+    assert_eq!(looked, [main.path(), &linked], "{looked:?}");
+    assert_eq!(roots(&linked), [&linked, main.path()]);
+
+    let why = base.run(&looked, "ext/fixture").unwrap().unwrap_err();
+    let main_named = format!("{}, ", main.display());
+    assert_eq!(why.matches(&main_named).count(), 1, "{why}");
+    assert_eq!(why.matches(linked_str).count(), 1, "{why}");
+    assert!(
+        why.contains(&format!("git worktree add --detach <dir> {}", base.commit)),
+        "{why}"
+    );
+
+    let run = fixture("base.json");
+    let file = path(&linked, &base.tree, "ext/fixture");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, serde_json::to_string_pretty(&run).unwrap()).unwrap();
+    assert_eq!(base.run(&roots(&main), "ext/fixture").unwrap(), Ok(run));
+
+    // Another spelling of the checkout is the same root, and a worktree
+    // git still lists whose directory is gone is none.
+    assert_eq!(roots(&main.join(".")), looked);
+    fs::remove_dir_all(&linked).unwrap();
+    assert_eq!(roots(&main), [main.path()]);
 }

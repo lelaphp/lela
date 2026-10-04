@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use super::INSTRUMENT;
 use super::argv;
 use super::call::Call;
+use crate::manifest::OneOrMany;
 use crate::reading::{self, Number, Reading, Status, Store};
 use crate::{git, manifest, steer};
 
@@ -312,18 +313,14 @@ fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
     }
 }
 
-/// Whether one of the command's simple commands runs `xtask steer`:
-/// `cargo xtask steer`, a built `xtask` by path, `cargo run -p xtask --
-/// steer`.
+/// Whether one of the command's simple commands runs `xtask steer`,
+/// however xtask is run: `cargo xtask steer`, a built `xtask` by path,
+/// `cargo run -p xtask -- steer` ([`argv`]).
 fn runs_steer(command: &str) -> bool {
-    argv::commands(command).iter().any(|argv| {
-        let words = argv.words();
-        words.iter().position(|w| w == "steer").is_some_and(|at| {
-            words[..at]
-                .iter()
-                .any(|w| w == "xtask" || w.ends_with("/xtask"))
-        })
-    })
+    let steer = OneOrMany::One("xtask steer".to_owned());
+    argv::commands(command)
+        .iter()
+        .any(|argv| argv.invokes(&steer))
 }
 
 /// The checkouts a call reaches: the hook's own and the one the call

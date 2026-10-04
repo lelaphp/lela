@@ -250,6 +250,26 @@ pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `git` in `dir` as a person commits there: named, unsigned and
+/// unhooked, since the real pre-commit measuring a scratch is not the
+/// test.
+#[cfg(test)]
+pub(crate) fn committing(dir: &Path, args: &[&str]) {
+    let unhooked = [
+        "-c",
+        "user.name=x",
+        "-c",
+        "user.email=x@x",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/var/empty",
+    ];
+    if let Err(err) = git(dir, &[&unhooked[..], args].concat(), None) {
+        panic!("git {args:?} in {}: {err:#}", dir.display());
+    }
+}
+
 /// The lock beside `tree`, opened and taken.
 ///
 /// The file is made and locked under a name the sweep does not read, and

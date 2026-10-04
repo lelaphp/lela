@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"target/release/xtask phpt --jit=exit-fuzz > lane.out","description":"Run the tier's lane through the built binary's path"}}
