@@ -688,17 +688,32 @@ impl Argv {
     /// after it a name for the tree rather than for files (`.`, `:/`, a
     /// `*` the shell left unexpanded). The separator is `--` for git, after
     /// which every word is a path, so `git add -A -- src` is bounded to
-    /// `src` and passes.
+    /// `src` and passes; an option separator may carry its value after
+    /// `=`, `--subset=ext/pcre`. A command that asks for its help (`-h`,
+    /// `--help` among its options) runs nothing and is never unbounded.
     pub(super) fn unbounded(&self, separator: &str, with: &OneOrMany) -> bool {
         self.invocations(with).any(|invocation| {
             let own = invocation.own();
-            match own.iter().position(|t| t == separator) {
-                None => true,
-                Some(at) => {
-                    let paths = &own[at + 1..];
-                    paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
-                }
+            let options = own.iter().take_while(|w| *w != "--");
+            if options.into_iter().any(|w| w == "-h" || w == "--help") {
+                return false;
             }
+            let joined = |word: &String| {
+                word.strip_prefix(separator)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(str::to_owned)
+            };
+            let Some(at) = own
+                .iter()
+                .position(|w| w == separator || joined(w).is_some())
+            else {
+                return true;
+            };
+            let paths: Vec<String> = joined(&own[at])
+                .into_iter()
+                .chain(own[at + 1..].iter().cloned())
+                .collect();
+            paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
         })
     }
 
@@ -1238,6 +1253,43 @@ mod tests {
         assert!(!carries("git worktree add -b x dir"));
         assert!(!carries("cargo add serde"));
         assert!(carries("git commit -m x"));
+    }
+
+    /// `lanes.builder-subset` as `require_argv = "--subset"` under `with =
+    /// "xtask phpt"`: the subset named, as a word or after `=`, passes,
+    /// and so does a call for the instrument's help; the lane run bare or
+    /// with `--census`, however xtask is run, is unbounded, and a message
+    /// that cites it is no xtask.
+    #[test]
+    fn a_subset_bounds_the_phpt_lane() {
+        let with = OneOrMany::One("xtask phpt".to_owned());
+        let bare = |line: &str| {
+            commands(line)
+                .iter()
+                .any(|a| a.unbounded("--subset", &with))
+        };
+        for line in [
+            "cargo xtask phpt",
+            "cargo xtask phpt --census --against e7f3b27",
+            "cargo run -q -p xtask -- phpt --jobs 4",
+            "X=target/release/xtask; $X phpt",
+            "cargo xtask phpt; grep -h x file",
+            "cargo xtask phpt --subset",
+        ] {
+            assert!(bare(line), "{line}");
+        }
+        for line in [
+            "cargo xtask phpt --subset ext/zlib",
+            "cargo xtask phpt --subset=ext/zlib --census",
+            "target/debug/xtask phpt --jobs 2 --subset Zend/tests",
+            "cargo xtask phpt --help | grep -E '^ +--'",
+            "cargo xtask phpt -h",
+            "git commit -m 'the merge check runs cargo xtask phpt --census' -- a.rs",
+            "cargo xtask phpt-census",
+            "cargo xtask bench",
+        ] {
+            assert!(!bare(line), "{line}");
+        }
     }
 
     #[test]

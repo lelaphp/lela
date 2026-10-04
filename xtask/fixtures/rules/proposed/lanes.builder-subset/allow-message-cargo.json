@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -m \"xtask phpt: the merge check runs cargo xtask phpt --census over main\" -- xtask/src/phpt/mod.rs","description":"Commit with a message that cites the merge check's command under cargo"}}
