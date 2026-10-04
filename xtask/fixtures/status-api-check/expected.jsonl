@@ -1,0 +1,7 @@
+{"v":1,"instrument":"api-check","scope":"heap","status":"pass","at":"2026-09-12T18:51:08Z","commit":"6f4870c","items":51,"private":null,"edges":null,"extensions":null}
+{"v":1,"instrument":"api-check","scope":"ops","status":"skip","at":"2026-09-12T18:51:09Z","commit":"6f4870c","items":null,"private":null,"edges":null,"extensions":null}
+{"v":1,"instrument":"api-check","scope":"php_syntax","status":"pass","at":"2026-09-12T18:51:10Z","commit":"6f4870c","items":null,"private":null,"edges":0,"extensions":null}
+{"v":1,"instrument":"api-check","scope":"api","status":"pass","at":"2026-09-20T10:00:00Z","commit":"3c2f1aa","items":540,"private":null,"edges":null,"extensions":null}
+{"v":1,"instrument":"api-check","scope":"api","status":"fail","at":"2026-09-26T21:54:52Z","commit":"aa1416a","items":679,"private":11,"edges":null,"extensions":null}
+{"v":1,"instrument":"api-check","scope":"php_bundle","status":"fail","at":"2026-09-28T17:31:06Z","commit":"d83b707","items":null,"private":null,"edges":30,"extensions":29}
+{"v":1,"instrument":"api-check","scope":"sapi","status":"pass","at":"2026-10-03T12:00:00Z","commit":"2ebc652","items":31,"private":null,"edges":null,"extensions":null}

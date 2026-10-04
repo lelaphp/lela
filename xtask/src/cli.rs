@@ -671,7 +671,9 @@ pub enum Section {
     /// judges it and its reading; the text its failure prints is under
     /// `--uncut` and in JSON (#1772).
     Rules,
-    /// Each lock's width against `api_items`.
+    /// Each lock's width against `api_items`: the api-check readings, of
+    /// which `--every` renders every one, a crate's edges among them.
+    #[value(alias = "api-check")]
     Locks,
     /// Each crate against its ceiling.
     Budget,
