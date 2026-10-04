@@ -205,13 +205,21 @@ fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
 /// The first step of php's `pdo_dbh_free_storage` (`pdo_dbh.c:1588-1591`):
 /// a transaction the connection still has open rolled back, asked of the
 /// connector's `in_transaction` where it answers and of `in_txn` where it
-/// does not; whether one was, for the caller to clear `in_txn`.
-fn rolled_back(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) -> bool {
-    let open = conn.in_transaction(req).unwrap_or(in_txn);
-    if open {
-        let _ = conn.rollback(req);
+/// does not. True where the connector's `rollback` ran, failed or not,
+/// for the caller to clear `in_txn`; a connector whose slot is php's null
+/// one leaves it set, as php's `methods->rollback` test does.
+#[must_use]
+fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) -> bool {
+    if !conn.in_transaction(req).unwrap_or(in_txn) {
+        return false;
     }
-    open
+    !matches!(
+        conn.rollback(req),
+        Err(Failure {
+            cause: Cause::Unsupported,
+            ..
+        })
+    )
 }
 
 /// What php's `shutdown_executor` does to pdo's persistent connections,
@@ -229,7 +237,7 @@ pub(crate) fn deactivate(req: &mut Request) {
     for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
         let in_txn = dbh.in_txn;
         if let Conn::Open(conn) = &mut dbh.conn
-            && rolled_back(req, &mut **conn, in_txn)
+            && roll_back_open(req, &mut **conn, in_txn)
         {
             dbh.in_txn = false;
         }
@@ -270,7 +278,7 @@ impl ObjectHandlers for Handlers {
                 return;
             };
             let rolled = with_connection(req, object, |req, conn| {
-                let rolled = rolled_back(req, conn, tracked);
+                let rolled = roll_back_open(req, conn, tracked);
                 conn.persistent_shutdown(req);
                 Ok(rolled)
             });
@@ -293,7 +301,7 @@ impl ObjectHandlers for Handlers {
         let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
-            rolled_back(req, &mut *conn, tracked);
+            let _ = roll_back_open(req, &mut *conn, tracked);
             if let Some(stmt) = held.0 {
                 req.release(stmt.as_value());
             }
