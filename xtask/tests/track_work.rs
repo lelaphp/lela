@@ -825,7 +825,9 @@ fn a_run_that_closes_a_blocker_does_not_lay_down_its_dependent() {
         "#21 is not laid down off a main without t20: {out}"
     );
     assert!(
-        out.contains("the frontier of main is empty after 1 ticket: #20 closed"),
+        out.contains(
+            "the frontier of main is empty, #21 waiting on t20, after 1 ticket: #20 closed"
+        ),
         "{out}"
     );
 
@@ -838,6 +840,131 @@ fn a_run_that_closes_a_blocker_does_not_lay_down_its_dependent() {
         rev(&scratch.root, "t21^"),
         rev(&scratch.root, "t20"),
         "cut from a main that holds t20: {out}"
+    );
+}
+
+/// One ticket of [`blocked`]'s list: its number, its labels, and its
+/// blockers, each `(number, state)`.
+type Row<'a> = (u64, &'a [&'a str], &'a [(u64, &'a str)]);
+
+/// The tracker's open list as rows written whole: each ticket `ready-for-agent`
+/// unless `labels` names its own, blocked by each `(number, state)` of
+/// `blockers`.
+fn blocked(rows: &[Row]) -> String {
+    let rows = rows
+        .iter()
+        .map(|(number, labels, blockers)| {
+            let labels = if labels.is_empty() {
+                &["ready-for-agent"][..]
+            } else {
+                labels
+            };
+            serde_json::json!({
+                "number": number,
+                "title": format!("ticket {number}"),
+                "url": format!("https://example.invalid/issues/{number}"),
+                "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+                "blockedBy": {
+                    "nodes": blockers.iter().map(|(number, state)| serde_json::json!({"number": number, "state": state})).collect::<Vec<_>>(),
+                    "totalCount": blockers.len(),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::Value::Array(rows).to_string()
+}
+
+/// With `--fill`, a frontier emptied only by a held ticket does not plan
+/// (#1855, #1857): #21 is blocked by #20, the session closes #20, and
+/// `t20` waits for /specs, so the frontier is empty while #21 is held
+/// behind `t20`. The run ends there with no `/frontier` session, the
+/// step's line and the closing line each naming #21 and `t20`.
+#[test]
+fn a_frontier_emptied_by_a_held_ticket_ends_the_fill_run_naming_it() {
+    let scratch = Scratch::lay("held");
+    fs::write(
+        scratch.dir.join("list.json"),
+        blocked(&[(21, &[], &[(20, "OPEN")]), (20, &[], &[])]),
+    )
+    .unwrap();
+    fs::write(
+        scratch.dir.join("list.after.json"),
+        blocked(&[(21, &[], &[(20, "CLOSED")])]),
+    )
+    .unwrap();
+    scratch.viewed(20);
+    scratch.act_on(20, "commit close");
+    scratch.session_then(&format!(
+        "cp '{}' '{}'",
+        scratch.dir.join("list.after.json").display(),
+        scratch.dir.join("list.json").display()
+    ));
+    scratch.frontier_files(&[(22, &["ready-for-agent"])]);
+    let (code, out) = scratch.work(&["--fill"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("#20 closed at"), "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20",
+        "no /frontier session: {out}"
+    );
+    assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t21"), "{out}");
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.contains(
+            &"track work: none: the frontier of main is empty, 1 ticket held until main contains the branch it waits on; nothing laid down:"
+        ),
+        "{out}"
+    );
+    assert!(lines.contains(&"  #21 ticket 21, waiting on t20"), "{out}");
+    assert_eq!(
+        lines.last(),
+        Some(
+            &"track work: the frontier of main is empty, #21 waiting on t20, after 1 ticket: #20 closed"
+        ),
+        "{out}"
+    );
+}
+
+/// With `--fill`, a frontier empty with nothing held starts the
+/// `/frontier` session as before (#85, #1857): #22 waits on #23, open
+/// and a person's, and on #20, closed on `t20`, which `main` contains, so
+/// it is blocked and not held, and the planner is started in the
+/// checkout.
+#[test]
+fn a_frontier_empty_with_nothing_held_starts_the_fill_session() {
+    let scratch = Scratch::lay("unheld");
+    sh(&scratch.root, &["git", "branch", "t20"]);
+    sh(&scratch.root, &["git", "config", "branch.t20.ticket", "20"]);
+    fs::write(
+        scratch.dir.join("list.json"),
+        blocked(&[
+            (22, &[], &[(23, "OPEN"), (20, "CLOSED")]),
+            (23, &["for-a-person"], &[]),
+        ]),
+    )
+    .unwrap();
+    scratch.frontier_files(&[(23, &["for-a-person"])]);
+    let (code, out) = scratch.work(&["--one", "--fill"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-opus-5 --permission-mode auto --effort high /frontier",
+        "{out}"
+    );
+    assert_eq!(scratch.wrote("session.cwd"), scratch.root.to_str().unwrap());
+    assert!(
+        scratch.dir.join("planned").exists(),
+        "the planner ran: {out}"
+    );
+    assert!(!out.contains("waiting on"), "nothing held: {out}");
+    assert!(
+        out.contains(
+            "track work: none: the frontier of main is still empty after the /frontier session; nothing laid down; the track waits on 1 for-a-person ticket:"
+        ),
+        "{out}"
     );
 }
 

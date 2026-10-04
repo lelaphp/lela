@@ -16,9 +16,14 @@
 //! A closed blocker whose branch `main` does not contain yet still blocks
 //! (#1843, #1850), so a ticket is cut only from a `main` that holds what
 //! it waited on, even when the same run closed its blocker;
-//! [`waits_on`] is the one statement of that. "No branch yet" and "not
+//! [`waits`] is the one statement of that. "No branch yet" and "not
 //! yet in `main`" are the repository's own records, `branch.<name>.ticket`
 //! and git's reachability, read once per answer as [`Records`].
+//! What the frontier is, once read, is one [`Frontier`]: a ticket to
+//! work, empty with tickets held, or empty (#1855, #1857). A ticket is
+//! held when nothing but such branches blocks it, so it comes back the
+//! moment /specs merges them, and `track work --fill` plans only for a
+//! frontier empty with none held.
 //! The tracker is reached through [`Gh::open`], the ticket module's one
 //! list, and through nothing else here. The same list answers what the
 //! track waits on (#85): its open tickets labelled `for-a-person`, which
@@ -122,17 +127,96 @@ impl Next {
     }
 }
 
-/// The ticket `track` works next in the clone at `root`, `None` for an
-/// empty frontier.
-pub fn next(root: &Path, gh: &Gh, track: &str) -> Result<Option<Next>> {
+/// The frontier of `track` in the clone at `root`, read once: its widest
+/// ticket, or why it is empty.
+pub fn frontier(root: &Path, gh: &Gh, track: &str) -> Result<Frontier> {
     let open = gh.open(root)?;
     let weights = Weights::of_store(&Store::of_workspace(root))?;
     let records = Records::read(root)?;
-    Ok(frontier(&open, track, &weights, &records).map(|found| {
-        let mut next = Next::from(found.clone());
-        next.weight = weights.weigh(&next.title).0;
-        next
-    }))
+    Ok(Frontier::of(&open, track, &weights, &records))
+}
+
+/// The ticket `track` works next in the clone at `root`, `None` for an
+/// empty frontier, held or not.
+pub fn next(root: &Path, gh: &Gh, track: &str) -> Result<Option<Next>> {
+    Ok(match frontier(root, gh, track)? {
+        Frontier::Ready(next) => Some(next),
+        Frontier::Held(_) | Frontier::Empty => None,
+    })
+}
+
+/// What the frontier of a track is, decided once by the rule here and
+/// read by `track work` without deciding it again (#1857).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Frontier {
+    /// The widest ticket on it.
+    Ready(Next),
+    /// Empty, and each of these tickets, at least one, would be on it
+    /// once `main` contains the branches it waits on.
+    Held(Vec<Held>),
+    /// Empty, with no ticket held.
+    Empty,
+}
+
+impl Frontier {
+    /// The frontier `open` and `records` make for `track`, weighed by
+    /// `weights`: the widest ticket, else the held ones by number, else
+    /// empty.
+    fn of(open: &[Open], track: &str, weights: &Weights, records: &Records) -> Frontier {
+        if let Some(found) = widest(open, track, weights, records) {
+            let mut next = Next::from(found.clone());
+            next.weight = weights.weigh(&next.title).0;
+            return Frontier::Ready(next);
+        }
+        let mut held: Vec<Held> = workable(open, track, records)
+            .filter_map(|ticket| Held::of(ticket, records))
+            .collect();
+        held.sort_by_key(|held| held.ticket);
+        if held.is_empty() {
+            Frontier::Empty
+        } else {
+            Frontier::Held(held)
+        }
+    }
+}
+
+/// A ticket off the frontier only because the branches recording its
+/// closed blockers are not yet in `main` (#1850, #1855): its number and
+/// title, and those branches, which it waits on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub ticket: Ticket,
+    pub title: String,
+    pub branches: Vec<String>,
+}
+
+impl Held {
+    /// `ticket` held, where every [`Wait`] it has is a branch; `None`
+    /// where an open blocker blocks it or nothing does.
+    fn of(ticket: &Open, records: &Records) -> Option<Held> {
+        let mut branches = Vec::new();
+        for wait in waits(ticket, records) {
+            match wait {
+                Wait::Open(_) => return None,
+                Wait::Branch(_, branch) => branches.push(branch.to_owned()),
+            }
+        }
+        (!branches.is_empty()).then(|| Held {
+            ticket: Ticket::new(ticket.number),
+            title: ticket.title.clone(),
+            branches,
+        })
+    }
+
+    /// The branches it waits on, `t20`, or `t20 and t22`.
+    pub(crate) fn behind(&self) -> String {
+        self.branches.join(" and ")
+    }
+
+    /// The ticket and what it waits on, `#21 waiting on t20`.
+    pub(crate) fn waiting(&self) -> String {
+        format!("{} waiting on {}", self.ticket, self.behind())
+    }
 }
 
 /// The open tickets `track` waits on a person for: those labelled
@@ -168,21 +252,33 @@ impl From<Open> for Next {
 /// — because no census has been run, or because none of these tickets
 /// names a construct it counted — is every weight zero and so every tie,
 /// which is the order this had before the census existed.
-fn frontier<'a>(
+fn widest<'a>(
     open: &'a [Open],
     track: &str,
     weights: &Weights,
     records: &Records,
 ) -> Option<&'a Open> {
-    open.iter()
-        .filter(|ticket| ticket.label_names().any(|name| name == READY))
-        .filter(|ticket| waits_on(ticket, records).next().is_none())
-        .filter(|ticket| is_tracks(ticket, track))
-        .filter(|ticket| records.branch(Ticket::new(ticket.number)).is_none())
+    workable(open, track, records)
+        .filter(|ticket| waits(ticket, records).next().is_none())
         .min_by_key(|ticket| {
             let weight = weights.weigh(&ticket.title).0;
             (std::cmp::Reverse(weight), ticket.number)
         })
+}
+
+/// The open tickets that pass the three filters other than what blocks
+/// them: labelled `ready-for-agent`, the track's, and recorded by no
+/// branch. The frontier is those nothing blocks, and the held are those
+/// only branches do.
+fn workable<'a>(
+    open: &'a [Open],
+    track: &str,
+    records: &Records,
+) -> impl Iterator<Item = &'a Open> {
+    open.iter()
+        .filter(|ticket| ticket.label_names().any(|name| name == READY))
+        .filter(move |ticket| is_tracks(ticket, track))
+        .filter(|ticket| records.branch(Ticket::new(ticket.number)).is_none())
 }
 
 /// Whether `track` works the ticket: it is one of the ticket's
@@ -204,23 +300,47 @@ pub(crate) fn tracks_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<&'
     if named.is_empty() { vec![MAIN] } else { named }
 }
 
-/// The tickets that still block `ticket`, by number: each blocker open at
-/// the tracker, and each closed one recorded by a branch `main` does not
-/// contain yet (#1843, #1850), since its work is not in the `main` the
-/// ticket would be cut from until /specs merges that branch. The
-/// frontier and the chains read the rule here.
+/// One blocker that still blocks a ticket, and why: open at the tracker,
+/// or closed and recorded by a branch `main` does not contain yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wait<'a> {
+    /// The blocker, open.
+    Open(u64),
+    /// The blocker, closed, and the branch recording it.
+    Branch(u64, &'a str),
+}
+
+impl Wait<'_> {
+    /// The blocker's number.
+    pub(crate) fn number(self) -> u64 {
+        match self {
+            Wait::Open(number) | Wait::Branch(number, _) => number,
+        }
+    }
+}
+
+/// What still blocks `ticket`: each blocker open at the tracker, and each
+/// closed one recorded by a branch `main` does not contain yet (#1843,
+/// #1850), since its work is not in the `main` the ticket would be cut
+/// from until /specs merges that branch. The frontier, the held and the
+/// chains read the rule here.
+pub(crate) fn waits<'a>(ticket: &'a Open, records: &'a Records) -> impl Iterator<Item = Wait<'a>> {
+    ticket.blocked_by.nodes.iter().filter_map(|blocker| {
+        if blocker.state == State::Open {
+            return Some(Wait::Open(blocker.number));
+        }
+        records
+            .unmerged(Ticket::new(blocker.number))
+            .map(|branch| Wait::Branch(blocker.number, branch))
+    })
+}
+
+/// The blockers that still block `ticket`, by number, as [`waits`] says.
 pub(crate) fn waits_on<'a>(
     ticket: &'a Open,
     records: &'a Records,
 ) -> impl Iterator<Item = u64> + 'a {
-    ticket
-        .blocked_by
-        .nodes
-        .iter()
-        .filter(|blocker| {
-            blocker.state == State::Open || records.unmerged(Ticket::new(blocker.number))
-        })
-        .map(|blocker| blocker.number)
+    waits(ticket, records).map(Wait::number)
 }
 
 /// `xtask track next`: the track named and the answer printed; no
@@ -242,7 +362,7 @@ pub fn command(root: &Path, track: &str, json: bool, why: bool) -> Result<()> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Weights, frontier, is_tracks, waits_on};
+    use super::{Frontier, Held, Weights, is_tracks, waits_on, widest};
     use crate::ticket::{BlockedBy, Blocker, Label, Open, State};
     use crate::track::{Records, Ticket};
 
@@ -316,15 +436,15 @@ mod tests {
             ),
         ];
         let none = records(&[], &[]);
-        let found = frontier(&open, "main", &weights, &none).expect("a frontier");
+        let found = widest(&open, "main", &weights, &none).expect("a frontier");
         assert_eq!(found.number, 3, "the widest, not the oldest");
 
         // With the widest already on a branch, the next widest follows.
-        let found = frontier(&open, "main", &weights, &records(&[3], &[])).expect("a frontier");
+        let found = widest(&open, "main", &weights, &records(&[3], &[])).expect("a frontier");
         assert_eq!(found.number, 4);
 
         // Weighed at nothing, the order is the filing order it always was.
-        let found = frontier(&open, "main", &Weights::default(), &none).expect("a frontier");
+        let found = widest(&open, "main", &Weights::default(), &none).expect("a frontier");
         assert_eq!(found.number, 1);
     }
 
@@ -348,6 +468,49 @@ mod tests {
         };
         let held = records(&[2, 3], &["t2"]);
         assert_eq!(waits_on(&ticket, &held).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// The frontier's three states (#1857): #9 waits on #2, closed on
+    /// `t2` not merged, so it is held behind `t2`, and #8 waits on #2 and
+    /// on #1, open, so it is blocked and not held; with #9's blocker
+    /// merged instead the frontier is #9, and with #9 gone it is empty.
+    #[test]
+    fn a_frontier_empty_but_for_branches_is_held_naming_them() {
+        let blocked = |number: u64, blockers: &[(u64, State)]| {
+            let mut ticket = ready(number, &format!("ticket {number}"));
+            ticket.blocked_by = BlockedBy {
+                nodes: blockers
+                    .iter()
+                    .map(|&(number, state)| Blocker { number, state })
+                    .collect(),
+            };
+            ticket
+        };
+        let open = vec![
+            blocked(8, &[(2, State::Closed), (1, State::Open)]),
+            blocked(9, &[(2, State::Closed)]),
+        ];
+        let none = Weights::default();
+        let held = Held {
+            ticket: Ticket::new(9),
+            title: "ticket 9".to_owned(),
+            branches: vec!["t2".to_owned()],
+        };
+        assert_eq!(held.waiting(), "#9 waiting on t2");
+        assert_eq!(
+            Frontier::of(&open, "main", &none, &records(&[2], &["t2"])),
+            Frontier::Held(vec![held])
+        );
+
+        let merged = Frontier::of(&open, "main", &none, &records(&[2], &[]));
+        assert!(
+            matches!(&merged, Frontier::Ready(next) if next.number == 9),
+            "{merged:?}"
+        );
+        assert_eq!(
+            Frontier::of(&open[..1], "main", &none, &records(&[2], &["t2"])),
+            Frontier::Empty
+        );
     }
 
     /// No `track:` label is `main`'s alone (ADR-0009, #1836); one names

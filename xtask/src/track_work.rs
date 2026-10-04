@@ -48,16 +48,25 @@
 //! is named the same way in the error. `--one` runs the step once and
 //! exits 1 when the ticket is left to a person.
 //!
-//! With `--fill` the run fills its own frontier (#85): when `next`
-//! answers "none", a session is started on the prompt `/frontier` in the
-//! checkout itself, not a worktree, on the same model, permission mode
-//! and effort as a ticket's, and `next` is asked again once it ends. A
-//! frontier still empty then ends the run, `--one` or not, with the line
-//! listing the track's open `for-a-person` tickets, what the track waits
-//! on. Without `--fill` the run ends at "none". What bounds the run is
-//! the planner filing nothing: a planner that keeps filing tickets whose
-//! sessions leave them standing plans again at each "none", and a person
-//! reading the lines is what stops it.
+//! What the frontier is comes from [`track_next::frontier`], decided
+//! there once as a [`Frontier`]: a ticket, empty with tickets held, or
+//! empty. A frontier empty but for held tickets, each waiting on a branch
+//! `main` does not contain yet (#1850), ends the run, `--fill` or not,
+//! with no `/frontier` session (#1855, #1857): the held tickets are the
+//! track's still and come back once /specs merges those branches, so the
+//! track has not run out of work. Its line names each held ticket and
+//! the branch it waits on, and so does the run's closing line.
+//!
+//! With `--fill` the run fills its own frontier (#85): when the frontier
+//! is empty with nothing held, a session is started on the prompt
+//! `/frontier` in the checkout itself, not a worktree, on the same model,
+//! permission mode and effort as a ticket's, and `next` is asked again
+//! once it ends. A frontier still empty then ends the run, `--one` or
+//! not, with the line listing the track's open `for-a-person` tickets,
+//! what the track waits on. Without `--fill` the run ends at "none". What
+//! bounds the run is the planner filing nothing: a planner that keeps
+//! filing tickets whose sessions leave them standing plans again at each
+//! "none", and a person reading the lines is what stops it.
 //!
 //! What the session is started with, every part a flag of the run and
 //! none a record of the checkout ([`Session`]): `claude -p --model
@@ -97,7 +106,7 @@ use crate::reading::{Reading, Status, Store};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, STAMPED_OVER, State};
 use crate::track::{Ticket, rev, short};
-use crate::track_next::{self, Next};
+use crate::track_next::{self, Frontier, Held, Next};
 use crate::usage::{Spent, Total};
 use crate::worktree::{self, say};
 
@@ -288,7 +297,8 @@ pub struct Run {
     pub track: String,
     #[command(flatten)]
     pub session: Session,
-    /// Start a `/frontier` session when the frontier is empty (#85).
+    /// Start a `/frontier` session when the frontier is empty with no
+    /// ticket held (#85, #1857).
     #[arg(long)]
     pub fill: bool,
 }
@@ -298,6 +308,10 @@ pub struct Run {
 pub enum Worked {
     /// The frontier of the track is empty; nothing was laid down.
     Nothing { track: String },
+    /// The frontier of the track is empty but for `held`, tickets that
+    /// wait on branches `main` does not contain yet (#1857); nothing was
+    /// laid down and no `/frontier` session started.
+    Held { track: String, held: Vec<Held> },
     /// The frontier is still empty after a `/frontier` session (#85);
     /// nothing was laid down, and `waits_on` is the track's open
     /// `for-a-person` tickets.
@@ -322,18 +336,47 @@ pub enum Worked {
 
 impl Worked {
     /// The one line: the prefix and what the outcome says, and under a
-    /// frontier still empty the tickets the track waits on.
+    /// frontier held the held tickets with the branches they wait on, and
+    /// under one still empty the tickets the track waits on.
     pub fn render(&self) -> String {
         let head = format!("{WORK}: {}\n", self.said());
-        match self {
-            Worked::StillEmpty { waits_on, .. } => std::iter::once(head)
-                .chain(
-                    waits_on
-                        .iter()
-                        .map(|ticket| format!("  #{} {}\n", ticket.number, ticket.title)),
-                )
+        let under: Vec<String> = match self {
+            Worked::Held { held, .. } => held
+                .iter()
+                .map(|held| {
+                    format!(
+                        "  {} {}, waiting on {}\n",
+                        held.ticket,
+                        held.title,
+                        held.behind()
+                    )
+                })
                 .collect(),
-            _ => head,
+            Worked::StillEmpty { waits_on, .. } => waits_on
+                .iter()
+                .map(|ticket| format!("  #{} {}\n", ticket.number, ticket.title))
+                .collect(),
+            _ => Vec::new(),
+        };
+        std::iter::once(head).chain(under).collect()
+    }
+
+    /// How a run that ends on this step ended, the words its closing
+    /// line and reading open with, where the step is an empty frontier:
+    /// a held one names each held ticket and the branch it waits on.
+    fn ended(&self) -> Option<String> {
+        match self {
+            Worked::Nothing { track } | Worked::StillEmpty { track, .. } => {
+                Some(format!("the frontier of {track} is empty after"))
+            }
+            Worked::Held { track, held } => Some(format!(
+                "the frontier of {track} is empty, {}, after",
+                held.iter()
+                    .map(Held::waiting)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Worked::Closed { .. } | Worked::Standing { .. } => None,
         }
     }
 
@@ -345,6 +388,15 @@ impl Worked {
         match self {
             Worked::Nothing { track } => {
                 format!("none: the frontier of {track} is empty; nothing laid down")
+            }
+            Worked::Held { track, held } => {
+                let tickets = match held.len() {
+                    1 => "1 ticket".to_owned(),
+                    n => format!("{n} tickets"),
+                };
+                format!(
+                    "none: the frontier of {track} is empty, {tickets} held until main contains the branch it waits on; nothing laid down:"
+                )
             }
             Worked::StillEmpty { track, waits_on } => {
                 let waits = match waits_on.len() {
@@ -382,7 +434,7 @@ impl Worked {
     /// when it does; an empty frontier worked no ticket and has none.
     fn step(&self) -> Option<Step> {
         match self {
-            Worked::Nothing { .. } | Worked::StillEmpty { .. } => None,
+            Worked::Nothing { .. } | Worked::Held { .. } | Worked::StillEmpty { .. } => None,
             Worked::Closed { ticket, commit, .. } => Some(Step {
                 judged: verdict(*ticket, commit, Landed::Closed, self.said()),
                 standing_at: None,
@@ -555,9 +607,10 @@ fn record_run(
 /// the error.
 pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     let track = run.track.clone();
-    let next = match track_next::next(root, gh, &track)? {
-        Some(next) => next,
-        None if run.fill => match fill(root, gh, &run.session, &track)? {
+    let next = match track_next::frontier(root, gh, &track)? {
+        Frontier::Ready(next) => next,
+        Frontier::Held(held) => return Ok(Worked::Held { track, held }),
+        Frontier::Empty if run.fill => match fill(root, gh, &run.session, &track)? {
             Some(next) => next,
             None => {
                 return Ok(Worked::StillEmpty {
@@ -566,7 +619,7 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
                 });
             }
         },
-        None => return Ok(Worked::Nothing { track }),
+        Frontier::Empty => return Ok(Worked::Nothing { track }),
     };
     let ticket = Ticket::new(next.number);
     let skill = Skill::of(ticket, next.labels.iter().map(String::as_str))?;
@@ -678,12 +731,7 @@ fn steps(
         let outcome = work(root, &gh, run)
             .with_context(|| format!("{WORK}: {}", outcomes(tally, STOPPED)))?;
         print!("{}", outcome.render());
-        let empty = match &outcome {
-            Worked::Nothing { track } | Worked::StillEmpty { track, .. } => {
-                Some(format!("the frontier of {track} is empty after"))
-            }
-            _ => None,
-        };
+        let empty = outcome.ended();
         hold(root, store, tally, total, outcome.step())?;
         if let Some(how) = empty {
             if !tally.judged.is_empty() {
