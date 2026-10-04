@@ -2,7 +2,6 @@
 //! handed to it as `FastCGI` records under php-fpm's name.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -174,6 +173,7 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
 
 /// A log line with its time, the pids and a child's lifetime masked: the
 /// number after `pid`, `child` and `after` is `N`.
+#[cfg(target_os = "macos")]
 fn masked(line: &str) -> String {
     let line = line.split_once("] ").map_or(line, |(_, rest)| rest);
     let mut out: Vec<String> = Vec::new();
@@ -196,6 +196,7 @@ fn masked(line: &str) -> String {
 /// masked (#1382): the pin's php-fpm (`oracle.toml`'s `[sapi]`) run under
 /// the configuration `quit_at_debug` writes, its log put through
 /// [`masked`]. Captured again on #1502, byte for byte these lines.
+#[cfg(target_os = "macos")]
 const QUIT_AT_DEBUG: &str = "\
 DEBUG: pid N, fpm_scoreboard_init_main(), line 38: got clock tick '100'
 DEBUG: pid N, fpm_signals_init_main(), line 219: Unblocking all signals
@@ -222,12 +223,14 @@ NOTICE: pid N, fpm_pctl_exit(), line 69: exiting, bye-bye!
 ";
 
 /// How many loopback ports [`quit_at_debug`] tries before it gives up.
+#[cfg(target_os = "macos")]
 const TRIES: usize = 5;
 
 /// A loopback port the system found free, let go at once: free for anyone
 /// until the master binds it.
+#[cfg(target_os = "macos")]
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
+    std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
@@ -313,7 +316,7 @@ fn a_static_pool_at_debug_sent_sigquit_writes_the_oracle_s_lines() {
 #[test]
 fn a_port_taken_before_the_master_binds_it_is_given_up_for_another() {
     let dir = tree("debug-taken");
-    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let held = taken.local_addr().unwrap().port();
     let ports = std::iter::once(held).chain(std::iter::repeat_with(free_port));
     let lines = quit_at_debug(&dir, ports);
