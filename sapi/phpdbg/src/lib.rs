@@ -28,6 +28,7 @@ mod natives;
 mod out;
 mod prompt;
 mod session;
+mod shown;
 mod watch;
 
 use std::ffi::OsString;

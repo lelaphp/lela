@@ -135,15 +135,11 @@ impl Request {
     }
 
     /// The one question the unit cache asks about the file at the full
-    /// path `full` (design §6.3): the first extension's answer in bundle
-    /// order, and with none, php without the cache.
+    /// path `full` (design §6.3): the last supplier's answer, and with
+    /// none, php without the cache.
     fn admission(&mut self, full: &[u8]) -> Admission {
         let shared = Arc::clone(&self.shared);
-        match shared
-            .extensions
-            .iter()
-            .find_map(|extension| extension.admission)
-        {
+        match shared.supplied.admission.get() {
             Some(hook) => hook(self, full),
             None => Admission::Held {
                 validation: Validation::EveryHit,
@@ -499,7 +495,7 @@ impl Request {
     /// path, in bundle order ([`crate::api::abi::ExtensionBuilder::cached`]).
     pub(crate) fn tell_cached(&mut self, full: &[u8]) {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.extensions.iter().filter_map(|e| e.cached) {
+        for hook in shared.supplied.cached.iter() {
             hook(self, full);
         }
     }

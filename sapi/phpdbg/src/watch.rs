@@ -8,13 +8,14 @@
 //! `WATCH_ON_ZVAL`; a string changed in place as a `WATCH_ON_STR`; an
 //! array that grew or shrank as a `WATCH_ON_HASHTABLE`.
 
-use php_sapi::tier::{self, FrameRef, Key, Request, Shown};
+use php_sapi::tier::{self, FrameRef, Request};
 
 use crate::cmd::Param;
 use crate::info::flat;
 use crate::out;
 use crate::prompt::{Here, Ret};
 use crate::session::{self, Origin, Session};
+use crate::shown::{self, Key, Shown};
 
 /// How deep a watched value is copied.
 const DEPTH: u32 = 16;
@@ -186,7 +187,7 @@ fn walk<'a>(root: &'a Shown, path: &[Vec<u8>]) -> Option<&'a Shown> {
 /// What a watch reads now, and what would free it: none where its path
 /// reaches nothing.
 fn read(req: &mut Request, watch: &Watch) -> Option<(Shown, Freed)> {
-    let root = tier::variable(req, watch.frame, &watch.variable, DEPTH)?;
+    let root = shown::variable(req, watch.frame, &watch.variable, DEPTH)?;
     let value = walk(&root, &watch.path).cloned()?;
     Some((value, freed(&root, &watch.path, watch.element)))
 }
@@ -279,11 +280,11 @@ fn add(s: &mut Session, here: &mut Here<'_>, input: &[u8], kind: Kind) {
         out::error(b"Malformed input");
         return;
     };
-    let Some(root) = tier::variable(req, frame, &variable, DEPTH) else {
+    let Some(root) = shown::variable(req, frame, &variable, DEPTH) else {
         out::error(format!("{} is undefined", lossy(input)).as_bytes());
         return;
     };
-    let table = tier::variables(req, frame);
+    let table = shown::variables(req, frame);
     let place = table
         .iter()
         .position(|row| row.name == variable)

@@ -41,6 +41,7 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
 use crate::streams::Standard;
+use crate::supplied::{Keyed, Last, Resolved};
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -621,9 +622,11 @@ pub(crate) struct Shared {
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
     hooked: php_compile::Hooked,
-    /// The interactive shell the bundle provides, where the host carries
-    /// php's table of shell callbacks ([`EngineBuilder::cli_shell`]).
-    pub(crate) shell: Option<crate::api::abi::Shell>,
+    /// What the bundle supplies beyond its declarations, each kind
+    /// resolved by php's rule ([`crate::supplied`]); the shell only
+    /// where the host carries php's table of shell callbacks
+    /// ([`EngineBuilder::cli_shell`]).
+    pub(crate) supplied: Resolved,
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
     /// wrote there over the host's values, as opcache's handlers log a
@@ -2334,10 +2337,10 @@ fn at_stub_places(
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
-    extensions: &[Extension],
+    intercepts: &Keyed<Name, Entry>,
 ) -> Vec<Vec<Entry>> {
     let mut replaced = vec![Vec::new(); functions.len()];
-    for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
+    for (name, entry) in intercepts.iter() {
         let found = functions
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
@@ -2569,18 +2572,25 @@ impl EngineBuilder {
         let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
+        // Each extension's supplies taken out of it, by its number in
+        // `module_registry`, which numbers Core 0 and the bundle from 1.
+        let mut supplied = Resolved::resolve(
+            extensions
+                .iter_mut()
+                .zip(1u32..)
+                .map(|(e, at)| (ExtensionId(at), std::mem::take(&mut e.supplies))),
+        );
+        if !self.cli_shell {
+            supplied.shell = Last::default();
+        }
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
         // once with every value the bundle registered.
-        let registered: Vec<_> = extensions
-            .iter()
-            .flat_map(|e| e.registered.iter().cloned())
-            .collect();
         for extension in &mut extensions {
             if let Some(link) = extension.constants_link.clone() {
                 let declared = std::mem::take(&mut extension.constants);
-                extension.constants = link(declared, &registered);
+                extension.constants = link(declared, &supplied.registered);
             }
         }
         for extension in &extensions {
@@ -2635,7 +2645,7 @@ impl EngineBuilder {
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
             function_table(&core, &extensions, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
-        let replaced = intercept(&functions, &mut entries, &extensions);
+        let replaced = intercept(&functions, &mut entries, &supplied.intercepts);
         let function_flags = functions
             .iter()
             .map(|decl| crate::attributes::Flags::of(&decl.attributes))
@@ -2672,10 +2682,6 @@ impl EngineBuilder {
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(MAX_ACCELERATED_FILES, self.hooked, &functions, &classes);
-        let shell = self
-            .cli_shell
-            .then(|| extensions.iter().filter_map(|e| e.shell).next_back())
-            .flatten();
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -2702,7 +2708,7 @@ impl EngineBuilder {
                 build_defs: BuildDefs::of(self.configure),
                 shebang,
                 hooked: self.hooked,
-                shell,
+                supplied,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
@@ -3208,7 +3214,7 @@ impl Engine {
     /// of the bundle filled it, which `do_cli` asks of `-a`.
     #[must_use]
     pub fn has_shell(&self) -> bool {
-        self.shared.shell.is_some()
+        self.shared.supplied.shell.get().is_some()
     }
 
     /// `php_ini_activate_per_host_config` for `host`, lowered as a CGI's

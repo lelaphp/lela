@@ -17145,7 +17145,7 @@ impl Request {
     /// write first, as `sapi_cli_ub_write` calls `cli_shell_ub_write`
     /// and `cli_shell_write` for every write that is not empty.
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
-        if let Some(shell) = self.shared.shell
+        if let Some(shell) = self.shared.supplied.shell.get()
             && !bytes.is_empty()
         {
             (shell.write)(self, bytes);
@@ -17499,13 +17499,12 @@ impl Request {
 
     /// The source an extension's `zend_compile_file` answers for `path`
     /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), the first
-    /// hook to answer in bundle order; `None` where none replaces it.
+    /// link to answer from the top of the chain; `None` where none
+    /// replaces it.
     pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        for extension in &shared.extensions {
-            if let Some(hook) = extension.compile_file
-                && let Some(source) = hook(self, path)?
-            {
+        for hook in shared.supplied.compile_file.top_down() {
+            if let Some(source) = hook(self, path)? {
                 return Ok(Some(source));
             }
         }
@@ -18021,11 +18020,7 @@ impl Request {
     /// ```
     pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
         let shared = Arc::clone(&self.shared);
-        for hook in shared
-            .extensions
-            .iter()
-            .filter_map(|extension| extension.resolve_path)
-        {
+        for hook in shared.supplied.resolve_path.top_down() {
             if let Some(path) = hook(self, written).map_err(Unresolved::Threw)? {
                 return Ok(path);
             }
@@ -20000,12 +19995,7 @@ impl Request {
     /// answer. Its name is php's `provider_name`.
     #[must_use]
     pub fn multibyte_provider(&self) -> Option<ExtensionId> {
-        self.shared
-            .extensions
-            .iter()
-            .rposition(|e| e.encodings.is_some())
-            .and_then(|at| u32::try_from(at).ok())
-            .map(ExtensionId)
+        self.shared.supplied.encodings.supplier()
     }
 
     /// `module->version`: what the extension declared with
@@ -20800,9 +20790,9 @@ impl Request {
     /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
     pub fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
         self.shared
-            .extensions
-            .iter()
-            .flat_map(|e| e.registered.iter())
+            .supplied
+            .registered
+            .under(TypeId::of::<T>())
             .filter_map(|value| value.downcast_ref::<T>())
     }
 
@@ -20899,16 +20889,16 @@ impl Request {
         self.heap.resource_at(id).map(Resource::of)
     }
 
-    /// Each extension's interrupt hook, in bundle order: php's
-    /// `zend_interrupt_function` and the chain each `MINIT` that set it
-    /// keeps to the one before, what the interrupt check serves when the
-    /// execution timer was not what raised it.
+    /// Each extension's interrupt hook, from the top of the chain: php's
+    /// `zend_interrupt_function`, which the last `MINIT` to set it
+    /// holds, each link serving its own work and then the one it saved
+    /// beneath it, as pcntl's does (`Z/ext/pcntl/pcntl.c:1922-1927`);
+    /// what the interrupt check serves when the execution timer was not
+    /// what raised it.
     pub(crate) fn serve_interrupt_hooks(&mut self) {
         let shared = Arc::clone(&self.shared);
-        for extension in &shared.extensions {
-            if let Some(hook) = extension.interrupt
-                && let Err(thrown) = hook(self)
-            {
+        for hook in shared.supplied.interrupt.top_down() {
+            if let Err(thrown) = hook(self) {
                 self.leave_pending(&thrown);
             }
         }
@@ -20921,26 +20911,23 @@ impl Request {
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
     pub(crate) fn program_ended(&mut self) {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.extensions.iter().filter_map(|e| e.program_ended) {
+        for hook in shared.supplied.program_ended.iter() {
             hook(self);
         }
     }
 
-    /// Each extension's hook for a fatal the host's log took, in bundle
-    /// order, until one bailed out of the log
+    /// The host's log for a fatal it took, `sapi_module.log_message`,
+    /// the last extension's that supplied one
     /// ([`ExtensionBuilder::fatal_logged`]).
     ///
     /// [`ExtensionBuilder::fatal_logged`]: crate::api::abi::ExtensionBuilder::fatal_logged
     fn fatal_logged(&mut self) -> AfterLog {
         let shared = Arc::clone(&self.shared);
-        for extension in &shared.extensions {
-            if let Some(hook) = extension.fatal_logged
-                && hook(self) == AfterLog::BailedOut
-            {
-                return AfterLog::BailedOut;
-            }
-        }
-        AfterLog::Returned
+        shared
+            .supplied
+            .fatal_logged
+            .get()
+            .map_or(AfterLog::Returned, |hook| hook(self))
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
@@ -22230,10 +22217,8 @@ impl Request {
     /// [`Request::tick`]'s round, while fiber switching is blocked.
     fn serve_ticks(&mut self) -> Result<(), Thrown> {
         let shared = Arc::clone(&self.shared);
-        for extension in &shared.extensions {
-            if let Some(hook) = extension.ticks {
-                hook(self)?;
-            }
+        for hook in shared.supplied.ticks.iter() {
+            hook(self)?;
         }
         let mut at = 0;
         while let Some(entry) = self.tick_functions.get_mut(at) {

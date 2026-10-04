@@ -25,9 +25,10 @@ pub(crate) enum Started {
 
 impl Engine {
     /// How the engine's startup finished, which the first request's host
-    /// finishes: every extension asked in bundle order as php calls
-    /// `zend_post_startup_cb` (`php_module_startup`), until one refuses
-    /// or names a file to preload. What the extensions wrote goes to
+    /// finishes: each link of `zend_post_startup_cb` (`php_module_startup`)
+    /// asked from the bottom of the chain, as opcache's calls the one it
+    /// saved before its own work, until one refuses or names a file to
+    /// preload. What the extensions wrote goes to
     /// `sink` before anything the first request writes.
     pub(crate) fn started(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
         *self
@@ -37,12 +38,7 @@ impl Engine {
     }
 
     fn finish_startup(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
-        let hooks: Vec<_> = self
-            .shared
-            .extensions
-            .iter()
-            .filter_map(|extension| extension.post_startup)
-            .collect();
+        let hooks: Vec<_> = self.shared.supplied.post_startup.bottom_up().collect();
         if hooks.is_empty() {
             return Started::Serving;
         }
