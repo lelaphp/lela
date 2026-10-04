@@ -230,7 +230,7 @@ fn assert_kept(root: &Path, out: &str, path: &str) {
         .as_str()
         .unwrap();
     assert!(said.contains(path), "{said}");
-    assert!(said.contains("not by it"), "{said}");
+    assert!(said.contains("its line cannot write it"), "{said}");
     let reading = Store::of_workspace(root)
         .read("permit", "harness.self")
         .unwrap()
@@ -239,7 +239,11 @@ fn assert_kept(root: &Path, out: &str, path: &str) {
     assert_eq!(reading.rule, "harness.self");
     assert_eq!(reading.session, SESSION);
     assert!(reading.message.contains(path), "{}", reading.message);
-    assert!(reading.message.contains("not by it"), "{}", reading.message);
+    assert!(
+        reading.message.contains("its line cannot write it"),
+        "{}",
+        reading.message
+    );
 }
 
 /// #1895: a person pastes rows into the manifest while another session's
@@ -250,6 +254,26 @@ fn a_persons_edit_made_while_the_call_runs_is_kept_and_named() {
     let root = scratch("person");
     let edited = format!("{}\n# a person's rows, pasted\n", read(&root, "seams.toml"));
     let (out, _) = through_the_hooks_while(&root, "toolu_person", "git status --short", || {
+        std::fs::write(root.join("seams.toml"), &edited).unwrap();
+    });
+    assert_eq!(
+        read(&root, "seams.toml"),
+        edited,
+        "the person's edit stands"
+    );
+    assert_kept(&root, &out, "seams.toml");
+}
+
+/// A call whose line names the manifest without writing it, a reader of
+/// it and a note about it, is no writer of it either: the person's edit
+/// made while it runs stands.
+#[test]
+fn a_persons_edit_outlives_a_call_that_reads_the_file_and_writes_about_it() {
+    let root = scratch("mention");
+    let edited = format!("{}\n# a person's rows, pasted\n", read(&root, "seams.toml"));
+    let command = "grep -c rule seams.toml; cat > note.txt <<'EOF'\nseams.toml gains a row\nEOF\n\
+                   git add -- note.txt && git commit -q -F note.txt -- note.txt";
+    let (out, _) = through_the_hooks_while(&root, "toolu_mention", command, || {
         std::fs::write(root.join("seams.toml"), &edited).unwrap();
     });
     assert_eq!(

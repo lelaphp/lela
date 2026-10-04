@@ -48,8 +48,17 @@ pub(super) fn commands(line: &str) -> Vec<Argv> {
 pub(super) struct Line {
     commands: Vec<Argv>,
     text: String,
-    bodies: Vec<String>,
+    bodies: Vec<Heretext>,
     written: Vec<String>,
+}
+
+/// One heredoc body its command reads as text, whole, beside the commands
+/// of the line that opened it, by their place in [`Line::commands`]: the
+/// program an interpreter on that line runs, or a message `cat` writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Heretext {
+    pub(super) commands: Range<usize>,
+    pub(super) text: String,
 }
 
 impl Line {
@@ -62,15 +71,10 @@ impl Line {
             at = body.end;
         }
         text.extend(&lexer.chars[at..]);
-        let bodies = lexer
-            .text_bodies
-            .iter()
-            .map(|body| lexer.chars[body.clone()].iter().collect())
-            .collect();
         Line {
             commands: lexer.commands,
             text,
-            bodies,
+            bodies: lexer.bodies,
             written: lexer.written,
         }
     }
@@ -91,53 +95,17 @@ impl Line {
         &self.text
     }
 
-    /// Whether the line can write the file whose name is `name` (#1895):
-    /// a redirection writes it; a command that is no [`READERS`] program
-    /// names it among its words, its program included, or in a file one of
-    /// its words names, which `file` reads (the program an interpreter runs);
-    /// or a heredoc body names it, a program handed to an interpreter on
-    /// its stdin. What the line cannot be read to write, a binary that
-    /// holds the name where no word or file spells it, is not its write.
-    pub(super) fn can_write(&self, name: &str, file: impl Fn(&str) -> Option<Vec<u8>>) -> bool {
-        let names = |text: &[u8]| names_file(text, name);
-        self.written.iter().any(|target| names(target.as_bytes()))
-            || self.bodies.iter().any(|body| names(body.as_bytes()))
-            || self
-                .commands
-                .iter()
-                .filter(|argv| !argv.only_reads())
-                .flat_map(Argv::words)
-                .any(|word| names(word.as_bytes()) || file(word).is_some_and(|text| names(&text)))
+    /// Every heredoc body a command reads as text, a nested line's
+    /// included, each with the commands of its line.
+    pub(super) fn bodies(&self) -> &[Heretext] {
+        &self.bodies
     }
-}
 
-/// Programs that read the files their words name and write none of them,
-/// `git` by the subcommands that only read; a command of one names a
-/// harness file without being able to write it, so a person's edit made
-/// while it runs stands.
-const READERS: [&str; 19] = [
-    "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
-    "stat", "ls", "file", "nl", "shasum", "md5", "md5sum",
-];
-
-/// `git`'s subcommands that only read the files they name.
-const GIT_READERS: [&str; 8] = [
-    "diff", "log", "show", "blame", "status", "grep", "ls-files", "cat-file",
-];
-
-/// Whether `text` names the file `name`: `name` standing in it with no
-/// character of a file name on either side, so `docs/divergence.toml` and
-/// `open('divergence.toml')` name `divergence.toml` and `divergence.toml.bak`
-/// does not.
-fn names_file(text: &[u8], name: &str) -> bool {
-    let name = name.as_bytes();
-    let part = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || b"._-".contains(b));
-    !name.is_empty()
-        && text.windows(name.len()).enumerate().any(|(at, window)| {
-            window == name
-                && !part(at.checked_sub(1).and_then(|i| text.get(i)))
-                && !part(text.get(at + name.len()))
-        })
+    /// The files the line's redirections write (`>`, `>>`, `>|`, `&>`,
+    /// `<>`), a nested line's included, as the line spells them.
+    pub(super) fn written(&self) -> &[String] {
+        &self.written
+    }
 }
 
 /// A heredoc whose body starts at the next newline.
@@ -231,6 +199,8 @@ struct Lexer {
     assigned: Assigned,
     /// The files the line's redirections write, in order.
     written: Vec<String>,
+    /// The heredoc bodies the line's commands read as text ([`Heretext`]).
+    bodies: Vec<Heretext>,
 }
 
 impl Lexer {
@@ -244,6 +214,7 @@ impl Lexer {
             text_bodies: Vec::new(),
             assigned: Assigned::new(),
             written: Vec::new(),
+            bodies: Vec::new(),
         }
     }
 
@@ -255,11 +226,18 @@ impl Lexer {
     }
 
     /// A line the line runs in turn, read by a lexer of its own: its
-    /// commands and the files its redirections write join this one's.
+    /// commands, the files its redirections write and its heredoc bodies
+    /// join this one's.
     fn nested(&mut self, line: &str) {
         let nested = Lexer::read(line);
+        let offset = self.commands.len();
         self.commands.extend(nested.commands);
         self.written.extend(nested.written);
+        self.bodies
+            .extend(nested.bodies.into_iter().map(|body| Heretext {
+                commands: body.commands.start + offset..body.commands.end + offset,
+                text: body.text,
+            }));
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -395,8 +373,17 @@ impl Lexer {
             }
         } else if c == '<' && self.eat('>') {
             command.next = Next::Target { writes: true };
+        } else if self.eat('&') {
+            // `>&1` and `>&-` name a descriptor, not a file.
+            let descriptor = self
+                .chars
+                .get(self.at)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '-');
+            command.next = Next::Target {
+                writes: c == '>' && !descriptor,
+            };
         } else {
-            let _ = self.eat('>') || self.eat('&') || self.eat('|');
+            let _ = self.eat('>') || self.eat('|');
         }
     }
 
@@ -442,8 +429,10 @@ impl Lexer {
         } else {
             Body::Text
         };
+        let line_commands = self.line_start..self.commands.len();
         for heredoc in std::mem::take(&mut self.heredocs) {
             let mut stdin = String::new();
+            let mut whole = String::new();
             while self.at < self.chars.len() {
                 let start = self.at;
                 let end = self.chars[start..]
@@ -471,8 +460,13 @@ impl Lexer {
                 match body {
                     Body::Text if substituted.is_empty() => {
                         self.text_bodies.push(start..self.at.min(self.chars.len()));
+                        whole.push_str(text);
+                        whole.push('\n');
                     }
-                    Body::Text => {}
+                    Body::Text => {
+                        whole.push_str(text);
+                        whole.push('\n');
+                    }
                     Body::Commands => {
                         stdin.push_str(text);
                         stdin.push('\n');
@@ -482,6 +476,11 @@ impl Lexer {
             }
             if body == Body::Commands {
                 self.nested(&stdin);
+            } else {
+                self.bodies.push(Heretext {
+                    commands: line_commands.clone(),
+                    text: whole,
+                });
             }
         }
         self.line_start = self.commands.len();
@@ -742,15 +741,20 @@ impl Argv {
         &self.0
     }
 
-    /// Whether the program only reads the files it names ([`READERS`]).
-    fn only_reads(&self) -> bool {
-        let Some(program) = self.0.first() else {
-            return true;
-        };
-        READERS.contains(&basename(program))
-            || GIT_READERS
-                .iter()
-                .any(|sub| self.phrase_end(&format!("git {sub}")).is_some())
+    /// The program's name without its directory; empty for no words.
+    pub(super) fn program(&self) -> &str {
+        self.0.first().map_or("", |program| basename(program))
+    }
+
+    /// Whether `phrase` names this command: a program of one word by its
+    /// name, `cat`, or a program and its subcommand, `git diff`, with only
+    /// options between them ([`Argv::phrase_end`]).
+    pub(super) fn runs(&self, phrase: &str) -> bool {
+        if phrase.contains(' ') {
+            self.phrase_end(phrase).is_some()
+        } else {
+            self.program() == phrase
+        }
     }
 
     /// Whether one of the phrases names this command; none names every one.
@@ -1007,52 +1011,6 @@ mod tests {
             vec![vec!["cargo", "test"], vec!["tail", "-n", "5"]]
         );
         assert_eq!(words("echo a>b"), vec![vec!["echo", "a"]]);
-    }
-
-    /// #1895: what a line can write is read from its words, its
-    /// redirections, its heredoc bodies and the files its words name.
-    #[test]
-    fn a_line_can_write_what_it_redirects_into_or_names_to_a_writer() {
-        let none = |_: &str| None;
-        let can = |line: &str, name: &str| Line::read(line).can_write(name, none);
-        assert!(can("echo x >> seams.toml", "seams.toml"));
-        assert!(can(
-            "cat <<'EOF' > docs/divergence.toml\nrow\nEOF",
-            "divergence.toml"
-        ));
-        assert!(can("cargo test &> oracle.toml", "oracle.toml"));
-        assert!(can("cmd <> oracle.toml", "oracle.toml"));
-        assert!(can("bash -c 'echo x > seams.toml'", "seams.toml"));
-        assert!(can("echo `echo x > seams.toml`", "seams.toml"));
-        assert!(can("sed -i '' -e 's/a/b/' seams.toml", "seams.toml"));
-        assert!(can("cp /tmp/m seams.toml", "seams.toml"));
-        assert!(can("echo x | tee -a oracle.toml", "oracle.toml"));
-        assert!(can(
-            "python3 -c \"open('.claude/settings.json','a')\"",
-            "settings.json"
-        ));
-        assert!(can(
-            "python3 - <<'EOF'\nopen('seams.toml', 'a')\nEOF",
-            "seams.toml"
-        ));
-        assert!(can("git checkout -- seams.toml", "seams.toml"));
-        // A reader names it and cannot write it; nor can a line that never
-        // names it, or names another file.
-        assert!(!can("grep -n api_items seams.toml", "seams.toml"));
-        assert!(!can("cat seams.toml | head -5 > /tmp/m", "seams.toml"));
-        assert!(!can(
-            "git diff -- seams.toml && git -C x log -p seams.toml",
-            "seams.toml"
-        ));
-        assert!(!can("cargo xtask status --section rules", "seams.toml"));
-        assert!(!can("cmd < oracle.toml 2>&1", "oracle.toml"));
-        assert!(!can("cp seams.toml.bak /tmp/m", "seams.toml"));
-        assert!(!can("echo x > myseams.toml", "seams.toml"));
-        // A program run from a file is read through the file.
-        let program =
-            |word: &str| (word == "append.py").then(|| b"open('docs/divergence.toml')".to_vec());
-        assert!(Line::read("python3 append.py").can_write("divergence.toml", program));
-        assert!(!Line::read("cat append.py").can_write("divergence.toml", program));
     }
 
     #[test]

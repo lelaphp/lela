@@ -7,11 +7,11 @@
 //! one the call stands in, and keeps them in the store under the session
 //! and the hook's tool-use id ([`before`]). After the call `permit --after`
 //! takes the ids again ([`after`]): a file whose blob moved, and which the
-//! call's line can write ([`argv::Line::can_write`]: a redirection, a
-//! writer's operand, a program file that names it), is put back from the blob
-//! kept before, and the call is a `harness.self` denial with the rule's
-//! text and the path, a permit reading like any other, and the
-//! `PostToolUse` hook's block, which the model reads.
+//! call's line can write ([`writes::can_write`]: a redirection into it, a
+//! writer handed its path, an interpreter whose program names it), is put
+//! back from the blob kept before, and the call is a `harness.self` denial
+//! with the rule's text and the path, a permit reading like any other, and
+//! the `PostToolUse` hook's block, which the model reads.
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -19,11 +19,11 @@
 //!   (#1895). Several sessions share one checkout, so a person's edit made
 //!   in an editor lands inside some call's window most of the time, and a
 //!   change the line does not account for is as likely theirs as the
-//!   call's. It is kept as it stands and named: a passing reading and the
-//!   hook's context say it changed while the call ran, not by it, with the
-//!   blob it was before. What that misses, a binary that hides the path,
-//!   is `done`'s condition 6 to hold at the push; a person's lost edit is
-//!   held by nothing.
+//!   call's. The sensor cannot tell whose it is, so it keeps it as it
+//!   stands and says so: a passing reading and the hook's context name the
+//!   file and the blob it was before. What that misses, a binary that
+//!   hides the path, is `done`'s condition 6 to hold at the push; a
+//!   person's lost edit is held by nothing.
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use super::INSTRUMENT;
 use super::argv;
 use super::call::Call;
+use super::writes::{self, Place};
 use crate::manifest::OneOrMany;
 use crate::reading::{self, Number, Reading, Status, Store};
 use crate::{git, manifest, steer};
@@ -97,16 +98,27 @@ struct Moved {
     checkout: PathBuf,
     path: String,
     said: String,
-    by: By,
+    verdict: Verdict,
 }
 
-/// Whose a moved file's change is, as the call's line reads.
+/// What the sensor did with a moved file, as the call's line reads.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum By {
+enum Verdict {
     /// The line can write it: put back, and the call denied.
-    Call,
-    /// The line cannot: kept as it stands, and named.
-    Unknown,
+    PutBack,
+    /// The line cannot: kept as it stands, and named, since the sensor
+    /// cannot tell a person's edit from a write the line does not show.
+    Kept,
+}
+
+impl Verdict {
+    /// The reading's status: a denial fails, a kept change is a note.
+    fn status(self) -> Status {
+        match self {
+            Verdict::PutBack => Status::Fail,
+            Verdict::Kept => Status::Pass,
+        }
+    }
 }
 
 /// Before a `Bash` call: the blob id of every tracked file `harness.self`
@@ -175,7 +187,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         );
         return Ok(());
     };
-    let Ok(kept) = fs::read_to_string(&file) else {
+    let Ok(taken) = fs::read_to_string(&file) else {
         eprintln!(
             "xtask permit --after: nothing was taken before this call ({}), so nothing is put back",
             file.display()
@@ -184,9 +196,9 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     };
     // The record is this call's alone and is spent whatever follows.
     fs::remove_file(&file).ok();
-    let record: Record = serde_json::from_str(&kept)
+    let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let moved = put_back(&record, call.cwd.as_deref().map(Path::new));
+    let moved = sort_moved(&record, call.cwd.as_deref().map(Path::new));
     if moved.is_empty() {
         return Ok(());
     }
@@ -196,7 +208,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     let context = serde_json::json!({"hookEventName": "PostToolUse", "additionalContext": said});
-    let hook = if moved.iter().any(|m| m.by == By::Call) {
+    let hook = if moved.iter().any(|m| m.verdict == Verdict::PutBack) {
         serde_json::json!({"decision": "block", "reason": said, "hookSpecificOutput": context})
     } else {
         serde_json::json!({"hookSpecificOutput": context})
@@ -210,14 +222,13 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
 
 /// Every file of the record whose blob moved and that steer did not write:
 /// put back where the call's line can write it, kept where it cannot. A
-/// word of the line is read as a file in the call's `cwd`, or in the
+/// word of the line is read where the call stands, its `cwd`, or the
 /// checkout where the call carries none.
-fn put_back(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
+fn sort_moved(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
     for guarded in &record.checkouts {
-        let here = cwd.unwrap_or(&guarded.checkout);
         for (path, was) in &guarded.blobs {
             let now = on_disk(&guarded.checkout.join(path));
             if now == *was {
@@ -226,49 +237,103 @@ fn put_back(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
-            let name = Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let (by, said) = if line.can_write(&name, |word| named_file(here, word)) {
+            let place = OnDisk::new(cwd.unwrap_or(&guarded.checkout), &guarded.checkout, path);
+            let (verdict, said) = if writes::can_write(&line, &place) {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
-                (By::Call, format!("{} {path}: {what}", guarded.text))
+                (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
-                (By::Unknown, format!("{path}: {}", kept(was.as_deref())))
+                (
+                    Verdict::Kept,
+                    format!("{path}: {}", kept_words(was.as_deref())),
+                )
             };
             moved.push(Moved {
                 checkout: guarded.checkout.clone(),
                 path: path.clone(),
                 said,
-                by,
+                verdict,
             });
         }
     }
     moved
 }
 
-/// What a file the line cannot write says when it moved: kept, and where
-/// what it was before stands.
-fn kept(was: Option<&str>) -> String {
+/// What a file the line cannot write says when it moved: kept, why, and
+/// where what it was before stands.
+fn kept_words(was: Option<&str>) -> String {
     let before = match was {
         Some(id) => format!("it was blob {id} before the call (`git cat-file -p {id}`)"),
         None => "it was not on disk before the call".to_owned(),
     };
     format!(
-        "changed while the call ran, not by it as its line reads, and kept as it stands; {before}"
+        "changed while the call ran, and its line cannot write it, so it is kept as it stands: \
+         a person's edit, or a write the line does not show; {before}"
     )
 }
 
-/// The bytes of the file a word of the line names, read from `cwd`: a
-/// program an interpreter runs, or a binary. `None` for a word that names
-/// no regular file, or one larger than any program an interpreter reads.
-fn named_file(cwd: &Path, word: &str) -> Option<Vec<u8>> {
-    const LARGEST: u64 = 16 << 20;
-    let path = cwd.join(word);
-    let meta = fs::metadata(&path).ok()?;
-    (meta.is_file() && meta.len() <= LARGEST)
-        .then(|| fs::read(&path).ok())
-        .flatten()
+/// One guarded file where a call stood, as [`writes::can_write`] asks
+/// about it.
+struct OnDisk {
+    cwd: PathBuf,
+    file: PathBuf,
+    name: String,
+}
+
+impl OnDisk {
+    fn new(cwd: &Path, checkout: &Path, path: &str) -> OnDisk {
+        let file = checkout.join(path);
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        OnDisk {
+            cwd: cwd.to_path_buf(),
+            file: resolved(&file),
+            name,
+        }
+    }
+
+    /// `word` as a path where the call stands, `~/` read as the home.
+    fn at(&self, word: &str) -> PathBuf {
+        match (word.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => Path::new(&home).join(rest),
+            _ => self.cwd.join(word),
+        }
+    }
+}
+
+impl Place for OnDisk {
+    fn is(&self, word: &str) -> bool {
+        !word.is_empty() && resolved(&self.at(word)) == self.file
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The bytes of a program an interpreter runs or one run by its path;
+    /// `None` for no regular file, or one larger than any such program.
+    fn read(&self, word: &str) -> Option<Vec<u8>> {
+        const LARGEST: u64 = 16 << 20;
+        let path = self.at(word);
+        let meta = fs::metadata(&path).ok()?;
+        (meta.is_file() && meta.len() <= LARGEST)
+            .then(|| fs::read(&path).ok())
+            .flatten()
+    }
+}
+
+/// `path` with its directory resolved, links and `..` alike, so a word
+/// and the guarded file compare as places; lexical where the directory
+/// is not on disk.
+fn resolved(path: &Path) -> PathBuf {
+    match (
+        path.parent().and_then(|dir| dir.canonicalize().ok()),
+        path.file_name(),
+    ) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => path.components().collect(),
+    }
 }
 
 /// One reading per moved file, in the store of the checkout the file is
@@ -279,10 +344,7 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
         let mut reading =
             Reading::stamped_over(INSTRUMENT, RULE, &one.checkout, Path::new(&one.path))?;
         RULE.clone_into(&mut reading.rule);
-        reading.status = match one.by {
-            By::Call => Status::Fail,
-            By::Unknown => Status::Pass,
-        };
+        reading.status = one.verdict.status();
         reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), one.said);
         reading.session.clone_from(&call.session_id);
         Store::of_workspace(&one.checkout).record(&[reading])?;
