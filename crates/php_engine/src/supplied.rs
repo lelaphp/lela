@@ -19,9 +19,9 @@
 //!
 //! Suppliers are taken in the order their extensions start, the host's
 //! own extension last, as php starts a host's `additional_module` after
-//! the bundle; [`Resolved::resolve`] is handed that order, so a kind
-//! added later, or an order that also weighs when php installs a
-//! supplier, changes no read site.
+//! the bundle; [`Resolved::resolve`] is handed that order with each
+//! supplier's extension beside it, so a kind added later, or an order
+//! that also weighs when php installs a supplier, changes no read site.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use php_unit::decl::Name;
 
 use crate::api::abi::{
-    AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, Extension, FatalLoggedHook,
+    AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, FatalLoggedHook,
     InputFilterHook, InterruptHook, PostStartupHook, ResolvePathHook, Shell, TicksHook,
     TreatDataHook, UploadHook,
 };
@@ -119,14 +119,15 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// The bundle's supplied behaviour from `extensions` in the order
-    /// they start, the first at `first`, each extension's own taken out
-    /// of it so that nothing reads a supplier but through the table.
-    pub(crate) fn resolve(extensions: &mut [Extension], first: u32) -> Resolved {
+    /// The bundle's supplied behaviour from each supplier's own, in the
+    /// order php installs them, each beside the extension it is of: the
+    /// order is the caller's alone, so one that also weighs the phase
+    /// php installs a supplier in reorders this and names no other.
+    pub(crate) fn resolve(
+        suppliers: impl IntoIterator<Item = (ExtensionId, Supplies)>,
+    ) -> Resolved {
         let mut table = Resolved::default();
-        for (extension, at) in extensions.iter_mut().zip(first..) {
-            let by = ExtensionId(at);
-            let own = std::mem::take(&mut extension.supplies);
+        for (by, own) in suppliers {
             table.interrupt.install(own.interrupt);
             table.compile_file.install(own.compile_file);
             table.resolve_path.install(own.resolve_path);
@@ -405,6 +406,29 @@ mod tests {
                 .build("later"),
         ];
         assert_eq!(treated(&extensions, None), "ba");
+    }
+
+    /// A replaced slot names the extension that wrote it by its
+    /// `module_number`, as `multibyte_provider` answers mbstring's for
+    /// phpinfo's `Zend Multibyte Support` row.
+    #[test]
+    fn a_replaced_kind_names_its_supplier_at_its_module_number() {
+        let extensions = [
+            ExtensionBuilder::default()
+                .treat_data(UPPER)
+                .build("earlier"),
+            ExtensionBuilder::default()
+                .treat_data(REVERSE)
+                .build("later"),
+            ExtensionBuilder::default().build("after"),
+        ];
+        let engine = Engine::cli_builder().extensions(&extensions).build();
+        let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let supplier = engine.shared.supplied.treat_data.supplier();
+        assert_eq!(
+            supplier.and_then(|id| req.extension_name(id)),
+            Some("later")
+        );
     }
 
     /// The host's own extension starts after the bundle, as php starts

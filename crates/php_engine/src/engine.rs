@@ -2570,12 +2570,16 @@ impl EngineBuilder {
         let mut extensions = self.extensions;
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
-        sort_modules(&mut extensions);
-        // The host's module starts after the bundle, as php starts its
-        // `additional_module` last.
         extensions.extend(self.additional_extension);
-        // `module_registry` numbers Core 0 and the bundle from 1.
-        let mut supplied = Resolved::resolve(&mut extensions, 1);
+        sort_modules(&mut extensions);
+        // Each extension's supplies taken out of it, by its number in
+        // `module_registry`, which numbers Core 0 and the bundle from 1.
+        let mut supplied = Resolved::resolve(
+            extensions
+                .iter_mut()
+                .zip(1u32..)
+                .map(|(e, at)| (ExtensionId(at), std::mem::take(&mut e.supplies))),
+        );
         if !self.cli_shell {
             supplied.shell = Last::default();
         }
