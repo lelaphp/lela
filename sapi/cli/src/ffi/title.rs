@@ -12,6 +12,8 @@
 
 use std::ffi::{CStr, c_char, c_int};
 use std::sync::atomic::AtomicU8;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 /// The area, `ps_buffer` for `ps_buffer_size` bytes; `None` where there
 /// is none. Called once, first in `main`, before any thread starts and
@@ -46,7 +48,7 @@ pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
             end = var.wrapping_add(length(var));
         }
     }
-    let size = (end as usize).checked_sub(start as usize)?;
+    let size = end.addr().checked_sub(start.addr())?;
     move_environ(&env);
     point_argv_at_copy(&args);
     for i in 1..count {
@@ -150,9 +152,20 @@ unsafe extern "C" {
 }
 
 /// `argc` and `argv` as glibc hands them to each `.init_array` function
-/// before `main`, kept here, as the standard library keeps its own.
+/// before `main`, kept here, as the standard library keeps its own. `argv`
+/// is kept as the pointer itself, so what `process_args` reads back carries
+/// the provenance glibc's pointer did; an atomic is what makes a pointer a
+/// `Sync` static without an `unsafe impl`. Both are written once, by
+/// `capture`, and read once, by `process_args`, on the main thread before
+/// any other starts, so `Relaxed` orders nothing that program order does
+/// not; a null `ARGV` is a process glibc never called `capture` in.
 #[cfg(target_os = "linux")]
-static ARGS: std::sync::OnceLock<(c_int, usize)> = std::sync::OnceLock::new();
+static ARGC: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// `argv`, as [`ARGC`] says.
+#[cfg(target_os = "linux")]
+static ARGV: std::sync::atomic::AtomicPtr<*mut c_char> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(target_os = "linux")]
 #[used]
@@ -161,16 +174,21 @@ static CAPTURE: extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char) = captu
 
 #[cfg(target_os = "linux")]
 extern "C" fn capture(count: c_int, vector: *mut *mut c_char, _environment: *mut *mut c_char) {
-    let _ = ARGS.set((count, vector as usize));
+    ARGC.store(count, Ordering::Relaxed);
+    ARGV.store(vector, Ordering::Relaxed);
 }
 
 #[cfg(target_os = "linux")]
 fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
-    let &(count, vector) = ARGS.get()?;
+    let vector = ARGV.load(Ordering::Relaxed);
+    if vector.is_null() {
+        return None;
+    }
+    let count = ARGC.load(Ordering::Relaxed);
     // SAFETY: `environ` is the C library's, which nothing else writes: no
     // thread has started yet.
     let environment = unsafe { environ };
-    Some((count, vector as *mut *mut c_char, environment))
+    Some((count, vector, environment))
 }
 
 #[cfg(target_os = "linux")]
