@@ -128,9 +128,9 @@ const COMMITS: usize = 64;
 /// store or the store of another worktree of the clone (#1448). The
 /// evidence travels with the commits: a line `--accept` captured on a
 /// branch is in the branch's commit, the commit's crate is what the
-/// branch's reading measured, and the reading reaches the track's store at
-/// `worktree retire`, so a merge that also brings other changes to the
-/// crate is still read as the branch's capture, and a block typed by hand
+/// branch's reading measured, and the reading reaches the main checkout's
+/// store at `worktree retire`, so a merge that also brings other changes to
+/// the crate is still read as the branch's capture, and a block typed by hand
 /// in a commit nothing measured is not. A block is the hit's line and every
 /// line around it up to the nearest blank one, the rustdoc paragraph and
 /// the item under it, so an edit to what the line stands in is a block no

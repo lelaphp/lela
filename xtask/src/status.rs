@@ -842,8 +842,8 @@ fn last_run(log: &Log) -> Vec<Row> {
 
 /// The `usage` section (#210): the last reading of `instrument` under each
 /// scope, read off the append-only log as the `track` section is, since a
-/// retired worktree's readings reach the track's store through its log
-/// alone; one row per scope, a ticket's number or a session's id, in
+/// retired worktree's readings reach the main checkout's store through its
+/// log alone; one row per scope, a ticket's number or a session's id, in
 /// scope order.
 fn last_per_scope(log: &Log, instrument: &str) -> Vec<Row> {
     let mut last: BTreeMap<&str, &Reading> = BTreeMap::new();

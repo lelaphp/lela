@@ -15,9 +15,14 @@ use crate::status::PerReading;
 use crate::status::every::{Head, count};
 use crate::tally;
 
-/// The version of [`Row`]'s shape. It changes when the shape does, a
-/// field added, removed, renamed or read differently, and never for a
-/// new reading; a reader refuses a `v` it does not know.
+/// The version of [`Row`]'s shape, which changes only when the shape does
+/// and never for a new reading; a reader refuses a `v` it does not know
+/// (harness-design.md §4.6, revision 76). A field a row may omit, whose
+/// absence a reader of the earlier shape already handles correctly, is
+/// added under the same `v`, as `target.missed_skipped` was (#1834): a
+/// reader of `v = 1` that never reads it keeps its own estimate of the
+/// target's skipped misses. A field removed, renamed or retyped, or a
+/// meaning changed, is a new `v`.
 pub(crate) const V: u32 = 1;
 
 /// One phpt reading, in the shape the dashboard and any other reader of
@@ -89,6 +94,11 @@ pub(crate) struct Target {
     /// The subset's tests the kept target holds no verdict for, kept apart
     /// from `outside` (#1644); 0 where the reading counts none.
     pub(crate) predated: u64,
+    /// The target's tests the engine missed by skipping them, where the
+    /// reading counts them ([`Measure::MISSED_SKIPPED`]); omitted from the
+    /// line where it does not, as [`V`] allows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) missed_skipped: Option<u64>,
 }
 
 impl Row {
@@ -164,6 +174,7 @@ impl PerReading for Row {
                 met: counted(Measure::MET),
                 outside: counted(Measure::OUTSIDE),
                 predated: counted(Measure::PREDATED),
+                missed_skipped: count(reading, Measure::MISSED_SKIPPED),
             }),
         }
     }
@@ -288,8 +299,32 @@ mod tests {
                 n: 44,
                 met: 40,
                 outside: 4,
-                predated: 2
+                predated: 2,
+                missed_skipped: None
             })
+        );
+    }
+
+    /// A reading that counts the target's misses the engine skipped
+    /// carries the count in its target (#1834); one from before the count
+    /// was kept carries no such field at all, so its line is the shape it
+    /// always had under `v = 1`.
+    #[test]
+    fn a_row_carries_the_skipped_misses_where_the_reading_counts_them() {
+        let held = [FIRST, &[("target", 44), ("met", 40), ("outside", 6)]].concat();
+        let counted = [held.as_slice(), &[("missed_skipped", 3)]].concat();
+        let row = Row::of(&reading("ext/standard", &counted));
+        assert_eq!(row.target.and_then(|t| t.missed_skipped), Some(3));
+        let line = serde_json::to_value(&row).unwrap();
+        assert_eq!(line["target"]["missed_skipped"], 3);
+
+        let row = Row::of(&reading("ext/standard", &held));
+        assert_eq!(row.target.and_then(|t| t.missed_skipped), None);
+        let line = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            line["target"],
+            json!({ "n": 44, "met": 40, "outside": 6, "predated": 0 }),
+            "a reading from before the count renders as it did"
         );
     }
 

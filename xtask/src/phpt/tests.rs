@@ -2038,6 +2038,56 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
 
+/// The divergence key of the fixture subset's test `name`.
+fn fixture_id(name: &str) -> String {
+    format!("phpt:php-src/ext/fixture/tests/{name}")
+}
+
+/// A target kept over the fixture subset: the oracle's verdict on each
+/// test named.
+fn fixture_target(verdicts: &[(&str, &str)]) -> Target {
+    let verdicts: serde_json::Map<String, serde_json::Value> = verdicts
+        .iter()
+        .map(|(name, j)| (fixture_id(name), serde_json::Value::from(*j)))
+        .collect();
+    Target::of(
+        serde_json::from_value(serde_json::json!({
+            "commit": "e01b1f6",
+            "corpus": "the fixture's corpus",
+            "engine": "php md5 0",
+            "verdicts": verdicts,
+        }))
+        .unwrap(),
+    )
+}
+
+/// The fixture subset's reading of a linked run that judged each test
+/// named as given, held to `target` under `registry`.
+fn held_to_fixture(judged: &[(&str, Judgement)], target: &Target, registry: &Registry) -> Reading {
+    let tally = Tally {
+        judged: judged
+            .iter()
+            .map(|(name, judgement)| Judged::new(&fixture_id(name), name, *judgement, ""))
+            .collect(),
+        found: judged.len(),
+    };
+    let mut reading = Reading::new(INSTRUMENT, "ext/fixture");
+    held_to(
+        &mut reading,
+        (&tally, "ext/fixture"),
+        (Some(target), false),
+        registry,
+        (&Runner::Linked, &manifest().pin),
+    )
+    .unwrap();
+    reading
+}
+
+/// One count of a reading, where it has one.
+fn number(reading: &Reading, key: &str) -> Option<crate::reading::Number> {
+    reading.numbers.get(key).copied()
+}
+
 /// A target kept over another corpus than the one the subset holds now
 /// (#1644), as #1598 grew `ext/intl` by `ext/intl/uchar/tests` under the
 /// same pin: the tests it holds no verdict for are counted as `predated`
@@ -2049,47 +2099,16 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
 #[test]
 fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
     use crate::reading::Number;
-    let id = |name: &str| format!("phpt:php-src/ext/fixture/tests/{name}");
-    let run = |verdicts: &[(&str, &str)]| -> against::Run {
-        let verdicts: serde_json::Map<String, serde_json::Value> = verdicts
-            .iter()
-            .map(|(name, j)| (id(name), serde_json::Value::from(*j)))
-            .collect();
-        serde_json::from_value(serde_json::json!({
-            "commit": "e01b1f6",
-            "corpus": "the fixture's corpus",
-            "engine": "php md5 0",
-            "verdicts": verdicts,
-        }))
-        .unwrap()
-    };
-    let judged = |name: &str, judgement| Judged::new(&id(name), name, judgement, "");
-    let tally = Tally {
-        judged: vec![
-            judged("met.phpt", Judgement::Pass),
-            judged("oracle-miss.phpt", Judgement::Fail),
-            judged("uchar/new.phpt", Judgement::Pass),
-            judged("uchar/newer.phpt", Judgement::Fail),
-        ],
-        found: 4,
-    };
-    let pin = manifest().pin;
-    let held = |target: &Target| {
-        let mut reading = Reading::new(INSTRUMENT, "ext/fixture");
-        held_to(
-            &mut reading,
-            (&tally, "ext/fixture"),
-            (Some(target), false),
-            &Registry::parse("").unwrap(),
-            (&Runner::Linked, &pin),
-        )
-        .unwrap();
-        reading
-    };
-    let number = |reading: &Reading, key: &str| reading.numbers.get(key).copied();
+    let judged = [
+        ("met.phpt", Judgement::Pass),
+        ("oracle-miss.phpt", Judgement::Fail),
+        ("uchar/new.phpt", Judgement::Pass),
+        ("uchar/newer.phpt", Judgement::Fail),
+    ];
+    let registry = Registry::parse("").unwrap();
 
-    let older = Target::of(run(&[("met.phpt", "pass"), ("oracle-miss.phpt", "fail")]));
-    let reading = held(&older);
+    let older = fixture_target(&[("met.phpt", "pass"), ("oracle-miss.phpt", "fail")]);
+    let reading = held_to_fixture(&judged, &older, &registry);
     assert_eq!(
         number(&reading, "target"),
         Some(Number::Int(1)),
@@ -2112,17 +2131,17 @@ fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
     );
     let keeps = format!(
         "1 of 1 target tests met, 1 outside; 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --engine {}` keeps it again",
-        pin.oracle.path.display()
+        manifest().pin.oracle.path.display()
     );
     assert!(reading.message.contains(&keeps), "{}", reading.message);
 
-    let current = Target::of(run(&[
+    let current = fixture_target(&[
         ("met.phpt", "pass"),
         ("oracle-miss.phpt", "fail"),
         ("uchar/new.phpt", "pass"),
         ("uchar/newer.phpt", "skip"),
-    ]));
-    let reading = held(&current);
+    ]);
+    let reading = held_to_fixture(&judged, &current, &registry);
     assert_eq!(
         number(&reading, "target"),
         Some(Number::Int(2)),
@@ -2135,4 +2154,68 @@ fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
     );
     assert_eq!(number(&reading, "predated"), None, "{reading:#?}");
     assert!(!reading.message.contains("predates"), "{}", reading.message);
+}
+
+/// A run whose target misses include a test the engine skipped counts it
+/// as `missed_skipped` (#1834), so the forecast reads how many of the
+/// tests still to meet are skips off the reading and not an estimate: of
+/// the target, `skipped.phpt` skipped is a miss and a skipped one,
+/// `failed.phpt` is a miss and not, and `row.phpt` skipped under an
+/// accepted row is met and neither; `oracle-skip.phpt`, which the oracle
+/// skips too, is outside and never counted. The negative control is the
+/// same run with nothing of the target skipped: the count is written, as 0.
+#[test]
+fn a_run_counts_the_targets_misses_the_engine_skipped() {
+    use crate::reading::Number;
+    let target = fixture_target(&[
+        ("met.phpt", "pass"),
+        ("skipped.phpt", "pass"),
+        ("failed.phpt", "pass"),
+        ("row.phpt", "pass"),
+        ("oracle-skip.phpt", "skip"),
+    ]);
+    let registry = Registry::parse(&format!(
+        "[[divergence]]\nid = \"{}\"\nkind = \"phpt\"\nreason = \"a person's reason\"\nstatus = \"accepted\"\nsince = \"2026-10-04\"\n",
+        fixture_id("row.phpt")
+    ))
+    .unwrap();
+    let held = |skipped: Judgement| {
+        let judged = [
+            ("met.phpt", Judgement::Pass),
+            ("skipped.phpt", skipped),
+            ("failed.phpt", Judgement::Fail),
+            ("row.phpt", Judgement::Skip),
+            ("oracle-skip.phpt", Judgement::Skip),
+        ];
+        held_to_fixture(&judged, &target, &registry)
+    };
+
+    let reading = held(Judgement::Skip);
+    assert_eq!(
+        number(&reading, "target"),
+        Some(Number::Int(4)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "met"),
+        Some(Number::Int(2)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "outside"),
+        Some(Number::Int(1)),
+        "{reading:#?}"
+    );
+    assert_eq!(
+        number(&reading, "missed_skipped"),
+        Some(Number::Int(1)),
+        "{reading:#?}"
+    );
+
+    let reading = held(Judgement::Pass);
+    assert_eq!(
+        number(&reading, "missed_skipped"),
+        Some(Number::Int(0)),
+        "{reading:#?}"
+    );
 }
