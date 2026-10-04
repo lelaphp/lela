@@ -75,6 +75,7 @@ fn dump_regime() -> Regime {
             "opcache.enable_cli=1".to_owned(),
             "opcache.opt_debug_level=0x10000".to_owned(),
         ],
+        ..Regime::default()
     }
 }
 
@@ -129,6 +130,16 @@ impl Scratch {
             corpus,
             manifest,
         }
+    }
+
+    /// The pin's `[regime.dump]` carrying `args` beside its ini.
+    fn dump_with_args(&mut self, args: &[&str]) {
+        self.manifest
+            .pin
+            .regime
+            .get_mut(compile_identity::REGIME)
+            .unwrap()
+            .args = args.iter().map(|&arg| arg.to_owned()).collect();
     }
 
     /// A file standing where the engine's binary would: `body` is the
@@ -484,6 +495,56 @@ fn a_pin_without_the_dump_regime_refuses_the_run() {
     };
     let refused = compile_identity::run(&scratch.root, &manifest, &registry(""), &ask).unwrap_err();
     assert!(format!("{refused:#}").contains("dump"), "{refused:#}");
+}
+
+/// A regime's `args` reach both binaries' command lines (#1780, #1887):
+/// under a `dump` regime that carries `-e`, php dumps with extended info,
+/// so the binary that hands php every argument it was given is identical
+/// on every file, and the one that hands it all but `-e` differs on each
+/// file php dumped an op array for. The difference is the argument
+/// reaching the oracle's side, and the identity is it reaching the
+/// engine's.
+#[test]
+fn a_regimes_args_reach_both_binaries() {
+    let Some(php) = oracle() else {
+        return;
+    };
+    let mut scratch = Scratch::new("args");
+    scratch.dump_with_args(&["-e"]);
+    let same = scratch.run(&registry(""), &scratch.same_as_php());
+    assert_eq!(same.status, Status::Pass, "{same:#?}");
+    assert_eq!(count(&same, "identical"), 2);
+    let dropped = scratch.binary(
+        "drops-e",
+        &format!(
+            "for arg in \"$@\"; do shift; [ \"$arg\" = -e ] || set -- \"$@\" \"$arg\"; done\nexec \"{}\" \"$@\"",
+            php.display()
+        ),
+    );
+    let without = scratch.run(&registry(""), &dropped);
+    assert_eq!(without.status, Status::Fail, "{without:#?}");
+    assert_eq!(count(&without, "differ"), 2, "{without:#?}");
+}
+
+/// The linked compiler has no command line, so a `dump` regime that
+/// carries `args` is refused before anything is dumped, naming the regime
+/// and its arguments, rather than the arguments dropped from the engine's
+/// side alone (#1780: no flag is swallowed silently).
+#[test]
+fn the_linked_compiler_refuses_a_dump_regime_that_carries_args() {
+    let mut scratch = Scratch::new("linked-args");
+    scratch.dump_with_args(&["-e"]);
+    let ask = Ask {
+        corpus: Some(scratch.corpus.clone()),
+        ..Ask::default()
+    };
+    let refused =
+        compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap_err();
+    let refused = format!("{refused:#}");
+    assert!(
+        refused.contains("[regime.dump]") && refused.contains("\"-e\""),
+        "{refused}"
+    );
 }
 
 /// One file, on request (harness §7): the verdict is printed, a difference
