@@ -560,7 +560,7 @@ mod tests {
                 );
             String::from_utf8_lossy(&served.stdout).into_owned()
         };
-        let zend_first = [
+        let mut extensions = [
             zend(
                 ExtensionBuilder::default().intercept(b"strlen", opcache),
                 "opcache",
@@ -569,17 +569,9 @@ mod tests {
                 .intercept(b"strlen", phar)
                 .build("phar"),
         ];
-        let minit_first = [
-            ExtensionBuilder::default()
-                .intercept(b"strlen", phar)
-                .build("phar"),
-            zend(
-                ExtensionBuilder::default().intercept(b"strlen", opcache),
-                "opcache",
-            ),
-        ];
-        assert_eq!(serve(&zend_first), "opcache phar 4");
-        assert_eq!(serve(&minit_first), "opcache phar 4");
+        assert_eq!(serve(&extensions), "opcache phar 4");
+        extensions.reverse();
+        assert_eq!(serve(&extensions), "opcache phar 4");
     }
 
     /// What a Zend extension registers is its `MINIT`'s, which runs

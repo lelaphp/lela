@@ -11,12 +11,16 @@ use std::process::{Command, Stdio};
 #[test]
 fn a_failing_ffi_preload_refuses_startup_before_opcache_preloads() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("startup-order");
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
     let preload = dir.join("preload.php");
     let script = dir.join("served.php");
     let missing = dir.join("missing.h");
-    let _ = std::fs::write(&preload, "<?php echo \"preloaded\\n\";");
-    let _ = std::fs::write(&script, "<?php echo \"served\\n\";");
+    for (path, source) in [
+        (&preload, "<?php echo \"preloaded\\n\";"),
+        (&script, "<?php echo \"served\\n\";"),
+    ] {
+        std::fs::write(path, source).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_php"))
         .arg("-n")
         .args(["-d", "opcache.enable_cli=1"])

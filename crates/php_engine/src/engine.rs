@@ -4694,7 +4694,7 @@ mod tests {
     }
 
     /// Two extensions that intercept one native stack in bundle order,
-    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// each at its `MINIT`: the later serves
     /// first and passes through to the earlier, the earlier to the
     /// native, and each hands on the call's own arguments.
     #[test]
