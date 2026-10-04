@@ -1,8 +1,9 @@
 //! `xtask track next`, the ticket a track works next (#73): the frontier
 //! held without the network. The tracker is a shell file answering `issue
 //! list` from a recorded transcript, and the clone is a scratch repository
-//! whose branch records are written by hand, so each of the four filters
-//! is held against an answer this test wrote down.
+//! with one commit on `main` whose branch records are written by hand, so
+//! each of the four filters is held against an answer this test wrote
+//! down.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -29,7 +30,11 @@ impl Recorded {
         );
         fs::write(dir.join("gh"), script).unwrap();
         fs::set_permissions(dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        git(&dir.join("repo"), &["init", "-q"]);
+        git(&dir.join("repo"), &["init", "-q", "-b", "main"]);
+        git(
+            &dir.join("repo"),
+            &["commit", "-q", "--allow-empty", "-m", "main"],
+        );
         Recorded { dir }
     }
 
@@ -91,6 +96,13 @@ impl Recorded {
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
+        .args(["-c", "user.name=x", "-c", "user.email=x@x"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ])
         .args(args)
         .current_dir(dir)
         .output()
@@ -193,6 +205,63 @@ fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
     };
     assert_eq!(run("parity-hosts"), "#21 ticket 21\n");
     assert_eq!(run("main"), "#20 ticket 20\n");
+}
+
+/// A blocker counts as open while it is open, or while the branch that
+/// records it is not yet in `main` (#1843, #1850): #5's blocker #4 is
+/// closed at the tracker, but `t4` holds a commit `main` does not, so #5
+/// is passed over and #7 is next; once `main` contains `t4`, #5 is named.
+/// #3's closed blocker #2 is recorded by a branch `main` already
+/// contains, and #7's closed blocker #1 by a record whose branch is gone,
+/// so neither is held.
+#[test]
+fn a_closed_blockers_branch_not_in_main_holds_its_dependent_until_merged() {
+    let recorded = Recorded::lay("unmerged-blocker");
+    let repo = recorded.repo();
+    git(&repo, &["branch", "t2"]);
+    recorded.records("t2", 2);
+    recorded.records("t1", 1);
+    git(&repo, &["checkout", "-q", "-b", "t4"]);
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "the work of #4"],
+    );
+    git(&repo, &["checkout", "-q", "main"]);
+    recorded.records("t4", 4);
+    let closed = |number: u64, blocker: u64| {
+        serde_json::json!({
+            "number": number,
+            "title": format!("ticket {number}"),
+            "url": format!("https://example.invalid/issues/{number}"),
+            "labels": [{"name": "ready-for-agent"}],
+            "blockedBy": {"nodes": [{"number": blocker, "state": "CLOSED"}], "totalCount": 1},
+        })
+    };
+    let write = |rows: Vec<serde_json::Value>| {
+        fs::write(
+            recorded.dir.join("list.json"),
+            serde_json::Value::Array(rows).to_string(),
+        )
+        .unwrap();
+    };
+    let number = || {
+        next(&repo, &recorded.gh(), "main")
+            .unwrap()
+            .map(|n| n.number)
+    };
+
+    write(vec![closed(5, 4)]);
+    assert_eq!(number(), None, "t4 is not in main, so #4 still blocks #5");
+    write(vec![closed(7, 1), closed(6, 4), closed(5, 4), closed(3, 2)]);
+    assert_eq!(
+        number(),
+        Some(3),
+        "t2 is in main and t1 is gone, so #3 and #7 are free; #5 and #6 wait on t4"
+    );
+    write(vec![closed(7, 1), closed(5, 4)]);
+    assert_eq!(number(), Some(7), "#5 waits on t4 still, so #7 is next");
+    git(&repo, &["merge", "-q", "--ff-only", "t4"]);
+    assert_eq!(number(), Some(5), "main contains t4 now, so #5 is named");
 }
 
 #[test]

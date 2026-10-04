@@ -2,18 +2,23 @@
 //! plan; CONTEXT.md, Track, Frontier, Ticket): `xtask track next` answers
 //! it from the tracker's open tickets and the repository's branch
 //! records, as text or as one JSON object, and writes no reading. The
-//! frontier is the open tickets labelled `ready-for-agent` that no open
-//! ticket blocks, that are the track's, and that no branch of the
-//! repository records; the next is the widest of them by the census, the
-//! number breaking a tie (#618). An empty frontier is stated, "none", and
-//! is not an error, since a track with nothing to work has not failed.
+//! frontier is the open tickets labelled `ready-for-agent` that no ticket
+//! blocks while it is open or while the branch that records it is not yet
+//! in `main`, that are the track's, and that no branch of the repository
+//! records; the next is the widest of them by the census, the number
+//! breaking a tie (#618). An empty frontier is stated, "none", and is not
+//! an error, since a track with nothing to work has not failed.
 //!
 //! A track is the tickets that carry its `track:<name>` label, and a
 //! ticket with no `track:` label is `main`'s alone (ADR-0009), so every
 //! ticket is some track's and two runs on different tracks never compete
 //! for an unlabelled one; [`tracks_of`] is the one statement of that.
-//! "No branch yet" is the repository's own record, `branch.<name>.ticket`,
-//! the one [`track::branch_of_ticket`] reads.
+//! A closed blocker whose branch `main` does not contain yet still blocks
+//! (#1843, #1850), so a ticket is cut only from a `main` that holds what
+//! it waited on, even when the same run closed its blocker;
+//! [`waits_on`] is the one statement of that. "No branch yet" and "not
+//! yet in `main`" are the repository's own records, `branch.<name>.ticket`
+//! and git's reachability, read once per answer as [`Records`].
 //! The tracker is reached through [`Gh::open`], the ticket module's one
 //! list, and through nothing else here. The same list answers what the
 //! track waits on (#85): its open tickets labelled `for-a-person`, which
@@ -26,8 +31,8 @@ use serde_json::{Value, json};
 
 use crate::census_weight::Weights;
 use crate::reading::Store;
-use crate::ticket::{Gh, Open};
-use crate::track::{self, MAIN, Ticket};
+use crate::ticket::{Gh, Open, State};
+use crate::track::{MAIN, Records, Ticket};
 use toml::value::Datetime;
 
 /// The label a ticket an agent may take carries. The frontier reads it
@@ -122,10 +127,8 @@ impl Next {
 pub fn next(root: &Path, gh: &Gh, track: &str) -> Result<Option<Next>> {
     let open = gh.open(root)?;
     let weights = Weights::of_store(&Store::of_workspace(root))?;
-    Ok(frontier(&open, track, &weights, |ticket| {
-        track::branch_of_ticket(root, ticket).is_some()
-    })
-    .map(|found| {
+    let records = Records::read(root)?;
+    Ok(frontier(&open, track, &weights, &records).map(|found| {
         let mut next = Next::from(found.clone());
         next.weight = weights.weigh(&next.title).0;
         next
@@ -155,9 +158,9 @@ impl From<Open> for Next {
     }
 }
 
-/// The widest of the open tickets that pass the four filters, `recorded`
-/// answering whether a branch of the clone records one; a function of
-/// the tracker's answer and the census the store holds.
+/// The widest of the open tickets that pass the four filters, `records`
+/// answering what the branches of the clone record; a function of the
+/// tracker's answer, those records and the census the store holds.
 ///
 /// Widest is the census's count of the refused tests the ticket's
 /// constructs would let through (#617, #618), and the tie is the number,
@@ -169,13 +172,13 @@ fn frontier<'a>(
     open: &'a [Open],
     track: &str,
     weights: &Weights,
-    recorded: impl Fn(Ticket) -> bool,
+    records: &Records,
 ) -> Option<&'a Open> {
     open.iter()
         .filter(|ticket| ticket.label_names().any(|name| name == READY))
-        .filter(|ticket| !ticket.blocked())
+        .filter(|ticket| waits_on(ticket, records).next().is_none())
         .filter(|ticket| is_tracks(ticket, track))
-        .filter(|ticket| !recorded(Ticket::new(ticket.number)))
+        .filter(|ticket| records.branch(Ticket::new(ticket.number)).is_none())
         .min_by_key(|ticket| {
             let weight = weights.weigh(&ticket.title).0;
             (std::cmp::Reverse(weight), ticket.number)
@@ -201,6 +204,25 @@ pub(crate) fn tracks_of<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<&'
     if named.is_empty() { vec![MAIN] } else { named }
 }
 
+/// The tickets that still block `ticket`, by number: each blocker open at
+/// the tracker, and each closed one recorded by a branch `main` does not
+/// contain yet (#1843, #1850), since its work is not in the `main` the
+/// ticket would be cut from until /specs merges that branch. The
+/// frontier and the chains read the rule here.
+pub(crate) fn waits_on<'a>(
+    ticket: &'a Open,
+    records: &'a Records,
+) -> impl Iterator<Item = u64> + 'a {
+    ticket
+        .blocked_by
+        .nodes
+        .iter()
+        .filter(|blocker| {
+            blocker.state == State::Open || records.unmerged(Ticket::new(blocker.number))
+        })
+        .map(|blocker| blocker.number)
+}
+
 /// `xtask track next`: the track named and the answer printed; no
 /// reading.
 pub fn command(root: &Path, track: &str, json: bool, why: bool) -> Result<()> {
@@ -218,8 +240,21 @@ pub fn command(root: &Path, track: &str, json: bool, why: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Weights, frontier, is_tracks};
-    use crate::ticket::{BlockedBy, Label, Open};
+    use std::collections::BTreeSet;
+
+    use super::{Weights, frontier, is_tracks, waits_on};
+    use crate::ticket::{BlockedBy, Blocker, Label, Open, State};
+    use crate::track::{Records, Ticket};
+
+    /// The records of branches `t<n>` for each of `on`, those of
+    /// `unmerged` not in `main`.
+    fn records(on: &[u64], unmerged: &[&str]) -> Records {
+        let recorded = on
+            .iter()
+            .map(|&n| (format!("t{n}"), Ticket::new(n)))
+            .collect();
+        Records::of(recorded, &unmerged.iter().copied().collect::<BTreeSet<_>>())
+    }
 
     /// An open, unblocked, ready ticket with no `track:` label, `main`'s,
     /// by number and title: what the frontier orders.
@@ -280,17 +315,39 @@ mod tests {
                 "php_compile: the global statement, BIND_GLOBAL binding a CV",
             ),
         ];
-        let found = frontier(&open, "main", &weights, |_| false).expect("a frontier");
+        let none = records(&[], &[]);
+        let found = frontier(&open, "main", &weights, &none).expect("a frontier");
         assert_eq!(found.number, 3, "the widest, not the oldest");
 
         // With the widest already on a branch, the next widest follows.
-        let found =
-            frontier(&open, "main", &weights, |ticket| ticket.number() == 3).expect("a frontier");
+        let found = frontier(&open, "main", &weights, &records(&[3], &[])).expect("a frontier");
         assert_eq!(found.number, 4);
 
         // Weighed at nothing, the order is the filing order it always was.
-        let found = frontier(&open, "main", &Weights::default(), |_| false).expect("a frontier");
+        let found = frontier(&open, "main", &Weights::default(), &none).expect("a frontier");
         assert_eq!(found.number, 1);
+    }
+
+    /// A blocker blocks while it is open, or while the branch recording
+    /// it is not in `main` (#1850): of #1 to #4, open, closed on `t2`
+    /// not merged, closed on `t3` merged and closed with no branch, the
+    /// first two wait.
+    #[test]
+    fn a_closed_blocker_waits_while_its_branch_is_not_in_main() {
+        let mut ticket = ready(9, "ticket 9");
+        ticket.blocked_by = BlockedBy {
+            nodes: [
+                (1, State::Open),
+                (2, State::Closed),
+                (3, State::Closed),
+                (4, State::Closed),
+            ]
+            .into_iter()
+            .map(|(number, state)| Blocker { number, state })
+            .collect(),
+        };
+        let held = records(&[2, 3], &["t2"]);
+        assert_eq!(waits_on(&ticket, &held).collect::<Vec<_>>(), [1, 2]);
     }
 
     /// No `track:` label is `main`'s alone (ADR-0009, #1836); one names

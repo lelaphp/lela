@@ -25,8 +25,10 @@
 //! readings into the checkout's store, and the branch `t<n>` is left
 //! with its record for the /specs coordinator to merge through its merge
 //! check (#1749, ADR-0009): the loop never moves `main` and pushes
-//! nothing. The close is the one signal, so a ticket closed with nothing
-//! committed, as a withdrawn one is, is retired the same way. When the
+//! nothing, so a ticket the closed one blocks is not named until `main`
+//! contains that branch ([`track_next::waits_on`], #1850). The close is
+//! the one signal, so a ticket closed with nothing committed, as a
+//! withdrawn one is, is retired the same way. When the
 //! session ends with the ticket open, the worktree is left standing for a
 //! person, the ticket's record kept with its branch, nothing retired, and
 //! the line says so; the console shows the worktree. A worktree left

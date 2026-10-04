@@ -501,7 +501,7 @@ pub(crate) struct Identity {
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
     /// The ticket the track works next: the widest open `ready-for-agent`
-    /// ticket by the census that no open ticket blocks, that carries no
+    /// ticket by the census that no ticket blocks, that carries no
     /// `track:<name>` label naming another track, and that no branch of
     /// the repository records; "none" when the frontier is empty. Reads the tracker
     /// through the ticket module and writes no reading.
@@ -524,7 +524,7 @@ pub(crate) enum TrackCommand {
     /// first and named under the others, and the tickets with no edge
     /// follow on their own. Each line carries the ticket's standing as
     /// `next` judges it: `ready` or `a person's`, the branch recording
-    /// it, the open tickets it waits on. Reads the
+    /// it, the tickets it waits on. Reads the
     /// tracker through the ticket module and writes no reading.
     Chains {
         /// The track, by its `track:` label.

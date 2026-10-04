@@ -17,6 +17,7 @@
 //! branch with no record names no ticket, which is stated, and no reader
 //! guesses one from a number in the branch's name.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -31,7 +32,7 @@ pub(crate) const MAIN: &str = "main";
 /// The ticket a branch's work is for: the number of the GitHub issue
 /// recorded on the branch when its worktree was laid down, or the one a
 /// `[parity]` ruling names, read from the manifest as the bare number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Ticket(u64);
 
@@ -176,24 +177,92 @@ pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result
 /// The branch whose record names `ticket`, if one does: what refuses a
 /// second branch on the same ticket, so no ticket is closed twice.
 pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
-    let number = ticket.number().to_string();
+    Records::of(branch_records(root), &BTreeSet::new())
+        .branch(ticket)
+        .map(str::to_owned)
+}
+
+/// Every branch record of the repository, each branch with the ticket it
+/// records, in git's order: the one read of `branch.<name>.ticket` across
+/// branches. A record that is not a number is no record here, and git
+/// not answering, as it does by exiting 1 when no branch records one, is
+/// no record at all.
+fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
     let found = git(
         root,
-        &[
-            "config",
-            "--get-regexp",
-            r"^branch\..*\.ticket$",
-            &format!("^{number}$"),
-        ],
+        &["config", "--get-regexp", r"^branch\..*\.ticket$"],
         None,
     )
-    .ok()?;
-    found.lines().find_map(|line| {
-        let (key, _) = line.split_once(' ')?;
-        key.strip_prefix("branch.")?
-            .strip_suffix(".ticket")
-            .map(str::to_owned)
-    })
+    .unwrap_or_default();
+    found
+        .lines()
+        .filter_map(|line| {
+            let (key, number) = line.split_once(' ')?;
+            let branch = key.strip_prefix("branch.")?.strip_suffix(".ticket")?;
+            Some((branch.to_owned(), Ticket::new(number.trim().parse().ok()?)))
+        })
+        .collect()
+}
+
+/// The repository's branch records as the frontier reads them, once per
+/// `track next` (#1850): the branch recording each ticket, and the
+/// tickets recorded by a branch `main` does not contain yet. Containment
+/// is git's own reachability, the test `merge-base --is-ancestor` makes,
+/// asked of every branch in one `for-each-ref --no-merged`; a record
+/// whose branch is gone names no branch `main` could lack.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Records {
+    branches: BTreeMap<Ticket, String>,
+    unmerged: BTreeSet<Ticket>,
+}
+
+impl Records {
+    /// The records of the repository at `root`, held to its `main`, its
+    /// own or `origin`'s; a repository with neither is an error, since
+    /// nothing can be said contained in it.
+    pub(crate) fn read(root: &Path) -> Result<Records> {
+        let main = ref_of(root, MAIN).with_context(|| {
+            format!("the repository has no {MAIN}, its own or origin's, to hold a branch to")
+        })?;
+        let unmerged = git(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname:lstrip=2)",
+                &format!("--no-merged={main}"),
+                "refs/heads/",
+            ],
+            None,
+        )
+        .with_context(|| format!("the branches {main} does not contain could not be listed"))?;
+        let unmerged: BTreeSet<&str> = unmerged.lines().collect();
+        Ok(Records::of(branch_records(root), &unmerged))
+    }
+
+    /// Each branch of `pairs` with the ticket it records, the branches in
+    /// `unmerged` being the ones `main` does not contain; the first branch
+    /// recording a ticket is the one named for it, and any one not in
+    /// `main` holds it.
+    pub(crate) fn of(pairs: Vec<(String, Ticket)>, unmerged: &BTreeSet<&str>) -> Records {
+        let mut records = Records::default();
+        for (branch, ticket) in pairs {
+            if unmerged.contains(branch.as_str()) {
+                records.unmerged.insert(ticket);
+            }
+            records.branches.entry(ticket).or_insert(branch);
+        }
+        records
+    }
+
+    /// The branch recording `ticket`, if one does.
+    pub(crate) fn branch(&self, ticket: Ticket) -> Option<&str> {
+        self.branches.get(&ticket).map(String::as_str)
+    }
+
+    /// Whether a branch records `ticket` and `main` does not contain it.
+    pub(crate) fn unmerged(&self, ticket: Ticket) -> bool {
+        self.unmerged.contains(&ticket)
+    }
 }
 
 /// The ref `name` is here: the branch itself, then `origin`'s.
