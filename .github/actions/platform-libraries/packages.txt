@@ -1,9 +1,11 @@
 # The Debian development packages of the platform libraries the workspace
 # links (design §7.2: platform libraries through pkg-config, never vendored;
 # #1300), one per line, each with the crate whose build script or `-sys`
-# dependency finds it. An extension that links a new platform library adds
-# its line here, and every ubuntu job that builds the workspace installs it
-# through this directory's action. `#` starts a comment.
+# dependency finds it, under the names ubuntu-26.04 gives them, the image
+# the jobs that build the workspace run on (#1724). An extension that
+# links a new platform library adds its line here, and every ubuntu job
+# that builds the workspace installs it through this directory's action.
+# `#` starts a comment.
 #
 # Not listed, since the runner's C library carries them: libintl.h
 # (ext/gettext), iconv (ext/iconv), libresolv (ext/standard). Not listed,
@@ -25,3 +27,4 @@ libxml2-dev           # ext/libxml, ext/xsl: pkg-config libxml-2.0, >= 2.9
 libxslt1-dev          # ext/xsl: pkg-config libxslt >= 1.1, libexslt >= 0.8
 libedit-dev           # ext/readline: pkg-config libedit
 libffi-dev            # ext/ffi: pkg-config libffi, >= 3.3
+libicu-dev            # ext/intl: pkg-config icu-uc, icu-i18n, icu-io; ICU 78, the oracle's
