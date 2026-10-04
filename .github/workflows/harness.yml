@@ -199,6 +199,7 @@ jobs:
       # itself: what the push changed was judged on its pull request.
       - name: done
         run: |
+          # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
             cargo xtask done --base "$GITHUB_BASE_REF"
           else
