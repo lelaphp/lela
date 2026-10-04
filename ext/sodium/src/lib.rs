@@ -64,13 +64,21 @@ pub(crate) mod constants {
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NSECBYTES: i64 = 0;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_NPUBBYTES: i64 = 12;
     pub(crate) const SODIUM_CRYPTO_AEAD_AES256GCM_ABYTES: i64 = 16;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS128L_KEYBYTES: i64 = 16;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS128L_NSECBYTES: i64 = 0;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS128L_NPUBBYTES: i64 = 16;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS128L_ABYTES: i64 = 32;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS256_KEYBYTES: i64 = 32;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS256_NSECBYTES: i64 = 0;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS256_NPUBBYTES: i64 = 32;
+    #[cfg(libsodium_aegis)]
     pub(crate) const SODIUM_CRYPTO_AEAD_AEGIS256_ABYTES: i64 = 32;
     pub(crate) const SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_KEYBYTES: i64 = 32;
     pub(crate) const SODIUM_CRYPTO_AEAD_CHACHA20POLY1305_NSECBYTES: i64 = 0;
@@ -299,12 +307,18 @@ pub fn extension() -> Extension {
             aead::sodium_crypto_aead_aes256gcm_decrypt::declared(),
             aead::sodium_crypto_aead_aes256gcm_encrypt::declared(),
             aead::sodium_crypto_aead_aes256gcm_keygen::declared(),
-            aead::sodium_crypto_aead_aegis128l_decrypt::declared(),
-            aead::sodium_crypto_aead_aegis128l_encrypt::declared(),
-            aead::sodium_crypto_aead_aegis128l_keygen::declared(),
-            aead::sodium_crypto_aead_aegis256_decrypt::declared(),
-            aead::sodium_crypto_aead_aegis256_encrypt::declared(),
-            aead::sodium_crypto_aead_aegis256_keygen::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis128l_decrypt::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis128l_encrypt::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis128l_keygen::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis256_decrypt::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis256_encrypt::declared(),
+            #[cfg(libsodium_aegis)]
+            aead::aegis::sodium_crypto_aead_aegis256_keygen::declared(),
             aead::sodium_crypto_aead_chacha20poly1305_decrypt::declared(),
             aead::sodium_crypto_aead_chacha20poly1305_encrypt::declared(),
             aead::sodium_crypto_aead_chacha20poly1305_keygen::declared(),
