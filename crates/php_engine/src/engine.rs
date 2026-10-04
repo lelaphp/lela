@@ -30,8 +30,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
-    States, Validation,
+    DependencyKind, EndFunction, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify,
+    StartupIni, States, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
@@ -3896,12 +3896,7 @@ impl Engine {
         req: &mut Request,
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(rshutdown) = extension.rshutdown {
-                rshutdown(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.rshutdown);
         crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
@@ -3909,12 +3904,7 @@ impl Engine {
         req.destroy_uploaded_files();
         // `zend_deactivate` reaches `shutdown_executor`: each extension's
         // `deactivate`, in reverse, before the resources are closed.
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(deactivate) = extension.deactivate {
-                deactivate(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.deactivate);
         req.close_resources();
         req.return_persistent();
         req.free_user_handlers();
@@ -3979,6 +3969,23 @@ impl Engine {
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
         self.transaction(description, sink, Work::Serve, true)
+    }
+}
+
+/// One end phase of the extensions' (ADR-0010): `hook` of each that
+/// declared one, in reverse bundle order, each in a `zend_try` of its
+/// own, as `zend_deactivate_modules` serves each extension's `RSHUTDOWN`
+/// (`Z/Zend/zend_API.c:3441-3448`). A fatal one raises is rendered and
+/// ends that function only; the next is still served, and a fatal it
+/// raises is rendered too.
+fn end_phase(
+    extensions: &[Extension],
+    req: &mut Request,
+    hook: fn(&Extension) -> Option<EndFunction>,
+) {
+    for serve in extensions.iter().rev().filter_map(hook) {
+        serve(req);
+        req.catch_bailout();
     }
 }
 
