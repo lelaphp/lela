@@ -2239,9 +2239,10 @@ pub struct Request {
     returned: Value,
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
-    /// The execution timer, armed while `max_execution_time` is not
-    /// zero; dropping the request unsets it.
-    timer: Option<crate::interrupt::Timer>,
+    /// The request's timer: the execution timer's deadline while
+    /// `max_execution_time` is not zero, and the one thread that waits
+    /// for it; dropping the request joins the thread.
+    timer: crate::interrupt::Timer,
     /// The thread's stack limit, php's `EG(stack_limit)`, worked out
     /// once at request start on the thread the request runs on
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
@@ -2851,7 +2852,7 @@ impl Request {
             shutdown_walk_ended: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
-            timer: None,
+            timer: crate::interrupt::Timer::default(),
             stack_limit: StackLimit::UNCHECKED,
             declared: tables.classes,
             bound_at_load: Vec::new(),
@@ -2930,19 +2931,15 @@ impl Request {
     /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
     /// so the seconds count from here.
     fn arm_timer(&mut self) {
-        self.timer = None;
-        self.timer = crate::interrupt::Timer::arm(
-            &self.interrupt,
-            self.max_execution_time(),
-            self.hard_timeout(),
-        );
+        let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
+        self.timer.arm(&self.interrupt, seconds, hard);
     }
 
     /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
     /// once the program's shutdown functions, destructors and buffer
     /// handlers are done: nothing the request does after it is timed.
     pub(crate) fn unset_timer(&mut self) {
-        self.timer = None;
+        self.timer.arm(&self.interrupt, 0, 0);
     }
 
     // -------------------------------------------------- crate-internal

@@ -74,13 +74,20 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     Ok(req.is_pending())
 }
 
-/// The engine's execution timer (design §5.8): what `zend_set_timeout`
-/// arms at the start of a request whose `max_execution_time` is not
-/// zero and again when `set_time_limit()` moves the entry, and what its
-/// drop unsets, as `php_request_shutdown` and `OnUpdateTimeout` unset
-/// php's. One thread per armed timer, which is the only timed wake the
-/// standard library has; a request that is served before the seconds
-/// elapse wakes it at once rather than leaving it to the deadline.
+/// The request's timer (design §5.8): every deadline the request has,
+/// and the one thread the engine runs to wait for them and raise the
+/// request's interrupt at each. The execution timer is one deadline:
+/// what `zend_set_timeout` arms at the start of a request whose
+/// `max_execution_time` is not zero and again when `set_time_limit()`
+/// moves the entry, and what `zend_unset_timeout` unsets, as
+/// `php_request_shutdown` and `OnUpdateTimeout` unset php's. A thread is
+/// the only timed wake the standard library has, and one serves every
+/// deadline: moving one is a write under the timer's mutex and a wake,
+/// with no thread spawned (#1924); the thread is started when the first
+/// deadline is set and joined when none is left; and a request that ends
+/// before a deadline wakes it at once rather than leaving it to the
+/// deadline. What is timed later is one more deadline in the
+/// [`Schedule`] the thread reads, never a second thread.
 ///
 /// Past a timeout the timer is armed again for `hard_timeout` seconds,
 /// as `zend_timeout_handler` arms it (`Z/Zend/zend_execute_API.c:1520`),
@@ -103,27 +110,29 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
 /// ```
 ///
-/// **Its thread is never caught starting or ending.** Arming returns
-/// once the thread waits, and the drop returns once the thread has ended
-/// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, a
-/// timer's thread is parked in its wait holding nothing, and a dropped
-/// timer has no thread at all. A fork needs both halves (#1783). The
-/// standard library takes one process-wide mutex as a thread starts and
-/// again as it ends, its stack overflow handler's thread table
-/// (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`), and a child
-/// forked while a timer's thread stood in either copied it taken, with
-/// no thread to release it, and hung at exit, where its own main thread
-/// takes it. The drop wakes the thread rather than waiting out its
-/// deadline, so a join costs a wake and an exit, never the seconds left.
-/// That is what the engine's fork home stands on (#1807): a request
-/// whose timer is unset has no timer thread alive.
+/// **Its thread is never caught starting or ending.** Starting it
+/// returns once it waits, and ending it returns once it has ended
+/// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, the
+/// timer's thread is parked in its wait or raising the interrupt, and a
+/// timer with no deadline left has no thread at all. A fork needs both
+/// halves (#1783). The standard library takes one process-wide mutex as
+/// a thread starts and again as it ends, its stack overflow handler's
+/// thread table (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`),
+/// and a child forked while a timer's thread stood in either copied it
+/// taken, with no thread to release it, and hung at exit, where its own
+/// main thread takes it. Ending wakes the thread rather than waiting out
+/// its deadline, so a join costs a wake and an exit, never the seconds
+/// left. That is what the engine's fork home stands on (#1807): a
+/// request whose timer has no deadline has no timer thread alive, and
+/// one that keeps its deadlines across a fork joins the thread and
+/// starts it again over the same schedule, whose deadlines are instants.
 ///
-/// A timer dropped in a process forked from the one that armed it has no
-/// thread there, since a child copies its calling thread alone, as a
-/// child does not inherit php's interval timer either. It is forgotten,
-/// neither woken nor joined: the mutex waking takes may have been copied
-/// held, and there is nothing to join. So the child runs untimed, as
-/// php's does, until it sets a limit of its own.
+/// A timer in a process forked from the one that started its thread has
+/// no thread there, since a child copies its calling thread alone, as a
+/// child does not inherit php's interval timer either. Its thread and
+/// its schedule are forgotten, neither woken nor joined: the mutex may
+/// have been copied held, and there is nothing to join. So the child
+/// runs untimed, as php's does, until it sets a limit of its own.
 ///
 /// ```php
 /// set_time_limit(1);
@@ -194,64 +203,105 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// 0 of 15000 children hung, 0 did not fork or end with status 0
 /// 0 of 8 workers did not end with status 0
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Timer {
-    unset: Arc<Unset>,
-    interrupt: Interrupt,
-    /// The thread, which the drop takes to join or forget.
+    shared: Arc<Shared>,
+    /// The thread, while a deadline is set.
     thread: Option<JoinHandle<()>>,
-    /// The process that armed it, the only one its thread is in.
-    armed_in: Process,
+    /// The process that started the thread, the only one it is in.
+    started_in: Process,
 }
 
 impl Timer {
-    /// Armed for `seconds` on `interrupt`, and again for `hard` seconds
-    /// past each timeout where `hard` is above zero; nothing at all for
-    /// a `seconds` that is zero or below, which is php's
-    /// `max_execution_time = 0` and the CLI's own default. It returns
-    /// once the thread waits.
-    pub(crate) fn arm(interrupt: &Interrupt, seconds: i64, hard: i64) -> Option<Timer> {
-        let elapses = Duration::from_secs(u64::try_from(seconds).ok().filter(|s| *s > 0)?);
-        let hard = u64::try_from(hard).ok().filter(|h| *h > 0);
-        let unset = Arc::new(Unset::default());
-        let waited = Arc::clone(&unset);
+    /// `zend_unset_timeout` then `zend_set_timeout`: the execution
+    /// deadline `seconds` from now, and again `hard` seconds past each
+    /// timeout where `hard` is above zero; none at all for a `seconds`
+    /// that is zero or below, which is php's `max_execution_time = 0`
+    /// and the CLI's own default. It returns with the thread waiting
+    /// where a deadline is left, and with no thread where none is.
+    pub(crate) fn arm(&mut self, interrupt: &Interrupt, seconds: i64, hard: i64) {
+        let execution = u64::try_from(seconds)
+            .ok()
+            .filter(|s| *s > 0)
+            .map(|s| Execution {
+                deadline: Instant::now() + Duration::from_secs(s),
+                seconds,
+                hard: u64::try_from(hard).ok().filter(|h| *h > 0),
+            });
+        self.change(interrupt, |schedule| schedule.execution = execution);
+        // The old deadline is gone from the schedule, so whatever it
+        // raised is raised already, and is cleared here.
+        interrupt.timer_unset();
+    }
+
+    /// `f` over the schedule, under the mutex, and the thread woken to
+    /// read it again: started where it had no thread and now has a
+    /// deadline, ended where it now has none.
+    fn change<R>(&mut self, interrupt: &Interrupt, f: impl FnOnce(&mut Schedule) -> R) -> R {
+        self.here();
+        let (answer, idle) = {
+            let mut schedule = self.shared.held();
+            let answer = f(&mut schedule);
+            self.shared.woken.notify_all();
+            (answer, schedule.next().is_none())
+        };
+        if idle {
+            self.end();
+        } else if self.thread.is_none() {
+            self.start(interrupt);
+        }
+        answer
+    }
+
+    /// Spawn the thread and return once it waits; a thread the system
+    /// refuses leaves the request untimed, as before any deadline.
+    fn start(&mut self, interrupt: &Interrupt) {
+        self.shared.held().phase = Phase::Starting;
+        let shared = Arc::clone(&self.shared);
         let raised = interrupt.clone();
-        let thread = thread::Builder::new()
-            .name(String::from("php-execution-timer"))
-            .spawn(move || waited.elapse(&raised, elapses, seconds, hard))
-            .ok()?;
-        unset.started();
-        Some(Timer {
-            unset,
-            interrupt: interrupt.clone(),
-            thread: Some(thread),
-            armed_in: Process::current(),
-        })
+        let Ok(thread) = thread::Builder::new()
+            .name(String::from("php-request-timer"))
+            .spawn(move || shared.serve(&raised))
+        else {
+            return;
+        };
+        self.shared.started();
+        self.thread = Some(thread);
+        self.started_in = Process::current();
+    }
+
+    /// Tell the thread to raise nothing more, and join it.
+    fn end(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            self.shared.held().phase = Phase::Unset;
+            self.shared.woken.notify_all();
+            // A thread that panicked has ended all the same.
+            let _ = thread.join();
+        }
+    }
+
+    /// In a process forked from the one that started the thread, the
+    /// thread and its schedule forgotten (see [`Timer`]), so what follows
+    /// starts afresh.
+    fn here(&mut self) {
+        if self.thread.is_some() && !self.started_in.is_current() {
+            std::mem::forget(self.thread.take());
+            std::mem::forget(std::mem::take(&mut self.shared));
+        }
     }
 }
 
 impl Drop for Timer {
-    /// `zend_unset_timeout`: the thread told to raise nothing and joined,
-    /// and then the timer's word cleared, in that order, since the thread
-    /// holds the mutex while it decides and raises, so what it raised
-    /// before it ended is cleared with it. In a forked child the thread
-    /// is forgotten instead (see [`Timer`]).
+    /// The request's end: every deadline unset and the thread joined, or
+    /// forgotten in a forked child.
     fn drop(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            if self.armed_in.is_current() {
-                self.unset.now();
-                // A thread that panicked has ended all the same.
-                let _ = thread.join();
-            } else {
-                std::mem::forget(thread);
-            }
-        }
-        self.interrupt.timer_unset();
+        self.here();
+        self.end();
     }
 }
 
 /// A process, by its id, `getpid`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Process(u32);
 
 impl Process {
@@ -267,64 +317,102 @@ impl Process {
     }
 }
 
-/// Where the timer's thread stands, which only ever moves forward.
+/// Where the timer's thread stands: starting, then waiting, then told to
+/// end, and starting again only once it has been joined.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Spawned, and not yet waiting: arming waits this out.
+    /// Spawned, and not yet waiting: starting waits this out.
     #[default]
     Starting,
-    /// Waiting for its deadline or its drop.
+    /// Waiting for a deadline, a change or its end.
     Waiting,
-    /// Told by the drop to raise nothing and end.
+    /// Told to raise nothing more and end.
     Unset,
 }
 
-/// What the timer's thread and its owner share: the phase, and the
+/// Every deadline the request has, and where the thread stands: what the
+/// thread and the request share under the timer's mutex.
+#[derive(Debug, Default)]
+struct Schedule {
+    phase: Phase,
+    /// The execution timer's deadline, while one is set.
+    execution: Option<Execution>,
+}
+
+/// The execution timer, armed.
+#[derive(Debug, Clone, Copy)]
+struct Execution {
+    deadline: Instant,
+    /// What it was armed with, php's `EG(timeout_seconds)`.
+    seconds: i64,
+    /// `EG(hard_timeout)`, where it is above zero.
+    hard: Option<u64>,
+}
+
+impl Schedule {
+    /// The earliest deadline, `None` where none is set.
+    fn next(&self) -> Option<Instant> {
+        self.execution.map(|execution| execution.deadline)
+    }
+
+    /// What each deadline at or before `now` raises.
+    ///
+    /// The execution timer's: `zend_timeout_handler` sets both words and
+    /// returns (`Z/Zend/zend_execute_API.c:1516-1518`); so does this, and
+    /// the loop's next check is what raises the fatal. Where there is a
+    /// `hard` wait the deadline moves past it: a deadline that finds the
+    /// last timeout still unread ends the process ([`terminate`]), and
+    /// one that finds it taken is a timeout of its own (`:1482`).
+    fn elapse(&mut self, interrupt: &Interrupt, now: Instant) {
+        if let Some(execution) = &mut self.execution
+            && execution.deadline <= now
+        {
+            if let Some(hard) = execution.hard
+                && interrupt.timed_out()
+            {
+                terminate(execution.seconds, hard);
+            }
+            interrupt.elapsed(execution.seconds);
+            match execution.hard {
+                Some(hard) => execution.deadline = now + Duration::from_secs(hard),
+                None => self.execution = None,
+            }
+        }
+    }
+}
+
+/// What the timer's thread and the request share: the schedule, and the
 /// variable each wakes the other through.
 #[derive(Debug, Default)]
-struct Unset {
-    phase: Mutex<Phase>,
+struct Shared {
+    schedule: Mutex<Schedule>,
     woken: Condvar,
 }
 
-impl Unset {
-    /// The thread's whole body: say it waits, then wait until the
-    /// deadline or until the timer is dropped, and raise the interrupt
-    /// when the deadline is what came first. `zend_timeout_handler` sets
-    /// both words and returns (`Z/Zend/zend_execute_API.c:1516-1518`);
-    /// so does this, and the loop's next check is what raises the fatal.
-    /// Then, where there is a `hard` wait, the same again after it: a
-    /// deadline that finds the last timeout still unread ends the process
-    /// ([`terminate`]), and one that finds it taken is a timeout of its
-    /// own (`:1482`).
-    fn elapse(&self, interrupt: &Interrupt, elapses: Duration, seconds: i64, hard: Option<u64>) {
-        let mut phase = self.held();
-        *phase = Phase::Waiting;
+impl Shared {
+    /// The thread's whole body: say it waits, then wait for the earliest
+    /// deadline, or for ever where none is set, and raise what is due,
+    /// reading the schedule again at each wake, until told to end.
+    fn serve(&self, interrupt: &Interrupt) {
+        let mut schedule = self.held();
+        schedule.phase = Phase::Waiting;
         self.woken.notify_all();
-        let mut deadline = Instant::now() + elapses;
-        loop {
-            while *phase != Phase::Unset {
-                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                    break;
-                };
-                phase = match self.woken.wait_timeout(phase, left) {
-                    Ok((phase, _)) => phase,
+        while schedule.phase != Phase::Unset {
+            let now = Instant::now();
+            schedule = match schedule.next() {
+                Some(at) if at <= now => {
+                    schedule.elapse(interrupt, now);
+                    schedule
+                }
+                Some(at) => match self.woken.wait_timeout(schedule, at - now) {
+                    Ok((schedule, _)) => schedule,
                     Err(poisoned) => poisoned.into_inner().0,
-                };
-            }
-            if *phase == Phase::Unset {
-                return;
-            }
-            if let Some(hard) = hard
-                && interrupt.timed_out()
-            {
-                terminate(seconds, hard);
-            }
-            interrupt.elapsed(seconds);
-            let Some(hard) = hard else {
-                return;
+                },
+                None => self
+                    .woken
+                    .wait(schedule)
+                    .unwrap_or_else(PoisonError::into_inner),
             };
-            deadline = Instant::now() + Duration::from_secs(hard);
         }
     }
 
@@ -333,26 +421,20 @@ impl Unset {
     /// thing the thread's body does, so nothing it runs can leave this
     /// waiting.
     fn started(&self) {
-        let mut phase = self.held();
-        while *phase == Phase::Starting {
-            phase = match self.woken.wait(phase) {
-                Ok(phase) => phase,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+        let mut schedule = self.held();
+        while schedule.phase == Phase::Starting {
+            schedule = self
+                .woken
+                .wait(schedule)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
-    /// Wake the thread and tell it not to raise anything.
-    fn now(&self) {
-        *self.held() = Phase::Unset;
-        self.woken.notify_all();
-    }
-
-    /// The phase, whatever a panic on another thread left behind: what
-    /// this guards only ever moves forward, so a poisoned `MutexGuard` is
-    /// as good as a clean one.
-    fn held(&self) -> MutexGuard<'_, Phase> {
-        self.phase.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The schedule, whatever a panic on another thread left behind:
+    /// each write leaves it whole, so a poisoned `MutexGuard` is as good
+    /// as a clean one.
+    fn held(&self) -> MutexGuard<'_, Schedule> {
+        self.schedule.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -483,7 +565,8 @@ mod tests {
     #[test]
     fn unsetting_a_timer_that_elapsed_clears_what_it_raised() {
         let interrupt = Interrupt::default();
-        let timer = Timer::arm(&interrupt, 1, 0);
+        let mut timer = Timer::default();
+        timer.arm(&interrupt, 1, 0);
         let armed = Instant::now();
         while !interrupt.raised().load(Ordering::Relaxed) {
             assert!(
@@ -492,7 +575,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-        drop(timer);
+        timer.arm(&interrupt, 0, 0);
         assert_eq!(
             interrupt.taken(),
             None,
@@ -500,45 +583,77 @@ mod tests {
         );
     }
 
-    /// #1783: arming returns with the thread waiting, and dropping
-    /// returns with the thread's body done and its share of the timer
-    /// released, however often `set_time_limit()` replaces one; the drop
-    /// wakes it rather than waiting out the thirty seconds it was armed
-    /// for. That the thread has then ended, the standard library's exit
-    /// behind it too, is the join's, which nothing in the process can
-    /// observe short of counting its threads: the fork stress on
-    /// [`Timer`] is what holds it.
+    /// The thread serving a timer, by its id, while it has one.
+    fn serving(timer: &Timer) -> Option<thread::ThreadId> {
+        timer.thread.as_ref().map(|thread| thread.thread().id())
+    }
+
+    /// #1783: a deadline set returns with the thread waiting, and the
+    /// last one unset, or the timer dropped, returns with the thread's
+    /// body done and its share of the timer released; the unset wakes it
+    /// rather than waiting out the thirty seconds it was armed for. That
+    /// the thread has then ended, the standard library's exit behind it
+    /// too, is the join's, which nothing in the process can observe
+    /// short of counting its threads: the fork stress on [`Timer`] is
+    /// what holds it.
     #[test]
-    fn a_timers_thread_waits_once_armed_and_is_done_once_dropped() {
+    fn a_timers_thread_waits_once_armed_and_is_done_once_unset() {
         let interrupt = Interrupt::default();
         let began = Instant::now();
-        for _ in 0..200 {
-            let timer = Timer::arm(&interrupt, 30, 2);
+        for _ in 0..100 {
+            let mut timer = Timer::default();
+            timer.arm(&interrupt, 30, 2);
             assert_eq!(
-                timer.as_ref().map(|timer| *timer.unset.held()),
-                Some(Phase::Waiting),
+                timer.shared.held().phase,
+                Phase::Waiting,
                 "armed and waiting"
             );
-            let shared = timer.as_ref().map(|timer| Arc::downgrade(&timer.unset));
+            timer.arm(&interrupt, 0, 2);
+            assert_eq!(serving(&timer), None, "unset, and no thread");
+            assert_eq!(
+                Arc::strong_count(&timer.shared),
+                1,
+                "the thread let go of the timer before the unset returned"
+            );
+            timer.arm(&interrupt, 30, 2);
+            let shared = Arc::downgrade(&timer.shared);
             drop(timer);
             assert!(
-                shared.and_then(|shared| shared.upgrade()).is_none(),
+                shared.upgrade().is_none(),
                 "the thread let go of the timer before the drop returned"
             );
         }
         assert!(
             began.elapsed() < Duration::from_secs(10),
-            "each drop woke its thread rather than waiting out the deadline"
+            "each unset woke its thread rather than waiting out the deadline"
         );
     }
 
-    /// php's `max_execution_time = 0`, the CLI's default: no timer at
-    /// all, and an interrupt nothing raises.
+    /// #1924: `set_time_limit()` over an armed timer moves its deadline
+    /// and spawns nothing, so the thread that served the first deadline
+    /// serves every one after it.
+    #[test]
+    fn rearming_a_timer_keeps_its_thread() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::default();
+        timer.arm(&interrupt, 30, 2);
+        let first = serving(&timer);
+        assert!(first.is_some(), "armed, and served");
+        for seconds in 1..=1000 {
+            timer.arm(&interrupt, 30 + seconds, 2);
+            assert_eq!(serving(&timer), first, "the same thread");
+        }
+    }
+
+    /// php's `max_execution_time = 0`, the CLI's default: no deadline, no
+    /// thread, and an interrupt nothing raises.
     #[test]
     fn a_request_with_no_time_limit_arms_no_timer() {
         let interrupt = Interrupt::default();
-        assert!(Timer::arm(&interrupt, 0, 2).is_none());
-        assert!(Timer::arm(&interrupt, -1, 2).is_none());
+        let mut timer = Timer::default();
+        timer.arm(&interrupt, 0, 2);
+        timer.arm(&interrupt, -1, 2);
+        assert_eq!(serving(&timer), None);
         assert!(!interrupt.raised().load(Ordering::Relaxed));
     }
 
