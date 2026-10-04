@@ -47,16 +47,22 @@ pub(crate) type Registered = Arc<dyn Any + Send + Sync>;
 /// every extension's `MINIT` in `zend_startup_modules`, then every Zend
 /// extension's startup in `zend_startup_extensions`.
 ///
-/// A Zend extension's phase is the extension's, every kind it supplies
-/// together: php runs the `MINIT` of an extension that is a Zend
-/// extension too from the Zend extension's startup, as opcache's
-/// `MINIT` only registers its `zend_extension` (`start_accel_extension`,
-/// `Z/ext/opcache/ZendAccelerator.c:3168-3171`). opcache then installs
-/// its `zend_post_startup_cb` link at `accel_startup` (`:3220-3221`) and
-/// the rest, `zend_compile_file`, `zend_resolve_path` and its three
+/// A Zend extension's phase is the extension's, every kind it installs
+/// together, as opcache, the bundle's one Zend extension, installs
+/// nothing at its `MINIT`, which runs among the other extensions' and
+/// only registers its `zend_extension` (`start_accel_extension`,
+/// `Z/ext/opcache/ZendAccelerator.c:3168-3171`;
+/// `Z/ext/opcache/zend_accelerator_module.c:448-453`). It installs its
+/// `zend_post_startup_cb` link at `accel_startup` (`:3220-3221`) and the
+/// rest, `zend_compile_file`, `zend_resolve_path` and its three
 /// interceptions, at `accel_post_startup` (`:3403-3434`): two moments,
-/// both after every other extension's, which differ only to a Zend extension
-/// started after opcache, and the bundle has none.
+/// both after every other extension's `MINIT`, which differ only to a
+/// Zend extension started after opcache, and the bundle has none. What
+/// an extension registers into another's table is registered at its
+/// `MINIT` by definition, so [`Resolved::resolve`] keeps those rows in
+/// start order whatever the phase.
+///
+/// Declared in the order php runs the phases, which the sort reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Phase {
     /// An extension's `MINIT`.
@@ -162,13 +168,19 @@ impl Resolved {
     /// The bundle's supplied behaviour from each supplier's own, handed
     /// in the order the extensions start, each beside the extension it
     /// is of and the phase it installs in: installed phase by phase,
-    /// each phase's in start order ([`Phase`]).
+    /// each phase's in start order ([`Phase`]), and what each `MINIT`
+    /// registered in start order alone.
     pub(crate) fn resolve(
         suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>,
     ) -> Resolved {
-        let mut suppliers: Vec<_> = suppliers.into_iter().collect();
-        suppliers.sort_by_key(|&(_, phase, _)| phase);
         let mut table = Resolved::default();
+        let mut suppliers: Vec<_> = suppliers.into_iter().collect();
+        for (_, _, own) in &mut suppliers {
+            table
+                .registered
+                .install(std::mem::take(&mut own.registered));
+        }
+        suppliers.sort_by_key(|&(_, phase, _)| phase);
         for (by, _, own) in suppliers {
             table.interrupt.install(own.interrupt);
             table.compile_file.install(own.compile_file);
@@ -185,7 +197,6 @@ impl Resolved {
             table.treat_data.install(by, own.treat_data);
             table.encodings.install(by, own.encodings);
             table.intercepts.install(own.intercepts);
-            table.registered.install(own.registered);
         }
         table
     }
@@ -569,6 +580,25 @@ mod tests {
         ];
         assert_eq!(serve(&zend_first), "opcache phar 4");
         assert_eq!(serve(&minit_first), "opcache phar 4");
+    }
+
+    /// What a Zend extension registers is its `MINIT`'s, which runs
+    /// among the other extensions', so its rows keep their start order
+    /// though what it installs moves after every other extension's.
+    #[test]
+    fn a_zend_extension_s_registrations_keep_their_start_order() {
+        #[derive(Debug, PartialEq)]
+        struct Driver(&'static str);
+        let extensions = [
+            zend(ExtensionBuilder::default().register(Driver("zend")), "zend"),
+            ExtensionBuilder::default()
+                .register(Driver("minit"))
+                .build("minit"),
+        ];
+        let engine = Engine::cli_builder().extensions(&extensions).build();
+        let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let drivers: Vec<_> = req.registered::<Driver>().collect();
+        assert_eq!(drivers, [&Driver("zend"), &Driver("minit")]);
     }
 
     /// A Zend extension installs its `zend_post_startup_cb` link after
