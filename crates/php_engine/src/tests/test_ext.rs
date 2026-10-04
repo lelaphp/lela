@@ -66,6 +66,11 @@ pub(crate) enum Phase {
     /// The resource its `rinit` opened and never released was closed:
     /// php's `zend_close_rsrc_list` at request end.
     ResourceClosed,
+    /// Its `post_startup` ran, on the request the engine lays to ask
+    /// it. [`TestExt::builder`] declares none, since one declared lays
+    /// that request before every engine's first; a test that wants one
+    /// declares its own and records this.
+    PostStartup,
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -168,15 +173,6 @@ impl Events {
                 _ => None,
             })
             .collect()
-    }
-
-    /// Which extensions were handed `phase`, by number and not in the
-    /// order handed: for a property that holds whatever that order is.
-    #[must_use]
-    pub(crate) fn handed_each(&self, phase: &Phase) -> Vec<u8> {
-        let mut handed = self.handed(phase);
-        handed.sort_unstable();
-        handed
     }
 }
 

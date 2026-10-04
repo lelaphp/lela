@@ -31,7 +31,7 @@ use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
     DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
-    Validation,
+    States, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
@@ -602,7 +602,7 @@ pub(crate) struct Shared {
     /// parents declare, which never changes.
     pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
     constants: Vec<ConstDecl>,
-    pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
+    pub(crate) engine_states: States<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
@@ -2701,7 +2701,7 @@ impl EngineBuilder {
                 parents,
                 placed,
                 constants,
-                engine_states: Vec::new(),
+                engine_states: States::new(),
                 ini,
                 constant_values,
                 sapi_names,
