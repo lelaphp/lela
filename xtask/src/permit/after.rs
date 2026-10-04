@@ -6,13 +6,24 @@
 //! rule scopes, in each checkout the call can reach, the hook's own and the
 //! one the call stands in, and keeps them in the store under the session
 //! and the hook's tool-use id ([`before`]). After the call `permit --after`
-//! takes the ids again ([`after`]): a file whose blob moved is put back
-//! from the blob kept before, and the call is a `harness.self` denial with
-//! the rule's text and the path, a permit reading like any other, and the
+//! takes the ids again ([`after`]): a file whose blob moved, and which the
+//! call's line can write ([`argv::Line::can_write`]: a redirection, a
+//! writer's operand, a program file that names it), is put back from the blob
+//! kept before, and the call is a `harness.self` denial with the rule's
+//! text and the path, a permit reading like any other, and the
 //! `PostToolUse` hook's block, which the model reads.
 //!
 //! What it leaves alone, on purpose:
 //!
+//! - A file that moved while the call ran and that its line cannot write
+//!   (#1895). Several sessions share one checkout, so a person's edit made
+//!   in an editor lands inside some call's window most of the time, and a
+//!   change the line does not account for is as likely theirs as the
+//!   call's. It is kept as it stands and named: a passing reading and the
+//!   hook's context say it changed while the call ran, not by it, with the
+//!   blob it was before. What that misses, a binary that hides the path,
+//!   is `done`'s condition 6 to hold at the push; a person's lost edit is
+//!   held by nothing.
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
@@ -81,11 +92,21 @@ struct Guarded {
     blobs: BTreeMap<String, Option<String>>,
 }
 
-/// One file the call moved and the sensor put back.
-struct Denial {
+/// One file that moved across the call, and what the sensor did with it.
+struct Moved {
     checkout: PathBuf,
     path: String,
     said: String,
+    by: By,
+}
+
+/// Whose a moved file's change is, as the call's line reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum By {
+    /// The line can write it: put back, and the call denied.
+    Call,
+    /// The line cannot: kept as it stands, and named.
+    Unknown,
 }
 
 /// Before a `Bash` call: the blob id of every tracked file `harness.self`
@@ -165,35 +186,38 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     fs::remove_file(&file).ok();
     let record: Record = serde_json::from_str(&kept)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let denials = put_back(&record);
-    if denials.is_empty() {
+    let moved = put_back(&record, call.cwd.as_deref().map(Path::new));
+    if moved.is_empty() {
         return Ok(());
     }
-    let reason = denials
+    let said = moved
         .iter()
-        .map(|d| format!("{RULE}: {}", d.said))
+        .map(|m| format!("{RULE}: {}", m.said))
         .collect::<Vec<_>>()
         .join("\n");
-    println!(
-        "{}",
-        serde_json::json!({
-            "decision": "block",
-            "reason": reason,
-            "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": reason},
-        })
-    );
-    if let Err(err) = record_denials(root, &call, &denials) {
-        eprintln!("xtask permit --after: the denial stands but was not recorded: {err:#}");
+    let context = serde_json::json!({"hookEventName": "PostToolUse", "additionalContext": said});
+    let hook = if moved.iter().any(|m| m.by == By::Call) {
+        serde_json::json!({"decision": "block", "reason": said, "hookSpecificOutput": context})
+    } else {
+        serde_json::json!({"hookSpecificOutput": context})
+    };
+    println!("{hook}");
+    if let Err(err) = record_moved(root, &call, &moved) {
+        eprintln!("xtask permit --after: what was found stands but was not recorded: {err:#}");
     }
     Ok(())
 }
 
-/// Every file of the record whose blob moved, put back unless steer wrote
-/// it, as the denials to say.
-fn put_back(record: &Record) -> Vec<Denial> {
+/// Every file of the record whose blob moved and that steer did not write:
+/// put back where the call's line can write it, kept where it cannot. A
+/// word of the line is read as a file in the call's `cwd`, or in the
+/// checkout where the call carries none.
+fn put_back(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
-    let mut denials = Vec::new();
+    let line = argv::Line::read(&record.command);
+    let mut moved = Vec::new();
     for guarded in &record.checkouts {
+        let here = cwd.unwrap_or(&guarded.checkout);
         for (path, was) in &guarded.blobs {
             let now = on_disk(&guarded.checkout.join(path));
             if now == *was {
@@ -202,28 +226,66 @@ fn put_back(record: &Record) -> Vec<Denial> {
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
-            let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
-            denials.push(Denial {
+            let name = Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (by, said) = if line.can_write(&name, |word| named_file(here, word)) {
+                let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
+                (By::Call, format!("{} {path}: {what}", guarded.text))
+            } else {
+                (By::Unknown, format!("{path}: {}", kept(was.as_deref())))
+            };
+            moved.push(Moved {
                 checkout: guarded.checkout.clone(),
                 path: path.clone(),
-                said: format!("{} {path}: {what}", guarded.text),
+                said,
+                by,
             });
         }
     }
-    denials
+    moved
 }
 
-/// One reading per denial, in the store of the checkout the file is in,
-/// stamped over the file as it was put back.
-fn record_denials(root: &Path, call: &Call, denials: &[Denial]) -> Result<()> {
-    for denial in denials {
+/// What a file the line cannot write says when it moved: kept, and where
+/// what it was before stands.
+fn kept(was: Option<&str>) -> String {
+    let before = match was {
+        Some(id) => format!("it was blob {id} before the call (`git cat-file -p {id}`)"),
+        None => "it was not on disk before the call".to_owned(),
+    };
+    format!(
+        "changed while the call ran, not by it as its line reads, and kept as it stands; {before}"
+    )
+}
+
+/// The bytes of the file a word of the line names, read from `cwd`: a
+/// program an interpreter runs, or a binary. `None` for a word that names
+/// no regular file, or one larger than any program an interpreter reads.
+fn named_file(cwd: &Path, word: &str) -> Option<Vec<u8>> {
+    const LARGEST: u64 = 16 << 20;
+    let path = cwd.join(word);
+    let meta = fs::metadata(&path).ok()?;
+    (meta.is_file() && meta.len() <= LARGEST)
+        .then(|| fs::read(&path).ok())
+        .flatten()
+}
+
+/// One reading per moved file, in the store of the checkout the file is
+/// in, stamped over the file as it stands: a failure for one put back, a
+/// note that passes for one kept.
+fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
+    for one in moved {
         let mut reading =
-            Reading::stamped_over(INSTRUMENT, RULE, &denial.checkout, Path::new(&denial.path))?;
+            Reading::stamped_over(INSTRUMENT, RULE, &one.checkout, Path::new(&one.path))?;
         RULE.clone_into(&mut reading.rule);
-        reading.status = Status::Fail;
-        reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), denial.said);
+        reading.status = match one.by {
+            By::Call => Status::Fail,
+            By::Unknown => Status::Pass,
+        };
+        reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), one.said);
         reading.session.clone_from(&call.session_id);
-        Store::of_workspace(&denial.checkout).record(&[reading])?;
+        Store::of_workspace(&one.checkout).record(&[reading])?;
     }
     Ok(())
 }

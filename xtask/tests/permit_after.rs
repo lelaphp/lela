@@ -1,9 +1,12 @@
 //! `permit --after`, the `PostToolUse` sensor over `harness.self`'s files
 //! (#625, #1516): `permit` takes their blobs before a `Bash` call, and
-//! `--after` puts back any the call moved and denies the call there, by
-//! whatever route the write came: a program an interpreter runs, a shell
-//! redirection, a built binary. Every test runs in a scratch repository
-//! holding copies of the harness's files; none writes this checkout's.
+//! `--after` puts back any the call's line can write and denies the call
+//! there: a shell redirection, `sed -i`, a program an interpreter runs from
+//! a file that names the path. A file that moved while the call ran and
+//! that its line cannot write, a person's edit or a binary that hides the
+//! path, is kept and named (#1895). Every test runs in a scratch
+//! repository holding copies of the harness's files; none writes this
+//! checkout's.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -101,9 +104,21 @@ fn record(root: &Path, session: &str, id: &str) -> std::path::PathBuf {
 /// One call through both hooks: `permit` before it, the command, then
 /// `permit --after`; what `--after` printed.
 fn through_the_hooks(root: &Path, id: &str, command: &str) -> (String, String) {
+    through_the_hooks_while(root, id, command, || {})
+}
+
+/// [`through_the_hooks`], with `meanwhile` run while the call runs: what a
+/// person's editor or another session does between the two hooks.
+fn through_the_hooks_while(
+    root: &Path,
+    id: &str,
+    command: &str,
+    meanwhile: impl FnOnce(),
+) -> (String, String) {
     let (code, _, err) = permit(root, &stdin("PreToolUse", SESSION, id, root, command), &[]);
     assert_eq!(code, 0, "{err}");
     assert!(record(root, SESSION, id).is_file(), "the blobs were taken");
+    meanwhile();
     shell(root, command);
     let (code, out, err) = permit(
         root,
@@ -203,10 +218,69 @@ fn a_shell_redirection_into_the_pin_is_put_back_and_denied() {
     assert_denied(&root, &out, "oracle.toml", "# redirected");
 }
 
-/// A built binary, its path held inside it: the third route, which no
-/// pattern over the command can read either.
+/// The note `--after` prints and the reading it keeps for a file that
+/// changed while the call ran and that the call's line cannot write
+/// (#1895): kept as it stands, the call not denied, the path named.
+fn assert_kept(root: &Path, out: &str, path: &str) {
+    let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_else(|e| {
+        panic!("{e}: {out}");
+    });
+    assert!(hook.get("decision").is_none(), "nothing is denied: {out}");
+    let said = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(said.contains(path), "{said}");
+    assert!(said.contains("not by it"), "{said}");
+    let reading = Store::of_workspace(root)
+        .read("permit", "harness.self")
+        .unwrap()
+        .expect("the change is a permit reading");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.rule, "harness.self");
+    assert_eq!(reading.session, SESSION);
+    assert!(reading.message.contains(path), "{}", reading.message);
+    assert!(reading.message.contains("not by it"), "{}", reading.message);
+}
+
+/// #1895: a person pastes rows into the manifest while another session's
+/// call runs. The call's line names no harness file, so the change is not
+/// the call's to answer for: it stands, and the reading says it moved.
 #[test]
-fn a_binary_writing_the_manifest_is_put_back_and_denied() {
+fn a_persons_edit_made_while_the_call_runs_is_kept_and_named() {
+    let root = scratch("person");
+    let edited = format!("{}\n# a person's rows, pasted\n", read(&root, "seams.toml"));
+    let (out, _) = through_the_hooks_while(&root, "toolu_person", "git status --short", || {
+        std::fs::write(root.join("seams.toml"), &edited).unwrap();
+    });
+    assert_eq!(
+        read(&root, "seams.toml"),
+        edited,
+        "the person's edit stands"
+    );
+    assert_kept(&root, &out, "seams.toml");
+}
+
+/// A call whose line writes the file is still put back, a person's edit
+/// beside it or not: `sed -i` names the pin among its operands.
+#[test]
+fn a_sed_in_place_on_the_pin_is_put_back_and_denied() {
+    let root = scratch("sed");
+    let was = read(&root, "oracle.toml");
+    let (out, _) = through_the_hooks(
+        &root,
+        "toolu_sed",
+        "sed -i.bak -e '1s/^/# by sed /' oracle.toml",
+    );
+    assert_eq!(read(&root, "oracle.toml"), was);
+    assert_denied(&root, &out, "oracle.toml", "# by sed");
+}
+
+/// A built binary, its path held inside it where no word of the line and
+/// no file the line names spells it: the sensor cannot tell the binary's
+/// write from a person's, so it keeps the change and says so (#1895),
+/// `done`'s condition 6 being what holds the manifest at the push.
+#[test]
+fn a_binary_whose_line_names_no_harness_file_is_kept_and_named() {
     let root = scratch("binary");
     let source = root.join("writer.rs");
     std::fs::write(
@@ -229,10 +303,9 @@ fn a_binary_writing_the_manifest_is_put_back_and_denied() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let was = read(&root, "seams.toml");
     let (out, _) = through_the_hooks(&root, "toolu_binary", "./writer");
-    assert_eq!(read(&root, "seams.toml"), was);
-    assert_denied(&root, &out, "seams.toml", "# written by a binary");
+    assert!(read(&root, "seams.toml").ends_with("# written by a binary\n"));
+    assert_kept(&root, &out, "seams.toml");
 }
 
 /// The proposal that adds one regime to the scratch's pin.
