@@ -180,7 +180,7 @@ _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it
 _Avoid_: context file, system prompt, a track's map (the chart is that, and the two were one word until revision 22)
 
 **Frontier**:
-What a track has left to work, as the tracker has it: the open tickets labelled `ready-for-agent` that no ticket blocks while it is open or while the branch that records it is not yet in `main`, that are the track's (carry its `track:` label, or, for `main`, no `track:` label at all), and that no branch of the repository records. `xtask track next --track <name>` names the widest by the census, the number breaking a tie, `xtask track work` runs them until none is named, and the frontier is empty when `next` says `none`, which is when `/frontier work` fills it again. It is a state of the tracker read fresh each time, never a list a session keeps.
+What a track has left to work, as the tracker has it: the open tickets labelled `ready-for-agent` that no ticket blocks while it is open or while the branch that records it is not yet in `main`, that are the track's (carry its `track:` label, or, for `main`, no `track:` label at all), and that no branch of the repository records. `xtask track next --track <name>` names the widest by the census, the number breaking a tie, `xtask track work` runs them until none is named, and the frontier is empty when `next` says `none`, which is when `/frontier work <track>` fills it again. It is a state of the tracker read fresh each time, never a list a session keeps.
 _Avoid_: backlog (everything not yet done; a frontier is what is workable now), sprint, milestone
 
 **Chart**:
