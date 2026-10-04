@@ -22,7 +22,8 @@ use test_ext::{Recording, TestExt};
 
 /// Two extensions declared through the facade, an engine built and one
 /// request served: the startup request, engine state in bundle order,
-/// then the request's phases in bundle order and in reverse.
+/// then the request's phases in bundle order and in reverse, each
+/// request's states dropped in reverse.
 #[test]
 fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
     let rec = Recording::start();
@@ -33,19 +34,13 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     rec.mark("served");
     assert_eq!(served.stdout, b"ran");
-    let events = rec.events();
     assert_eq!(
-        events
-            .between("built", "served")
-            .handed(&RequestStateDropped)
-            .len(),
-        2
-    );
-    assert_eq!(
-        events.without(&RequestStateDropped).0,
+        rec.events().0,
         [
             Ext(0, RequestStateBuilt),
             Ext(1, RequestStateBuilt),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
             Ext(0, EngineStateBuilt(0)),
             Ext(1, EngineStateBuilt(0)),
             Mark("built"),
@@ -59,6 +54,8 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
             Ext(0, Deactivate),
             Ext(1, ResourceClosed),
             Ext(0, ResourceClosed),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
             Mark("served"),
         ]
     );

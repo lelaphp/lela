@@ -661,6 +661,55 @@ impl std::fmt::Debug for Extension {
     }
 }
 
+/// The states of one scope, one per extension that declared one, held
+/// in bundle order and dropped in its reverse (ADR-0005, ADR-0010), as
+/// php's `zend_destroy_modules` walks the modules back to front. A
+/// request's states and an engine's are each one of these, so every
+/// request a state is built for, the startup one, a refused one or a
+/// served one, and every engine drops them in the one order written
+/// here. A request state no extension declared, built at first touch
+/// by [`Request::state`], is held after the rest and dropped first.
+/// Nothing reorders what is held: it is read as a slice and written
+/// one state at a time.
+pub(crate) struct States<T>(Vec<T>);
+
+impl<T> States<T> {
+    pub(crate) const fn new() -> States<T> {
+        States(Vec::new())
+    }
+
+    /// Hold `state` after every state held before it.
+    pub(crate) fn push(&mut self, state: T) {
+        self.0.push(state);
+    }
+
+    /// The state held `at` that place, to replace or change in place.
+    pub(crate) fn get_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.0.get_mut(at)
+    }
+}
+
+impl<T> FromIterator<T> for States<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(states: I) -> States<T> {
+        States(states.into_iter().collect())
+    }
+}
+
+impl<T> std::ops::Deref for States<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> Drop for States<T> {
+    /// Reversed in place, so the vector's own drop, which goes on past a
+    /// state whose drop unwinds, drops them back to front.
+    fn drop(&mut self) {
+        self.0.reverse();
+    }
+}
+
 /// The builder of an [`Extension`], what a crate's `extension()` calls.
 #[derive(Default)]
 pub struct ExtensionBuilder {
@@ -838,7 +887,8 @@ impl ExtensionBuilder {
     }
 
     /// Declare engine state: built once in `Engine::new` from the startup
-    /// ini, immutable afterwards, shared by every request (ADR-0005).
+    /// ini, immutable afterwards, shared by every request, and dropped
+    /// with the engine's last clone in reverse bundle order (ADR-0005).
     #[must_use]
     pub fn engine_state<E: Send + Sync + 'static>(
         mut self,

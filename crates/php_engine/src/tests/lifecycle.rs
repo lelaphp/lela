@@ -1,17 +1,18 @@
 //! The Extension seam's lifecycle as `TestExt` records it (design §4.3,
-//! §7.1; ADR-0005), each property that holds today. Drop order is not
-//! asserted: request state and engine state drop front to back where
-//! ADR-0005 says reverse, and #1788 asserts the reverse as it fixes it.
+//! §7.1; ADR-0005, ADR-0010), each property that holds today: a scope's
+//! states are built in bundle order and dropped in its reverse, on every
+//! request a request state is built for and at engine drop.
 
-use super::test_ext::{Event, Events, Phase, Recording, TestExt};
-use crate::api::abi::Extension;
+use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
+use crate::api::abi::{Extension, PostStartup as Answer};
+use crate::api::request::Request;
 use crate::engine::Engine;
 use crate::test::Capture;
 
 use Event::{Ext, Mark};
 use Phase::{
-    Deactivate, EngineStateBuilt, EngineStateDropped, RequestStateBuilt, RequestStateDropped,
-    ResourceClosed, Rinit, Rshutdown,
+    Deactivate, EngineStateBuilt, EngineStateDropped, PostStartup, RequestStateBuilt,
+    RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 
 /// Three recording extensions, in bundle order.
@@ -43,7 +44,7 @@ fn serve(engine: &Engine) {
 /// `deactivate` in reverse, then the resources the request left open
 /// closed from the top down (`zend_close_rsrc_list`), which is reverse
 /// again for resources opened in bundle order; each request state
-/// dropped once, after all of it.
+/// dropped once, after all of it, in reverse.
 #[test]
 fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_closed_last() {
     let rec = Recording::start();
@@ -51,12 +52,8 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
     rec.mark("built");
     serve(&engine);
     rec.mark("served");
-    let request = rec.events().between("built", "served");
-    let dropped = request.handed_each(&RequestStateDropped);
-    assert_eq!(dropped, [0, 1, 2]);
-    let (handed, last) = request.0.split_at(request.0.len() - dropped.len());
     assert_eq!(
-        handed,
+        rec.events().between("built", "served").0,
         [
             Ext(0, RequestStateBuilt),
             Ext(1, RequestStateBuilt),
@@ -73,19 +70,18 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
             Ext(2, ResourceClosed),
             Ext(1, ResourceClosed),
             Ext(0, ResourceClosed),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
         ]
-    );
-    assert!(
-        last.iter()
-            .all(|e| matches!(e, Ext(_, RequestStateDropped)))
     );
 }
 
 /// Building an engine lays the startup request first, on which php's
 /// `php_module_startup` registers the ini entries: it builds every
-/// request state in bundle order and drops each before any engine state
-/// exists. Then each engine state is built once, in bundle order, and
-/// nothing else is handed to an extension until a request.
+/// request state in bundle order and drops each in reverse before any
+/// engine state exists. Then each engine state is built once, in bundle
+/// order, and nothing else is handed to an extension until a request.
 #[test]
 fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gone() {
     let rec = Recording::start();
@@ -97,16 +93,17 @@ fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gon
         .position(|e| matches!(e, Ext(_, EngineStateBuilt(_))))
         .unwrap_or(events.len());
     let (startup, after) = events.split_at(engine_start);
-    let startup = Events(startup.to_vec());
     assert_eq!(
-        startup.without(&RequestStateDropped).0,
+        startup,
         [
             Ext(0, RequestStateBuilt),
             Ext(1, RequestStateBuilt),
             Ext(2, RequestStateBuilt),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
         ]
     );
-    assert_eq!(startup.handed_each(&RequestStateDropped), [0, 1, 2]);
     assert_eq!(
         after,
         [
@@ -195,5 +192,104 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
     assert_eq!(
         events.between("clone dropped", "second dropped").0,
         [Ext(0, EngineStateDropped(1))]
+    );
+}
+
+/// A refusal from the last extension's `post_startup`, as opcache's
+/// `accel_post_startup` refuses a configuration it cannot start under:
+/// the request laid to ask builds every request state in bundle order,
+/// serves nothing, and drops them in reverse, as a served one does.
+#[test]
+fn a_refused_request_drops_its_request_state_in_reverse() {
+    fn refuse<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
+        Answer::Refuse { status: 3 }
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .post_startup(refuse::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    rec.mark("refused");
+    assert_eq!((served.stdout.as_slice(), served.exit_code), (&b""[..], 3));
+    assert_eq!(
+        rec.events().between("built", "refused").0,
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(2, RequestStateBuilt),
+            Ext(2, PostStartup),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
+        ]
+    );
+}
+
+/// Dropping the last clone of an engine drops each engine state once,
+/// in reverse bundle order, as php's `zend_destroy_modules` walks its
+/// modules back to front; nothing else is handed to an extension.
+#[test]
+fn an_engine_drops_its_engine_state_in_reverse_bundle_order() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder().extensions(&three()).build();
+    serve(&engine);
+    rec.mark("served");
+    drop(engine);
+    rec.mark("dropped");
+    assert_eq!(
+        rec.events().between("served", "dropped").0,
+        [
+            Ext(2, EngineStateDropped(0)),
+            Ext(1, EngineStateDropped(0)),
+            Ext(0, EngineStateDropped(0)),
+        ]
+    );
+}
+
+/// However a request ends, its request states drop in reverse: the
+/// request laid to ask `post_startup` when it answers serve, a program
+/// that calls `exit`, and one that ends in a fatal.
+#[test]
+fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
+    fn serve_on<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
+        Answer::Serve
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .post_startup(serve_on::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let exited = engine.serve_capture("<?php exit(4);", Capture::default());
+    rec.mark("exited");
+    let failed = engine.serve_capture("<?php undefined();", Capture::default());
+    rec.mark("failed");
+    assert_eq!((exited.exit_code, failed.exit_code), (4, 255));
+    let events = rec.events();
+    let asked_and_exited = events.between("built", "exited");
+    assert_eq!(asked_and_exited.handed(&PostStartup), [2]);
+    assert_eq!(
+        asked_and_exited.handed(&RequestStateDropped),
+        [2, 1, 0, 2, 1, 0]
+    );
+    assert_eq!(
+        events
+            .between("exited", "failed")
+            .handed(&RequestStateDropped),
+        [2, 1, 0]
     );
 }

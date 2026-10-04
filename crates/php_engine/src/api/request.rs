@@ -29,7 +29,7 @@ use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     AfterLog, Callable, Dependency, DimensionRead, Extension, IniStage, IniVerdict, NativeNew,
-    ObjectHandlers, OnModify, PropertyRead, PropertyTest, Std, ZendExtension,
+    ObjectHandlers, OnModify, PropertyRead, PropertyTest, States, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -1867,7 +1867,7 @@ pub struct Request {
     /// every entry `NULL` until touched. Every op array's runtime cache
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
     map: MapTable,
-    states: Vec<(TypeId, Box<dyn Any + Send>)>,
+    states: States<(TypeId, Box<dyn Any + Send>)>,
     /// `EG(modified_ini_directives)`: each entry the request changed,
     /// in the order it first changed, with the value it holds now, `None`
     /// where it has none (php's `NULL`), and the request string that value
@@ -2754,7 +2754,7 @@ impl Request {
             stack,
             vm: Vm::default(),
             map: MapTable::new(),
-            states: Vec::new(),
+            states: States::new(),
             ini: Vec::new(),
             locked: Vec::new(),
             closed: false,
@@ -20759,15 +20759,18 @@ impl Request {
             self.states.push((wanted, Box::new(T::default())));
             self.states.len() - 1
         };
-        if self.states[at].1.downcast_ref::<T>().is_none() {
-            self.states[at].1 = Box::new(T::default());
+        // Found or held at `at`, and written as a `T` where it is not
+        // one; each `else` is the type system's, not a path a request takes.
+        let Some((_, slot)) = self.states.get_mut(at) else {
+            return Box::leak(Box::new(T::default()));
+        };
+        if !slot.is::<T>() {
+            *slot = Box::new(T::default());
         }
-        match self.states[at].1.downcast_mut::<T>() {
-            Some(state) => state,
-            // Written as a `T` on the line above; this arm is the type
-            // system's, not a path a request takes.
-            None => Box::leak(Box::new(T::default())),
-        }
+        let Some(state) = slot.downcast_mut::<T>() else {
+            return Box::leak(Box::new(T::default()));
+        };
+        state
     }
 
     /// The engine state of the calling extension, `E` being the type its
