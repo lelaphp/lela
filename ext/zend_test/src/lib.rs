@@ -11,12 +11,10 @@
 //! ([`observer`]), the one bundled user of design §4.3 seam 9, whose
 //! tests set its ini switches. The rest of php's test extension, its
 //! test functions and classes, comes only with a raise of the crate's
-//! ceiling. Two more parts land here as their engine sides are built:
-//! the observed opcodes, `zend_test.observer.show_opcode` and
-//! `show_opcode_in_user_handler` (#1824), whose entries are declared
-//! already and whose tags [`observer`] leaves a place for, and the
-//! allocator hooks of `zend_mm_custom_handlers.c` (#1825), a file of
-//! their own beside [`observer`].
+//! ceiling. The observed opcodes, `zend_test.observer.show_opcode` and
+//! `show_opcode_in_user_handler` (#1824), are [`observer`]'s; the
+//! allocator hooks of `zend_mm_custom_handlers.c` (#1825) land as a file
+//! of their own beside it.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
