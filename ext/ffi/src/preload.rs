@@ -286,7 +286,8 @@ pub(crate) struct Preloads {
 /// into its scope, `C` where the header names none. The first that fails
 /// fails the start, `PHP_MINIT_FUNCTION(ffi)` returning `FAILURE`: its
 /// warnings are raised, then the engine's `Unable to start FFI module`,
-/// and the process ends as `zend_error_noreturn` ends it at startup.
+/// and the host ends the process with `php_error_cb`'s `exit(-2)`
+/// (`Z/main/main.c:1505-1507`).
 ///
 /// The test `a_failed_preload_refuses_startup` holds a missing file and
 /// a redeclaration to the oracle's bytes.
