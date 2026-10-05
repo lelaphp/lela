@@ -39,7 +39,7 @@ mod result;
 mod stats;
 mod wire;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Pool};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -134,7 +134,6 @@ pub fn extension() -> Extension {
                 .collect(),
         )
         .request_state::<State>()
-        .engine_state(|_| Ok(Idle(Pool::new(IDLE))))
         .info(mysqlnd_info)
         .version(VERSION)
         .build("mysqlnd")
@@ -295,54 +294,28 @@ impl Handle {
     }
 }
 
-/// The persistent connections no request holds, each under the
-/// `persistent_id` its socket is kept by: what php's persistent `MYSQLND`
-/// is between the requests its owner's `EG(persistent_list)` entry serves.
-struct Idle(Pool<Vec<u8>, Box<ConnData>>);
-
-/// The idle connections the pool keeps, the engine's own streams' bound.
-const IDLE: usize = 1024;
-
 impl Handle {
-    /// The connection taken out of the table and kept by the engine under
-    /// its `persistent_id`, this owner gone: its key, `None` where the
-    /// number names none, the connection is not a persistent one that
-    /// connected, or the pool answered it past its bound, when it is
-    /// closed with this request over the stream it still holds, its
-    /// `COM_QUIT` sent and its socket closed (ADR-0010's amendment of
-    /// ADR-0005).
-    pub(crate) fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
+    /// The connection taken out of the table, this owner gone, with its
+    /// socket kept by the connection itself, out of the request and out of
+    /// the engine's persistent list ([`net::Net::give_back`]): what its
+    /// owner keeps in its own pool, the one list a persistent connection
+    /// waits in, as php's mysqlnd keeps none of its own. `None` where the
+    /// number names none or the connection is not a persistent one that
+    /// connected.
+    pub(crate) fn give_back(self, req: &mut Request) -> Option<Box<ConnData>> {
         let slot = slot_of(req.state::<State>(), self)?;
-        let key = slot.conn.as_ref()?.net.persistent_id.clone()?;
+        slot.conn.as_ref()?.net.persistent_id.as_ref()?;
         let mut conn = slot.conn.take()?;
         slot.refs -= 1;
-        let stream = conn.net.give_back();
-        let past = match req.engine::<Idle>() {
-            Some(Idle(pool)) => pool.give_back(key.clone(), conn),
-            None => Some(conn),
-        };
-        let Some(mut conn) = past else {
-            return Some(key);
-        };
-        conn.net.hold(stream);
-        conn.stats.enabled = ini_bool(req, b"mysqlnd.collect_statistics");
-        let _ = conn.close(req, consts::CloseType::Implicit);
-        flush(req, &mut conn);
-        None
+        conn.net.give_back(req);
+        Some(conn)
     }
 
-    /// The connection kept under `key` held in the table again, one owner
-    /// counted, over the socket kept under the same key.
-    pub(crate) fn take_up(req: &mut Request, key: &[u8]) -> Result<Option<Handle>, Thrown> {
-        let Some(mut conn) = req
-            .engine::<Idle>()
-            .and_then(|Idle(pool)| pool.take(&key.to_vec()))
-        else {
-            return Ok(None);
-        };
-        let scheme = conn.scheme.clone().unwrap_or_default();
-        conn.net.take_up(req, &scheme)?;
-        Ok(Some(Handle::hold(req, conn)))
+    /// A connection a request gave back held in the table again, one
+    /// owner counted, over the socket it kept.
+    pub(crate) fn take_up(req: &mut Request, mut conn: Box<ConnData>) -> Result<Handle, Thrown> {
+        conn.net.take_up(req)?;
+        Ok(Handle::hold(req, conn))
     }
 }
 

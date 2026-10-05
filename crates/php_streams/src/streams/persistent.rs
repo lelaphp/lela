@@ -208,6 +208,37 @@ pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
     }
 }
 
+/// What php's mysqlnd does with the persistent stream it opens
+/// (`mysqlnd_vio::open_tcp_or_unix`, `Z/ext/mysqlnd/mysqlnd_vio.c:139-169`),
+/// deleting it from `EG(persistent_list)` and from `EG(regular_list)` so
+/// that the connection is its owner's alone: the socket of `stream` taken
+/// out, its owed write flushed first, out of the request's persistent list
+/// and out of the resource, which is closed, and the caller's owner given
+/// up. `None`, and the stream left as it is, for a stream that is not a
+/// socket's.
+pub(crate) fn keep(req: &mut Request, stream: Stream) -> Option<Entry> {
+    let res = stream.resource();
+    let socket = req.stream_op(stream, |_, s| s.ops.as_socket().is_some());
+    if socket != Some(true) {
+        return None;
+    }
+    req.stream_op(stream, |req, s| s.flush_owed(req));
+    let taken = res
+        .native_mut::<Option<PhpStream>>(req)
+        .and_then(Option::take);
+    res.close(req);
+    req.drop_persistent(res);
+    let kept = taken.and_then(|mut taken| {
+        let mut socket = taken.ops.as_socket()?.detach();
+        socket.forget_request();
+        let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
+        req.streams().pclose_ret = taken.release(req);
+        Some(Entry { socket, orig_path })
+    });
+    req.release(stream.as_value());
+    kept
+}
+
 /// `stream_resource_persistent_dtor`'s regular-list half, php's `NULL`
 /// (`Z/main/streams/streams.c:1911`): a `persistent stream` resource whose
 /// last owner let go, or which the request's shutdown closed, leaves its
