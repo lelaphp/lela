@@ -19976,6 +19976,7 @@ fn returned_to_caller<T: Tier>(
     op: &Opline,
     returned: Value,
 ) -> Edge {
+    crate::observer::returned(req);
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);

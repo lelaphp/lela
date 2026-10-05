@@ -218,6 +218,7 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
     }
+    crate::observer::call(req);
     let flow = T::safepoint(req, frame, Site::Entry);
     answered(req, flow, frame)
 }
@@ -306,6 +307,7 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     if refused_at_entry(req) {
         return Ok(());
     }
+    crate::observer::call(req);
     let flow = T::safepoint(req, entry, Site::Entry);
     let first = answered(req, flow, entry)?;
     serve_from::<T>(req, first)
