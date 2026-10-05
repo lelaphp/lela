@@ -57,7 +57,7 @@ use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpObject, PhpString, Value};
-use php_ext_mysqlnd::client::{CLIENT_INFO, Kept, Mysqlnd, ReverseApi};
+use php_ext_mysqlnd::client::{CLIENT_INFO, Idle, Mysqlnd, ReverseApi};
 
 /// `MYSQLI_VERSION_ID`, what the deprecated `driver_version` reads.
 const VERSION_ID: i64 = 101_009;
@@ -118,7 +118,7 @@ pub(crate) struct State {
 /// persistent connections, each key's a stack of free links, php's
 /// `plist->free_links`, each link the connection itself with its socket,
 /// in no other list between the requests that take it up.
-pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Kept>);
+pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Idle>);
 
 /// The idle persistent connections the pool keeps; php bounds mysqli's by
 /// `mysqli.max_persistent` alone, and this is the engine's own streams'

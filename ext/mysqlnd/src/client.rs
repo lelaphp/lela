@@ -145,14 +145,16 @@ pub enum Command<'a> {
     },
 }
 
-/// A persistent connection out of every request, what
-/// [`Mysqlnd::give_back`] answers: the connection data with its socket,
-/// kept by its owner in the owner's pool until a request takes it up
-/// ([`Mysqlnd::take_up`]) or closes it ([`Kept::close`]). Dropped, its
-/// socket closes with no `COM_QUIT` sent.
-pub struct Kept(Box<ConnData>);
+/// An idle persistent connection, what `mysqlnd.h`'s persistent
+/// `MYSQLND *` is between requests (#1674): it owns the connection's
+/// `ConnData` with its socket, and a pool entry of `pdo_mysql` or mysqli
+/// holds it, so dropping the entry closes the connection, its socket
+/// closed with no `COM_QUIT` sent. [`Mysqlnd::give_back`] answers one;
+/// a request takes it up ([`Mysqlnd::take_up`]) or closes it with a
+/// `COM_QUIT` ([`Idle::close`]).
+pub struct Idle(Box<ConnData>);
 
-impl Kept {
+impl Idle {
     /// `mysqlnd_close` with this request: the connection taken up and
     /// closed, its `COM_QUIT` sent and its socket closed, as an owner
     /// closes one past its pool's bound (ADR-0010's amendment of
@@ -181,16 +183,16 @@ impl Mysqlnd {
     /// `MYSQLND` itself; `None` where it is no persistent connection that
     /// connected.
     #[must_use]
-    pub fn give_back(self, req: &mut Request) -> Option<Kept> {
-        self.0.give_back(req).map(Kept)
+    pub fn give_back(self, req: &mut Request) -> Option<Idle> {
+        self.0.give_back(req).map(Idle)
     }
 
     /// The connection a request gave back taken up by this one, one owner
     /// counted, over the socket it kept; one whose socket the server has
     /// closed fails every command as one over a dead link does, as the
     /// `mysqlnd_ping` or `COM_CHANGE_USER` its owner sends first finds.
-    pub fn take_up(req: &mut Request, kept: Kept) -> Result<Mysqlnd, Thrown> {
-        Ok(Mysqlnd(Handle::take_up(req, kept.0)?))
+    pub fn take_up(req: &mut Request, idle: Idle) -> Result<Mysqlnd, Thrown> {
+        Ok(Mysqlnd(Handle::take_up(req, idle.0)?))
     }
 
     /// `get_reference`: one more owner, for a statement or a set of rows

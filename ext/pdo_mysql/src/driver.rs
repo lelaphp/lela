@@ -12,7 +12,7 @@
 
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
-use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Kept, Mysqlnd, Stmt as Ps};
+use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
     SqlError, SqlState, bool_attribute, long_attribute, option_long, option_string,
@@ -355,7 +355,7 @@ enum Place {
     /// pool: out of the request's table, with the connection and its
     /// socket, which wait in PDO's pool with it and in no other list
     /// until a request takes them up.
-    Idle(H, Kept),
+    Idle(H, Idle),
     /// In no request's table: closed, or given back and not kept.
     Gone,
 }
