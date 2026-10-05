@@ -937,7 +937,10 @@ impl ExtensionBuilder {
     /// The interrupt hook, php's `zend_interrupt_function` as pcntl's
     /// `MINIT` sets it: served by the loop's interrupt check when the
     /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
-    /// by something other than the execution timer (design §5.8). What
+    /// by something other than the execution timer (design §5.8): signal
+    /// delivery, or a periodic interrupt an extension started with
+    /// [`Request::start_periodic`], whose periods the hook reads with
+    /// [`Request::periods_elapsed`]. What
     /// it throws is left pending where the loop stands, as
     /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served
