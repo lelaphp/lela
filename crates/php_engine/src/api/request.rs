@@ -62,6 +62,9 @@ mod environment;
 mod execution;
 mod extensions;
 pub use extensions::InfoRow;
+mod frame_reads;
+pub(crate) use frame_reads::Identity;
+pub use frame_reads::{FrameId, FrameView};
 mod frames;
 use frames::{Link, Slots, links_of};
 mod hash_bytes;
@@ -328,6 +331,8 @@ pub struct Request {
     bailout: bool,
     /// The open observed frames ([`observing::Observing`]).
     observing: observing::Observing,
+    /// The frame identities given so far ([`frame_reads::FrameIds`]).
+    frame_ids: frame_reads::FrameIds,
     /// Where the request stands ([`ending::Progress`]).
     progress: ending::Progress,
     /// Where the destructors' walk was cut short ([`objects::Objects`]).
@@ -626,6 +631,7 @@ impl Request {
             raised: None,
             bailout: false,
             observing: observing::Observing::default(),
+            frame_ids: frame_reads::FrameIds::default(),
             progress: ending::Progress::default(),
             objects: objects::Objects::default(),
             returned: Value::null(),

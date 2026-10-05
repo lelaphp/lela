@@ -373,15 +373,6 @@ impl Request {
         self.vm.at(frame).and_then(|state| state.function)
     }
 
-    /// `EX(func)->op_array.filename`: the file the op array `frame`
-    /// serves was compiled from.
-    pub(crate) fn frame_filename(&self, frame: FrameRef) -> Option<&[u8]> {
-        self.vm
-            .at(frame)
-            .and_then(|state| exec::body_of(&state.unit, state.body))
-            .map(|code| code.filename.0.as_ref())
-    }
-
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, in this request's map table
     /// ([`exec::Vm::cached`]).

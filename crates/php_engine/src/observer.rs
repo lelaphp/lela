@@ -86,7 +86,10 @@
 //!
 //! What is not here yet, each built on the same slot and chain:
 //! the other notices and adding and removing handlers while a request
-//! is served (#1812), and a frame reference a handler may keep (#1827).
+//! is served (#1812). A handler reads the frame it is handed through
+//! [`Observed::frame`], and the user frame below it through
+//! [`Observed::caller`], and keeps one as a
+//! [`FrameId`](crate::api::request::FrameId) (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
@@ -98,7 +101,7 @@ use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{FrameView, Request};
 use crate::api::values::{ClassId, PhpObject, Value};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
@@ -168,8 +171,10 @@ pub struct ObserverHandlers {
 /// The frame an observer is handed, borrowed for the handler's span
 /// alone (design §4.3 row 9): the request through `Deref`, and reads of
 /// the one frame observed, a function's, a file's or a native's call,
-/// which no reference outlives. A frame reference that can be kept is
-/// #1827's.
+/// which no borrow outlives: [`Observed::frame`] reads a frame the loop
+/// serves, [`Observed::caller`] the user frame below. A frame kept past
+/// the handler is its [`FrameId`](crate::api::request::FrameId),
+/// checked each time it is read again.
 pub struct Observed<'a> {
     req: &'a mut Request,
     at: Observable,
@@ -189,13 +194,39 @@ impl DerefMut for Observed<'_> {
 }
 
 impl Observed<'_> {
+    /// The frame observed, `execute_data`, read for as long as the
+    /// handler does not write through the request: what it serves, where
+    /// it stands, the frames below it, and its identity to keep. `None`
+    /// for a native's call, which serves no op array and stands in no
+    /// frame of the loop's: its function is [`Observed::function`], and
+    /// the frame it was called from [`Observed::caller`].
+    #[must_use]
+    pub fn frame(&self) -> Option<FrameView<'_>> {
+        match self.at {
+            Observable::Code(frame) => Some(self.req.frame_view(frame)),
+            Observable::Native(_) => None,
+        }
+    }
+
+    /// `EX(prev_execute_data)` as far as user code goes: the user frame
+    /// below the one observed ([`FrameView::caller`]), and for a native's
+    /// call the user frame it stands on, the innermost on the running
+    /// stack, past any native between them.
+    #[must_use]
+    pub fn caller(&self) -> Option<FrameView<'_>> {
+        match self.at {
+            Observable::Code(frame) => self.req.frame_view(frame).caller(),
+            Observable::Native(_) => self.req.innermost_frame_view(),
+        }
+    }
+
     /// `EX(func)` where the frame serves a function, a method or a
     /// native; `None` for an included, evaluated or main file's op
     /// array, which php names by its `filename` alone.
     #[must_use]
     pub fn function(&self) -> Option<Function> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_function(frame),
+            Observable::Code(frame) => self.req.frame_view(frame).function(),
             Observable::Native(call) => Some(call.function),
         }
     }
@@ -206,7 +237,7 @@ impl Observed<'_> {
     #[must_use]
     pub fn function_scope(&self) -> Option<ClassId> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_scope(frame),
+            Observable::Code(frame) => self.req.frame_view(frame).function_scope(),
             Observable::Native(call) => self.req.method_class(call.function),
         }
     }
@@ -217,7 +248,7 @@ impl Observed<'_> {
     #[must_use]
     pub fn filename(&self) -> &[u8] {
         match self.at {
-            Observable::Code(frame) => self.req.frame_filename(frame).unwrap_or_default(),
+            Observable::Code(frame) => self.req.frame_view(frame).filename(),
             Observable::Native(_) => &[],
         }
     }
