@@ -72,20 +72,29 @@ pub(crate) struct Walk {
     table: Value,
 }
 
+/// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into, whose fields no file but this one
+/// reads.
+#[derive(Default)]
+pub(super) struct Holding {
+    /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into,
+    /// for the `ASSIGN_DIM` after it to hold ([`Request::hold_walk`]).
+    walk: Option<Walk>,
+}
+
 impl Request {
     /// What the `FETCH_DIM_W` just served laid down: the entry its
     /// `VAR` points at and the array or object that holds the entry, or
     /// nothing where the `VAR` holds no `IS_INDIRECT`. Every fetch
     /// notes one or the other, so what is noted is its own.
     pub(crate) fn note_walk(&mut self, walked: Option<(ZvalRef, Value)>) {
-        self.walk = walked.map(|(place, table)| Walk { place, table });
+        self.hold.walk = walked.map(|(place, table)| Walk { place, table });
     }
 
     /// An owner of the table the `FETCH_DIM_W` before this opline walked
     /// to `place`, taken before PHP code can be reached: nothing where the
     /// fetch noted another place or none.
     pub(crate) fn hold_walk(&mut self, place: ZvalRef) -> Option<Hold> {
-        let walk = self.walk.take()?;
+        let walk = self.hold.walk.take()?;
         (walk.place == place).then(|| self.take_hold(walk.table))
     }
 

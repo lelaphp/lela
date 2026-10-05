@@ -16,6 +16,14 @@ use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 use crate::exec::{self, TableId};
 use crate::tier::{Called, Class, Code, Evaluated, Named, Shape, Under};
 
+/// The uncaught throwable kept for a host that renders it, whose fields no file but this one
+/// reads.
+#[derive(Default)]
+pub(super) struct Inspected {
+    /// What the program left uncaught, kept for a host that renders it.
+    kept_uncaught: Option<crate::engine::Uncaught>,
+}
+
 impl Request {
     /// The VM stack the request runs on, read.
     pub(crate) fn stack(&self) -> &VmStack {
@@ -617,7 +625,7 @@ impl Request {
                 Vec::new()
             }
         };
-        self.kept_uncaught = Some(crate::engine::Uncaught {
+        self.inspect.kept_uncaught = Some(crate::engine::Uncaught {
             file: self.throwable_prop_bytes(throwable, b"file"),
             line: self.throwable_prop_int(throwable, b"line"),
             class,
@@ -629,7 +637,7 @@ impl Request {
 
     /// What [`Request::keep_uncaught`] kept, taken.
     pub(crate) fn take_kept_uncaught(&mut self) -> Option<crate::engine::Uncaught> {
-        self.kept_uncaught.take()
+        self.inspect.kept_uncaught.take()
     }
 
     // ------------------------------------------------ values

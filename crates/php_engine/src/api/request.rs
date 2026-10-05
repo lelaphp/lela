@@ -13,7 +13,6 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -220,8 +219,8 @@ pub enum Unresolved {
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
     description: RequestDescription,
-    /// What the program left uncaught, kept for a host that renders it.
-    kept_uncaught: Option<crate::engine::Uncaught>,
+    /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
+    inspect: inspect::Inspected,
     /// The request in flight, which no fork but its own happens beside
     /// (#1807, [`Request::fork`]).
     _inside: crate::fork::Inside,
@@ -257,11 +256,8 @@ pub struct Request {
     /// php's post state: the body's reader, what the host has handed
     /// out of it, and the files an upload wrote ([`post::Post`]).
     post: post::Post,
-    /// Each auto-global made just in time and not made yet, php's
-    /// `armed` on each of `CG(auto_globals)`: the first
-    /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
-    /// ([`Request::arm`]).
-    armed: Vec<php_unit::AutoGlobal>,
+    /// Each auto-global not made yet ([`variables::Variables`]).
+    variables: variables::Variables,
     /// The symbol tables, [`TableId`] naming one: php's
     /// `EG(symbol_table)` first, the main op array's variables (design
     /// §5.6, §5.10), and after it one table per function frame that
@@ -284,10 +280,8 @@ pub struct Request {
     /// before they open one (`zend_include_or_eval`), on the request's
     /// heap ([`hash_bytes::IncludedFiles`]).
     included_files: hash_bytes::IncludedFiles,
-    /// `EG(symtable_cache)`: the rebuilt symbol tables' bytes a frame's
-    /// end cleaned and kept for the next rebuild, at most
-    /// `SYMTABLE_CACHE_SIZE`.
-    symtable_cache: Vec<hash_bytes::HashBytes>,
+    /// The rebuilt symbol tables' bytes kept for the next rebuild ([`hash_bytes::HashTables`]).
+    hash_bytes: hash_bytes::HashTables,
     /// The request's constants and `PHP_SAPI` ([`constants::Constants`]).
     constants: constants::Constants,
     /// The class constants' state ([`class_constants::ClassConstants`]).
@@ -306,9 +300,8 @@ pub struct Request {
     site_override: Option<site_override::SiteOverride>,
     /// The static properties' slots ([`static_props::StaticProps`]).
     static_props: static_props::StaticProps,
-    /// `zend_class_mutable_data` of each class the request updated or
-    /// read a constant of ([`class_data`]).
-    class_data: std::collections::HashMap<ClassId, class_data::ClassData>,
+    /// Each class's mutable data and the blocks made beside each object ([`class_data::ClassDataTables`]).
+    class_data: class_data::ClassDataTables,
     /// php's `EG(weakrefs)`: every weakly referenced object's id against
     /// the `WeakReference` and `WeakMap` objects that name it
     /// (`crate::weakrefs`).
@@ -367,9 +360,8 @@ pub struct Request {
     /// The frames' debug record ([`frames::Frames`]).
     #[cfg(debug_assertions)]
     frames: frames::Frames,
-    /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into,
-    /// for the `ASSIGN_DIM` after it to hold ([`Request::hold_walk`]).
-    walk: Option<hold::Walk>,
+    /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
+    hold: hold::Holding,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -411,9 +403,6 @@ pub struct Request {
     user_functions: Stacked<UserFunction>,
     /// The `static` variables' tables ([`static_vars::StaticVars`]).
     static_vars: static_vars::StaticVars,
-    /// The `emalloc`s php's `create_object` made beside each object
-    /// that has them, by the object's id ([`Request::lay_beside`]).
-    beside: HashMap<u32, Vec<php_heap::Block>>,
     /// Where the request is the preload's (design §6.3), the files it
     /// compiled into the preload.
     preloading: Option<Preloading>,
@@ -617,7 +606,7 @@ impl Request {
             paths: paths::Paths::startup(&shared),
             shared,
             description,
-            kept_uncaught: None,
+            inspect: inspect::Inspected::default(),
             _inside: crate::fork::Inside::enter(),
             heap,
             stack,
@@ -632,10 +621,10 @@ impl Request {
             resources,
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
-            armed: Vec::new(),
+            variables: variables::Variables::default(),
             tables: vec![SymbolTable::default()],
             included_files: hash_bytes::IncludedFiles::default(),
-            symtable_cache: Vec::new(),
+            hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
             class_constants: class_constants::ClassConstants::default(),
             enum_functions: tables.enum_functions,
@@ -643,7 +632,7 @@ impl Request {
             properties: properties::Properties::default(),
             site_override: None,
             static_props: static_props::StaticProps::default(),
-            class_data: std::collections::HashMap::new(),
+            class_data: class_data::ClassDataTables::default(),
             weakrefs: crate::weakrefs::Table::default(),
             lazy: lazy::Table::default(),
             include: include::Include::default(),
@@ -671,12 +660,11 @@ impl Request {
             aliases: tables.aliases,
             user_functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
-            beside: HashMap::new(),
             preloading: None,
             accel_loaded: None,
             #[cfg(debug_assertions)]
             frames: frames::Frames::default(),
-            walk: None,
+            hold: hold::Holding::default(),
         };
         req.activate();
         req

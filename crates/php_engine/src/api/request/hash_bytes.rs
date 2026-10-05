@@ -193,6 +193,16 @@ impl SymbolTable {
     }
 }
 
+/// The rebuilt symbol tables' bytes kept for the next rebuild, whose fields no file but this one
+/// reads.
+#[derive(Default)]
+pub(super) struct HashTables {
+    /// `EG(symtable_cache)`: the rebuilt symbol tables' bytes a frame's
+    /// end cleaned and kept for the next rebuild, at most
+    /// `SYMTABLE_CACHE_SIZE`.
+    symtable_cache: Vec<HashBytes>,
+}
+
 impl Request {
     /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`:
     /// `path` put in the table where it is not there yet, its string
@@ -262,7 +272,7 @@ impl Request {
     /// 0
     /// ```
     pub(crate) fn rebuilt_table_bytes(&mut self, last_var: u32) -> Option<HashBytes> {
-        let mut bytes = if let Some(mut bytes) = self.symtable_cache.pop() {
+        let mut bytes = if let Some(mut bytes) = self.hash_bytes.symtable_cache.pop() {
             bytes.extend(self, last_var).ok()?;
             bytes
         } else {
@@ -287,10 +297,10 @@ impl Request {
         };
         bytes.used = 0;
         bytes.count = 0;
-        if self.symtable_cache.len() >= SYMTABLE_CACHE_SIZE {
+        if self.hash_bytes.symtable_cache.len() >= SYMTABLE_CACHE_SIZE {
             bytes.free(self);
         } else {
-            self.symtable_cache.push(bytes);
+            self.hash_bytes.symtable_cache.push(bytes);
         }
     }
 
