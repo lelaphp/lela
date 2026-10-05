@@ -529,6 +529,7 @@ impl Str {
 
     /// `zend_string_addref`: one more owner, and nothing at all for an
     /// interned string.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
         if !self.is_interned() {
             self.header().gc.addref();
@@ -537,6 +538,7 @@ impl Str {
 
     /// `zend_string_delref`: one owner fewer, and what is left. An
     /// interned string keeps its one.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn delref(self) -> u32 {
         if self.is_interned() {
             return 1;

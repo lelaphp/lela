@@ -646,11 +646,12 @@ impl Request {
         }
     }
 
-    /// What a debug build's two sensors found since the loop last asked
+    /// What a debug build's sensors found since the loop last asked
     /// (design §10, #761): a `TMP` written over an owner it still held,
-    /// or a refcount operation on a block the heap had freed, as the
-    /// `InternalError` fatal that ends the request; the first of them,
-    /// and taken. The loop asks after every handler.
+    /// or what the heap's sensors found ([`php_heap::Heap::take_sensed`]),
+    /// a refcount operation on a block the heap had freed among them, as
+    /// the `InternalError` fatal that ends the request; the first of
+    /// them, and taken. The loop asks after every handler.
     #[cfg(debug_assertions)]
     pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
         let dirty = self.frames.dirty.take().map(|dirty| {
@@ -662,7 +663,7 @@ impl Request {
                 dirty.held,
             ))
         });
-        dirty.or_else(|| self.heap.take_freed_use())
+        dirty.or_else(|| self.heap.take_sensed())
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`

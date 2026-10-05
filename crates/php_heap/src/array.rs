@@ -708,6 +708,7 @@ impl Arr {
     }
 
     /// `GC_ADDREF`, and nothing for an immutable array.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
         if !self.is_immutable() {
             self.header().gc.addref();
@@ -739,6 +740,7 @@ impl Arr {
     }
 
     /// `GC_DELREF`, and what is left; an immutable array keeps its one.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn delref(self) -> u32 {
         if self.is_immutable() {
             return 1;
