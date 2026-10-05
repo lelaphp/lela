@@ -467,6 +467,8 @@ raising::too_few_arguments
 raising::uncaught_at
 raising::warning
 raising::while_pending
+request::Allocation
+request::AllocationObserver
 request::BindTo
 request::BodyLimits
 request::Brigade
@@ -540,6 +542,8 @@ request::Interrupt::receive_signals
 request::Invalidation
 request::Notification
 request::NotifyCode
+request::ObserveAllocations
+request::ObserveAllocations::observe
 request::Opening
 request::OptionAnswer
 request::OutputOp
@@ -688,6 +692,7 @@ request::Request::method_named
 request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::native_trampoline
+request::Request::observe_allocations
 request::Request::open_temporary_fd
 request::Request::os_error_text
 request::Request::output_buffer_op
@@ -762,6 +767,7 @@ request::Request::trampoline
 request::Request::umask
 request::Request::unguarded_host_path
 request::Request::unit_cache
+request::Request::unobserve_allocations
 request::Request::unregister_tick_function
 request::Request::update_server
 request::Request::variadic_arguments

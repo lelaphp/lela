@@ -34,8 +34,9 @@ use super::api::abi::{
     Compiled, ErrorBeneath, Extension, ExtensionBuilder, FiberStatus, GcBeneath, Observed,
     ObservedFiber, ObserverHandlers, Refusal, Start, StringBeneath,
 };
+use super::api::decl::{IniDecl, Name};
 use super::api::raising::{Level, Thrown};
-use super::api::request::Request;
+use super::api::request::{Allocation, AllocationObserver, ObserveAllocations, Request};
 use super::api::values::{PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
@@ -130,6 +131,10 @@ pub(crate) enum Phase {
     FiberSwitch(String, String),
     /// Its fiber observer was told of a fiber given back.
     FiberDestroy(String),
+    /// Its allocation observer was told of what the request's heap
+    /// served, while its `test_ext_N.observe_allocations` entry was on
+    /// ([`TestExt::observing_allocations`]).
+    Allocation(Allocation),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -333,6 +338,24 @@ impl<const N: u8> Drop for RequestSlot<N> {
     }
 }
 
+/// Extension `N`'s request state under
+/// [`TestExt::observing_allocations`]: where its allocation observer
+/// stands in the heap's list, while its entry is on, as `zend_test`
+/// keeps its observed heap in `ZT_G(observed_heap)`.
+#[derive(Default)]
+pub(crate) struct AllocationSlot<const N: u8>(Option<AllocationObserver>);
+
+/// What [`TestExt::observing_allocations`] puts in the heap's list: each
+/// allocation recorded as handed to extension `N`, as `zend_test`'s
+/// custom handlers print each.
+struct AllocationRecorder<const N: u8>;
+
+impl<const N: u8> ObserveAllocations for AllocationRecorder<N> {
+    fn observe(&mut self, what: Allocation) {
+        record(N, Phase::Allocation(what));
+    }
+}
+
 /// Extension `N`'s process state, numbered as it is built.
 pub(crate) struct ProcessSlot<const N: u8> {
     built: u32,
@@ -397,6 +420,46 @@ impl<const N: u8> TestExt<N> {
             .fiber_switch(Self::fiber_switch)
             .fiber_destroy(Self::fiber_destroy)
             .build(&format!("test_ext_{N}"))
+    }
+
+    /// [`TestExt::builder`] with an ini entry,
+    /// `test_ext_N.observe_allocations`, whose `on_modify` puts an
+    /// allocation observer in the request's heap where it is turned on
+    /// and takes it out where it is turned off, as `zend_test`'s
+    /// `zend_test.zend_mm_custom_handlers.enabled` installs and removes
+    /// its handlers (`Z/ext/zend_test/zend_mm_custom_handlers.c`); its
+    /// request state is where the observer stands.
+    pub(crate) fn observing_allocations() -> Extension {
+        let name = format!("test_ext_{N}.observe_allocations");
+        Self::builder()
+            .request_state::<AllocationSlot<N>>()
+            .ini(vec![IniDecl {
+                name: Name(name.as_bytes().into()),
+                default: Some(b"0".as_slice().into()),
+                user: true,
+                per_dir: true,
+                system: true,
+            }])
+            .on_modify(name.as_bytes(), Self::observe_allocations)
+            .build(&format!("test_ext_{N}"))
+    }
+
+    /// `OnUpdateZendTestMMCustomHandlersEnabled`: on puts the observer
+    /// in where none stands, off takes the one standing out.
+    #[allow(clippy::unnecessary_wraps)]
+    fn observe_allocations(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+        let on = matches!(value, Some(b"1" | b"on" | b"yes" | b"true"));
+        let standing = req.state::<AllocationSlot<N>>().0.take();
+        let standing = match (on, standing) {
+            (true, None) => Some(req.observe_allocations(Box::new(AllocationRecorder::<N>))),
+            (false, Some(at)) => {
+                req.unobserve_allocations(at);
+                None
+            }
+            (_, standing) => standing,
+        };
+        req.state::<AllocationSlot<N>>().0 = standing;
+        Ok(true)
     }
 
     fn fiber_init(_: &mut Request, fiber: ObservedFiber) {

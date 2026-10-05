@@ -28,7 +28,7 @@
 //! sweeps: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`) counts the free slots
 //! of every bin `run` into the page map word that holds that count,
 //! gives back the `runs` whose slots are all free, and the caller asks
-//! again. [`Mm::gc`] is that function, called where php calls it, so a
+//! again. [`Mm::gc_heap`] is that function, called where php calls it, so a
 //! request that filled a bin and gave it back goes on exactly as far as
 //! php's does.
 
@@ -43,6 +43,7 @@ use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use crate::hooks::Fatal;
+use crate::observe::{Allocation, Observers};
 
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
@@ -233,6 +234,9 @@ pub(crate) struct Mm {
     /// refuses nothing, so rendering the fatal, its backtrace among it,
     /// is not refused by the limit it reports.
     overflow: bool,
+    /// The profilers told of what the entries serve, `alloc`, `realloc`,
+    /// `free` and `gc`, and of nothing the heap does on its own behalf.
+    observers: Observers,
 }
 
 impl Mm {
@@ -257,6 +261,7 @@ impl Mm {
             real_peak: 0,
             limit: NO_LIMIT,
             overflow: false,
+            observers: Observers::default(),
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             chunk_init(chunk, 0);
@@ -343,10 +348,82 @@ impl Mm {
         fatal
     }
 
-    /// `_emalloc`: `size` usable bytes, from the bin its size falls in,
-    /// sixteen at least as `zend_mm_alloc_heap` raises it, from a `run`
-    /// of pages, or from a huge block of its own.
+    /// `_emalloc`: [`Mm::alloc_heap`], and the observers told of what it
+    /// answered, where there are any ([`crate::observe`]).
+    #[inline]
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        let at = self.alloc_heap(size)?;
+        if !self.observers.is_empty() {
+            self.observers.tell(Allocation::Allocated {
+                at: at.as_ptr().addr(),
+                size,
+            });
+        }
+        Ok(at)
+    }
+
+    /// `_erealloc2`: [`Mm::realloc_heap`], and the observers told of what
+    /// it answered, where there are any.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::realloc_heap`]'s.
+    #[inline]
+    pub(crate) unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        // SAFETY: the caller's contract, handed on.
+        let to = unsafe { self.realloc_heap(at, copy, size) }?;
+        if !self.observers.is_empty() {
+            self.observers.tell(Allocation::Reallocated {
+                from: at.as_ptr().addr(),
+                to: to.as_ptr().addr(),
+                size,
+            });
+        }
+        Ok(to)
+    }
+
+    /// `_efree`: [`Mm::free_heap`], and the observers told of it, where
+    /// there are any.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s.
+    #[inline]
+    pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
+        // SAFETY: the caller's contract, handed on.
+        unsafe { self.free_heap(at) };
+        if !self.observers.is_empty() {
+            self.observers.tell(Allocation::Freed {
+                at: at.as_ptr().addr(),
+            });
+        }
+    }
+
+    /// `zend_mm_gc` as `gc_mem_caches()` calls it: [`Mm::gc_heap`], and
+    /// the observers told of the bytes it gave back, where there are
+    /// any.
+    pub(crate) fn gc(&mut self) -> usize {
+        let freed = self.gc_heap();
+        if !self.observers.is_empty() {
+            self.observers.tell(Allocation::Collected { freed });
+        }
+        freed
+    }
+
+    /// The observers of this heap's allocations, put in and taken out.
+    pub(crate) fn observers(&mut self) -> &mut Observers {
+        &mut self.observers
+    }
+
+    /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
+    /// falls in, sixteen at least as it raises it, from a `run` of pages,
+    /// or from a huge block of its own.
+    fn alloc_heap(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let size = size.max(MIN_USEABLE_BIN_SIZE);
         if size <= MAX_SMALL_SIZE {
             self.alloc_small(size_to_bin(size))
@@ -357,7 +434,7 @@ impl Mm {
         }
     }
 
-    /// `_erealloc2` (`Z/Zend/zend_alloc.c:1674`, `zend_mm_realloc_heap`):
+    /// `zend_mm_realloc_heap` (`Z/Zend/zend_alloc.c:1674`):
     /// `size` usable bytes with the first `copy` of the old ones in them,
     /// grown or cut where the block stands when php's would be, and moved
     /// otherwise. What a block's arm does is what php's does, because the
@@ -384,7 +461,7 @@ impl Mm {
     ///
     /// `at` is a pointer this heap returned from [`Mm::alloc`], has not
     /// been freed since, and its first `copy` bytes are initialised.
-    pub(crate) unsafe fn realloc(
+    unsafe fn realloc_heap(
         &mut self,
         at: NonNull<u8>,
         copy: usize,
@@ -491,13 +568,13 @@ impl Mm {
         size: usize,
     ) -> Result<NonNull<u8>, Fatal> {
         let peak = self.peak;
-        let moved = self.alloc(size)?;
+        let moved = self.alloc_heap(size)?;
         // SAFETY: `at` holds `copy` readable bytes and `moved` is a fresh
         // allocation of `size`, so the shorter of the two is in both.
         unsafe { copy_into(at, moved, copy.min(size)) };
         // SAFETY: the caller's contract, `at` is live in this heap; its
         // bytes are copied and nothing reads it after this.
-        unsafe { self.free(at) };
+        unsafe { self.free_heap(at) };
         self.peak = peak.max(self.size);
         Ok(moved)
     }
@@ -560,7 +637,7 @@ impl Mm {
             } else {
                 let more = new_size - old_size;
                 if more > self.limit - self.real_size.min(self.limit)
-                    && (self.gc() == 0 || more > self.limit - self.real_size.min(self.limit))
+                    && (self.gc_heap() == 0 || more > self.limit - self.real_size.min(self.limit))
                 {
                     return Err(limit_exhausted(self.limit, size));
                 }
@@ -578,15 +655,15 @@ impl Mm {
         unsafe { self.realloc_slow(at, copy.min(old_size), size) }
     }
 
-    /// `_efree`: give `at` back to the bin, `run` or huge block it came
-    /// from. php reads what it is from the chunk's page map, and so does
+    /// `zend_mm_free_heap`: give `at` back to the bin, `run` or huge
+    /// block it came from. php reads what it is from the chunk's page map, and so does
     /// this, so a pointer carries no header of its own.
     ///
     /// # Safety
     ///
     /// `at` is a pointer this heap returned from [`Mm::alloc`] and has
     /// not been freed since.
-    pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
+    unsafe fn free_heap(&mut self, at: NonNull<u8>) {
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             self.free_huge(at);
@@ -760,7 +837,7 @@ impl Mm {
                 break chunk;
             }
             if CHUNK_SIZE > self.limit - self.real_size.min(self.limit) {
-                if self.gc() != 0 {
+                if self.gc_heap() != 0 {
                     continue;
                 }
                 if !self.overflow {
@@ -769,7 +846,7 @@ impl Mm {
             }
             let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
-                None if self.gc() != 0 => chunk_alloc(CHUNK_SIZE),
+                None if self.gc_heap() != 0 => chunk_alloc(CHUNK_SIZE),
                 None => None,
             };
             let Some(chunk) = mapped else {
@@ -875,7 +952,7 @@ impl Mm {
     /// `run`'s element count; the walk of the chunks gives those `runs`
     /// back and resets the count of every other, so the next sweep
     /// starts from zero.
-    pub(crate) fn gc(&mut self) -> usize {
+    fn gc_heap(&mut self) -> usize {
         for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
             let elements = elements as u32;
             let mut has_free_pages = false;
@@ -985,14 +1062,14 @@ impl Mm {
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
-            && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
+            && (self.gc_heap() == 0 || new_size > self.limit - self.real_size.min(self.limit))
             && !self.overflow
         {
             return Err(self.refuse(limit_exhausted(self.limit, size)));
         }
         let mapped = match huge_map(new_size) {
             Some(at) => Some(at),
-            None if self.gc() != 0 => huge_map(new_size),
+            None if self.gc_heap() != 0 => huge_map(new_size),
             None => None,
         };
         let Some(at) = mapped else {

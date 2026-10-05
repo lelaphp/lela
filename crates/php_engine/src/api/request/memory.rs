@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+pub use php_heap::{Allocation, AllocationObserver, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
 
 use crate::api::raising::Thrown;
@@ -394,6 +395,33 @@ impl Request {
     /// `memory_reset_peak_usage()`.
     pub fn reset_memory_peak(&mut self) {
         self.heap.reset_peak();
+    }
+
+    /// `observer` told of every allocation, reallocation and free the
+    /// request's heap serves from here on, and of what
+    /// `gc_mem_caches()` gives back (design §7.1): what stands in the
+    /// place of php's `zend_mm_set_custom_handlers`, which no extension
+    /// is given. The heap serves each one still, so `memory_get_usage()`
+    /// reads what it reads with no observer, and with none put in an
+    /// allocation pays one test of an empty list, as php's pays its
+    /// `use_custom_heap` test. An observer is told mid-allocation and is
+    /// handed nothing of the request; what it keeps is its own, and it is
+    /// dropped with the request's heap where it is not taken out before.
+    pub fn observe_allocations(
+        &mut self,
+        observer: Box<dyn ObserveAllocations>,
+    ) -> AllocationObserver {
+        self.heap.observe_allocations(observer)
+    }
+
+    /// The observer put in at `at` taken out and handed back, so the
+    /// extension that put it in reads what it kept; `None` where it was
+    /// taken out already.
+    pub fn unobserve_allocations(
+        &mut self,
+        at: AllocationObserver,
+    ) -> Option<Box<dyn ObserveAllocations>> {
+        self.heap.unobserve_allocations(at)
     }
 
     /// `gc_collect_cycles()` through php's pointer: the top link the
