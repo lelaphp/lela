@@ -46,7 +46,7 @@ use php_macros::php_class;
 use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
 use crate::api::call::call_named;
 use crate::api::raising::{Thrown, throw, throw_error};
-use crate::api::request::{Observing, Raised, Request};
+use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
 use crate::exec::{self, Vm};
@@ -101,7 +101,7 @@ pub enum Transfer {
 pub(crate) struct Execution {
     pub(crate) stack: php_heap::VmStack,
     pub(crate) vm: Vm,
-    pub(crate) observing: Observing,
+    pub(crate) observing: ObservedChain,
     pub(crate) error_reporting: i64,
     pub(crate) stack_limit: StackLimit,
 }
@@ -1506,7 +1506,7 @@ fn start(
     let execution = Execution {
         stack: php_heap::VmStack::fiber(),
         vm: Vm::default(),
-        observing: Observing::default(),
+        observing: ObservedChain::default(),
         error_reporting: req.ini_error_reporting(),
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
     };

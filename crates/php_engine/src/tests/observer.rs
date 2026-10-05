@@ -7,7 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
-use super::test_ext::{Event, Events, Phase, Recording, TestExt};
+use php_macros::php_function;
+
+use super::test_ext::{
+    Event, Events, Phase, Recording, TestExt, observed_name, record, returned_name,
+};
+use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObserverHandlers};
+use crate::api::values::{PhpString, Value};
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
@@ -17,7 +23,7 @@ use Phase::{Begin, End, Error, FiberDestroy, FiberInit, FiberSwitch, ObserverIni
 /// The observer's events alone, the fiber notices among them, and the
 /// diagnostics `zend_error_cb` was handed among them, in the order
 /// recorded.
-fn observed(events: &Events) -> Vec<Event> {
+pub(super) fn observed(events: &Events) -> Vec<Event> {
     events
         .only(&[
             ObserverInit(String::new()),
@@ -45,7 +51,7 @@ fn end(n: u8, name: &str, returned: Option<&str>) -> Event {
 
 /// A directory of its own for one test's files, under the target's
 /// temporary directory, emptied first.
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("php_engine_observer_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -54,7 +60,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// `source` served as `main.php` in `dir`.
-fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
+pub(super) fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
     let _ = std::fs::write(&main, source);
     engine.serve_capture_in(
@@ -219,7 +225,8 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
 /// `ZEND_OBSERVER_FCALL_BEGIN` stands in `ZEND_DO_UCALL` before the
 /// callee's `RECV` runs: a `RECV` that throws ends the frame it began,
 /// with no value, from the unwind, for a call from code and for one a
-/// native makes alike, here the error handler `zend_error` calls.
+/// native makes alike, here the error handler `zend_error` calls. The
+/// native that sets the handler is observed as any native is.
 #[test]
 fn begin_runs_before_the_parameters_are_received() {
     let rec = Recording::start();
@@ -245,6 +252,9 @@ fn begin_runs_before_the_parameters_are_received() {
             init(0, "t"),
             begin(0, "t"),
             end(0, "t", None),
+            init(0, "set_error_handler"),
+            begin(0, "set_error_handler"),
+            end(0, "set_error_handler", Some("null")),
             begin(0, "t"),
             end(0, "t", None),
             end(0, file, Some("1")),
@@ -257,7 +267,11 @@ fn begin_runs_before_the_parameters_are_received() {
 /// `zend_dispatch_try_catch_finally_helper` ends it: through a `catch`
 /// further out, as the throwable leaves the main file uncaught
 /// (`observer_exception_01.phpt`, where the file ends before the fatal
-/// is rendered), and as `exit` unwinds.
+/// is rendered), and as `exit` unwinds. The natives the throw and the
+/// `exit` call are ended first: `Exception::__construct` as it returns,
+/// and `exit` as it throws, with no value, as `ZEND_DO_ICALL` ends a
+/// native under `EG(exception)`; the uncaught throwable's `__toString`
+/// after the file.
 #[test]
 fn an_unwind_ends_every_frame_it_leaves_once() {
     let rec = Recording::start();
@@ -293,15 +307,29 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     assert_eq!(
         unwound(&events.between("caught", "uncaught")),
         [
+            end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
             end(0, "a", None),
             end(0, file, Some("1"))
         ]
     );
     let uncaught = observed(&events.between("uncaught", "exited"));
+    let ended = unwound(&events.between("uncaught", "exited"));
     assert_eq!(
-        unwound(&events.between("uncaught", "exited")),
-        [end(0, "b", None), end(0, "a", None), end(0, file, None)]
+        ended.get(..4).unwrap_or_default(),
+        [
+            end(0, "Exception::__construct", Some("null")),
+            end(0, "b", None),
+            end(0, "a", None),
+            end(0, file, None)
+        ]
+    );
+    // `zend_exception_error` renders the throwable through its
+    // `__toString`, which `zend_call_function` serves after the file has
+    // ended, as `observer_exception_01.phpt` shows it.
+    assert!(
+        matches!(ended.get(4..), Some([Ext(0, End(name, Some(_)))]) if name == "Exception::__toString"),
+        "{ended:?}"
     );
     let rendered = uncaught
         .iter()
@@ -313,7 +341,12 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     );
     assert_eq!(
         unwound(&events.between("exited", "end")),
-        [end(0, "b", None), end(0, "a", None), end(0, file, None)]
+        [
+            end(0, "exit", None),
+            end(0, "b", None),
+            end(0, "a", None),
+            end(0, file, None)
+        ]
     );
 }
 
@@ -322,7 +355,8 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
 /// does at `php_request_shutdown` (`observer_error_01.phpt`), and before
 /// a shutdown function runs: a fatal the loop raises, the memory limit
 /// a concatenation reaches, and one a native raises, `trigger_error`'s
-/// `E_USER_ERROR`, inside the error handler `zend_error` called; and
+/// `E_USER_ERROR`, inside the error handler `zend_error` called, where
+/// the native is the innermost open call and ended first; and
 /// the time limit reached by a function a generator's body called,
 /// which the loop raises.
 #[test]
@@ -393,10 +427,15 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             .skip(fatal.unwrap_or_default() + 1)
             .cloned()
             .collect::<Vec<_>>(),
-        [end(0, "b", None), end(0, "a", None), end(0, file, None)],
+        [
+            end(0, "trigger_error", None),
+            end(0, "b", None),
+            end(0, "a", None),
+            end(0, file, None)
+        ],
         "every open frame ended once after the fatal: {user:?}"
     );
-    for name in ["a", "b", file] {
+    for name in ["a", "b", "trigger_error", file] {
         let begun = user.iter().filter(|e| **e == begin(0, name)).count();
         let ended = user
             .iter()
@@ -427,6 +466,237 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             end(0, file, None)
         ],
         "every open frame ended once after the fatal: {resumed:?}"
+    );
+}
+
+/// `frameless_probe(string $string): bool`, frameless for one argument:
+/// whether `$string` is empty. Core declares no frameless entry this
+/// engine's compiler emits (#1810's comment on `class_exists`), so the
+/// observer's tests declare their own.
+#[php_function(frameless(1))]
+fn frameless_probe(string: PhpString) -> bool {
+    string.as_bytes().is_empty()
+}
+
+/// An extension declaring [`frameless_probe`] and nothing else.
+fn probe() -> Extension {
+    ExtensionBuilder::default()
+        .functions(vec![frameless_probe::declared()])
+        .build("observer_probe")
+}
+
+/// Natives are observed as php observes its internal functions: each
+/// asked of on its first call in the request, begun before its entry and
+/// ended after it with what it returned (`ZEND_DO_ICALL`,
+/// `Z/Zend/zend_vm_def.h:4125`, `:4140`); a native method named by its
+/// class; and the user function a native calls begun and ended inside
+/// it, here the error handler `trigger_error` calls.
+#[test]
+fn natives_are_begun_before_their_entry_and_ended_after_it() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("natives");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
+         function h($no, $str) { return f($str) === 0; }\n\
+         echo f('b'), (new Exception('m'))->getMessage();\n\
+         set_error_handler('h');\ntrigger_error('a');\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "1m");
+    let file = "file 'main.php'";
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "f"),
+            begin(0, "f"),
+            init(0, "strcmp"),
+            begin(0, "strcmp"),
+            end(0, "strcmp", Some("1")),
+            end(0, "f", Some("1")),
+            init(0, "Exception::__construct"),
+            begin(0, "Exception::__construct"),
+            end(0, "Exception::__construct", Some("null")),
+            init(0, "Exception::getMessage"),
+            begin(0, "Exception::getMessage"),
+            end(0, "Exception::getMessage", Some("'m'")),
+            init(0, "set_error_handler"),
+            begin(0, "set_error_handler"),
+            end(0, "set_error_handler", Some("null")),
+            init(0, "trigger_error"),
+            begin(0, "trigger_error"),
+            init(0, "h"),
+            begin(0, "h"),
+            begin(0, "f"),
+            begin(0, "strcmp"),
+            end(0, "strcmp", Some("0")),
+            end(0, "f", Some("0")),
+            end(0, "h", Some("bool")),
+            end(0, "trigger_error", Some("bool")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A native that throws is ended at once, before the unwind ends the
+/// frames it leaves, and is handed what the path that called it hands:
+/// no value from a call opcode (`EG(exception) ? NULL : ret`,
+/// `Z/Zend/zend_vm_def.h:4140`), also where what threw was the error
+/// handler the native's notice called, and the `null` its return value
+/// was laid down with from `zend_call_function`
+/// (`Z/Zend/zend_execute_API.c:1039`), here that error handler, a
+/// native, and from a frameless call, which php serves as a full call
+/// where the callee is observed (`zend_frameless_observed_call`,
+/// `Z/Zend/zend_execute.c:1597`).
+#[test]
+fn a_native_that_throws_is_ended_before_the_frames_the_throw_leaves() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing(), probe()])
+        .build();
+    let dir = scratch("native_throw");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\n$a = [];\nfunction f($s) { return strcmp($s, 'a'); }\n\
+         try { f($a); } catch (TypeError $e) { echo 'c'; }\n\
+         try { frameless_probe($a); } catch (TypeError $e) { echo 'd'; }\n\
+         set_error_handler('strcmp');\n\
+         try { trigger_error('x'); } catch (ArgumentCountError $e) { echo 'e'; }\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "cde");
+    let file = "file 'main.php'";
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "f"),
+            begin(0, "f"),
+            init(0, "strcmp"),
+            begin(0, "strcmp"),
+            end(0, "strcmp", None),
+            end(0, "f", None),
+            init(0, "frameless_probe"),
+            begin(0, "frameless_probe"),
+            end(0, "frameless_probe", Some("null")),
+            init(0, "set_error_handler"),
+            begin(0, "set_error_handler"),
+            end(0, "set_error_handler", Some("null")),
+            init(0, "trigger_error"),
+            begin(0, "trigger_error"),
+            begin(0, "strcmp"),
+            end(0, "strcmp", Some("null")),
+            end(0, "trigger_error", None),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// `observer_frameless.phpt`: a frameless call's native is asked of on
+/// its first call and not again, and, observed, is begun and ended on
+/// every call as a full call is.
+#[test]
+fn a_frameless_call_is_observed_as_a_full_call() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing(), probe()])
+        .build();
+    let dir = scratch("frameless");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction f($s) { return \\frameless_probe($s); }\nf('a'); f('');\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "");
+    let file = "file 'main.php'";
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "f"),
+            begin(0, "f"),
+            init(0, "frameless_probe"),
+            begin(0, "frameless_probe"),
+            end(0, "frameless_probe", Some("bool")),
+            end(0, "f", Some("bool")),
+            begin(0, "f"),
+            begin(0, "frameless_probe"),
+            end(0, "frameless_probe", Some("bool")),
+            end(0, "f", Some("bool")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// An end handler that records whether a throwable stands pending as it
+/// is called, under extension number 9.
+fn pending_init(_: &mut Observed<'_>) -> ObserverHandlers {
+    ObserverHandlers {
+        begin: None,
+        end: Some(pending_end),
+    }
+}
+
+fn pending_end(observed: &mut Observed<'_>, returned: Option<&Value>) {
+    let pending = observed.is_pending();
+    record(
+        9,
+        End(
+            format!("{} pending {pending}", observed_name(observed)),
+            returned.map(returned_name),
+        ),
+    );
+}
+
+/// The throwable a native left stands pending while its end handlers
+/// are called, as it stands in `EG(exception)` at php's
+/// `ZEND_OBSERVER_FCALL_END` (`Z/Zend/zend_vm_def.h:4140`), and as it
+/// stands for the frames the unwind then ends; it is still the caller's
+/// to catch after.
+#[test]
+fn a_natives_throwable_stands_pending_while_its_end_handlers_are_called() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .observer(pending_init)
+            .build("observer_pending")])
+        .build();
+    let dir = scratch("pending");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction f($s) { return strcmp($s, 'a'); }\n\
+         try { f([]); } catch (TypeError $e) { echo 'c'; }\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "c");
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            Ext(9, End(String::from("strcmp pending true"), None)),
+            Ext(9, End(String::from("f pending true"), None)),
+            Ext(
+                9,
+                End(
+                    String::from("file 'main.php' pending false"),
+                    Some(String::from("1"))
+                )
+            ),
+        ]
     );
 }
 
@@ -524,6 +794,9 @@ fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
             end(0, "foo", Some("42")),
             begin(0, "foo"),
             end(0, "foo", Some("1337")),
+            init(0, "Generator::getReturn"),
+            begin(0, "Generator::getReturn"),
+            end(0, "Generator::getReturn", Some("1337")),
             end(0, "run", Some("1337")),
             end(0, file, Some("1")),
         ]
@@ -534,11 +807,9 @@ fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
 /// by `foreach` (`observer_generator_04.phpt`): its first read runs it
 /// to its first `yield`, each `next()` and the `send()` is one
 /// resumption, and a read of a generator not resumed again begins
-/// nothing; and one that throws out of its body
-/// (`observer_generator_05.phpt`) is ended with nothing, as every frame
-/// the throwable leaves is.
+/// nothing but the read.
 #[test]
-fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
+fn a_generator_resumed_by_hand_pairs_each_resumption() {
     let rec = Recording::start();
     let engine = Engine::cli_builder()
         .extensions(&[TestExt::<0>::observing()])
@@ -553,6 +824,69 @@ fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
          while ($g->current() !== null) { echo $g->current(); if ($g->current() === 2) { $g->send('Boop'); } $g->next(); }\n\
          return 'Done'; }\necho run();\n",
     );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "012Done");
+    let file = "file 'main.php'";
+    let events = rec.events();
+    // A native read of the generator, begun and ended with what it gave.
+    let read = |name: &str, gave: &str| [begin(0, name), end(0, name, Some(gave))];
+    let current = |gave: &str| read("Generator::current", gave);
+    let mut expected = vec![
+        init(0, file),
+        begin(0, file),
+        init(0, "run"),
+        begin(0, "run"),
+        init(0, "Generator::current"),
+        begin(0, "Generator::current"),
+        init(0, "foo"),
+        begin(0, "foo"),
+        end(0, "foo", Some("0")),
+        end(0, "Generator::current", Some("0")),
+    ];
+    expected.extend(current("0"));
+    expected.extend(current("0"));
+    expected.extend([
+        init(0, "Generator::next"),
+        begin(0, "Generator::next"),
+        begin(0, "foo"),
+        end(0, "foo", Some("1")),
+        end(0, "Generator::next", Some("null")),
+    ]);
+    for _ in 0..3 {
+        expected.extend(current("1"));
+    }
+    expected.extend([
+        begin(0, "Generator::next"),
+        begin(0, "foo"),
+        end(0, "foo", Some("2")),
+        end(0, "Generator::next", Some("null")),
+    ]);
+    for _ in 0..3 {
+        expected.extend(current("2"));
+    }
+    expected.extend([
+        init(0, "Generator::send"),
+        begin(0, "Generator::send"),
+        begin(0, "foo"),
+        end(0, "foo", Some("null")),
+        end(0, "Generator::send", Some("null")),
+    ]);
+    expected.extend(read("Generator::next", "null"));
+    expected.extend(current("null"));
+    expected.extend([end(0, "run", Some("'Done'")), end(0, file, Some("1"))]);
+    assert_eq!(observed(&events.between("by_hand", "end")), expected);
+}
+
+/// A generator that throws out of its body (`observer_generator_05.phpt`)
+/// is ended with nothing, as every frame the throwable leaves is, after
+/// the native that made the throwable.
+#[test]
+fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_thrown");
     rec.mark("thrown");
     serve_main(
         &engine,
@@ -561,36 +895,21 @@ fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
          function run() { foreach (foo() as $v) { echo $v; } return 'unseen'; }\necho run();\n",
     );
     rec.mark("end");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "012Done");
     let file = "file 'main.php'";
     let events = rec.events();
-    assert_eq!(
-        observed(&events.between("by_hand", "thrown")),
-        [
-            init(0, file),
-            begin(0, file),
-            init(0, "run"),
-            begin(0, "run"),
-            init(0, "foo"),
-            begin(0, "foo"),
-            end(0, "foo", Some("0")),
-            begin(0, "foo"),
-            end(0, "foo", Some("1")),
-            begin(0, "foo"),
-            end(0, "foo", Some("2")),
-            begin(0, "foo"),
-            end(0, "foo", Some("null")),
-            end(0, "run", Some("'Done'")),
-            end(0, file, Some("1")),
-        ]
-    );
+    // Up to the main file's end; what renders the throwable after it,
+    // `Exception::__toString`, is the natives' (#1810).
     let thrown = observed(&events.between("thrown", "end"));
     let rendered = thrown
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: Oops!")));
     assert!(rendered.is_some(), "the throwable is rendered: {thrown:?}");
+    let file_ended = thrown
+        .iter()
+        .position(|e| *e == end(0, file, None))
+        .map_or(0, |at| at + 1);
     assert_eq!(
-        thrown[..rendered.unwrap_or_default()],
+        thrown[..file_ended],
         [
             init(0, file),
             begin(0, file),
@@ -602,6 +921,9 @@ fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
             begin(0, "foo"),
             end(0, "foo", Some("1")),
             begin(0, "foo"),
+            init(0, "Exception::__construct"),
+            begin(0, "Exception::__construct"),
+            end(0, "Exception::__construct", Some("null")),
             end(0, "foo", None),
             end(0, "run", None),
             end(0, file, None),
@@ -642,18 +964,33 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
         [
             init(0, file),
             begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
             fiber_init(0, &fiber("init")),
             switch(0, "main running", &fiber("init")),
             init(0, closure),
             begin(0, closure),
             init(0, "inner"),
             begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
             switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
             switch(0, "main running", &fiber("suspended")),
+            end(0, "Fiber::suspend", Some("'r'")),
             end(0, "inner", Some("'ri'")),
             end(0, closure, Some("'ri'")),
             switch(0, &fiber("dead"), "main suspended"),
             destroy(0, &fiber("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("'ri'")),
             end(0, file, Some("1")),
         ]
     );
@@ -663,10 +1000,8 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
 /// fiber suspended inside `inner`, its frame open at the same height on
 /// the fiber's stack as `declined`'s on the request's, which the
 /// observer declined and never begins, so `declined`'s return ends
-/// nothing; `inner` is ended inside the fiber with what it returned.
-/// A fiber inside a fiber switches with its resumer, not with the
-/// request's own stack, and each is destroyed once its resumer is served
-/// again (`observer_fiber_03.phpt`).
+/// nothing; `inner` is ended inside the fiber with what it returned, and
+/// the `Fiber::suspend` it waits in with what the resume sent.
 #[test]
 fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     let rec = Recording::start();
@@ -682,6 +1017,62 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
          $fiber = new Fiber(function () { return inner(); });\n\
          $fiber->start();\necho declined();\n$fiber->resume();\necho $fiber->getReturn();\n",
     );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "di");
+    let file = "file 'main.php'";
+    let same_height = observed(&rec.events().between("same_height", "end"));
+    let (fiber, closure) = one_named_in(&same_height);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    assert_eq!(
+        same_height,
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
+            switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "declined"),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
+            end(0, "inner", Some("'i'")),
+            end(0, closure, Some("'i'")),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("'i'")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A fiber inside a fiber switches with its resumer, not with the
+/// request's own stack, each `Fiber::start`, `suspend` and `resume` is
+/// ended on the stack it was begun on, and each fiber is destroyed once
+/// its resumer is served again (`observer_fiber_03.phpt`).
+#[test]
+fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_nested");
     rec.mark("nested");
     let nested = serve_main(
         &engine,
@@ -692,38 +1083,9 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
          $fiber->start();\necho 'm';\n$fiber->resume();\necho $fiber->getReturn();\n",
     );
     rec.mark("end");
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "di");
     assert_eq!(String::from_utf8_lossy(&nested.stdout), "m1");
     let file = "file 'main.php'";
-    let events = rec.events();
-
-    let same_height = observed(&events.between("same_height", "nested"));
-    let (fiber, closure) = one_named_in(&same_height);
-    let fiber = |status: &str| format!("{fiber} {status}");
-    let closure = closure.as_str();
-    assert_eq!(
-        same_height,
-        [
-            init(0, file),
-            begin(0, file),
-            fiber_init(0, &fiber("init")),
-            switch(0, "main running", &fiber("init")),
-            init(0, closure),
-            begin(0, closure),
-            init(0, "inner"),
-            begin(0, "inner"),
-            switch(0, &fiber("running"), "main suspended"),
-            init(0, "declined"),
-            switch(0, "main running", &fiber("suspended")),
-            end(0, "inner", Some("'i'")),
-            end(0, closure, Some("'i'")),
-            switch(0, &fiber("dead"), "main suspended"),
-            destroy(0, &fiber("dead")),
-            end(0, file, Some("1")),
-        ]
-    );
-
-    let nested = observed(&events.between("nested", "end"));
+    let nested = observed(&rec.events().between("nested", "end"));
     let (fibers, closures) = named_in(&nested);
     assert!(
         fibers.len() == 2 && closures.len() == 2,
@@ -740,30 +1102,53 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
         [
             init(0, file),
             begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
             fiber_init(0, &outer("init")),
             switch(0, "main running", &outer("init")),
             init(0, outer_closure),
             begin(0, outer_closure),
             init(0, "in1"),
             begin(0, "in1"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            begin(0, "Fiber::start"),
             fiber_init(0, &inner("init")),
             switch(0, &outer("running"), &inner("init")),
             init(0, inner_closure),
             begin(0, inner_closure),
             init(0, "in2"),
             begin(0, "in2"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
             switch(0, &inner("running"), &outer("suspended")),
+            end(0, "Fiber::start", Some("null")),
+            begin(0, "Fiber::suspend"),
             switch(0, &outer("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
             switch(0, "main running", &outer("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
+            begin(0, "Fiber::resume"),
             switch(0, &outer("running"), &inner("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
             end(0, "in2", Some("2")),
             end(0, inner_closure, Some("2")),
             switch(0, &inner("dead"), &outer("suspended")),
             destroy(0, &inner("dead")),
+            end(0, "Fiber::resume", Some("null")),
             end(0, "in1", Some("1")),
             end(0, outer_closure, Some("1")),
             switch(0, &outer("dead"), "main suspended"),
             destroy(0, &outer("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("1")),
             end(0, file, Some("1")),
         ]
     );
@@ -814,6 +1199,7 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
             end(0, &closure, None),
             switch(0, &format!("{fiber} dead"), "main suspended"),
             destroy(0, &format!("{fiber} dead")),
+            end(0, "Fiber::resume", None),
             end(0, "resumer", None),
             end(0, "file 'main.php'", None),
         ],
@@ -860,15 +1246,24 @@ fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
         [
             init(0, file),
             begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
             fiber_init(0, &fiber("init")),
             switch(0, "main running", &fiber("init")),
             init(0, closure),
             begin(0, closure),
             init(0, "inner"),
             begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
             switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
             end(0, file, Some("1")),
             switch(0, "main running", &fiber("suspended destroyed")),
+            end(0, "Fiber::suspend", None),
             end(0, "inner", None),
             end(0, closure, None),
             switch(0, &fiber("dead destroyed"), "main suspended"),

@@ -1,6 +1,6 @@
 //! Seam 9, the observer (design §4.3 row 9 and "What a caller of seam 9
-//! must know", revision 79): php's observer interface for user calls,
-//! `Z/Zend/zend_observer.c`.
+//! must know", revision 79): php's observer interface for user calls and
+//! natives, `Z/Zend/zend_observer.c`.
 //!
 //! An extension declares an observer on its [`Extension`] value
 //! ([`ExtensionBuilder::observer`]), as php's `MINIT` calls
@@ -19,15 +19,37 @@
 //!   returned (`ZEND_OBSERVER_FCALL_END`, `Z/Zend/zend_vm_def.h:4581`),
 //!   and by an unwind with nothing, in the uncaught arm of
 //!   `zend_dispatch_try_catch_finally_helper` (`:8157-8161`), which is
-//!   `handlers::unwind_from`.
+//!   `handlers::unwind_from`;
+//! - [`native_call`] and [`native_returned`], around a native's entry in
+//!   `Request::serve_native`, which every call of a native reaches: the
+//!   call opcodes, as `ZEND_DO_ICALL` begins the call before
+//!   `fbc->internal_function.handler` and ends it after
+//!   (`Z/Zend/zend_vm_def.h:4125`, `:4140`), a native a native calls, as
+//!   `zend_call_function` does (`Z/Zend/zend_execute_API.c:1020`,
+//!   `:1039`), and a frameless call. php's frameless handler tests the
+//!   callee's slot and, unless it reads none-observed, falls back to a
+//!   full call, `zend_frameless_observed_call`
+//!   (`Z/Zend/zend_vm_def.h:9775`, `Z/Zend/zend_execute.c:1577-1613`),
+//!   as design §4.3 says a caller of seam 9 must know; here the
+//!   frameless handlers lay a frameless call down as a full call already,
+//!   so it is observed as one with no test of its own.
+//!
+//! Both homes stand where no tier's type parameter reaches, so a
+//! stepping host's [`crate::tier::step`] and [`crate::tier::unwind`]
+//! raise them as the loop does (#1813).
 //!
 //! That is the plain test #1808 measured, which #1954 ruled stands: the test
-//! lives in these two functions alone, so php's observer-specialised call
+//! lives in these functions alone, so php's observer-specialised call
 //! and return handlers, the escape design §4.3 names, would change no
 //! item of the seam. Past the word, out of line and cold, a frame's
 //! function is resolved on its first call into a slot in the runtime
 //! cache of the op array it serves ([`Slot`]), never indexed by the
-//! function's identity number, which is sparse: every observer asked in
+//! function's identity number, which is sparse; a native's slot stands in
+//! the request's table of natives' slots at the native's place among the
+//! natives, php's internal runtime cache
+//! (`zend_observer_fcall_internal_function_extension`,
+//! `zend_reset_internal_run_time_cache` at each request's start,
+//! `Z/Zend/zend.c:1329`). Every observer is asked in
 //! declaration order, each answering a begin handler, an end handler,
 //! both or neither ([`ObserverHandlers`]), php's
 //! `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`). There is no limit on how many. Begin
@@ -63,9 +85,8 @@
 //! is dead ends what its chain still holds first.
 //!
 //! What is not here yet, each built on the same slot and chain:
-//! natives (#1810), the other notices and adding and removing handlers
-//! while a request is served (#1812), the stepping function's events
-//! (#1813), and a frame reference a handler may keep (#1827).
+//! the other notices and adding and removing handlers while a request
+//! is served (#1812), and a frame reference a handler may keep (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
@@ -76,11 +97,53 @@ use std::sync::Arc;
 use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
+use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, Value};
 
-/// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once of each function, on its first
-/// call in the request, and of each included, evaluated or main file's
+/// What an observer observes, php's `zend_execute_data` of a call: a
+/// frame the loop serves, a function's or an included, evaluated or main
+/// file's, or a native's call. The open chain holds these, and a
+/// handler's [`Observed`] reads the one it is handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Observable {
+    /// A frame the loop serves, whose slot stands in its op array's
+    /// runtime cache.
+    Code(FrameRef),
+    /// A native's call, served while it stands on the call stack.
+    Native(NativeCall),
+}
+
+/// One native's call begun with an end handler: the native, and the
+/// number the request gave the call as it began it, which tells it
+/// apart from every other call of the same native still open, as
+/// php's `execute_data == EG(current_observed_frame)` tells frames
+/// apart by their address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeCall {
+    pub(crate) function: Function,
+    number: u64,
+}
+
+/// What a native's end handlers are handed where a throwable stands,
+/// which php decides by the path that called it: the call opcodes hand
+/// `NULL` while `EG(exception)` holds one, whether the native threw it or
+/// a handler it called did, `EG(exception) ? NULL : ret`
+/// (`Z/Zend/zend_vm_def.h:4140`), while `zend_call_function`
+/// (`Z/Zend/zend_execute_API.c:1039`) and an observed frameless call
+/// (`Z/Zend/zend_execute.c:1597`) hand the return value whatever stands,
+/// which holds the `null` it was laid down with where the native threw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnThrow {
+    /// No value, as a call opcode hands.
+    Nothing,
+    /// The return value, `null` where the native threw.
+    ReturnValue,
+}
+
+/// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once
+/// of each function, user or native, on its first call in the request,
+/// and of each included, evaluated or main file's
 /// frame on its activation, what handlers observe it; the default,
 /// neither, declines it, as php's answers `{NULL, NULL}`.
 pub type ObserverInit = fn(&mut Observed<'_>) -> ObserverHandlers;
@@ -90,7 +153,8 @@ pub type ObserverInit = fn(&mut Observed<'_>) -> ObserverHandlers;
 pub type BeginHandler = fn(&mut Observed<'_>);
 
 /// `zend_observer_fcall_end_handler`: a frame ended, with what it
-/// returned, or `None` where an unwind or a fatal left it.
+/// returned, or `None` where an unwind or a fatal left it or a native a
+/// call opcode served left a throwable standing ([`OnThrow`]).
 pub type EndHandler = fn(&mut Observed<'_>, Option<&Value>);
 
 /// What an [`ObserverInit`] answers of one function,
@@ -103,11 +167,12 @@ pub struct ObserverHandlers {
 
 /// The frame an observer is handed, borrowed for the handler's span
 /// alone (design §4.3 row 9): the request through `Deref`, and reads of
-/// the one frame observed, which no reference outlives. A frame reference that
-/// can be kept is #1827's.
+/// the one frame observed, a function's, a file's or a native's call,
+/// which no reference outlives. A frame reference that can be kept is
+/// #1827's.
 pub struct Observed<'a> {
     req: &'a mut Request,
-    frame: FrameRef,
+    at: Observable,
 }
 
 impl Deref for Observed<'_> {
@@ -124,35 +189,46 @@ impl DerefMut for Observed<'_> {
 }
 
 impl Observed<'_> {
-    /// `EX(func)` where the frame serves a function or a method; `None`
-    /// for an included, evaluated or main file's op array, which php
-    /// names by its `filename` alone.
+    /// `EX(func)` where the frame serves a function, a method or a
+    /// native; `None` for an included, evaluated or main file's op
+    /// array, which php names by its `filename` alone.
     #[must_use]
     pub fn function(&self) -> Option<Function> {
-        self.req.frame_function(self.frame)
+        match self.at {
+            Observable::Code(frame) => self.req.frame_function(frame),
+            Observable::Native(call) => Some(call.function),
+        }
     }
 
-    /// `EX(func)->common.scope`: the class a method is declared in, the
-    /// one a closure is bound to, and the includer's for a file's frame.
+    /// `EX(func)->common.scope`: the class a method, native or not, is
+    /// declared in, the one a closure is bound to, and the includer's
+    /// for a file's frame.
     #[must_use]
     pub fn function_scope(&self) -> Option<ClassId> {
-        self.req.frame_scope(self.frame)
+        match self.at {
+            Observable::Code(frame) => self.req.frame_scope(frame),
+            Observable::Native(call) => self.req.method_class(call.function),
+        }
     }
 
     /// `EX(func)->op_array.filename`: the file the op array was compiled
-    /// from, `… : eval()'d code` for an evaluated string's.
+    /// from, `… : eval()'d code` for an evaluated string's; empty for a
+    /// native, which no file holds.
     #[must_use]
     pub fn filename(&self) -> &[u8] {
-        self.req.frame_filename(self.frame).unwrap_or_default()
+        match self.at {
+            Observable::Code(frame) => self.req.frame_filename(frame).unwrap_or_default(),
+            Observable::Native(_) => &[],
+        }
     }
 }
 
-/// One op array's observer slot in a request's runtime cache, php's
+/// One op array's or one native's observer slot, php's
 /// `ZEND_OBSERVER_DATA`: unresolved until the first call, then the
 /// handlers every observer answered, or declined where none answered
-/// any (`ZEND_OBSERVER_NONE_OBSERVED`). Held where the op array's
-/// runtime cache is, so it lives as long as php's: a function's for the
-/// request, a file's for its activation.
+/// any (`ZEND_OBSERVER_NONE_OBSERVED`). Held where php's runtime cache
+/// is, so it lives as long as php's: a function's for the request, a
+/// file's for its activation, a native's for the request.
 #[derive(Debug, Clone, Default)]
 pub(crate) enum Slot {
     #[default]
@@ -175,7 +251,7 @@ pub(crate) struct Installed {
 #[allow(clippy::inline_always)]
 pub(crate) fn call(req: &mut Request, frame: FrameRef) {
     if req.shared.observers != 0 {
-        begin(req, frame);
+        begin(req, Observable::Code(frame));
     }
 }
 
@@ -186,7 +262,44 @@ pub(crate) fn call(req: &mut Request, frame: FrameRef) {
 #[allow(clippy::inline_always)]
 pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
     if req.shared.observers != 0 {
-        end(req, frame, value);
+        end(req, Observable::Code(frame), value);
+    }
+}
+
+/// The call home of a native: `function`'s call on top of the call stack
+/// and about to be served, `ZEND_OBSERVER_FCALL_BEGIN(call)` before
+/// `fbc->internal_function.handler` (`Z/Zend/zend_vm_def.h:4125`). The
+/// call begun with an end handler is what [`native_returned`] is handed;
+/// none where no observer is declared, after one load and one compare,
+/// or where nothing observes the call's end.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn native_call(req: &mut Request, function: Function) -> Option<NativeCall> {
+    if req.shared.observers != 0 {
+        begin_native(req, function)
+    } else {
+        None
+    }
+}
+
+/// The return home of a native: the call [`native_call`] began with an
+/// end handler ended, `served` being what the entry answered and
+/// `deferred` the throwable a stream raised while it ran, handed what
+/// the native returned, or, where a throwable stands, what `on_throw`
+/// says the path that called it hands (`ZEND_OBSERVER_FCALL_END`,
+/// `Z/Zend/zend_vm_def.h:4140`). One branch on what [`native_call`]
+/// answered, and no load.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn native_returned(
+    req: &mut Request,
+    begun: Option<NativeCall>,
+    served: &Result<Value, Thrown>,
+    deferred: Option<&Thrown>,
+    on_throw: OnThrow,
+) {
+    if let Some(begun) = begun {
+        end_native(req, begun, served, deferred, on_throw);
     }
 }
 
@@ -196,15 +309,17 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
 /// call.
 #[cold]
 #[inline(never)]
-fn begin(req: &mut Request, frame: FrameRef) {
-    let generator = req
-        .frame_function(frame)
-        .and_then(|function| req.function_decl(function))
-        .is_some_and(|decl| decl.is_generator);
-    if generator {
-        return;
+fn begin(req: &mut Request, at: Observable) {
+    if let Observable::Code(frame) = at {
+        let generator = req
+            .frame_function(frame)
+            .and_then(|function| req.function_decl(function))
+            .is_some_and(|decl| decl.is_generator);
+        if generator {
+            return;
+        }
     }
-    begin_prechecked(req, frame);
+    let _ = begin_prechecked(req, at);
 }
 
 /// The resumption home: a generator's `frame` pushed again by
@@ -216,8 +331,14 @@ fn begin(req: &mut Request, frame: FrameRef) {
 #[allow(clippy::inline_always)]
 pub(crate) fn generator_resumed(req: &mut Request, frame: FrameRef) {
     if req.shared.observers != 0 {
-        begin_prechecked(req, frame);
+        begin_resumed(req, frame);
     }
+}
+
+#[cold]
+#[inline(never)]
+fn begin_resumed(req: &mut Request, frame: FrameRef) {
+    let _ = begin_prechecked(req, Observable::Code(frame));
 }
 
 /// The suspension home: a generator's `frame` about to leave the stack
@@ -240,40 +361,59 @@ pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: P
 fn end_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
     let value = crate::generator::value(req, generator);
     req.addref(&value);
-    end(req, frame, Some(&value));
+    end(req, Observable::Code(frame), Some(&value));
     req.release(value);
 }
 
-/// `zend_observer_fcall_begin_prechecked` (`Z/Zend/zend_observer.c:257-281`):
-/// the frame's slot resolved on its first call, the frame put on the
-/// open chain where an end handler observes it, and the begin handlers
-/// called in declaration order.
-#[cold]
-#[inline(never)]
-fn begin_prechecked(req: &mut Request, frame: FrameRef) {
-    let slot = match req.observer_slot(frame) {
-        Slot::Unresolved => resolve(req, frame),
+/// `zend_observer_fcall_begin_prechecked` (`Z/Zend/zend_observer.c:257-281`)
+/// past the generator's test: the slot resolved where it is not yet, the
+/// call put on the open chain where an end handler observes it, which is
+/// the answer, and the begin handlers called in declaration order.
+fn begin_prechecked(req: &mut Request, at: Observable) -> bool {
+    let slot = match req.observer_slot(at) {
+        Slot::Unresolved => resolve(req, at),
         resolved => resolved,
     };
     let Slot::Installed(handlers) = slot else {
-        return;
+        return false;
     };
-    if !handlers.end.is_empty() {
-        req.open_observed(frame);
+    let opened = !handlers.end.is_empty();
+    if opened {
+        req.open_observed(at);
     }
     for begin in &handlers.begin {
-        begin(&mut Observed { req, frame });
+        begin(&mut Observed { req, at });
     }
+    opened
+}
+
+/// [`begin`] over a native's call: none for a native with no slot, a
+/// call's trampoline, which php leaves unobserved
+/// (`ZEND_ACC_CALL_VIA_TRAMPOLINE` in
+/// `zend_observer_fcall_has_no_observers`,
+/// `Z/Zend/zend_observer.h:96-112`); otherwise the call numbered and
+/// begun, and answered where it was opened.
+#[cold]
+#[inline(never)]
+fn begin_native(req: &mut Request, function: Function) -> Option<NativeCall> {
+    if !req.has_native_slot(function) {
+        return None;
+    }
+    let call = NativeCall {
+        function,
+        number: req.number_native_call(),
+    };
+    begin_prechecked(req, Observable::Native(call)).then_some(call)
 }
 
 /// `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`): every observer asked of the frame in
 /// declaration order, and what they answered written into its slot.
-fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
+fn resolve(req: &mut Request, at: Observable) -> Slot {
     let shared = Arc::clone(&req.shared);
     let mut begin = Vec::new();
     let mut end = Vec::new();
     for init in shared.supplied.observers.iter() {
-        let handlers = init(&mut Observed { req, frame });
+        let handlers = init(&mut Observed { req, at });
         begin.extend(handlers.begin);
         end.extend(handlers.end);
     }
@@ -286,7 +426,7 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
             end: end.into_boxed_slice(),
         }))
     };
-    req.set_observer_slot(frame, slot.clone());
+    req.set_observer_slot(at, slot.clone());
     slot
 }
 
@@ -297,20 +437,56 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
 /// handlers are called, so a fatal inside one does not end it twice.
 #[cold]
 #[inline(never)]
-fn end(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    if req.close_observed(frame) {
-        call_end_handlers(req, frame, value);
+fn end(req: &mut Request, at: Observable, value: Option<&Value>) {
+    if req.close_observed(at) {
+        call_end_handlers(req, at, value);
+    }
+}
+
+/// [`end`] over a native's call begun with an end handler: ended where
+/// it is still the innermost open, which a fatal inside it leaves it
+/// not, [`end_all`] having ended it. The throwable the native left, its
+/// own or a stream's, stands in the pending slot while the end handlers
+/// are called, as it stands in `EG(exception)` at php's
+/// `ZEND_OBSERVER_FCALL_END`, so a handler reads it there and a call it
+/// makes returns at once ([`Request::while_pending`]).
+#[cold]
+#[inline(never)]
+fn end_native(
+    req: &mut Request,
+    call: NativeCall,
+    served: &Result<Value, Thrown>,
+    deferred: Option<&Thrown>,
+    on_throw: OnThrow,
+) {
+    let at = Observable::Native(call);
+    let returned = served.as_ref().ok();
+    let standing = served.as_ref().err().or(deferred);
+    let null = Value::null();
+    let value = match on_throw {
+        OnThrow::Nothing => returned.filter(|_| standing.is_none() && !req.is_pending()),
+        OnThrow::ReturnValue => Some(returned.unwrap_or(&null)),
+    };
+    let Some(thrown) = standing else {
+        end(req, at, value);
+        return;
+    };
+    if req
+        .while_pending(thrown, |req| end(req, at, value))
+        .is_none()
+    {
+        end(req, at, value);
     }
 }
 
 /// `call_end_observers` (`Z/Zend/zend_observer.c:296-311`): the end
-/// handlers of `frame`'s slot, called in the order it holds them.
-fn call_end_handlers(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    let Slot::Installed(handlers) = req.observer_slot(frame) else {
+/// handlers of `at`'s slot, called in the order it holds them.
+fn call_end_handlers(req: &mut Request, at: Observable, value: Option<&Value>) {
+    let Slot::Installed(handlers) = req.observer_slot(at) else {
         return;
     };
     for end in &handlers.end {
-        end(&mut Observed { req, frame }, value);
+        end(&mut Observed { req, at }, value);
     }
 }
 
@@ -346,8 +522,8 @@ pub(crate) fn end_all(req: &mut Request) {
     if req.shared.observers == 0 {
         return;
     }
-    for frame in req.take_observed() {
-        call_end_handlers(req, frame, None);
+    for at in req.take_observed() {
+        call_end_handlers(req, at, None);
     }
 }
 
