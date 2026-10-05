@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::Subset;
-use crate::oracle::{self, Pin};
+use crate::oracle::Pin;
+use crate::oracle::hosts::FPM;
 
 /// Where the tests stand in the tree, the directory `FPM\Tester` looks
 /// beside.
@@ -29,7 +30,7 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     let host = if control || binary == pin.oracle.path {
         pin.sapi.fpm.as_ref().map(|fpm| fpm.path.clone())
     } else {
-        Some(binary.with_file_name(oracle::ENGINE_FPM))
+        Some(binary.with_file_name(FPM.binary))
     };
     host.filter(|path| path.is_file())
 }
@@ -47,7 +48,7 @@ pub(crate) fn place(subset: &Subset, host: Option<&Path>) -> Result<()> {
         let Some(parent) = place.dir.parent() else {
             continue;
         };
-        let link = parent.join(oracle::ENGINE_FPM);
+        let link = parent.join(FPM.binary);
         match std::fs::remove_file(&link) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

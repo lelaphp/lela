@@ -27,6 +27,7 @@ use crate::crosscheck;
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Seam, Week};
+use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
@@ -1493,7 +1494,9 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
 /// change to the roots never restores a checkout made by the old ones.
 /// Beside the checkout, `targets`: where a workspace keeps the targets
 /// under the pin, relative to its root, which CI keeps between runs so an
-/// engine's reading is held to its subset's target (#1733).
+/// engine's reading is held to its subset's target (#1733); and `hosts`,
+/// each host the lane hands a test to by its crate, package and binary
+/// ([`HOSTS`]), which CI builds (#1908).
 fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let patterns: Vec<String> = phpt::ROOTS.iter().map(|root| root.pattern()).collect();
@@ -1510,6 +1513,11 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
             "patterns": patterns,
             "key": key,
             "targets": targets,
+            "hosts": HOSTS.map(|host| json!({
+                "crate": host.krate,
+                "package": host.package(),
+                "binary": host.binary,
+            })),
         }))?,
         Table::Md => {
             let mut out = String::new();
@@ -1521,6 +1529,8 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
             let _ = writeln!(out, "| patterns | {} |", cell(&patterns.join(" ")));
             let _ = writeln!(out, "| key | {key} |");
             let _ = writeln!(out, "| targets | {} |", cell(&targets));
+            let packages: Vec<String> = HOSTS.map(EngineHost::package).into();
+            let _ = writeln!(out, "| hosts | {} |", cell(&packages.join(" ")));
             out
         }
     })
