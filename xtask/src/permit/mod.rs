@@ -32,7 +32,8 @@
 //! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
 //! region-body rule in [`region`],
 //! the sensor over `harness.self`'s files around a `Bash` call in
-//! [`after`], the `unless` qualifier's sensor in [`unless`], the `exempt_label`
+//! [`after`], whether a line can write one of them in [`writes`], the
+//! `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
@@ -51,6 +52,7 @@ mod label;
 mod region;
 mod rules;
 mod unless;
+mod writes;
 
 pub use adapters::{Adapter, run};
 pub use after::after;

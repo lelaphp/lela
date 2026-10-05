@@ -1,0 +1,181 @@
+//! What Zend asks of main's streams (design §4.3 seam 5): the
+//! [`StreamHooks`] `php_module_startup` points `zend_stream_open_function`
+//! and `zend_resolve_path` at, which `ext/standard` hands the engine
+//! with `ExtensionBuilder::stream_hooks`, and the CLI's standard handles
+//! `do_cli` registers and reads.
+
+use crate::api::abi::{IncludeSource, StreamHooks};
+
+use crate::api::raising::Thrown;
+use crate::api::request::{Request, ScannerFile, Streams, Unresolved, UrlStat, scheme_length};
+use crate::api::values::{Resource, Value};
+use crate::state::Layer;
+use crate::streams::{Located, OpenOptions, StreamLayer};
+
+/// The stream layer's hooks, which `ext/standard` hands the engine with
+/// `ExtensionBuilder::stream_hooks` as php's `basic_functions` registers
+/// the plain files wrapper in its `MINIT`.
+pub const STREAM_HOOKS: StreamHooks = StreamHooks {
+    open,
+    resolve_path,
+    spend,
+    standard_handles: crate::streams::standard_handles,
+    get_line,
+};
+
+/// `php_stream_open_for_zend_ex` and `zend_stream_fixup` for an include
+/// ([`ScannerFile`]): the file read whole, with the `*opened_path` its
+/// opener set. A read that bailed out leaves the file open, as
+/// `zend_bailout` leaves `zend_destroy_file_handle` unreached: its
+/// stream stands among the request's resources, which close it at
+/// shutdown.
+fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown> {
+    let Some(mut fh) = ScannerFile::open(req, path)? else {
+        return Ok(None);
+    };
+    let read = match fh.load(req) {
+        Ok(Some(source)) => Ok(Some(source.to_vec())),
+        Ok(None) => Ok(None),
+        Err(thrown) => Err(thrown),
+    };
+    let opened_path = fh.opened_path().map(|p| p.as_bytes().to_vec());
+    if !req.bailing_out() {
+        fh.destroy(req);
+    }
+    read.map(|source| {
+        source.map(|source| IncludeSource {
+            source,
+            opened_path,
+        })
+    })
+}
+
+/// The stream opcache's `zend_stream_open` of a file it holds opens and
+/// frees: a resource of the `stream` type made and released, its number
+/// spent.
+fn spend(req: &mut Request) {
+    let kind = req.types().stream;
+    if let Ok(opened) = Resource::bare(req, kind) {
+        req.release(opened.as_value());
+    }
+}
+
+/// `php_stream_get_line` on the stream `value` names, as `do_cli` reads
+/// `STDIN` for `-R`, `-F` and `-B`.
+fn get_line(req: &mut Request, value: &Value) -> Option<Vec<u8>> {
+    let stream = req.stream_of(value)?;
+    let line = stream.get_line(req, None).ok().flatten()?;
+    Some(line.as_bytes().to_vec())
+}
+
+/// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's
+/// `include_path`: a path with a scheme is resolved by its wrapper,
+/// the plain files wrapper's to its realpath and any other's to
+/// nothing; a path that begins `./` or `../`, or is absolute, or is
+/// asked with no `include_path` at all, is `tsrm_realpath` over
+/// itself; any other is tried under each entry of `include_path` in
+/// turn, an entry that is a stream wrapper's URL (whose `://` is no
+/// separator) found by that wrapper's `url_stat` and answered as the
+/// URL, and last under the directory of the file being served
+/// (`zend_get_executed_filename`), which is how a file beside the
+/// primary file is found from another working directory.
+/// `tsrm_realpath` is the kernel's canonical path against the
+/// request's working directory ([`Request::realpath`]), and here a
+/// regular file alone, which is the `S_ISREG` the plain-files wrapper
+/// holds an include to when it opens; php reports a directory with
+/// whatever `errno` the failed open left, and this engine as a file
+/// that is not there. The `Err` is the last attempt's reason, which
+/// the stream warning prints, or the throwable a wrapper's
+/// `url_stat` raised, which ends the walk with nothing reported
+/// (`if (EG(exception)) return NULL`).
+///
+/// ```php
+/// class W { public $context; function url_stat($path, $flags) { throw new Exception("stat failed"); } }
+/// stream_wrapper_register("test", "W");
+/// set_include_path("test://foo");
+/// try { include "missing.php"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// stat failed
+/// ```
+fn resolve_path(req: &mut Request, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
+    let not_found = || Unresolved::Missing(std::io::Error::from(std::io::ErrorKind::NotFound));
+    let for_include = OpenOptions {
+        for_include: true,
+        report: false,
+        ..OpenOptions::default()
+    };
+    if scheme_length(written).is_some() {
+        return match req.locate_for(written, for_include) {
+            (Located::Plain, local) => req.realpath_file(&local).map_err(Unresolved::Missing),
+            _ => Err(not_found()),
+        };
+    }
+    let include_path = req.ini_get(b"include_path").unwrap_or_default().to_vec();
+    let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
+    if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
+        return req.realpath_file(written).map_err(Unresolved::Missing);
+    }
+    let mut last = not_found();
+    let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
+    if let Some(file) = req.current_file()
+        && let Some(slash) = file.iter().rposition(|b| *b == b'/')
+        && slash > 0
+    {
+        entries.push(file[..slash].to_vec());
+    }
+    for entry in entries {
+        let mut candidate = entry.clone();
+        candidate.push(b'/');
+        candidate.extend_from_slice(written);
+        if scheme_length(&entry).is_some() {
+            match req.locate_for(&candidate, for_include) {
+                (Located::Nothing, _) => continue,
+                (Located::Plain, local) => match req.realpath_file(&local) {
+                    Ok(path) => return Ok(path),
+                    Err(reason) => last = Unresolved::Missing(reason),
+                },
+                _ => match req.url_stat_quiet(&candidate, false).map(UrlStat::found) {
+                    Ok(Some(_)) => return Ok(candidate),
+                    Err(thrown) if thrown.exception().is_some() => {
+                        return Err(Unresolved::Threw(thrown));
+                    }
+                    Ok(None) | Err(_) => {}
+                },
+            }
+            continue;
+        }
+        match req.realpath_file(&candidate) {
+            Ok(path) => return Ok(path),
+            Err(reason) => last = Unresolved::Missing(reason),
+        }
+    }
+    Err(last)
+}
+
+/// `include_path`'s entries as `php_resolve_path` walks them: split at
+/// `:`, where an entry that begins with a wrapper's scheme keeps its
+/// `://`, and `.://` or `..://` is no scheme.
+fn include_path_entries(include_path: &[u8]) -> Vec<Vec<u8>> {
+    let mut entries = Vec::new();
+    let mut rest = include_path;
+    while !rest.is_empty() {
+        let n = rest
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+            .count();
+        let skip = if n > 1 && rest[n..].starts_with(b"://") && &rest[..n] != b".." {
+            n + 3
+        } else {
+            0
+        };
+        if let Some(at) = rest[skip..].iter().position(|b| *b == b':') {
+            entries.push(rest[..skip + at].to_vec());
+            rest = &rest[skip + at + 1..];
+        } else {
+            entries.push(rest.to_vec());
+            rest = &[];
+        }
+    }
+    entries
+}

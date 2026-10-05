@@ -20,7 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{Request, Unresolved};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
 };
@@ -270,7 +270,29 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         idle.entry(key).or_default().push(entry);
         None
     }
+
+    /// Every idle entry, with its key, taken out for the caller to close
+    /// outside the `Mutex`: what an extension's engine-end function does
+    /// with its pools (ADR-0010), and the engine with its own before any
+    /// engine-end function, as `zend_shutdown` destroys
+    /// `EG(persistent_list)` before `zend_destroy_modules`
+    /// (`Z/Zend/zend.c:1166-1170`).
+    #[must_use]
+    pub fn drain(&self) -> Vec<(K, V)>
+    where
+        K: Clone,
+    {
+        self.idle()
+            .drain()
+            .flat_map(|(key, entries)| entries.into_iter().map(move |entry| (key.clone(), entry)))
+            .collect()
+    }
 }
+
+/// php's `EG(persistent_list)`, the engine's [`Pool`] the stream layer
+/// lends its persistent entries from, each a value of the layer's own
+/// type under php's key ([`Request::persistent_list`]).
+pub type PersistentList = Pool<Vec<u8>, Box<dyn Any + Send>>;
 
 /// The entries of a [`Pool`] one request holds, each under php's key from
 /// the ask that took it out or opened it to the request's end: a second
@@ -342,6 +364,10 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+/// The function of one end phase, `RSHUTDOWN`, `deactivate`,
+/// `post_deactivate` or the engine end: served in reverse bundle order,
+/// each in a `zend_try` of its own (ADR-0010).
+pub(crate) type EndFunction = fn(&mut Request);
 /// The interrupt hook, php's `zend_interrupt_function`.
 pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The hook `ZEND_TICKS` serves, a function php's `php_add_tick_function`
@@ -433,6 +459,55 @@ pub enum PostStartup {
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+
+/// What the engine asks of the stream layer above it, `php_streams`
+/// (design §4.3 seam 5), handed with [`ExtensionBuilder::stream_hooks`]:
+/// php's `zend_stream_open_function` and `zend_resolve_path` as
+/// `php_module_startup` points them at main's streams, opcache's open of
+/// a file it holds, and the standard streams `do_cli` registers and reads
+/// stdin through. With none the engine is Zend alone: an include opens a
+/// plain file and nothing else, a path resolves by `realpath(3)`
+/// (`zend_resolve_path_func`), and no standard stream is registered.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamHooks {
+    /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
+    /// STREAM_OPEN_FOR_INCLUDE)` and the whole read after it: the file a
+    /// path names read through its wrapper, with the `*opened_path` its
+    /// opener set; `None` for the open or the read that failed, which
+    /// warned. The `Err` is what the open threw.
+    pub open: StreamOpenHook,
+    /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
+    /// extension's own ([`ExtensionBuilder::resolve_path`]).
+    pub resolve_path: fn(&mut Request, &[u8]) -> Result<Vec<u8>, Unresolved>,
+    /// The stream opcache's `zend_stream_open` of a file it holds makes
+    /// and frees: its resource's number spent.
+    pub spend: fn(&mut Request),
+    /// `cli_register_file_handles`: the streams over the host's three
+    /// standard handles, `STDIN`, `STDOUT` and `STDERR` in that order, or
+    /// `None` where one of them could not be opened; with `true` once the
+    /// host's stdin was replaced under them, as phpdbg's `run <file`
+    /// replaces it.
+    pub standard_handles: StandardHandlesHook,
+    /// `php_stream_get_line` on the stream `value` names, as `do_cli`
+    /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
+    /// its end, or where it names no stream.
+    pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
+}
+
+/// [`StreamHooks::open`].
+pub type StreamOpenHook = fn(&mut Request, &[u8]) -> Result<Option<IncludeSource>, Thrown>;
+
+/// What [`StreamHooks::open`] read for an include: the file's bytes, and
+/// the `*opened_path` the wrapper's opener set, which the file is
+/// compiled under where it set one.
+#[derive(Debug)]
+pub struct IncludeSource {
+    pub source: Vec<u8>,
+    pub opened_path: Option<Vec<u8>>,
+}
+
+/// [`StreamHooks::standard_handles`].
+pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Value; 3]>, Thrown>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.
@@ -644,9 +719,13 @@ pub struct Extension {
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
-    pub(crate) rshutdown: Option<fn(&mut Request)>,
+    pub(crate) rshutdown: Option<EndFunction>,
     /// What [`ExtensionBuilder::deactivate`] was handed.
-    pub(crate) deactivate: Option<fn(&mut Request)>,
+    pub(crate) deactivate: Option<EndFunction>,
+    /// What [`ExtensionBuilder::post_deactivate`] was handed.
+    pub(crate) post_deactivate: Option<EndFunction>,
+    /// What [`ExtensionBuilder::engine_end`] was handed.
+    pub(crate) engine_end: Option<EndFunction>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What the builder methods of the supplied kinds were handed
@@ -736,8 +815,10 @@ pub struct ExtensionBuilder {
     request_state: Option<StateBuilder>,
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
-    rshutdown: Option<fn(&mut Request)>,
-    deactivate: Option<fn(&mut Request)>,
+    rshutdown: Option<EndFunction>,
+    deactivate: Option<EndFunction>,
+    post_deactivate: Option<EndFunction>,
+    engine_end: Option<EndFunction>,
     zend: Option<ZendExtension>,
     supplies: Supplies,
     info: Option<Info>,
@@ -921,7 +1002,9 @@ impl ExtensionBuilder {
     }
 
     /// The request-end function, `RSHUTDOWN`, served with every extension's
-    /// request state still live.
+    /// request state still live, in reverse bundle order and each in a
+    /// `zend_try` of its own: a fatal it raises ends this function only,
+    /// and the next extension's is still served.
     #[must_use]
     pub fn rshutdown(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.rshutdown = Some(hook);
@@ -942,10 +1025,47 @@ impl ExtensionBuilder {
         self
     }
 
+    /// Served after the request's `shutdown_executor`, php's
+    /// `post_deactivate_func` (`zend_post_deactivate_modules`, step 11 of
+    /// `php_request_shutdown`, `Z/main/main.c:2026-2029`): after every
+    /// `deactivate`, with the request's resources closed, its objects
+    /// freed and its ini entries restored, every extension's hook in
+    /// reverse bundle order and each in a `zend_try` of its own, with
+    /// every request state still live. No PHP code runs here, so what it
+    /// hands back to the engine, an entry lent from a pool, has outlived
+    /// every object that could reach it. An end that only releases is
+    /// the request state's `Drop` (ADR-0010).
+    #[must_use]
+    pub fn post_deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.post_deactivate = Some(hook);
+        self
+    }
+
+    /// The engine-end function, php's `MSHUTDOWN` as `php_module_shutdown`
+    /// serves it (`zend_destroy_modules`, `Z/Zend/zend.c:1170`): served
+    /// once, from the drop of the engine's last clone, on a request the
+    /// engine lays for it, the mirror of the startup request; every
+    /// extension's hook in reverse bundle order and each in a `zend_try`
+    /// of its own, before any engine state drops. That request reaches
+    /// the engine states, builds request states as every request does,
+    /// serves no program, and what it writes reaches no host. Where an
+    /// extension drains its pools and closes what they hold, or
+    /// finishes a file it kept open across requests (ADR-0010); an end
+    /// that only releases stays the engine state's `Drop`. An engine
+    /// whose start was refused is not ended.
+    #[must_use]
+    pub fn engine_end(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.engine_end = Some(hook);
+        self
+    }
+
     /// The interrupt hook, php's `zend_interrupt_function` as pcntl's
     /// `MINIT` sets it: served by the loop's interrupt check when the
     /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
-    /// by something other than the execution timer (design §5.8). What
+    /// by something other than the execution timer (design §5.8): signal
+    /// delivery, or a periodic interrupt an extension started with
+    /// [`Request::start_periodic`], whose periods the hook reads with
+    /// [`Request::periods_elapsed`]. What
     /// it throws is left pending where the loop stands, as
     /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served
@@ -1171,6 +1291,16 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The stream layer's hooks ([`StreamHooks`]), which `ext/standard`
+    /// hands as php's `basic_functions` registers the plain files wrapper
+    /// in its `MINIT`. The last supplier's are the ones asked, as
+    /// `php_module_startup` writes `zend_stream_open_function` once.
+    #[must_use]
+    pub fn stream_hooks(mut self, hooks: StreamHooks) -> ExtensionBuilder {
+        self.supplies.stream_hooks = Some(hooks);
+        self
+    }
+
     /// The encoding functions, php's `zend_multibyte_functions` as
     /// mbstring's `MINIT` hands them to `zend_multibyte_set_functions`:
     /// `bind` answers them for one request as its settings stand, the
@@ -1336,6 +1466,8 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             deactivate: self.deactivate,
+            post_deactivate: self.post_deactivate,
+            engine_end: self.engine_end,
             zend: self.zend,
             supplies: self.supplies,
             info: self.info,
@@ -1685,7 +1817,23 @@ pub trait ClassIterator: Send {
 /// `do_operation` answer the value or `None` in one call, since
 /// their kernels fall back either way; `get_properties_for` answers a
 /// [`PropertiesFor`], whose slot may answer php's `NULL` table besides.
+///
+/// What a table refuses of construction, cloning and comparison it
+/// states once, as [`ObjectHandlers::refusals`], and the default
+/// `get_constructor`, `clone_obj` and `compare` serve it.
 pub trait ObjectHandlers: Send + Sync {
+    /// The class's [`Refusals`], php's `get_constructor` that throws,
+    /// null `clone_obj` and `zend_objects_not_comparable`, which the
+    /// default bodies of those three slots read; none at `Std`. A table
+    /// that overrides one of the three slots answers it in its own words
+    /// and the refusal it states for that slot is not read. Each default
+    /// body is compiled per table, so the read is a call on the table's
+    /// own type, never through the class's handlers pointer, and `Std`'s
+    /// is the constant [`Refusals::NONE`].
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE
+    }
+
     /// `ce->create_object` past `zend_object_alloc`: what the class lays
     /// down with a new object on the request's heap that its payload's
     /// `Default` cannot, `array_init(&intern->array)` among them, after
@@ -1717,8 +1865,12 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `clone_obj`, `zend_objects_clone_obj` at `Std`: the members
     /// copied with one more owner each and `__clone` served on the copy.
-    /// `None` is php's null slot, an uncloneable class.
+    /// `None` is php's null slot, an uncloneable class, as a table that
+    /// refuses cloning in its [`Refusals`] answers.
     fn clone_obj(&self) -> Option<CloneObj> {
+        if self.refusals().cloning {
+            return None;
+        }
         Some(Request::clone_members)
     }
 
@@ -2024,12 +2176,16 @@ pub trait ObjectHandlers: Send + Sync {
     /// `get_constructor`, `zend_std_get_constructor` at `Std`: the
     /// class's `__construct` where the calling scope may reach it, php's
     /// `Error` where it may not, and none for a class with no
-    /// constructor.
+    /// constructor. A table that refuses construction in its
+    /// [`Refusals`] throws php's `Error` in its template instead.
     fn get_constructor(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
+        if let Construction::Refused(instead) = self.refusals().construction {
+            return Err(Refusals::refuse_construction(req, object, instead));
+        }
         req.constructor_of(object)
     }
 
@@ -2113,13 +2269,18 @@ pub trait ObjectHandlers: Send + Sync {
     /// `compare`, `zend_std_compare_objects` at `Std`: equal for one
     /// object, uncomparable (`None`, php's `ZEND_UNCOMPARABLE`) across
     /// classes, and the declared slots then the dynamic tables in order
-    /// within one class.
+    /// within one class. A table that refuses comparison in its
+    /// [`Refusals`] answers uncomparable for every pair,
+    /// `zend_objects_not_comparable`.
     fn compare(
         &self,
         req: &mut Request,
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
+        if self.refusals().comparison {
+            return Ok(None);
+        }
         req.compare_objects(left, right)
     }
 
@@ -2351,3 +2512,176 @@ pub type ClassUnserialize = fn(&mut Request, PhpObject, &[u8]) -> Result<(), Thr
 pub struct Std;
 
 impl ObjectHandlers for Std {}
+
+/// The three refusals php keeps in a class's handler table, each a fact
+/// of its own: a `get_constructor` that throws "Cannot directly
+/// construct", a null `clone_obj`, and `compare` as
+/// `zend_objects_not_comparable`. `CurlHandle` refuses construction and
+/// comparison and clones; `FTP\Connection` and `GdFont` refuse
+/// construction and cloning and compare. A class states its refusals
+/// once, as one named constant, and [`ObjectHandlers`]' default bodies
+/// serve them. The value is itself a table, `std_object_handlers` with
+/// these refusals, so a class with nothing else to override names the
+/// constant as its `handlers`; a table with slots of its own answers it
+/// from [`ObjectHandlers::refusals`]. The constant is a named `const`
+/// and not a builder chain in the class attribute, since the attribute
+/// borrows its table for the engine's whole life and only a named
+/// constant is promoted to that.
+///
+/// ```php
+/// try { new CurlShareHandle; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { clone curl_share_init(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(curl_share_init() == curl_share_init());
+/// try { new CurlHandle; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $c = curl_init();
+/// var_dump(clone $c instanceof CurlHandle, $c == clone $c);
+/// ```
+/// ```expect
+/// Cannot directly construct CurlShareHandle, use curl_share_init() instead
+/// Trying to clone an uncloneable object of class CurlShareHandle
+/// bool(false)
+/// Cannot directly construct CurlHandle, use curl_init() instead
+/// bool(true)
+/// bool(false)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refusals {
+    construction: Construction,
+    cloning: bool,
+    comparison: bool,
+}
+
+/// Whether `get_constructor` refuses, and with which words after the
+/// class's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Construction {
+    Allowed,
+    Refused(Option<&'static str>),
+}
+
+impl Refusals {
+    /// Nothing refused, `std_object_handlers`.
+    pub const NONE: Refusals = Refusals {
+        construction: Construction::Allowed,
+        cloning: false,
+        comparison: false,
+    };
+
+    /// Construction refused, in php's template: "Cannot directly
+    /// construct {class}, use {instead} instead", or "Cannot directly
+    /// construct {class}" alone where `instead` is `None`, as
+    /// `Soap\Url`'s and `Soap\Sdl`'s say. The class is the object's,
+    /// which for the final classes that spell their own name in php is
+    /// that name, and for a table several classes share is each one's.
+    /// A refusal php throws from a `__construct` method and not from
+    /// `get_constructor`, `mysqli_warning`'s and `Dom\Node`'s, is that
+    /// method's and is not stated here.
+    #[must_use]
+    pub const fn construction(self, instead: Option<&'static str>) -> Refusals {
+        Refusals {
+            construction: Construction::Refused(instead),
+            ..self
+        }
+    }
+
+    /// Cloning refused: `clone_obj` is php's null slot, so `clone`
+    /// throws "Trying to clone an uncloneable object of class {class}".
+    #[must_use]
+    pub const fn cloning(self) -> Refusals {
+        Refusals {
+            cloning: true,
+            ..self
+        }
+    }
+
+    /// Comparison refused: `compare` is `zend_objects_not_comparable`,
+    /// uncomparable with any value.
+    #[must_use]
+    pub const fn comparison(self) -> Refusals {
+        Refusals {
+            comparison: true,
+            ..self
+        }
+    }
+
+    /// The `Error` a refused `get_constructor` throws, `zend_throw_error`
+    /// in the template.
+    fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
+        let class = req.class_name(object.class());
+        let message = match instead {
+            Some(instead) => {
+                format!("Cannot directly construct {class}, use {instead} instead")
+            }
+            None => format!("Cannot directly construct {class}"),
+        };
+        crate::api::raising::throw_error(req, "Error", &message)
+    }
+}
+
+impl ObjectHandlers for Refusals {
+    fn refusals(&self) -> Refusals {
+        *self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use php_unit::decl::ClassKind;
+
+    use super::{ExtensionBuilder, Refusals};
+    use crate::api::__private::class;
+    use crate::engine::Engine;
+    use crate::test::Capture;
+
+    const UNMADE: Refusals = Refusals::NONE.construction(Some("make()"));
+    const UNNAMED: Refusals = Refusals::NONE.construction(None);
+    const UNCLONED: Refusals = Refusals::NONE.cloning();
+    const UNCOMPARED: Refusals = Refusals::NONE.comparison();
+
+    /// Each refusal holds alone, served by the default bodies of a table
+    /// that is nothing but its `Refusals`: the constructor's two
+    /// templates, a constructible class that refuses only cloning and
+    /// still compares, and one that refuses only comparison and still
+    /// clones.
+    #[test]
+    fn each_refusal_is_a_fact_of_its_own() {
+        let extension = ExtensionBuilder::default()
+            .class_with(class(b"Unmade", ClassKind::Class), Vec::new(), &UNMADE)
+            .class_with(class(b"Unnamed", ClassKind::Class), Vec::new(), &UNNAMED)
+            .class_with(class(b"Uncloned", ClassKind::Class), Vec::new(), &UNCLONED)
+            .class_with(
+                class(b"Uncompared", ClassKind::Class),
+                Vec::new(),
+                &UNCOMPARED,
+            )
+            .build("refusals");
+        let served = Engine::cli_builder()
+            .extensions(&[extension])
+            .build()
+            .serve_capture(
+                r#"<?php
+foreach (['Unmade', 'Unnamed', 'Uncloned', 'Uncompared'] as $c) {
+    try { new $c; echo "made $c\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+$a = new Uncloned;
+try { clone $a; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+var_dump($a == new Uncloned);
+$b = new Uncompared;
+var_dump(clone $b instanceof Uncompared, $b == new Uncompared);
+"#,
+                Capture::default(),
+            );
+        assert_eq!(served.fatal, None);
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "Cannot directly construct Unmade, use make() instead\n\
+             Cannot directly construct Unnamed\n\
+             made Uncloned\n\
+             made Uncompared\n\
+             Trying to clone an uncloneable object of class Uncloned\n\
+             bool(true)\n\
+             bool(true)\n\
+             bool(false)\n"
+        );
+    }
+}

@@ -15,8 +15,8 @@
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Closer, DirListing, Handshake, Opening, Request, SocketOptions, Stream, StreamWrapper, Xport,
-    XportFailure,
+    Closer, DirListing, Handshake, Opening, Request, SocketOptions, Stream, StreamWrapper,
+    Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::UriStruct;

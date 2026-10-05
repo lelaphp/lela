@@ -38,7 +38,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
 };
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ftp::{Ftp, Kind, Progress, Verb, cstr};

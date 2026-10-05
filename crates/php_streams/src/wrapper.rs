@@ -11,9 +11,10 @@
 //! `BG(CurrentLStatFile)` with the buffers they name, which lives here
 //! and not in `ext/standard` because php's plain files kind clears it
 //! (`php_clear_stat_cache` after every `read(2)`, `write(2)` and flush of
-//! a plain file, and after its open), and `php_open_temporary_fd_ex`
+//! a plain file, and after its open). `php_open_temporary_fd_ex`
 //! (`Z/main/php_open_temporary_file.c:318`), which `tempnam`, `tmpfile`
-//! and the spill of `php://temp` all make their file with.
+//! and the spill of `php://temp` all make their file with, is the
+//! engine's, since an upload's file is made with it too.
 //!
 //! The request's `umask` is its own, so that one request's `umask()` is
 //! not another's; a file or directory this layer creates is given the
@@ -28,6 +29,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::raising::{Level, Thrown, docref, warning};
 use crate::api::request::{Request, UrlStat, WrapperOp};
+use crate::state::Layer;
+use crate::streams::StreamLayer;
 use crate::streams::{Located, StatBuf, stat_buf, strerror};
 
 /// `S_IFMT` and `S_IFLNK`: the file type bits of `st_mode`, and a
@@ -76,7 +79,11 @@ fn shown(path: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(path)
 }
 
-impl Request {
+pub(crate) trait WrapperLabel {
+    fn wrapper_label(&self, wrapper: &Located) -> &'static str;
+}
+
+impl WrapperLabel for Request {
     /// The label `wrapper->wops->label` gives a wrapper, which the
     /// natives' refusals print.
     fn wrapper_label(&self, wrapper: &Located) -> &'static str {
@@ -84,7 +91,10 @@ impl Request {
             Located::Plain => "plainfile",
             Located::Php => "PHP",
             Located::Data => "RFC2397",
-            Located::Ext(at) => self.wrappers.get(*at).map_or("user-space", |w| w.label),
+            Located::Ext(at) => self
+                .streams_ref()
+                .and_then(|state| state.wrappers.get(*at))
+                .map_or("user-space", |w| w.label),
             Located::Space(_) | Located::Nothing => "user-space",
         }
     }
@@ -130,18 +140,53 @@ fn host_bytes(path: &[u8]) -> PathBuf {
     PathBuf::from(std::ffi::OsStr::from_bytes(path))
 }
 
-impl Request {
+pub(crate) trait PlainFiles {
+    fn forget_stats(&mut self);
+    fn forget_stats_and_realpaths(&mut self);
+    fn forget_relative_stats(&mut self);
+    fn docref1(&mut self, param: &[u8], message: &str);
+    fn stat_url(
+        &mut self,
+        path: &[u8],
+        link: bool,
+        cached: bool,
+        quiet: bool,
+    ) -> Result<UrlStat, Thrown>;
+    fn stat_url_quiet(&mut self, path: &[u8]) -> Result<UrlStat, Thrown>;
+    fn wrapper_stat(
+        &mut self,
+        wrapper: Located,
+        local: &[u8],
+        link: bool,
+        cached: bool,
+        quiet: bool,
+    ) -> Result<UrlStat, Thrown>;
+    fn plain_local(&mut self, path: &[u8]) -> Option<Vec<u8>>;
+    fn path_op(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown>;
+    fn unlink_url(&mut self, path: &[u8]) -> Result<bool, Thrown>;
+    fn plain_unlink(&mut self, url: &[u8]) -> bool;
+    fn rename_url(&mut self, from: &[u8], to: &[u8]) -> Result<bool, Thrown>;
+    fn plain_rename(&mut self, from: &[u8], to: &[u8]) -> bool;
+    fn apply_umask(&self, path: &Path, mode: u32);
+    fn make_dir(&self, path: &Path, mode: u32) -> std::io::Result<()>;
+    fn plain_mkdir(&mut self, dir: &[u8], mode: i64, recursive: bool) -> bool;
+    fn plain_rmdir(&mut self, url: &[u8]) -> bool;
+    fn metadata_url(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown>;
+    fn plain_metadata(&mut self, url: &[u8], op: WrapperOp<'_>) -> bool;
+}
+
+impl PlainFiles for Request {
     /// `php_clear_stat_cache(0, NULL, 0)` (`Z/ext/standard/filestat.c:697`):
     /// both entries of the stat cache dropped.
-    pub(crate) fn forget_stats(&mut self) {
-        self.stat_cache = StatCache::default();
+    fn forget_stats(&mut self) {
+        self.streams().stat_cache = StatCache::default();
     }
 
     /// `php_clear_stat_cache(1, NULL, 0)`, what the plain files wrapper's
     /// `unlink`, `rename` and `rmdir` do after they change the tree
     /// (`Z/main/streams/plain_wrapper.c:1321`, `:1428`, `:1560`): the
     /// stat cache and the realpath cache emptied.
-    pub(crate) fn forget_stats_and_realpaths(&mut self) {
+    fn forget_stats_and_realpaths(&mut self) {
         self.forget_stats();
         self.realpath_cache_clear(None);
     }
@@ -149,24 +194,28 @@ impl Request {
     /// What `chdir` does to the stat cache (`Z/ext/standard/dir.c:367`):
     /// an entry whose path is relative is dropped, since it now names
     /// another file.
-    pub(crate) fn forget_relative_stats(&mut self) {
+    fn forget_relative_stats(&mut self) {
         let relative = |entry: &Option<(Vec<u8>, StatBuf)>| {
             entry
                 .as_ref()
                 .is_some_and(|(path, _)| path.first() != Some(&b'/'))
         };
-        if relative(&self.stat_cache.stat) {
-            self.stat_cache.stat = None;
+        if relative(&self.streams().stat_cache.stat) {
+            self.streams().stat_cache.stat = None;
         }
-        if relative(&self.stat_cache.lstat) {
-            self.stat_cache.lstat = None;
+        if relative(&self.streams().stat_cache.lstat) {
+            self.streams().stat_cache.lstat = None;
         }
     }
 
     /// `php_error_docref1(NULL, param, E_WARNING, ...)`: the native, the
     /// path in parentheses, and the message.
     fn docref1(&mut self, param: &[u8], message: &str) {
-        let text = format!("{}({}): {message}", self.active_native(), shown(param));
+        let text = format!(
+            "{}({}): {message}",
+            self.active_function_name(),
+            shown(param)
+        );
         warning(self, &text);
     }
 
@@ -181,7 +230,7 @@ impl Request {
     /// under `link` and the other one too unless the answer is a
     /// symbolic link's. `None` is the stat that failed or a wrapper with
     /// no `url_stat`, `php://` among them.
-    pub(crate) fn stat_url(
+    fn stat_url(
         &mut self,
         path: &[u8],
         link: bool,
@@ -190,9 +239,9 @@ impl Request {
     ) -> Result<UrlStat, Thrown> {
         if cached {
             let entry = if link {
-                &self.stat_cache.lstat
+                &self.streams().stat_cache.lstat
             } else {
-                &self.stat_cache.stat
+                &self.streams().stat_cache.stat
             };
             if let Some((name, sb)) = entry
                 && name == path
@@ -204,10 +253,10 @@ impl Request {
         let answer = self.wrapper_stat(wrapper, &local, link, cached, quiet)?;
         if cached && let UrlStat::Found(sb) = answer {
             if link {
-                self.stat_cache.lstat = Some((path.to_vec(), sb));
+                self.streams().stat_cache.lstat = Some((path.to_vec(), sb));
             }
             if !link || sb[2] & S_IFMT != S_IFLNK {
-                self.stat_cache.stat = Some((path.to_vec(), sb));
+                self.streams().stat_cache.stat = Some((path.to_vec(), sb));
             }
         }
         Ok(answer)
@@ -218,7 +267,7 @@ impl Request {
     /// `php_libxml_streams_IO_open_wrapper` asks it before it opens
     /// (`Z/ext/libxml/libxml.c:487`): no warning, no stat cache, and a
     /// wrapper without a `url_stat` told apart from one whose stat failed.
-    pub(crate) fn stat_url_quiet(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
+    fn stat_url_quiet(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
         let quiet = crate::streams::OpenOptions {
             report: false,
             ..crate::streams::OpenOptions::REPORT
@@ -274,7 +323,7 @@ impl Request {
                     self, &user, local, flags,
                 )?)
             }
-            Located::Ext(at) => match self.wrappers[at].stat {
+            Located::Ext(at) => match self.streams().wrappers[at].stat {
                 Some(stat) => match stat(self, local)? {
                     Some(array) => {
                         // `statbuf_from_array`
@@ -302,7 +351,7 @@ impl Request {
     /// &php_plain_files_wrapper`: the path the plain files wrapper would
     /// be handed, or `None` where the path is another wrapper's or no
     /// wrapper's, after the warnings the locate itself raises.
-    pub(crate) fn plain_local(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+    fn plain_local(&mut self, path: &[u8]) -> Option<Vec<u8>> {
         match self.locate_wrapper(path) {
             (Located::Plain, local) => Some(local),
             _ => None,
@@ -313,7 +362,7 @@ impl Request {
     /// reaches the wrapper (`Z/ext/standard/file.c`, `filestat.c`), with
     /// php's warnings where the path has no wrapper or its wrapper lacks
     /// the operation.
-    pub(crate) fn path_op(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown> {
+    fn path_op(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown> {
         match op {
             WrapperOp::Unlink => self.unlink_url(path),
             WrapperOp::Rename { to } => self.rename_url(path, to),
@@ -323,7 +372,7 @@ impl Request {
                 // nothing said.
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_mkdir(path, mode, recursive)),
-                    Located::Ext(at) => match self.wrappers[at].mkdir {
+                    Located::Ext(at) => match self.streams().wrappers[at].mkdir {
                         Some(mkdir) => mkdir(self, path, mode, recursive),
                         None => Ok(false),
                     },
@@ -338,7 +387,7 @@ impl Request {
                 // as `_php_stream_mkdir`.
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_rmdir(path)),
-                    Located::Ext(at) => match self.wrappers[at].rmdir {
+                    Located::Ext(at) => match self.streams().wrappers[at].rmdir {
                         Some(rmdir) => rmdir(self, path),
                         None => Ok(false),
                     },
@@ -372,7 +421,7 @@ impl Request {
             Located::Space(user) => {
                 return crate::streams::userspace::path_op(self, user, path, WrapperOp::Unlink);
             }
-            Located::Ext(at) => self.wrappers[*at].unlink,
+            Located::Ext(at) => self.streams().wrappers[*at].unlink,
             Located::Php | Located::Data => None,
         };
         if let Some(unlink) = unlink {
@@ -431,7 +480,9 @@ impl Request {
                 return Ok(false);
             }
             Located::Plain | Located::Space(_) => None,
-            Located::Ext(at) if self.wrappers[*at].rename.is_some() => self.wrappers[*at].rename,
+            Located::Ext(at) if self.streams().wrappers[*at].rename.is_some() => {
+                self.streams().wrappers[*at].rename
+            }
             Located::Ext(_) | Located::Php | Located::Data => {
                 let text = format!(
                     "{} wrapper does not support renaming",
@@ -477,7 +528,7 @@ impl Request {
         let docref2 = |req: &mut Request, error: &std::io::Error| {
             let text = format!(
                 "{}({},{}): {}",
-                req.active_native(),
+                req.active_function_name(),
                 shown(from),
                 shown(to),
                 strerror(error)
@@ -533,7 +584,7 @@ impl Request {
     /// The permission bits a file or directory this layer created is
     /// given, `mode & ~umask` as `open(2)` and `mkdir(2)` apply the mask
     /// php's `umask()` set, whatever the process's own mask took off.
-    pub(crate) fn apply_umask(&self, path: &Path, mode: u32) {
+    fn apply_umask(&self, path: &Path, mode: u32) {
         let want = mode & 0o777 & !self.umask();
         if let Ok(meta) = std::fs::metadata(path) {
             let have = meta.permissions().mode();
@@ -578,7 +629,7 @@ impl Request {
         }
         // `expand_filepath_with_mode(dir, buf, NULL, 0, CWD_EXPAND)`.
         let cwd = self.cwd().into_os_string().into_encoded_bytes();
-        let Some(mut buf) = self.virtual_file_ex(&cwd, dir, crate::virtual_cwd::Resolve::Expand)
+        let Some(mut buf) = self.virtual_file_ex(&cwd, dir, crate::api::request::Resolve::Expand)
         else {
             docref(self, Level::Warning, "Invalid path");
             return false;
@@ -692,7 +743,7 @@ impl Request {
         match wrapper {
             Located::Plain => return Ok(self.plain_metadata(path, op)),
             Located::Ext(at) => {
-                if let Some(set_stat) = self.wrappers[at].set_stat {
+                if let Some(set_stat) = self.streams().wrappers[at].set_stat {
                     return set_stat(self, path, op);
                 }
             }
@@ -783,105 +834,6 @@ impl Request {
             }
         }
     }
-
-    /// `php_open_temporary_fd_ex` (`Z/main/php_open_temporary_file.c:318`):
-    /// the file made in `dir`, or where that fails php's notice `file
-    /// created in the system's temporary directory` and the file made
-    /// there; no `dir`, or an empty one, goes to the temporary directory
-    /// with nothing said. The guard is asked, warning, of the directories
-    /// `check` names before each is tried ([`TemporaryCheck`]). The file
-    /// is open for reading and writing, and `None` is the one that could
-    /// not be made anywhere or was refused.
-    pub(crate) fn open_temporary_fd(
-        &mut self,
-        dir: Option<&[u8]>,
-        prefix: &[u8],
-        check: TemporaryCheck,
-    ) -> Option<(File, PathBuf)> {
-        if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
-            if check == TemporaryCheck::Always && self.check_open_basedir(dir, true).is_err() {
-                return None;
-            }
-            let dir = self.absolutize(dir);
-            if let Some(made) = open_temporary_in(&dir, prefix) {
-                return Some(made);
-            }
-            docref(
-                self,
-                Level::Notice,
-                "file created in the system's temporary directory",
-            );
-        }
-        let temp_dir = self.temp_dir();
-        if check != TemporaryCheck::Never
-            && self
-                .check_open_basedir(temp_dir.as_os_str().as_bytes(), true)
-                .is_err()
-        {
-            return None;
-        }
-        open_temporary_in(&temp_dir, prefix)
-    }
-}
-
-/// Which directories `php_open_temporary_fd_ex` asks the `open_basedir`
-/// guard of, php's flags (`Z/main/php_open_temporary_file.h:20-28`)
-/// decoded once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TemporaryCheck {
-    /// `PHP_TMP_FILE_DEFAULT`, what a temporary stream opens with: neither.
-    Never,
-    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ON_FALLBACK`, what an upload's
-    /// file is made with (`Z/main/rfc1867.c:1006`): the system's temporary
-    /// directory only, where `dir` is unset or could not be used.
-    OnFallback,
-    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS`, what `tempnam()` makes
-    /// its file with: `dir` before it is tried, and the fallback.
-    Always,
-}
-
-/// `php_do_open_temporary_file` (`Z/main/php_open_temporary_file.c:92`):
-/// the directory resolved as `realpath(3)` resolves it, the prefix
-/// followed by thirteen characters of `base32alphabet` from a random
-/// word, and `mkstemp(3)`'s six, a new six tried where the name is
-/// taken; the file `0600`, open for reading and writing.
-fn open_temporary_in(dir: &Path, prefix: &[u8]) -> Option<(File, PathBuf)> {
-    use std::hash::{BuildHasher, Hasher};
-    const BASE32: &[u8] = b"0123456789abcdefghijklmnopqrstuv";
-    const MKSTEMP: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let random = |salt: u64| {
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u64(salt);
-        hasher.finish()
-    };
-    let real = std::fs::canonicalize(dir).ok()?;
-    let mut name = prefix.to_vec();
-    let mut word = random(0);
-    for _ in 0..13 {
-        name.push(BASE32[usize::try_from(word % 32).unwrap_or(0)]);
-        word /= 32;
-    }
-    for attempt in 1u64..=100 {
-        let mut candidate = name.clone();
-        let mut word = random(attempt);
-        for _ in 0..6 {
-            candidate.push(MKSTEMP[usize::try_from(word % 62).unwrap_or(0)]);
-            word /= 62;
-        }
-        let path = real.join(std::ffi::OsStr::from_bytes(&candidate));
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => return Some((file, path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
-        }
-    }
-    None
 }
 
 /// `utime(2)` with a `utimbuf` of the two times, or the current time for

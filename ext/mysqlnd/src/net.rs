@@ -13,7 +13,7 @@ use std::time::Duration;
 use php_ext::abi::Callable;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, SocketOptions, Stream, StreamOption, Xport};
+use php_ext::request::{Request, SocketOptions, Stream, StreamOption, Streams as _, Xport};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::consts::{MAX_PACKET_SIZE, cr};

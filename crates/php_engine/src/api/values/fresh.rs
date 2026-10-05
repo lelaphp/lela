@@ -51,6 +51,12 @@ impl FreshString {
         self.0.is_empty()
     }
 
+    /// The bytes, to read.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+
     /// The bytes, to write.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         self.0.bytes_mut()

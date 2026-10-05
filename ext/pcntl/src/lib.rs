@@ -19,15 +19,17 @@
 //! `pcntl_signal_dispatch()` serves where asked.
 //!
 //! **A forked child.** `pcntl_fork` copies the process with its calling
-//! thread alone, as php's does. The child goes on in its request's own
-//! state, which is its copy: its values, frames, buffered bytes, the handler
-//! table here. What it may not rely on is anything another thread of the
-//! parent held: the execution timer, which is a thread and is gone (php's
-//! is an interval timer, which a child does not inherit either), and a
-//! mutex of the engine's shared tables another request took at the fork,
-//! which stays taken. The `php` binary serves its one request on its one
-//! thread, so neither arises there, which is why the extension is built
-//! for it and no server host.
+//! thread alone, as php's does, through the engine's one home for fork
+//! ([`Request::fork`], #1807): the engine joins every thread of its own
+//! first, the request's timer among them, and forks only while this
+//! request is the one inside the engine, so nothing a thread of the
+//! engine's held is left held in the child. The child goes on in its request's own
+//! state, which is its copy: its values, frames, buffered bytes, the
+//! handler table here, and no timer, as a child inherits no interval
+//! timer. A host that serves on threads has requests on other threads,
+//! and there the fork is refused rather than made, so the extension is
+//! built for the hosts whose serving process is single-threaded: the
+//! `php` binary and php-fpm's children.
 //!
 //! **Its witnesses** are served by that binary for the same reason: every
 //! fence here is marked `process`, and `xtask witness` runs it in

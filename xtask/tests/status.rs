@@ -107,6 +107,49 @@ fn every_section_reports_no_reading_when_the_store_is_gone() {
     );
 }
 
+/// The modules section is each item lock's lines by the module that
+/// defines them, from the groups of the seam's api-check reading, the
+/// widest first with its share of the lock and the reading's commit
+/// (#1795); a seam whose reading
+/// keeps no groups has no row, and with none at all the section has no
+/// reading.
+#[test]
+fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
+    let root = scratch("modules");
+    let store = Store::of_workspace(&root);
+    let (ok, md, err) = status(&root, &["--section", "modules"]);
+    assert!(ok, "{err}");
+    assert_eq!(md, "no reading\n");
+
+    let mut api = Reading::new("api-check", "api");
+    api.status = Status::Pass;
+    api.numbers.insert("items".into(), 4.into());
+    api.commit = "21ad0fb8c0ffee".into();
+    api.group("php_engine::api::values", 1).unwrap();
+    api.group("php_engine::api::request", 3).unwrap();
+    let mut heap = Reading::new("api-check", "heap");
+    heap.status = Status::Pass;
+    heap.numbers.insert("items".into(), 9.into());
+    store.record(&[api, heap]).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "modules"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        md,
+        "| seam | module | items | share | commit |\n|---|---|---|---|---|\n\
+         | api | php_engine::api::request | 3 | 75.0% | 21ad0fb8 |\n\
+         | api | php_engine::api::values | 1 | 25.0% | 21ad0fb8 |\n"
+    );
+
+    let (ok, json, err) = status(&root, &["--section", "modules", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows[0]["lock"], "api.lock");
+    assert_eq!(rows[0]["module"], "php_engine::api::request");
+    assert_eq!(rows[0]["items"], 3);
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     let root = scratch("readings");

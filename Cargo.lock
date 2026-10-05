@@ -758,6 +758,7 @@ dependencies = [
  "php_compile",
  "php_heap",
  "php_macros",
+ "php_process",
  "php_unit",
  "toml",
 ]
@@ -768,6 +769,7 @@ version = "0.0.0"
 dependencies = [
  "php_engine",
  "php_macros",
+ "php_streams",
 ]
 
 [[package]]
@@ -1319,6 +1321,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_process"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "php_proto"
 version = "0.0.0"
 
@@ -1370,6 +1379,13 @@ dependencies = [
  "php_bundle",
  "php_ext",
  "php_sapi",
+]
+
+[[package]]
+name = "php_streams"
+version = "0.0.0"
+dependencies = [
+ "php_engine",
 ]
 
 [[package]]

@@ -78,7 +78,7 @@ use anyhow::{Context, Result};
 use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
-use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, linked};
+use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, listed, plural};
 use crate::sources::{self, Standing};
 use crate::witness::Binary;
@@ -350,14 +350,11 @@ pub fn run(
     store: &Store,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
-    let oracle = manifest.pin.oracle();
-    let pinned = &manifest.pin.oracle.path;
-    let oracle_absent = if pinned.is_file() {
-        oracle.asserted()?;
-        None
-    } else {
-        Some(format!("the pinned php is not at {}", pinned.display()))
-    };
+    // The main oracle, and one for each variant a row names, under which
+    // that row's extension is rendered (#1782); each digest is asserted at
+    // the first rendering under it and never again.
+    let variants = manifest.variants();
+    let oracles = Oracles::new(&manifest.pin, &variants);
     let engines = Engines {
         linked: Carried::linked()?,
         binary: Binary::of(root),
@@ -384,15 +381,32 @@ pub fn run(
                 reading.message = format!("{}: {}", reading.scope, sources::NOT_YET_CREATED);
                 return Ok(reading);
             }
-            if let Some(why) = &oracle_absent {
+            let oracle = match oracles.of(manifest.variant_of(&row)) {
+                Ok(oracle) => oracle,
+                Err(unknown) => {
+                    reading.status = Status::Fail;
+                    reading.message = format!("{}: nothing rendered; {unknown:#}", reading.scope);
+                    return Ok(reading);
+                }
+            };
+            let pin = oracle.pin();
+            // A reading taken under a variant says so, whatever it came to.
+            let told = |mut reading: Reading| {
+                if let Some(under) = pin.oracle.read_under() {
+                    reading.message = format!("{}; {under}", reading.message);
+                }
+                Ok(reading)
+            };
+            if let Some(why) = pin.oracle.absent() {
                 reading.status = Status::Skip;
                 reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);
-                return Ok(reading);
+                return told(reading);
             }
+            oracle.asserted()?;
             let observed = if host == Host::Cli {
-                render(&oracle, name, column)?
+                render(oracle, name, column)?
             } else {
-                host::oracle_side(&oracle, host, name, column)?
+                host::oracle_side(oracle, host, name, column)?
             };
             if observed.exit != Some(0) {
                 reading.status = Status::Fail;
@@ -401,11 +415,11 @@ pub fn run(
                     reading.scope,
                     said(&observed)
                 );
-                return Ok(reading);
+                return told(reading);
             }
             let path = kept_at(
                 store,
-                &manifest.pin.oracle.md5,
+                &pin.oracle.md5,
                 &host.scope(name, Column::Re),
                 column,
             );
@@ -414,7 +428,7 @@ pub fn run(
             }
             fs::write(&path, &observed.stdout)
                 .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
-            let engine = rendering(manifest, ask, &engines, &oracle, name, host, column)?;
+            let engine = rendering(manifest, ask, &engines, oracle, name, host, column)?;
             let judgement = judge(
                 registry,
                 &host.id(name, column),
@@ -441,7 +455,7 @@ pub fn run(
                     observed.stdout.len()
                 ),
             };
-            Ok(reading)
+            told(reading)
         })
         .collect()
 }

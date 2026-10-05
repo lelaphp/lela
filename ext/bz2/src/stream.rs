@@ -19,7 +19,9 @@ use php_ext::abi::{OrFalse, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
-use php_ext::request::{Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper};
+use php_ext::request::{
+    Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::State;

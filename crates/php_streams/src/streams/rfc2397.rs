@@ -8,6 +8,7 @@
 use super::{MetaValue, PhpStream, TempMode, Whence, temp_stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream};
+use crate::streams::StreamLayer;
 
 /// What the opener answered: the stream, or the text php's wrapper logs,
 /// which `php_stream_display_wrapper_errors` prints after `Failed to open

@@ -101,7 +101,9 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
+};
 use php_ext::values::{
     PhpArray, PhpObject, PhpRef, PhpString, Resource, ResourceType, Value, ValueRef,
 };

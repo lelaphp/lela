@@ -8,7 +8,7 @@ use php_ext::abi::ExtensionBuilder;
 use php_ext::call::passthrough;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};

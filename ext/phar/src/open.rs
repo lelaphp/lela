@@ -7,7 +7,7 @@
 //! An error is php's message, `None` where php sets none.
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::Value;
 
 use crate::archive::{

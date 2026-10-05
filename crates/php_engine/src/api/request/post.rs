@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use super::Request;
 use super::variables::BodyLimits;
 use crate::api::raising::{Level, Thrown, docref, throw_error};
+use crate::api::request::TemporaryGuard;
 use crate::api::values::PhpArray;
 use crate::engine::{Body, Method};
-use crate::wrapper::TemporaryCheck;
 
 /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the form reader
 /// asks the host for at a time.
@@ -193,7 +193,7 @@ impl Request {
             if !spilled && !block.is_empty() && body.len() + block.len() >= POST_BLOCK_SIZE {
                 let dir = self.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
                 let Some((_, path)) =
-                    self.open_temporary_fd(dir.as_deref(), b"php", TemporaryCheck::Never)
+                    self.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::Never)
                 else {
                     docref(
                         self,
@@ -295,7 +295,7 @@ impl Request {
     /// is asked for more only while what it has handed out falls short of
     /// the chunk wanted, so a body the form reader stopped reading part way
     /// is read no further.
-    pub(crate) fn input_bytes(&mut self) -> Vec<u8> {
+    pub fn input_bytes(&mut self) -> Vec<u8> {
         const CHUNK: usize = 8192;
         let mut body = self.post.request_body.take().unwrap_or_default();
         let mut out = Vec::new();

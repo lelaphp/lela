@@ -1,0 +1,4 @@
+#!/bin/sh
+# The drift fixture's variant binary (#1890): its md5 is not the pin's, so
+# no lane runs it.
+echo drift
