@@ -661,6 +661,10 @@ pub(crate) struct Shared {
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
     pub(crate) entry: Loop,
+    /// The observer word (design §4.3 seam 9): how many observers the
+    /// engine was built with, fixed here and read at every call and
+    /// return home ([`crate::observer`]); zero while none is declared.
+    pub(crate) observers: u32,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
     /// destructor's or a callback's frame through, bound to the same
@@ -2731,6 +2735,7 @@ impl EngineBuilder {
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
                 entry: self.entry,
+                observers: 0,
                 reenter: self.reenter,
                 resume: self.resume,
                 locked,
