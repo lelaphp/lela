@@ -36,8 +36,8 @@ use crate::api::values::{Emalloc, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notifier,
-    OptionAnswer, Request, Standard, Stream, StreamOption, TemporaryGuard, Whence,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
+    OptionAnswer, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard, Whence,
 };
 use crate::api::values::{ClassId, FreshString, Key, PhpArray, PhpString, Resource, Value};
 
@@ -421,18 +421,17 @@ pub(crate) struct PhpStream {
 }
 
 /// The fields of `php_stream` a wrapper writes on a stream it opened
-/// over another kind: `PHP_STREAM_CONTEXT(stream)`'s notifier,
-/// `stream->wrapperthis` with the wrapper's `stream_closer`,
+/// over another kind: `stream->wrapperthis` with the wrapper's `stream_closer`,
 /// `stream->wrapperdata` (one owner the stream's, which
 /// `stream_get_meta_data` prints ahead of what the kind keeps),
 /// `stream->wrapper->wops->stream_stat`, which `fstat()` asks in place of
 /// the kind's, and `stream->ctx`, `PHP_STREAM_CONTEXT(stream)`, one owner
 /// the stream's, which a socket's `transport` and the wrappers that
-/// connect one set.
+/// connect one set, and whose notifier the stream's reads and writes
+/// tell.
 #[derive(Default)]
 struct Wrapped {
-    context: Option<Resource>,
-    notifier: Option<Box<dyn Notifier>>,
+    context: Option<StreamCtx>,
     closer: Option<Box<dyn Closer>>,
     wrapperdata: Option<Value>,
     stat: Option<fn(&mut Request, Stream) -> Option<StatBuf>>,
@@ -689,15 +688,6 @@ impl PhpStream {
         Ok(())
     }
 
-    /// `php_stream_context_set`'s notifier: the one given in place, the
-    /// one the stream had handed back.
-    pub(crate) fn set_notifier(
-        &mut self,
-        notifier: Option<Box<dyn Notifier>>,
-    ) -> Option<Box<dyn Notifier>> {
-        std::mem::replace(&mut self.wrapped_mut().notifier, notifier)
-    }
-
     /// `stream->wrapperthis`: the closer given in place, where the
     /// stream has none yet; one it has already is kept, and the new one
     /// is left in `closer` for the caller to close.
@@ -731,9 +721,9 @@ impl PhpStream {
         self.wrapped.get_or_insert_with(Box::default)
     }
 
-    /// The notifier the stream's `context` has, where a wrapper set one.
-    fn notifier_mut(&mut self) -> Option<&mut Box<dyn Notifier>> {
-        self.wrapped.as_mut()?.notifier.as_mut()
+    /// `PHP_STREAM_CONTEXT(stream)`, whose notifier the stream tells.
+    fn context(&self) -> Option<StreamCtx> {
+        self.wrapped.as_ref()?.context
     }
 
     /// `stream->position = 0` and `strlcpy(stream->mode, mode)`, cut to
@@ -750,8 +740,9 @@ impl PhpStream {
         if n == 0 || !self.ops.counts_progress() {
             return;
         }
-        if let Some(notifier) = self.notifier_mut()
-            && let Err(thrown) = notifier.progress(req, n)
+        let increment = Notification::ProgressIncrement { dsofar: n, dmax: 0 };
+        if let Some(context) = self.context()
+            && let Err(thrown) = context.notify(req, increment)
         {
             filters::defer(req, thrown);
         }
@@ -763,8 +754,8 @@ impl PhpStream {
         if old_eof == self.eof {
             return;
         }
-        if let Some(notifier) = self.notifier_mut()
-            && let Err(thrown) = notifier.completed(req)
+        if let Some(context) = self.context()
+            && let Err(thrown) = context.completed(req)
         {
             filters::defer(req, thrown);
         }
@@ -1588,17 +1579,15 @@ impl PhpStream {
         let Self { ops, .. } = &mut self;
         let ret = ops.close(req);
         self.free_filters(req);
+        let mut context = None;
         if let Some(wrapped) = self.wrapped.take() {
             let Wrapped {
-                context,
-                notifier,
+                context: kept,
                 closer,
                 wrapperdata,
                 ..
             } = *wrapped;
-            if let Some(context) = context {
-                req.release(context.as_value());
-            }
+            context = kept;
             if let Some(closer) = closer
                 && let Err(thrown) = closer.close(req)
             {
@@ -1607,14 +1596,15 @@ impl PhpStream {
             if let Some(data) = wrapperdata {
                 req.release(data);
             }
-            if let Some(notifier) = notifier {
-                notifier.release(req);
-            }
         }
         // `pefree(stream->readbuf)` and `pefree(stream->orig_path)`.
         self.readbuf.free(req);
         if let Some(path) = self.orig_path.take() {
             path.free(req);
+        }
+        // `zend_list_delete(context->res)`, once everything else is gone.
+        if let Some(context) = context {
+            req.release(context.resource().as_value());
         }
         ret
     }
@@ -3636,8 +3626,8 @@ pub(crate) trait StreamLayer {
     fn copy_all(&mut self, from: Stream, to: Stream) -> bool;
     fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown>;
     fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown>;
-    fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>);
-    fn stream_context(&self, stream: Stream) -> Option<Resource>;
+    fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>);
+    fn stream_context(&self, stream: Stream) -> Option<StreamCtx>;
     fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown>;
     fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>>;
     fn wrapper_errors_text(&self, logged: &[String]) -> String;
@@ -4402,9 +4392,9 @@ impl StreamLayer for Request {
     /// stream keeps `context`, one owner more, in place of the one it
     /// kept, which gives its owner up; a socket's crypto layer reads it
     /// from then.
-    fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>) {
+    fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>) {
         if let Some(context) = context {
-            self.addref(&context.as_value());
+            self.addref(&context.resource().as_value());
         }
         let old = self
             .stream_op(stream, |_, s| {
@@ -4418,12 +4408,12 @@ impl StreamLayer for Request {
             })
             .flatten();
         if let Some(old) = old {
-            self.release(old.as_value());
+            self.release(old.resource().as_value());
         }
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`.
-    fn stream_context(&self, stream: Stream) -> Option<Resource> {
+    fn stream_context(&self, stream: Stream) -> Option<StreamCtx> {
         self.stream_ref(stream)?.wrapped.as_ref()?.context
     }
 

@@ -14,12 +14,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_ext::request::Request;
+use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
-use php_ext_standard::{
-    php_get_current_user, stream_ctx_alloc, stream_ctx_option, stream_ctx_set_option,
-};
+use php_ext_standard::php_get_current_user;
 
 use crate::classes::string;
 use crate::http::{basic_authentication, http_context_headers, proxy_authentication};
@@ -1320,10 +1318,13 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     let mut has_proxy_authorization = false;
     let mut has_authorization = false;
     if instance_of(req, this, "SoapClient") {
-        let tmp = client_slot(this, ClientSlot::StreamContext);
+        let tmp = client_slot(this, ClientSlot::StreamCtx);
         if let Some(r) = tmp.as_resource().copied() {
+            // `php_stream_context_from_zval(tmp, 0)`, one owner more,
+            // shared with `new_context` below.
+            let c = StreamCtx::fetch(req, r)?;
             req.addref(&r.as_value());
-            context = Some(r);
+            context = Some(c);
         }
         let agent = client_slot(this, ClientSlot::UserAgent);
         if let Some(a) = agent.as_str_bytes().filter(|a| !a.is_empty()) {
@@ -1342,17 +1343,17 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             let ctx = if let Some(c) = context {
                 c
             } else {
-                let c = stream_ctx_alloc(req)?;
+                let c = StreamCtx::alloc(req)?;
                 context = Some(c);
                 c
             };
             let value = string(req, &proxy)?;
-            let set = stream_ctx_set_option(req, ctx, b"http", b"proxy", &value);
+            let set = ctx.set_option(req, b"http", b"proxy", &value);
             req.release(value);
             set?;
             let https = uri_len >= 8 && uri[..8].eq_ignore_ascii_case(b"https://");
             if !https {
-                stream_ctx_set_option(req, ctx, b"http", b"request_fulluri", &Value::bool(true))?;
+                ctx.set_option(req, b"http", b"request_fulluri", &Value::bool(true))?;
             }
             has_proxy_authorization = proxy_authentication(this, &mut headers);
         }
@@ -1360,10 +1361,10 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     }
     let ctx = match context {
         Some(c) => c,
-        None => stream_ctx_alloc(req)?,
+        None => StreamCtx::alloc(req)?,
     };
-    if stream_ctx_option(req, ctx, b"http", b"protocol_version")?.is_none() {
-        stream_ctx_set_option(req, ctx, b"http", b"protocol_version", &Value::float(1.1))?;
+    if ctx.option(req, b"http", b"protocol_version").is_none() {
+        ctx.set_option(req, b"http", b"protocol_version", &Value::float(1.1))?;
         headers.extend_from_slice(b"Connection: close\r\n");
     }
     if !headers.is_empty() {
@@ -1374,13 +1375,13 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             has_proxy_authorization,
             false,
             &mut headers,
-        )?;
+        );
         let value = string(req, &headers)?;
-        let set = stream_ctx_set_option(req, ctx, b"http", b"header", &value);
+        let set = ctx.set_option(req, b"http", b"header", &value);
         req.release(value);
         set?;
     }
-    let orig_context = php_ext_libxml::switch_stream_ctx(req, Some(ctx.as_value()));
+    let orig_context = php_ext_libxml::switch_stream_ctx(req, Some(ctx.resource().as_value()));
     req.state::<State>().error_code = Some("WSDL");
     // WSDL code: an error leaves here as php's bailout leaves
     // `load_wsdl`, with `SOAP_GLOBAL(error_code)` still `WSDL` and the

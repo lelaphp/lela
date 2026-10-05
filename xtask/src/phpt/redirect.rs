@@ -18,7 +18,7 @@
 //! measures the driver, so it is the driver's crate's reading, and a
 //! verdict names both tests, the one run and the one that redirected it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,63 @@ use crate::tally;
 /// What names the redirecting test after the test it ran, in a verdict's
 /// id and its name.
 const VIA: &str = " via ";
+
+/// Whether `keys`, the verdicts a target kept, hold every test of the set
+/// the redirecting test keyed `by` ran, as the set stands in `subset`'s
+/// tree now (#1830): the tests kept through it, each keyed `<test> via
+/// <by>` ([`Redirect::id`]), name the set's directory as the deepest one
+/// they share, and each `.phpt` there ([`set_files`]) is one of them. A set
+/// whose tests all stand in one directory of a deeper one is read as that
+/// directory; a redirect nothing was kept through holds nothing.
+pub(crate) fn set_kept<'k>(
+    subset: &Subset,
+    by: &str,
+    keys: impl Iterator<Item = &'k String>,
+) -> bool {
+    let corpus = format!("phpt:{CORPUS}/");
+    let Some(by) = by.strip_prefix(&corpus) else {
+        return false;
+    };
+    let via = format!("{VIA}{CORPUS}/{by}");
+    let kept: BTreeSet<PathBuf> = keys
+        .filter_map(|key| key.strip_suffix(&via)?.strip_prefix(&corpus))
+        .map(PathBuf::from)
+        .collect();
+    let Some(mut dir) = kept
+        .first()
+        .and_then(|first| first.parent())
+        .map(Path::to_path_buf)
+    else {
+        return false;
+    };
+    while !kept.iter().all(|test| test.starts_with(&dir)) {
+        if !dir.pop() {
+            return false;
+        }
+    }
+    set_files(&subset.root.join(&dir)).is_ok_and(|files| {
+        files.iter().all(|file| {
+            file.strip_prefix(&subset.root)
+                .is_ok_and(|test| kept.contains(test))
+        })
+    })
+}
+
+/// Every `.phpt` under `dir`, a redirect's set, as upstream lists it: not
+/// a hidden file, sorted.
+fn set_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut listed = Vec::new();
+    tally::files_under(dir, &mut listed)
+        .with_context(|| format!("listing the redirected set at {}", dir.display()))?;
+    listed.retain(|file| {
+        file.extension().is_some_and(|e| e == "phpt")
+            && !file
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    });
+    listed.sort();
+    Ok(listed)
+}
 
 /// Where the section is evaluated: beside run-tests.php at the root of the
 /// tree, where upstream evaluates it, so `__DIR__` is that root.
@@ -203,16 +260,7 @@ impl Redirect {
             .split_whitespace()
             .map(str::to_owned)
             .collect();
-        let mut listed = Vec::new();
-        tally::files_under(&dir, &mut listed)
-            .with_context(|| format!("listing the redirected set at {}", dir.display()))?;
-        listed.retain(|file| {
-            file.extension().is_some_and(|e| e == "phpt")
-                && !file
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-        });
-        listed.sort();
+        let listed = set_files(&dir)?;
         let redirect = Redirect {
             by: by.to_path_buf(),
             set: Dir { under, dir },

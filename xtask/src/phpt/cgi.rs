@@ -22,11 +22,8 @@ use super::environment::Environment;
 use super::file::Phpt;
 use super::miss::Miss;
 use super::{Judged, Judgement};
+use crate::oracle::hosts::CGI;
 use crate::oracle::{self, Normalise, Pin};
-
-/// Where run-tests.php finds php-cgi in a build tree, and where the
-/// engine's stands in the tree a subset runs in.
-const BESIDE: &str = "sapi/cgi/php-cgi";
 
 /// The CGI host a run hands a CGI-shaped test to: the php-cgi `[sapi]`
 /// pins where `binary` is the pinned php, which is the runner's control,
@@ -39,10 +36,14 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     let host = if control || binary == pin.oracle.path {
         pin.sapi.cgi.as_ref().map(|cgi| cgi.path.clone())
     } else {
-        Some(binary.with_file_name(oracle::ENGINE_CGI))
+        Some(binary.with_file_name(CGI.binary))
     };
     host.filter(|path| path.is_file())
 }
+
+/// Where run-tests.php finds php-cgi in a build tree, php-src's layout and
+/// not this workspace's.
+const BESIDE: &str = "sapi/cgi/php-cgi";
 
 /// `binary` under the name php-cgi: a link of that name to it at
 /// [`BESIDE`] under `root`, the witness lane's `php-cgi-witness` run

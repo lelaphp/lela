@@ -9,11 +9,11 @@
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{Request, StreamCtx, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
-use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
+use crate::streamsfuncs::{NullContext, context_of};
 
 pub(super) use constants::PHP_QUERY_RFC3986;
 use constants::{
@@ -668,13 +668,13 @@ impl UriParser {
     /// names none and for any other value.
     pub fn of_ctx(
         req: &mut Request,
-        ctx: Option<Resource>,
+        ctx: Option<StreamCtx>,
         wrapper: &[u8],
     ) -> Result<Option<UriParser>, Thrown> {
         let Some(ctx) = ctx else {
             return Ok(Some(UriParser::ParseUrl));
         };
-        let named = stream_ctx_option(req, ctx, wrapper, b"uri_parser_class")?;
+        let named = ctx.option(req, wrapper, b"uri_parser_class");
         Ok(match named.as_ref().map(Value::as_ref) {
             None | Some(ValueRef::Null) => Some(UriParser::ParseUrl),
             Some(ValueRef::Str(name)) => match name.as_bytes() {

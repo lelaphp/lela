@@ -22,8 +22,8 @@ use std::time::Duration;
 pub use crate::api::net::Readiness;
 
 use crate::api::raising::Thrown;
-use crate::api::request::{Request, Stream};
-use crate::api::values::{PhpArray, Resource};
+use crate::api::request::{Request, Stream, StreamCtx};
+use crate::api::values::PhpArray;
 
 /// One socket `transport` an extension hands the engine with
 /// [`ExtensionBuilder::register`], php's `php_stream_xport_register(name,
@@ -49,7 +49,7 @@ pub struct XportFactory {
         &str,
         &[u8],
         Option<Duration>,
-        Option<Resource>,
+        Option<StreamCtx>,
     ) -> Result<Box<dyn Crypto>, Thrown>,
 }
 
@@ -83,7 +83,7 @@ pub struct CryptoSocket<'a> {
     pub timeout: Option<Duration>,
     pub timed_out: bool,
     pub supplemental: bool,
-    pub ctx: Option<Resource>,
+    pub ctx: Option<StreamCtx>,
     pub stream: Option<Stream>,
 }
 
