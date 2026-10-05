@@ -8,7 +8,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -29,7 +29,7 @@ use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     AfterLog, Callable, Dependency, DimensionRead, Extension, IniStage, NativeNew, ObjectHandlers,
-    PropertyRead, PropertyTest, States, Std, ZendExtension,
+    PropertyRead, PropertyTest, Std, ZendExtension,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -90,6 +90,7 @@ pub use response::{
 };
 mod shutdown;
 mod site_override;
+mod state;
 mod table;
 mod temporary;
 pub use temporary::TemporaryGuard;
@@ -535,7 +536,8 @@ pub struct Request {
     /// every entry `NULL` until touched. Every op array's runtime cache
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
     map: MapTable,
-    states: States<(TypeId, Box<dyn Any + Send>)>,
+    /// The state area's state ([`state::RequestState`]).
+    state: state::RequestState,
     /// The ini area's state ([`ini::Ini`]).
     ini: ini::Ini,
     /// The response area's state ([`response::Response`]).
@@ -1322,7 +1324,7 @@ impl Request {
             stack,
             vm: Vm::default(),
             map: MapTable::new(),
-            states: States::new(),
+            state: state::RequestState::default(),
             ini: ini::Ini::default(),
             error_reporting: 0,
             response: response::Response::new(output),
@@ -1420,12 +1422,7 @@ impl Request {
         {
             self.sapi_constant = name;
         }
-        // Request state in bundle order (ADR-0005).
-        for extension in &self.shared.extensions {
-            if let Some((type_id, build)) = &extension.request_state {
-                self.states.push((*type_id, build()));
-            }
-        }
+        self.build_request_states();
         // The execution timer, as `zend_set_timeout` arms one at the
         // start of a request (design §5.8), and the memory limit, as
         // `php_request_startup` sets one from the ini.
@@ -17555,70 +17552,6 @@ impl Request {
     }
 
     // -------------------------------------------------- state
-
-    /// The request state of the calling extension, `T` being the type it
-    /// declared with `request_state::<T>()` (ADR-0005). A type no bundled
-    /// extension declared is built on first touch here, where the design
-    /// names a bug; the linker's slot table replaces this scan.
-    pub fn state<T: Default + Send + 'static>(&mut self) -> &mut T {
-        let wanted = TypeId::of::<T>();
-        let at = if let Some(at) = self.states.iter().position(|(id, _)| *id == wanted) {
-            at
-        } else {
-            self.states.push((wanted, Box::new(T::default())));
-            self.states.len() - 1
-        };
-        // Found or held at `at`, and written as a `T` where it is not
-        // one; each `else` is the type system's, not a path a request takes.
-        let Some((_, slot)) = self.states.get_mut(at) else {
-            return Box::leak(Box::new(T::default()));
-        };
-        if !slot.is::<T>() {
-            *slot = Box::new(T::default());
-        }
-        let Some(state) = slot.downcast_mut::<T>() else {
-            return Box::leak(Box::new(T::default()));
-        };
-        state
-    }
-
-    /// The request state of type `T` where it stands, read through a
-    /// request held shared: what [`Request::state`] answers once built,
-    /// and `None` before a type no extension declared is first touched.
-    #[must_use]
-    pub fn state_ref<T: Send + 'static>(&self) -> Option<&T> {
-        let wanted = TypeId::of::<T>();
-        self.states
-            .iter()
-            .find(|(id, _)| *id == wanted)
-            .and_then(|(_, state)| state.downcast_ref::<T>())
-    }
-
-    /// The engine state of the calling extension, `E` being the type its
-    /// `engine_state` built (ADR-0005). `None` for a type no extension
-    /// built, where the design names a bug.
-    #[must_use]
-    pub fn engine<E: Send + Sync + 'static>(&self) -> Option<&E> {
-        self.shared
-            .engine_states
-            .iter()
-            .find_map(|state| state.downcast_ref::<E>())
-    }
-
-    /// Every value of type `T` an extension of the bundle handed over
-    /// with [`ExtensionBuilder::register`], in bundle order: what
-    /// `pdo_driver_hash` holds after every `MINIT` of the bundle has
-    /// registered into it, immutable for the engine's life
-    /// (ADR-0005).
-    ///
-    /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-    pub fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
-        self.shared
-            .supplied
-            .registered
-            .under(TypeId::of::<T>())
-            .filter_map(|value| value.downcast_ref::<T>())
-    }
 
     /// The trampoline `class` answers under the lowered name, a method
     /// its `get_method` synthesises and its table has no row for: one
