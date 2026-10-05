@@ -3058,10 +3058,12 @@ impl EngineEnd {
 
 impl Drop for EngineEnd {
     /// `php_module_shutdown`'s `zend_shutdown` (`Z/Zend/zend.c:1162-1170`):
-    /// the shutdown request, the mirror of the startup request: request
-    /// states built in bundle order, each extension's engine-end function
-    /// in reverse ([`end_phase`]), the request dropped with its states in
-    /// reverse; and then, with the last owner of what every request shares, the
+    /// the engine's own persistent sockets closed first, as
+    /// `EG(persistent_list)` is destroyed first; then the shutdown
+    /// request, the mirror of the startup request: request states built
+    /// in bundle order, each extension's engine-end function in reverse
+    /// ([`end_phase`]), the request dropped with its states in reverse;
+    /// and then, with the last owner of what every request shares, the
     /// engine states in reverse (`zend_destroy_modules`). What the
     /// request writes reaches no host. A start the extensions'
     /// post-startup refused ends nothing, as no host of php's calls
@@ -3076,6 +3078,7 @@ impl Drop for EngineEnd {
         ) {
             return;
         }
+        drop(shared.persistent.drain());
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()

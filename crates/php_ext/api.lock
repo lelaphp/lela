@@ -186,6 +186,7 @@ abi::OrFalse
 abi::Passed
 abi::Path
 abi::Pool
+abi::Pool::drain
 abi::Pool::give
 abi::Pool::idle_len
 abi::Pool::new

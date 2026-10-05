@@ -269,6 +269,23 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         idle.entry(key).or_default().push(entry);
         None
     }
+
+    /// Every idle entry, with its key, taken out for the caller to close
+    /// outside the `Mutex`: what an extension's engine-end function does
+    /// with its pools (ADR-0010), and the engine with its own before any
+    /// engine-end function, as `zend_shutdown` destroys
+    /// `EG(persistent_list)` before `zend_destroy_modules`
+    /// (`Z/Zend/zend.c:1166-1170`).
+    #[must_use]
+    pub fn drain(&self) -> Vec<(K, V)>
+    where
+        K: Clone,
+    {
+        self.idle()
+            .drain()
+            .flat_map(|(key, entries)| entries.into_iter().map(move |entry| (key.clone(), entry)))
+            .collect()
+    }
 }
 
 /// The entries of a [`Pool`] one request holds, each under php's key from
