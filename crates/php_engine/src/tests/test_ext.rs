@@ -31,12 +31,13 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Compiled, ErrorBeneath, Extension, ExtensionBuilder, FiberStatus, GcBeneath, Observed,
-    ObservedFiber, ObserverHandlers, Refusal, Start, StringBeneath,
+    Compiled, ErrorBeneath, ErrorNotice, Extension, ExtensionBuilder, FiberStatus, GcBeneath,
+    Observed, ObservedFiber, ObserverHandlers, Refusal, Start, StringBeneath,
 };
+use super::api::call::Function;
 use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
-use super::api::values::{PhpObject, Resource, Value};
+use super::api::values::{ClassId, PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +123,15 @@ pub(crate) enum Phase {
     /// what it returned as [`returned_name`] renders it: `None` where
     /// it returned nothing, on an unwind or at a fatal.
     End(String, Option<String>),
+    /// Its error observer was told of a diagnostic, its level, message
+    /// and whether it was an uncaught throwable's ([`TestExt::observing`]).
+    ErrorObserved(Level, String, bool),
+    /// Its observer of declared functions was told of one, the lowered
+    /// name it was declared under.
+    Declared(String),
+    /// Its observer of linked classes was told of one, the lowered name
+    /// it stands under.
+    Linked(String),
     /// Its fiber observer was told of a fiber's creation, the fiber as
     /// [`fiber_name`] renders it.
     FiberInit(String),
@@ -390,13 +400,45 @@ impl<const N: u8> TestExt<N> {
     /// frame a request serves would then show in each sequence a test of
     /// the lifecycle spells out whole, and a bundle with no observer
     /// declared is the one the plain test is measured on.
+    ///
+    /// It observes php's notices too, as `zend_test`'s observer does under
+    /// `zend_test.observer.observe_declaring`: diagnostics, declared
+    /// functions and linked classes, each recorded as told.
     pub(crate) fn observing() -> Extension {
+        Self::observing_builder().build(&format!("test_ext_{N}"))
+    }
+
+    /// [`TestExt::observing`]'s declarations, for a test that adds or
+    /// replaces one before it builds.
+    pub(crate) fn observing_builder() -> ExtensionBuilder {
         Self::builder()
             .observer(Self::observer_init)
+            .error_observer(Self::error_observed)
+            .function_declared_observer(Self::declared)
+            .class_linked_observer(Self::linked)
             .fiber_init(Self::fiber_init)
             .fiber_switch(Self::fiber_switch)
             .fiber_destroy(Self::fiber_destroy)
-            .build(&format!("test_ext_{N}"))
+    }
+
+    fn error_observed(_: &mut Request, notice: &ErrorNotice<'_>) {
+        let message = String::from_utf8_lossy(notice.message()).into_owned();
+        let level = notice.level();
+        record(N, Phase::ErrorObserved(level, message, notice.uncaught()));
+    }
+
+    fn declared(_: &mut Request, _: Function, lowered: &[u8]) {
+        record(
+            N,
+            Phase::Declared(String::from_utf8_lossy(lowered).into_owned()),
+        );
+    }
+
+    fn linked(_: &mut Request, _: ClassId, lowered: &[u8]) {
+        record(
+            N,
+            Phase::Linked(String::from_utf8_lossy(lowered).into_owned()),
+        );
     }
 
     fn fiber_init(_: &mut Request, fiber: ObservedFiber) {
