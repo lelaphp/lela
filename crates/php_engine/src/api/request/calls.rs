@@ -642,7 +642,6 @@ impl Request {
         call: CallState,
     ) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
-        let passed = call.arguments.len();
         let caller = self
             .current_user_frame()
             .map_or(exec::Caller::Outside, exec::Caller::Loop);
@@ -655,7 +654,7 @@ impl Request {
         // safepoint is raised after them by the loop below.
         let serving = self.vm.serving(frame);
         let raised = match serving.as_ref().and_then(crate::exec::Serving::code) {
-            Some(body) => crate::exec::parameter_prologue(self, frame, body, function, passed),
+            Some(body) => crate::exec::parameter_prologue(self, frame, body),
             None => Err(Fatal::Error(String::from(
                 "InternalError: the frame just pushed names a body the unit has not",
             ))),

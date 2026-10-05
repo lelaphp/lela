@@ -461,6 +461,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
+        exec::skip_passed(self, frame, function, num_args);
         crate::observer::call(self, frame);
         Ok(frame)
     }

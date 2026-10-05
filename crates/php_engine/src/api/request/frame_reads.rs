@@ -153,6 +153,21 @@ impl<'a> FrameView<'a> {
         self.state().map_or(0, exec::line_of)
     }
 
+    /// `zend_get_opcode_name(EX(opline)->opcode)`: the opcode of the
+    /// opline the frame stands on, as php names it, `ZEND_ECHO`, the
+    /// call's for a frame below the innermost, as `zend_test`'s
+    /// `observer.show_opcode` prints it from a begin or an end handler;
+    /// empty past its op array.
+    #[must_use]
+    pub fn opcode(&self) -> &'static str {
+        self.state()
+            .and_then(|state| {
+                exec::body_of(&state.unit, state.body)
+                    .and_then(|code| exec::opline_at(code, state.opline))
+            })
+            .map_or("", |op| op.opcode.name())
+    }
+
     /// `EX(prev_execute_data)` as far as user code goes: the user frame
     /// below this one, on its stack or, below a fiber's first frame, on
     /// the stack that resumed the fiber; none below the request's first.

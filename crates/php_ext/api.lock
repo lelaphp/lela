@@ -519,6 +519,7 @@ request::FrameView::function
 request::FrameView::function_scope
 request::FrameView::id
 request::FrameView::line
+request::FrameView::opcode
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus

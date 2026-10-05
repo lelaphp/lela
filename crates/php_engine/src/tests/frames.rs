@@ -220,3 +220,46 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
         "[strcmp framed=false from f:3]0"
     );
 }
+
+/// `zend_test.observer.show_opcode` (`observer_opline_01.phpt`): a begin
+/// handler reads the opline its frame stands on, past the `RECV` of a
+/// passed argument php skips before the begin, and an end handler the
+/// `RETURN` that leaves it; the main file's frame begins at its first
+/// opline, and a native's call stands in no frame of the loop's.
+#[test]
+fn a_handler_reads_the_opcode_its_frame_stands_on() {
+    fn init(_: &mut Observed<'_>) -> ObserverHandlers {
+        ObserverHandlers {
+            begin: Some(begin),
+            end: Some(end),
+        }
+    }
+    fn show(observed: &mut Observed<'_>, edge: &str) {
+        let req: &Request = observed;
+        let Some(view) = observed.frame() else {
+            return;
+        };
+        let line = format!("<{edge} {} {}>", name(req, &view), view.opcode());
+        observed.write(line.as_bytes());
+    }
+    fn begin(observed: &mut Observed<'_>) {
+        show(observed, "begin");
+    }
+    fn end(observed: &mut Observed<'_>, _: Option<&crate::api::values::Value>) {
+        show(observed, "end");
+    }
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
+        .build();
+    let dir = super::observer::scratch("opcode_read");
+    let served = super::observer::serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction f($a) {\n    echo $a;\n    return $a;\n}\necho f(1);\nstrlen('x');\n",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "<begin main.php ZEND_INIT_FCALL><begin f ZEND_ECHO>1<end f ZEND_RETURN>1\
+         <end main.php ZEND_RETURN>"
+    );
+}
