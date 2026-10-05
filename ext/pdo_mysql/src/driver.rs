@@ -661,16 +661,20 @@ impl Connection for Db {
 
     /// The connection out of the request's tables and kept by mysqlnd,
     /// its `pdo_mysql_db_handle` kept here, for the next request to take
-    /// up.
+    /// up. One mysqlnd did not keep, past its pool's bound and closed
+    /// there, leaves the connection naming no slot of any request's
+    /// table, so the next request's `check_liveness` finds it dead.
     fn give_back(&mut self, req: &mut Request) {
         let Some(h) = handle(req, self.id) else {
             return;
         };
-        if let Some(key) = h.server.give_back(req) {
-            if let Some(slot) = req.state::<State>().handles.get_mut(self.id) {
-                *slot = None;
-            }
-            self.idle = Some((h, key));
+        let kept = h.server.give_back(req);
+        if let Some(slot) = req.state::<State>().handles.get_mut(self.id) {
+            *slot = None;
+        }
+        match kept {
+            Some(key) => self.idle = Some((h, key)),
+            None => self.id = usize::MAX,
         }
     }
 
