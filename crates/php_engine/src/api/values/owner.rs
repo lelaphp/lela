@@ -183,6 +183,34 @@ impl<T: View> Owner<T> {
         req.release(self.view.counted());
     }
 
+    /// The owner given up as `GC_DELREF` gives one up, and what is left
+    /// of the value: at the last owner the value is destroyed,
+    /// `zend_array_destroy`, `zend_string_efree` or
+    /// `zend_objects_store_del` with its destructor served, and where
+    /// owners are left nothing else happens, no possible root of the
+    /// cycle collector (design §5.12). What php's handlers do after a
+    /// diagnostic, and the test they make after it: whether the call the
+    /// owner was held across freed the value or took an owner of its own.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
+        self.consume();
+        let value = self.view.counted();
+        if !value.is_refcounted() {
+            return Left::Uncounted;
+        }
+        let owners = value.refcount().saturating_sub(1);
+        req.release_nogc(value);
+        Left::Owners(owners)
+    }
+
+    /// The owner left to the request's end, as php's fatal leaves every
+    /// owner it held: a fatal is ending the request, no code runs after
+    /// it, and the heap is freed whole with the request (design §5.1).
+    /// Only a path that hands a `Fatal` on takes it.
+    pub(crate) fn abandon(mut self) {
+        self.consume();
+    }
+
     /// The view, the owner handed on with it: what a sink keeps, and what
     /// the engine is handed as a native's return.
     // Taking the owner is the point: the sink holds it from here.
@@ -200,6 +228,34 @@ impl<T: View> Owner<T> {
         {
             self.made = None;
         }
+    }
+}
+
+/// What is left of a value once an owner of it is let go
+/// ([`Owner::let_go`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// Nothing was counted: a scalar, an interned string or an immutable
+    /// array, which no handler frees (php's `IS_ARRAY_IMMUTABLE` test
+    /// before its `GC_ADDREF`).
+    Uncounted,
+    /// The owners besides the one let go, as they stand after it; none
+    /// is the value freed as it was let go.
+    Owners(u32),
+}
+
+impl Left {
+    /// The owner let go was the last, and the value is gone:
+    /// `GC_DELREF(ht) == 0`.
+    pub(crate) fn freed(self) -> bool {
+        self == Left::Owners(0)
+    }
+
+    /// Anything but the one owner the write started from is left, so
+    /// the write lands nowhere: `GC_DELREF(ht) != 1` in
+    /// `slow_index_convert_w` and `zend_undefined_index_write`.
+    pub(crate) fn not_alone(self) -> bool {
+        matches!(self, Left::Owners(owners) if owners != 1)
     }
 }
 

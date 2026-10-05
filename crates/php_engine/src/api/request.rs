@@ -76,7 +76,6 @@ pub use ini::IniEntry;
 pub(crate) use ini::{ini_atol, ini_truth};
 pub use ini_files::IniFiles;
 mod hold;
-pub(crate) use hold::Hold;
 mod hooks;
 mod inspect;
 mod lazy;

@@ -14,7 +14,9 @@ use php_unit::decl::{PropertyDecl, Visibility};
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
 
 use frames::Link;
 
@@ -1673,9 +1675,9 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
-        self.release_hold(held);
+        held.give_up(self);
         served
     }
 
@@ -1863,9 +1865,9 @@ impl Request {
         // an `__isset` that gives up every other owner does not free
         // the object the `__get` is served on.
         if let Some(issetter) = issetter {
-            let held = self.take_hold(object.as_value());
+            let held = Owner::take(self, object.as_value());
             let served = self.isset_then_get(object, name, read, issetter, getter);
-            self.release_hold(held);
+            held.give_up(self);
             if let Some(served) = served? {
                 return Ok(served);
             }
@@ -2266,14 +2268,14 @@ impl Request {
         value: Value,
         strict: bool,
     ) -> Result<Value, Thrown> {
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let verified = self.hold_to_property_type(typed, name, value, strict);
         let Ok(landing) = verified else {
-            self.let_go(held);
+            held.let_go(self);
             return verified;
         };
         if object.as_value().refcount() > 1 {
-            self.let_go(held);
+            held.let_go(self);
             return Ok(landing);
         }
         let class = self.class_name(typed.declaring);
@@ -2283,7 +2285,7 @@ impl Request {
             "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
         );
-        self.let_go(held);
+        held.let_go(self);
         self.release(landing);
         Err(error)
     }
@@ -3033,16 +3035,16 @@ impl Request {
                 &format!("Cannot create dynamic property {class_name}::${shown}"),
             ));
         }
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         crate::api::raising::deprecated(
             self,
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
         if object.as_value().refcount() > 1 {
-            self.let_go(held);
+            held.let_go(self);
             return Ok(());
         }
-        self.let_go(held);
+        held.let_go(self);
         if self.is_pending() {
             return Err(Thrown::of(None));
         }
@@ -3786,10 +3788,10 @@ impl Request {
         // gives up every other owner does not free the object the
         // `__get` is served on.
         self.guard_take(object, name, IN_ISSET);
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let answered = self.isset_then_truth(object, name, test, issetter);
         self.guard_drop(object, name, IN_ISSET);
-        self.release_hold(held);
+        held.give_up(self);
         answered
     }
 

@@ -742,7 +742,7 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        let held = req.take_hold(self.to_value());
+        let held = Owner::take(req, self.to_value());
         let mut pending: Option<Thrown> = None;
         let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
@@ -760,7 +760,7 @@ impl PhpArray {
             };
             ordering.then(x.position.cmp(&y.position))
         });
-        req.release_hold(held);
+        held.give_up(req);
         sorted?;
         pending.map_or(Ok(()), Err)
     }
