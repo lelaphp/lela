@@ -157,19 +157,35 @@ impl Request {
             .map(|table| &mut table.entries)
     }
 
-    /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt
-    /// the last table pops: its values released and the table gone, its
-    /// bytes kept in `EG(symtable_cache)`. A bucket still pointing at a
-    /// CV points at a slot the pop is giving up, and owns nothing.
+    /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt a
+    /// table pops: its values released and the table gone, its bytes
+    /// kept in `EG(symtable_cache)`. A bucket still pointing at a CV
+    /// points at a slot the pop is giving up, and owns nothing.
+    ///
+    /// A table is named by its place among the request's, so one freed
+    /// below a table that still stands is left in its place, owned by no
+    /// frame and empty, and taken off with the last one above it: tables
+    /// are built in the order frames are pushed, except where a frame
+    /// below the innermost is given one, as an evaluation in a paused
+    /// frame gives it ([`Request::eval_in_frame`]).
     pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef) {
-        if self
+        let Some(at) = self
             .tables
-            .last()
-            .is_none_or(|table| table.owner != Some(frame))
-        {
+            .iter()
+            .rposition(|table| table.owner == Some(frame))
+        else {
             return;
+        };
+        let freed = self.tables.get_mut(at).map(|table| SymbolTable {
+            owner: table.owner.take(),
+            entries: std::mem::take(&mut table.entries),
+            bytes: table.bytes.take(),
+        });
+        // `EG(symbol_table)`, the first, is never one a frame rebuilt.
+        while self.tables.len() > 1 && self.tables.last().is_some_and(|t| t.owner.is_none()) {
+            self.tables.pop();
         }
-        let Some(mut table) = self.tables.pop() else {
+        let Some(mut table) = freed else {
             return;
         };
         for (_, symbol) in std::mem::take(&mut table.entries) {

@@ -205,7 +205,7 @@ fn a_regimes_args_stand_after_the_recipes_and_ahead_of_every_ini() {
     let argv = |regime: Option<&str>| -> Vec<String> {
         let out = oracle
             .run_under(&oracle::Invocation {
-                regime,
+                regimes: regime.as_slice(),
                 flags: &lint,
                 ..oracle::Invocation::new(&echo, Program::Snippet("echo 1;"))
             })
@@ -238,7 +238,10 @@ fn a_regimes_args_stand_after_the_recipes_and_ahead_of_every_ini() {
 /// A regime's arguments reach php itself: `-e` compiles with extended
 /// info, which no ini setting reaches, so php's op-array dump under it
 /// carries the `EXT_STMT` oplines the dump without it does not (#1780,
-/// #1822).
+/// #1822). Regimes compose in the order named: the tracked `dump` and
+/// `extended-info` rows, one after the other, are the run of a row that
+/// carries both, which is how `compile-identity --regime extended-info`
+/// dumps without a combined row of its own.
 #[test]
 fn a_regimes_args_reach_php() {
     let Some(mut pin) = pin() else { return };
@@ -258,10 +261,10 @@ fn a_regimes_args_reach_php() {
     let oracle = pin.oracle();
     oracle.asserted().unwrap();
     let lint = [String::from("-l")];
-    let dumped = |regime: &str| -> String {
+    let dumped = |regimes: &[&str]| -> String {
         let out = oracle
             .run_under(&oracle::Invocation {
-                regime: Some(regime),
+                regimes,
                 flags: &lint,
                 ..oracle::Invocation::new(
                     pin.oracle.path.as_path(),
@@ -271,13 +274,15 @@ fn a_regimes_args_reach_php() {
             .unwrap();
         String::from_utf8(out.stderr).unwrap()
     };
-    let plain = dumped("dump-plain");
-    let extended = dumped("dump-extended");
+    let plain = dumped(&["dump-plain"]);
+    let extended = dumped(&["dump-extended"]);
     assert!(
         plain.contains("ASSIGN") && !plain.contains("EXT_STMT"),
         "{plain}"
     );
     assert!(extended.contains("EXT_STMT"), "{extended}");
+    assert_eq!(dumped(&["dump", "extended-info"]), extended);
+    assert_eq!(dumped(&["dump"]), plain);
 }
 
 /// The flag before the program (harness-design.md §4.3): `-l` compiles a

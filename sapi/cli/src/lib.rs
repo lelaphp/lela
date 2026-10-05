@@ -26,8 +26,11 @@
 //! asks `cli_shell_callbacks.cli_shell_run`, and is `do_cli`'s sentence
 //! where it has none.
 //!
-//! The switches taken and changing nothing: `-e` and `-H`: the compiler
-//! emits no extended info, and `-H` blanks copies
+//! `-e` builds the engine with extended info, as `main` sets
+//! `ZEND_COMPILE_EXTENDED_INFO` once the module has started
+//! (`Z/sapi/cli/php_cli.c:1366`), for the built-in server's engine as for the CLI's
+//! ([`php_sapi::EngineBuilder::extended_info`]). The switches taken and
+//! changing nothing: `-H`, which blanks copies
 //! of the arguments nothing reads again; `-C` and `-q`, php's own no-ops. `--ini=diff` is refused with
 //! php's usage: the engine keeps no default apart from an entry's value.
 //!
@@ -110,7 +113,9 @@ pub fn main() -> ExitCode {
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
     let _ = TITLE.set(ffi::save_ps_args().map(ProcessTitle::new));
-    let options = match Options::parse(&argv, &|ini| engine(ini, IniFiles::default()).has_shell()) {
+    let options = match Options::parse(&argv, &|ini| {
+        engine(ini, IniFiles::default(), false).has_shell()
+    }) {
         Ok(options) => options,
         Err(refused) => {
             let _ = std::io::stderr()
@@ -123,14 +128,14 @@ pub fn main() -> ExitCode {
         }
     };
     let found = |sapi| php_sapi::ini::search(sapi, &options.ini_search, true);
-    let engine = |ini: &[(Vec<u8>, Vec<u8>)]| engine(ini, found(NAME));
+    let engine = |ini: &[(Vec<u8>, Vec<u8>)]| engine(ini, found(NAME), options.extended_info);
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
         Ask::Version => started(&options.ini, found(NAME), version),
         Ask::Info => request::info(&engine(&options.ini)),
         Ask::Extensions => started(&options.ini, found(NAME), php_sapi::modules),
         Ask::Server(server) => {
-            let engine = server_engine(&options.ini, found(server::NAME));
+            let engine = server_engine(&options.ini, found(server::NAME), options.extended_info);
             match request::started(&engine, server::NAME) {
                 0 => {
                     let color = php_sapi::ini::enabled(&engine, "cli_server.color");
@@ -223,7 +228,7 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
 /// ```
 fn started(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, text: fn(&Engine) -> String) -> i32 {
-    let engine = engine(ini, files);
+    let engine = engine(ini, files, false);
     match request::started(&engine, NAME) {
         0 => print(&text(&engine)),
         failed => failed,
@@ -241,8 +246,9 @@ fn print(text: &str) -> i32 {
 /// under `standard` ([`natives::cli`]), the shebang line of every file
 /// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
 /// carried, started over the CLI's defaults, the `files` found, its
-/// `HARDCODED_INI` and the line's `ini` ([`php_sapi::start`]).
-fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
+/// `HARDCODED_INI` and the line's `ini` ([`php_sapi::start`]); with
+/// extended info where the line carried `-e`.
+fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: bool) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
         .ini_files(files)
@@ -251,7 +257,8 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
-        .cli_shell();
+        .cli_shell()
+        .extended_info(extended_info);
     let builder = php_sapi::ini::CLI_HARDCODED
         .iter()
         .fold(builder, |builder, (name, value)| builder.ini(name, value));
@@ -272,8 +279,9 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// The built-in server's engine: the bundle as [`engine`] builds it,
 /// without the CLI's `HARDCODED_INI`, which `main` lays only under the
 /// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
-/// natives after the bundle.
-fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
+/// natives after the bundle; with extended info where the line carried
+/// `-e`.
+fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: bool) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
         .ini_files(files)
@@ -281,6 +289,7 @@ fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
-        .skip_shebang();
+        .skip_shebang()
+        .extended_info(extended_info);
     php_sapi::start(natives::server(builder), ini, server::log_message)
 }

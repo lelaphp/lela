@@ -16,6 +16,16 @@ use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 use crate::exec::{self, TableId};
 use crate::tier::{Called, Class, Code, Evaluated, Named, Shape, Under};
 
+/// What [`Request::eval_returning`] did with a string.
+pub(super) enum Evaluation {
+    /// It did not compile; what the compiler threw is pending.
+    NotCompiled,
+    /// It compiled, and what its declarations raised refused it.
+    Refused,
+    /// It was served, and what it returned is in `returned`.
+    Served,
+}
+
 /// The uncaught throwable kept for a host that renders it, whose fields no file but this one
 /// reads.
 #[derive(Default)]
@@ -120,7 +130,7 @@ impl Request {
 
     /// The code block itself, on a frame of its own over the global table.
     fn code_over(&mut self, name: &[u8], code: &[u8]) -> Result<Evaluated, Fatal> {
-        let unit = match self.compile_eval(code, name) {
+        let unit = match self.host_string(|req| req.compile_eval(code, name)) {
             Ok(unit) => unit,
             Err(thrown) => {
                 self.leave_pending(&thrown);
@@ -144,21 +154,58 @@ impl Request {
         Ok(Evaluated::Rendered)
     }
 
-    /// The evaluation itself, in `scope`'s frame as a nested code frame
-    /// is, or, with none, on a frame of its own over the global table as
-    /// `zend_execute` serves an op array with no frame standing.
+    /// The evaluation itself, in `scope`'s frame or with none
+    /// ([`Request::eval_returning`]); then what it returned printed, or
+    /// what it left rendered as `ev` renders it.
     fn evaluate_over(&mut self, scope: Option<FrameRef>, code: &[u8]) -> Result<Evaluated, Fatal> {
-        const NAME: &[u8] = b"eval()'d code";
+        match self.eval_returning(scope, code, b"eval()'d code")? {
+            Evaluation::NotCompiled => return Ok(Evaluated::NotCompiled),
+            Evaluation::Refused => return Ok(self.evaluation_uncaught()),
+            Evaluation::Served => {}
+        }
+        if self.unwind_exit() {
+            // phpdbg's loop bails out at the unwind exit, and `ev`'s
+            // `zend_catch` writes the status 0 and leaves the exit
+            // pending, which the next evaluation renders.
+            self.exit_status = 0;
+            return Ok(Evaluated::Rendered);
+        }
+        if self.is_pending() {
+            return Ok(self.evaluation_uncaught());
+        }
+        let returned = std::mem::replace(&mut self.returned, Value::null());
+        let printed = self.print_r(&returned);
+        self.release(returned);
+        Ok(Evaluated::Printed(printed))
+    }
+
+    /// `zend_eval_stringl(code, &retval, name)`'s compile and serving
+    /// (`Z/Zend/zend_execute_API.c:1333-1390`): `return code;` compiled
+    /// as an `eval` under `name`, as a host's string is
+    /// ([`Request::host_string`]), and served by the loop bound to the
+    /// engine, in `scope`'s frame as a nested code frame is, which
+    /// `zend_execute` serves with `EG(current_execute_data)` there: its
+    /// variables, `$this` and scope, the frame below the evaluated one.
+    /// With none, on a frame of its own over the global table, as
+    /// `zend_execute` serves an op array with no frame standing. What
+    /// it returned is left in [`Request::returned`] where it was served;
+    /// what the compiler threw is left pending.
+    pub(super) fn eval_returning(
+        &mut self,
+        scope: Option<FrameRef>,
+        code: &[u8],
+        name: &[u8],
+    ) -> Result<Evaluation, Fatal> {
         let source = [&b"return "[..], code, b";"].concat();
-        let unit = match self.compile_eval(&source, NAME) {
+        let unit = match self.host_string(|req| req.compile_eval(&source, name)) {
             Ok(unit) => unit,
             Err(thrown) => {
                 self.leave_pending(&thrown);
-                return Ok(Evaluated::NotCompiled);
+                return Ok(Evaluation::NotCompiled);
             }
         };
         if !crate::engine::note_compiled(self, &unit, SourceKind::Eval) {
-            return Ok(self.evaluation_uncaught());
+            return Ok(Evaluation::Refused);
         }
         let standing = self.vm.frames().len();
         let callee = match scope {
@@ -175,20 +222,7 @@ impl Request {
             self.leave_frame(top);
         }
         served?;
-        if self.unwind_exit() {
-            // phpdbg's loop bails out at the unwind exit, and `ev`'s
-            // `zend_catch` writes the status 0 and leaves the exit
-            // pending, which the next evaluation renders.
-            self.exit_status = 0;
-            return Ok(Evaluated::Rendered);
-        }
-        if self.is_pending() {
-            return Ok(self.evaluation_uncaught());
-        }
-        let returned = std::mem::replace(&mut self.returned, Value::null());
-        let printed = self.print_r(&returned);
-        self.release(returned);
-        Ok(Evaluated::Printed(printed))
+        Ok(Evaluation::Served)
     }
 
     /// `f` served with the request executing nothing, as php's

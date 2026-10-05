@@ -121,7 +121,7 @@ use php_unit::Unit;
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{FrameView, Request, TimeLimitSuspended};
+use crate::api::request::{ChainFrame, FrameView, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, PhpObject, Value};
 
 pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, tell_before};
@@ -195,7 +195,8 @@ pub struct ObserverHandlers {
 /// alone (design §4.3 row 9): the request through `Deref`, and reads of
 /// the one frame observed, a function's, a file's or a native's call,
 /// which no borrow outlives: [`Observed::frame`] reads a frame the loop
-/// serves, [`Observed::caller`] the user frame below. A frame kept past
+/// serves, [`Observed::caller`] the user frame below, [`Observed::walk`]
+/// every frame of php's chain from it down. A frame kept past
 /// the handler is its [`FrameId`](crate::api::request::FrameId),
 /// checked each time it is read again.
 pub struct Observed<'a> {
@@ -248,6 +249,18 @@ impl Observed<'_> {
         match self.at {
             Observable::Code(frame) => self.req.frame_view(frame).caller(),
             Observable::Native(_) => self.req.innermost_frame_view(),
+        }
+    }
+
+    /// php's `prev_execute_data` walk from the frame observed: the frame
+    /// or the native's call itself, then every frame below it, natives'
+    /// calls and the frames generators and fibers link in among them
+    /// ([`FrameView::walk`]).
+    #[must_use]
+    pub fn walk(&self) -> std::vec::IntoIter<ChainFrame<'_>> {
+        match self.at {
+            Observable::Code(frame) => self.req.frame_view(frame).walk(),
+            Observable::Native(call) => self.req.native_walk(call.function),
         }
     }
 

@@ -29,14 +29,17 @@
 //! the extension observes (design §7.1, #1824), declared as the engine
 //! starts, each written as it is told of one before its handler runs.
 
+use std::fmt::Write as _;
+
 use php_ext::abi::{
     ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Opcodes,
     Refusal, Start,
 };
 use php_ext::call::{Function, lookup_function};
+use php_ext::coerce::type_name;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{FrameView, Raised, Request};
+use php_ext::request::{ChainFrame, FrameView, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
 
@@ -290,6 +293,15 @@ impl Observing {
     }
 }
 
+/// The names `observe_function_names` holds, split at each comma as the
+/// handler splits them, none where it is empty.
+fn names_in(value: Option<&[u8]>) -> impl Iterator<Item = &[u8]> {
+    value
+        .filter(|names| !names.is_empty())
+        .into_iter()
+        .flat_map(|names| names.split(|&b| b == b','))
+}
+
 /// `ZEND_INI_MH(zend_test_observer_OnUpdateCommaList)`: refused while
 /// the observer is not enabled, as `ZT_G(observer_enabled)` reads
 /// whenever the handler runs. The table php keeps is the entry's value
@@ -304,17 +316,19 @@ impl Observing {
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    // Read from the entry and not from [`Switches`]: at the engine's
+    // start the handler runs before the engine state is built.
     if !req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
         return Ok(false);
     }
     if req.ini_stage() != IniStage::Runtime {
         return Ok(true);
     }
+    // `zend_hash_find_ptr(EG(function_table), funcname)`: the table's
+    // keys are lowered, so a name written with a capital finds nothing.
     let named = |req: &Request, names: Option<&[u8]>| -> Vec<Function> {
-        names
-            .filter(|names| !names.is_empty())
-            .into_iter()
-            .flat_map(|names| names.split(|&b| b == b','))
+        names_in(names)
+            .filter(|name| !name.iter().any(u8::is_ascii_uppercase))
             .filter_map(|name| lookup_function(req, name))
             .collect()
     };
@@ -372,7 +386,7 @@ impl Serves {
             (None, Some(function)) => {
                 Serves::function_of(observed, function, observed.function_scope())
             }
-            (None, None) => Serves::File(Vec::new()),
+            (None, None) => Serves::File(NO_ACTIVE_FILE.to_vec()),
         }
     }
 
@@ -381,6 +395,16 @@ impl Serves {
         match frame.function() {
             Some(function) => Serves::function_of(req, function, frame.function_scope()),
             None => Serves::File(frame.filename().to_vec()),
+        }
+    }
+
+    /// A frame of php's `prev_execute_data` chain: one that names no
+    /// function by its file, and a fiber's bottom frame, which names no
+    /// file either, as php writes a NULL `op_array.filename`.
+    fn chain(req: &Request, frame: &ChainFrame<'_>) -> Serves {
+        match frame.function() {
+            Some(function) => Serves::function_of(req, function, frame.function_scope()),
+            None => Serves::File(frame.filename().unwrap_or(NO_ACTIVE_FILE).to_vec()),
         }
     }
 
@@ -406,6 +430,10 @@ impl Serves {
     }
 }
 
+/// What `observer_show_init` and `observer_show_init_backtrace` write
+/// for a frame with no file.
+const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
+
 /// `%*s` with php's width: two spaces a level.
 fn indent(depth: usize) -> Vec<u8> {
     vec![b' '; depth.saturating_mul(2)]
@@ -425,7 +453,7 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     if switches.show_output {
         show_init(observed, &serves);
         if switches.show_init_backtrace {
-            show_init_backtrace(observed, &serves);
+            show_init_backtrace(observed);
         }
         show_opcode(observed);
     }
@@ -433,12 +461,8 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
         begin: Some(begin),
         end: Some(end),
     };
-    let observed_by_name = |name: &[u8]| {
-        observed
-            .ini_get(OBSERVE_FUNCTION_NAMES)
-            .filter(|names| !names.is_empty())
-            .is_some_and(|names| names.split(|&b| b == b',').any(|named| named == name))
-    };
+    let observed_by_name =
+        |name: &[u8]| names_in(observed.ini_get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name);
     match &serves {
         _ if switches.observe_all => both,
         Serves::Function { name, .. } if switches.observe_functions || observed_by_name(name) => {
@@ -498,32 +522,26 @@ fn show_init(req: &mut Request, serves: &Serves) {
 }
 
 /// `observer_show_init_backtrace`: the frame observed and every frame
-/// below it, `f()`, `C::m()` or `{main} file`, four spaces in from the
-/// tag. The frames below are the user frames [`FrameView::caller`]
-/// walks; php's `prev_execute_data` passes natives' frames too.
-fn show_init_backtrace(observed: &mut Observed<'_>, serves: &Serves) {
+/// below it on php's `prev_execute_data` chain ([`Observed::walk`]),
+/// natives' calls and a fiber's bottom frame among them, `f()`,
+/// `C::m()` or `{main} file`, four spaces in from the tag.
+fn show_init_backtrace(observed: &mut Observed<'_>) {
     let depth = observed.state::<Observing>().depth;
-    let row = |out: &mut Vec<u8>, serves: &Serves| {
+    let mut out = indent(depth);
+    out.extend_from_slice(b"<!--\n");
+    for frame in observed.walk() {
         out.extend(indent(depth + 2));
-        match serves {
+        match Serves::chain(observed, &frame) {
             Serves::Function { scope, name } => {
-                out.extend(Serves::function(scope.as_deref(), name));
+                out.extend(Serves::function(scope.as_deref(), &name));
                 out.extend_from_slice(b"()\n");
             }
             Serves::File(file) => {
                 out.extend_from_slice(b"{main} ");
-                out.extend_from_slice(file);
+                out.extend_from_slice(&file);
                 out.push(b'\n');
             }
         }
-    };
-    let mut out = indent(depth);
-    out.extend_from_slice(b"<!--\n");
-    row(&mut out, serves);
-    let mut below = observed.caller();
-    while let Some(frame) = below {
-        row(&mut out, &Serves::frame(observed, &frame));
-        below = frame.caller();
     }
     out.extend(indent(depth));
     out.extend_from_slice(b"-->\n");
@@ -634,7 +652,7 @@ fn retval_info(
                 let _ = php_var_export_ex(req, &mut info, value, level);
             }
         }
-        Some(value) => info.extend_from_slice(value.type_name().as_bytes()),
+        Some(value) => info.extend_from_slice(type_name(req, value).as_bytes()),
     }
     info
 }
@@ -704,7 +722,7 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
     );
     for (tag, fiber) in [(entered, to), (left, from)] {
         if let Some(tag) = tag {
-            out.extend([format!("<{tag} '{}'>\n", address(fiber))]);
+            let _ = writeln!(out, "<{tag} '{}'>", address(fiber));
         }
     }
     req.write(out.as_bytes());

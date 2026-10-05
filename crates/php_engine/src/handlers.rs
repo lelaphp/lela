@@ -98,6 +98,75 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
     Ok(advance(req, frame))
 }
 
+/// `ZEND_EXT_STMT` (`Z/Zend/zend_vm_def.h:7923`), which a compile with
+/// extended info leaves before each statement (`-e`, #1780): php tells
+/// each loaded Zend extension's `statement_handler` here and goes on, and
+/// no Zend extension is loaded in this engine (design §7.1), so the loop
+/// goes on. `op1`, the operand of a pipe the opline stands before, is
+/// read by nothing and freed by nothing, as php's handler leaves it.
+///
+/// ```php
+/// function f($a) { return $a + 1; }
+/// $x = f(1);
+/// if ($x > 5) { echo "big"; } elseif ($x > 1) { echo "mid"; } else { echo "small"; }
+/// for ($i = 0; $i < 2; $i++) { echo $i; }
+/// echo "\n", "1234" |> strlen(...), eval('return 5;'), "\n";
+/// $o = new ArrayObject([1, 2]);
+/// var_dump(count($o), [1, 2] |> array_sum(...));
+/// ```
+/// ```expect regime=extended-info
+/// mid01
+/// 45
+/// int(2)
+/// int(3)
+/// ```
+pub(crate) fn ext_stmt<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7935`), before a call
+/// op compiled with extended info: php tells each loaded Zend
+/// extension's `fcall_begin_handler`, and none is loaded here
+/// ([`ext_stmt`]'s witness serves it).
+pub(crate) fn ext_fcall_begin<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_EXT_FCALL_END` (`Z/Zend/zend_vm_def.h:7947`), after a call op
+/// compiled with extended info: php tells each loaded Zend extension's
+/// `fcall_end_handler`, and none is loaded here ([`ext_stmt`]'s witness
+/// serves it).
+pub(crate) fn ext_fcall_end<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_EXT_NOP` (`Z/Zend/zend_vm_def.h:8086`): nothing, and on to the
+/// opline after it. php 8.5's compiler emits none, so only a unit some
+/// other tool wrote would carry one.
+pub(crate) fn ext_nop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_TICKS` (`Z/Zend/zend_vm_def.h:8024`), what `declare(ticks=N)`
 /// leaves after each statement in its scope, `N` in `extended_value`:
 /// every `N`th one passed serves the functions `register_tick_function()`

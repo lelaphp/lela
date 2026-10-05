@@ -63,8 +63,9 @@ mod execution;
 mod extensions;
 pub use extensions::InfoRow;
 mod frame_reads;
+mod frame_writes;
 pub(crate) use frame_reads::Identity;
-pub use frame_reads::{FrameId, FrameView};
+pub use frame_reads::{ChainFrame, FrameId, FrameView};
 mod frames;
 use frames::{Link, Slots, links_of};
 mod hash_bytes;
@@ -89,7 +90,9 @@ mod methods;
 use methods::visibility_string;
 mod objects;
 mod observing;
+mod op_arrays;
 pub(crate) use observing::ObservedChain;
+pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
@@ -369,6 +372,11 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
+    /// Whether the string compiling now is one the host evaluates of its
+    /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
+    /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
+    /// extended info ([`Request::host_string`]).
+    pub(crate) compiling_host_string: bool,
     /// `CG(script_encoding_list)` where an `ini_set()` of
     /// `zend.script_encoding` moved it this request; the engine's where
     /// none did.
@@ -642,6 +650,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            compiling_host_string: false,
             script_encodings: None,
             buckets,
             aliases: tables.aliases,
