@@ -96,10 +96,16 @@ fn count(reading: &Reading, key: &str) -> i64 {
 fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
     let text = tracked_text();
     let read = Pin::parse(
-        &(text.clone() + &variant_table("zend-test", "darwin-arm64", Path::new("/opt/php"), "0")),
+        &(text.clone()
+            + &variant_table(
+                "fixture-variant",
+                "darwin-arm64",
+                Path::new("/opt/php"),
+                "0",
+            )),
     )
     .unwrap();
-    let variant = &read.variant["zend-test"];
+    let variant = &read.variant["fixture-variant"];
     assert_eq!(variant.flags, ["--enable-zend-test"]);
     let build = variant.build(Platform::DarwinArm64).unwrap();
     assert_eq!(
@@ -114,7 +120,13 @@ fn the_pin_reads_a_variant_and_refuses_a_platform_outside_the_grammar() {
     );
 
     let err = Pin::parse(
-        &(text + &variant_table("zend-test", "darwin-x86_64", Path::new("/opt/php"), "0")),
+        &(text
+            + &variant_table(
+                "fixture-variant",
+                "darwin-x86_64",
+                Path::new("/opt/php"),
+                "0",
+            )),
     )
     .unwrap_err()
     .to_string();
@@ -173,9 +185,9 @@ fn a_variant_is_the_pin_with_its_build_for_this_platform_in_place_of_the_oracles
         assert_eq!(Path::new(&variant.recipe.env[name]), path, "{name}");
     }
 
-    let err = pin.variant("zend-test").unwrap_err().to_string();
+    let err = pin.variant("fixture-variant").unwrap_err().to_string();
     assert!(
-        err.contains("\"zend-test\"") && err.contains("stand-in"),
+        err.contains("\"fixture-variant\"") && err.contains("stand-in"),
         "the name asked for and the names the pin has: {err}"
     );
 }
@@ -185,13 +197,17 @@ fn a_variant_pinning_no_build_for_this_platform_is_absent_and_says_which() {
     let Some((platform, other)) = other_platform() else {
         return;
     };
-    let text = tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0");
-    let variant = Pin::parse(&text).unwrap().variant("zend-test").unwrap();
+    let text =
+        tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0");
+    let variant = Pin::parse(&text)
+        .unwrap()
+        .variant("fixture-variant")
+        .unwrap();
     let why = variant.oracle.absent().unwrap();
     assert_eq!(
         why,
         format!(
-            "the oracle variant zend-test pins no build for {}",
+            "the oracle variant fixture-variant pins no build for {}",
             platform.key()
         )
     );
@@ -210,16 +226,21 @@ fn a_relative_build_path_is_the_pins_directorys_on_load() {
         return;
     };
     let dir = Tree::new("variant-relative").unwrap();
-    let text =
-        tracked_text() + &variant_table("zend-test", platform.key(), Path::new("build/php"), "0");
+    let text = tracked_text()
+        + &variant_table(
+            "fixture-variant",
+            platform.key(),
+            Path::new("build/php"),
+            "0",
+        );
     fs::write(dir.join("oracle.toml"), &text).unwrap();
     let pin = Pin::load(&dir.join("oracle.toml")).unwrap();
-    let variant = pin.variant("zend-test").unwrap();
+    let variant = pin.variant("fixture-variant").unwrap();
     assert_eq!(variant.oracle.path, dir.join("build/php"));
     assert_eq!(
         variant.oracle.absent(),
         Some(format!(
-            "the pinned php of the oracle variant zend-test is not at {}",
+            "the pinned php of the oracle variant fixture-variant is not at {}",
             dir.join("build/php").display()
         ))
     );
@@ -398,9 +419,9 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
     let lib =
         "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn native() {}\n";
     let root = scratch("witness-unpinned", lib);
-    let mut manifest = Manifest::of([Crate::named("ext/fixture").with_oracle("zend-test")]);
+    let mut manifest = Manifest::of([Crate::named("ext/fixture").with_oracle("fixture-variant")]);
     manifest.pin = Pin::parse(
-        &(tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0")),
+        &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
     )
     .unwrap();
     let readings = witness::run(
@@ -420,7 +441,7 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
     assert_eq!(count(reading, "not_run"), 1, "{reading:#?}");
     assert!(
         reading.message.contains(&format!(
-            "the oracle variant zend-test pins no build for {}",
+            "the oracle variant fixture-variant pins no build for {}",
             platform.key()
         )),
         "{}",
@@ -687,7 +708,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
     scratch_workspace(workspace(), &root).unwrap();
     let mut manifest = Manifest::load(workspace()).unwrap();
     manifest.pin = Pin::parse(
-        &(tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0")),
+        &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
     )
     .unwrap();
     manifest
@@ -695,7 +716,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
         .iter_mut()
         .find(|krate| krate.name == "ext/ctype")
         .unwrap()
-        .oracle = Some("zend-test".to_owned());
+        .oracle = Some("fixture-variant".to_owned());
     let store = Store::at(root.join("target/harness"));
     let readings = crosscheck::run(
         &root,
@@ -713,7 +734,7 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
         assert_eq!(reading.status, Status::Skip, "{reading:#?}");
         assert!(
             reading.message.contains(&format!(
-                "the oracle variant zend-test pins no build for {}",
+                "the oracle variant fixture-variant pins no build for {}",
                 platform.key()
             )),
             "{}",
