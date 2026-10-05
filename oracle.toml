@@ -190,6 +190,10 @@ ini = ["session.use_only_cookies=0", "session.use_trans_sid=1"]
 # recipe it differs, and a divergence row covers that (#770, settled on #917).
 ini = ["opcache.enable_cli=1"]
 
+[regime.extended-info]
+# php's -e (ZEND_COMPILE_EXTENDED_INFO), which no ini setting reaches (#1780)
+args = ["-e"]
+
 [sapi]
 # The oracle's other hosts, from the keg and build `[oracle]` pins: parity is
 # every test the oracle runs (design §1), and upstream's run-tests.php runs
