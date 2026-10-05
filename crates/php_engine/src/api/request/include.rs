@@ -535,9 +535,9 @@ impl Request {
     /// extended info whatever the engine's, and an `eval` the string
     /// serves compiles under the engine's again.
     pub(crate) fn host_string<T>(&mut self, f: impl FnOnce(&mut Request) -> T) -> T {
-        let outer = std::mem::replace(&mut self.host_string, true);
+        let outer = std::mem::replace(&mut self.compiling_host_string, true);
         let compiled = f(self);
-        self.host_string = outer;
+        self.compiling_host_string = outer;
         compiled
     }
 

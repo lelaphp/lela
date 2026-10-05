@@ -1150,7 +1150,7 @@ impl Shared {
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
         let declared = Declared {
-            extended_info: self.extended_info && !req.host_string,
+            extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
         let unit = req.compiling(|heap, request_classes| {
