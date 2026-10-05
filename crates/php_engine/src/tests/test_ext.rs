@@ -31,11 +31,12 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Refusal, Start, StringBeneath,
+    Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Observed, ObserverHandlers,
+    Refusal, Start, StringBeneath,
 };
 use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
-use super::api::values::{PhpObject, Resource};
+use super::api::values::{PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,17 @@ pub(crate) enum Phase {
     /// Its `zend_throw_exception_hook` link was told of a throwable
     /// thrown, its message.
     Thrown(String),
+    /// Its observer was asked of a function on the function's first
+    /// call, or of an included or evaluated file's frame, as php's
+    /// `zend_observer_fcall_init` is ([`TestExt::observing`]): what the
+    /// frame serves, as [`observed_name`] renders it.
+    ObserverInit(String),
+    /// Its begin handler was handed a frame, what the frame serves.
+    Begin(String),
+    /// Its end handler was handed a frame, what the frame serves, and
+    /// what it returned as [`returned_name`] renders it: `None` where
+    /// it returned nothing, on an unwind or at a fatal.
+    End(String, Option<String>),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -241,6 +253,38 @@ pub(crate) fn message_of(req: &Request, throwable: PhpObject) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// What an observed frame serves, as php's `zend_test` observer prints
+/// it: `Class::method` or `function` for a function's frame, and
+/// `file 'name'` for an included, evaluated or main file's, the name
+/// after its last `/`.
+pub(crate) fn observed_name(observed: &Observed<'_>) -> String {
+    if let Some(function) = observed.function() {
+        let name = observed
+            .function_decl(function)
+            .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
+            .unwrap_or_default();
+        return match observed.function_scope() {
+            Some(class) => format!("{}::{name}", observed.class_name(class)),
+            None => name,
+        };
+    }
+    let file = observed.filename();
+    let base = file.rsplit(|&b| b == b'/').next().unwrap_or(file);
+    format!("file '{}'", String::from_utf8_lossy(base))
+}
+
+/// What a frame returned, as the end handler was handed it: an int or a
+/// string as `var_export` writes it, and the type's name otherwise.
+pub(crate) fn returned_name(returned: &Value) -> String {
+    if let Some(int) = returned.as_int() {
+        return int.to_string();
+    }
+    if let Some(bytes) = returned.as_str_bytes() {
+        return format!("'{}'", String::from_utf8_lossy(bytes));
+    }
+    String::from(returned.type_name())
+}
+
 /// Extension `N`'s request state: recorded where it is built and where
 /// it is dropped, and nothing else.
 pub(crate) struct RequestSlot<const N: u8>;
@@ -304,6 +348,44 @@ impl<const N: u8> TestExt<N> {
             .gc_collect(Self::gc_collect)
             .compile_string(Self::compile_string)
             .thrown(Self::thrown)
+    }
+
+    /// [`TestExt::builder`] with an observer declared (design §4.3 seam
+    /// 9): asked of each function on its first call and of each file's
+    /// frame, it declines a function named `declined`, and observes the
+    /// rest with a begin and an end handler that record what they are
+    /// handed. The observer is not in [`TestExt::builder`], since every
+    /// frame a request serves would then show in each sequence a test of
+    /// the lifecycle spells out whole, and a bundle with no observer
+    /// declared is the one the plain test is measured on.
+    pub(crate) fn observing() -> Extension {
+        Self::builder()
+            .observer(Self::observer_init)
+            .build(&format!("test_ext_{N}"))
+    }
+
+    fn observer_init(observed: &mut Observed<'_>) -> ObserverHandlers {
+        let name = observed_name(observed);
+        let declined = name == "declined";
+        record(N, Phase::ObserverInit(name));
+        if declined {
+            return ObserverHandlers::default();
+        }
+        ObserverHandlers {
+            begin: Some(Self::observer_begin),
+            end: Some(Self::observer_end),
+        }
+    }
+
+    fn observer_begin(observed: &mut Observed<'_>) {
+        record(N, Phase::Begin(observed_name(observed)));
+    }
+
+    fn observer_end(observed: &mut Observed<'_>, returned: Option<&Value>) {
+        record(
+            N,
+            Phase::End(observed_name(observed), returned.map(returned_name)),
+        );
     }
 
     /// [`TestExt::builder`] with its engine start replaced by one that

@@ -84,6 +84,7 @@ mod memory;
 mod methods;
 use methods::visibility_string;
 mod objects;
+mod observing;
 mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
@@ -324,6 +325,8 @@ pub struct Request {
     /// what its callback left reads the fatal, and a second fatal raised
     /// on the way is not rendered.
     bailout: bool,
+    /// The open observed frames ([`observing::Observing`]).
+    observing: observing::Observing,
     /// Where the request stands ([`ending::Progress`]).
     progress: ending::Progress,
     /// Where the destructors' walk was cut short ([`objects::Objects`]).
@@ -621,6 +624,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
+            observing: observing::Observing::default(),
             progress: ending::Progress::default(),
             objects: objects::Objects::default(),
             returned: Value::null(),

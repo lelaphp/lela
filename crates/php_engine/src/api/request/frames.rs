@@ -234,6 +234,7 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 
@@ -285,6 +286,7 @@ impl Request {
             state.symbol_table = Some(table);
         }
         self.attach_symbol_table(frame);
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 
@@ -360,6 +362,21 @@ impl Request {
             let caller = self.stack.current();
             self.attach_symbol_table(caller);
         }
+    }
+
+    /// `EX(func)`: the function `frame` serves, `None` for an included,
+    /// evaluated or main file's op array, which is no function.
+    pub(crate) fn frame_function(&self, frame: FrameRef) -> Option<Function> {
+        self.vm.at(frame).and_then(|state| state.function)
+    }
+
+    /// `EX(func)->op_array.filename`: the file the op array `frame`
+    /// serves was compiled from.
+    pub(crate) fn frame_filename(&self, frame: FrameRef) -> Option<&[u8]> {
+        self.vm
+            .at(frame)
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.filename.0.as_ref())
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
@@ -450,6 +467,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 

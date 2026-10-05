@@ -180,6 +180,15 @@ impl Request {
         self.end_at_level(level, message, &file, line);
     }
 
+    /// `zend_bailout` under way, the fatal already rendered: every frame
+    /// still open to an observer ended with no value while the frames
+    /// still stand ([`crate::observer::end_all`]), since the serving that
+    /// catches the fatal pops them on its way out.
+    pub(super) fn leave_by_zend_bailout(&mut self) {
+        self.bailout = true;
+        crate::observer::end_all(self);
+    }
+
     /// The ending alone, the diagnostic already rendered at its own
     /// level: php's status alone for `E_PARSE`, and for every other
     /// fatal level the log form the host is handed, the trace under
@@ -205,7 +214,7 @@ impl Request {
         {
             let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
         }
-        self.bailout = true;
+        self.leave_by_zend_bailout();
         if self.ending.is_some() {
             return;
         }

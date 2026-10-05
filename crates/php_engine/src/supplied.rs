@@ -11,7 +11,8 @@
 //!   `zend_compile_file`, `zend_compile_string`, `zend_resolve_path`,
 //!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
 //!   `zend_post_startup_cb`, `php_rfc1867_callback`);
-//! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`);
+//! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`,
+//!   `zend_observers_fcall_list`);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
 //!   functions, the CLI's shell callbacks);
@@ -36,8 +37,9 @@ use php_unit::decl::Name;
 
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
-    Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, PostStartupHook,
-    ResolvePathHook, Shell, StreamHooks, ThrownHook, TicksHook, TreatDataHook, UploadHook,
+    Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, ObserverInit,
+    PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook, TicksHook, TreatDataHook,
+    UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
@@ -112,6 +114,7 @@ pub(crate) struct Supplies {
     pub(crate) encodings: Option<EncodingsHook>,
     pub(crate) intercepts: Vec<(Name, Entry)>,
     pub(crate) registered: Vec<(TypeId, Registered)>,
+    pub(crate) observers: Vec<ObserverInit>,
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -178,6 +181,12 @@ pub(crate) struct Resolved {
     pub(crate) ticks: Listed<TicksHook>,
     /// Told of each file the unit cache holds.
     pub(crate) cached: Listed<CachedHook>,
+    /// `zend_observers_fcall_list`, as `zend_observer_fcall_register`
+    /// (`Z/Zend/zend_observer.c:44`)
+    /// appends to it at each `MINIT` and each Zend extension's startup,
+    /// and `zend_observer_fcall_install` asks every one of a function in
+    /// that order (design §4.3 seam 9, [`crate::observer`]).
+    pub(crate) observers: Listed<ObserverInit>,
     /// Served once the primary program has ended.
     pub(crate) program_ended: Listed<fn(&mut Request)>,
     /// The unit cache's one question, which opcache's
@@ -237,6 +246,7 @@ impl Resolved {
             table.upload.install(own.upload);
             table.ticks.install(own.ticks);
             table.cached.install(own.cached);
+            table.observers.install_all(own.observers);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);
@@ -402,8 +412,18 @@ impl<H: Copy> Listed<H> {
         self.0.extend(hook);
     }
 
+    /// Each of a supplier's, for a kind it may supply more than once.
+    fn install_all(&mut self, hooks: Vec<H>) {
+        self.0.extend(hooks);
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = H> + '_ {
         self.0.iter().copied()
+    }
+
+    /// How many the list holds, as a `u32`.
+    pub(crate) fn count(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
     }
 }
 

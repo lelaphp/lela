@@ -667,6 +667,9 @@ impl Request {
             }
         };
         if raised.is_some() {
+            // The `RECV` that raised is the callee's, whose unwind ends
+            // what it began (`unwind_from`); here it is left at once.
+            crate::observer::returned(self, frame, None);
             while self.vm.frames().len() > standing {
                 self.pop_frame();
             }

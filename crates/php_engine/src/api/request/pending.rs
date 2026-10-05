@@ -284,12 +284,12 @@ impl Request {
         match self.uncaught() {
             Err(fatal) => {
                 self.end_in(&fatal);
-                self.bailout = true;
+                self.leave_by_zend_bailout();
                 Err(Thrown::of(None))
             }
             Ok(()) if threw => Ok(Value::undef()),
             Ok(()) => {
-                self.bailout = true;
+                self.leave_by_zend_bailout();
                 Err(Thrown::of(None))
             }
         }

@@ -471,19 +471,24 @@ pub(crate) struct FrameState {
 /// (`memset(run_time_cache, 0, cache_size)`) and kept until request
 /// end. The engine's slot is an enum where php's is a word, so the
 /// storage is the engine's and not the heap's; the table it stands in
-/// is the heap's.
+/// is the heap's. Beside the slots stands the op array's observer slot
+/// (design §4.3 seam 9), php's `ZEND_OBSERVER_DATA` at the
+/// `zend_observer_fcall_op_array_extension` offset of the same cache,
+/// unresolved when the cache is laid down.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCache {
     slots: Option<Box<[Cached]>>,
+    observer: crate::observer::Slot,
 }
 
 impl RuntimeCache {
     /// `zend_arena_alloc(&CG(arena), cache_size)` and the `memset` after
-    /// it: `cache_size / sizeof(void *)` slots, all `Unprimed`, over
-    /// whatever stood here.
+    /// it: `cache_size / sizeof(void *)` slots, all `Unprimed`, and the
+    /// observer slot unresolved, over whatever stood here.
     fn lay_down(&mut self, cache_size: u32) {
         let slots = usize::try_from(cache_size / SLOT_BYTES).unwrap_or(0);
         self.slots = Some(vec![Cached::Unprimed; slots].into_boxed_slice());
+        self.observer = crate::observer::Slot::Unresolved;
     }
 
     /// `CACHED_PTR(num)`: what the slot at `slot`, a byte offset as the
@@ -1012,6 +1017,29 @@ impl Vm {
     ) {
         if let Some(state) = self.at(frame) {
             map.map(state.runtime_cache).set(slot, value);
+        }
+    }
+
+    /// `ZEND_OBSERVER_DATA(EX(func))`: the observer slot of the op array
+    /// `frame` serves, in the request's map table; unresolved for a frame
+    /// that stands nowhere.
+    pub(crate) fn observer_slot(&self, map: &MapTable, frame: FrameRef) -> crate::observer::Slot {
+        self.at(frame)
+            .and_then(|state| map.get(state.runtime_cache))
+            .map(|cache| cache.observer.clone())
+            .unwrap_or_default()
+    }
+
+    /// The observer slot of the op array `frame` serves, resolved to
+    /// `slot` (`zend_observer_fcall_install`).
+    pub(crate) fn set_observer_slot(
+        &self,
+        map: &mut MapTable,
+        frame: FrameRef,
+        slot: crate::observer::Slot,
+    ) {
+        if let Some(state) = self.at(frame) {
+            map.map(state.runtime_cache).observer = slot;
         }
     }
 

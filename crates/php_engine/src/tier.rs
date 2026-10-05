@@ -277,6 +277,7 @@ pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), 
         Stepped::Same(frame)
     };
     let outcome = serve_from::<T>(req, first);
+    crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
 }
@@ -286,6 +287,7 @@ pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), 
 fn serving<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
     let outcome = serve::<T>(req, frame);
+    crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
 }
@@ -304,6 +306,9 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     // over with the throwable pending, as the unwinder leaves an entry
     // frame it caught nothing in.
     if refused_at_entry(req) {
+        // php's `execute_ex` hands the refusal to `ZEND_HANDLE_EXCEPTION`,
+        // whose uncaught arm ends what the frame's push began.
+        crate::observer::returned(req, entry, None);
         return Ok(());
     }
     let flow = T::safepoint(req, entry, Site::Entry);
