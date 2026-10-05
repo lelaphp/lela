@@ -15,16 +15,15 @@
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Closer, DirListing, Handshake, Opening, Request, SocketOptions, Stream, StreamWrapper,
-    Streams as _, Xport, XportFailure,
+    Closer, DirListing, Handshake, Notification, NotifyCode, Opening, Request, SocketOptions,
+    Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
-use crate::sockets::{default_timeout, socket_options, timeval};
-use crate::streamsfuncs::notifier::{self, Code};
-use crate::streamsfuncs::stream_ctx_option;
+use crate::sockets::{default_timeout, timeval};
+use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_raw_url_decode};
 
 /// `php_stream_ftp_wrapper`: `ftp`, a URL wrapper that opens streams and
@@ -202,7 +201,7 @@ fn secured(req: &mut Request, stream: Stream) -> bool {
 fn connect(
     req: &mut Request,
     path: &[u8],
-    ctx: Option<Resource>,
+    ctx: Option<StreamCtx>,
     report: Report,
 ) -> Result<Option<Session>, Thrown> {
     let Some(parser) = UriParser::of_ctx(req, ctx, b"ftp")? else {
@@ -224,14 +223,13 @@ fn connect(
     let mut transport = b"tcp://".to_vec();
     transport.extend_from_slice(resource.host.as_deref().map(cstr).unwrap_or_default());
     transport.extend_from_slice(format!(":{}", resource.port.unwrap_or(21)).as_bytes());
-    let (socket, context) = socket_options(req, ctx)?;
     let timeout = timeval(default_timeout(req).trunc());
     let xport = Xport::Client {
         timeout,
         connect: true,
         persistent: None,
-        socket,
-        context,
+        socket: SocketOptions::default(),
+        context: ctx,
     };
     let control = match req.xport_create(&transport, xport)? {
         Ok(stream) => stream,
@@ -245,11 +243,17 @@ fn connect(
             return Ok(None);
         }
     };
-    notifier::attach(req, control, ctx);
-    notifier::info(req, ctx, Code::Connect, None, 0)?;
+    control.set_ctx(req, ctx);
+    notify_info(req, ctx, NotifyCode::Connect, None, 0)?;
     let greeting = get_result(req, control)?;
     if greeting.class() != Class::Completion {
-        notifier::error(req, ctx, Code::Failure, Some(&greeting.line), greeting.code)?;
+        notify_error(
+            req,
+            ctx,
+            NotifyCode::Failure,
+            Some(&greeting.line),
+            greeting.code,
+        )?;
         control.free(req);
         return Ok(None);
     }
@@ -284,7 +288,7 @@ fn connect(
 fn login(
     req: &mut Request,
     control: Stream,
-    ctx: Option<Resource>,
+    ctx: Option<StreamCtx>,
     resource: &UriStruct,
     report: Report,
 ) -> Result<bool, Thrown> {
@@ -305,7 +309,7 @@ fn login(
     );
     let mut reply = get_result(req, control)?;
     if reply.class() == Class::Intermediate {
-        notifier::info(req, ctx, Code::AuthRequired, Some(&reply.line), 0)?;
+        notify_info(req, ctx, NotifyCode::AuthRequired, Some(&reply.line), 0)?;
         let password = match &resource.password {
             Some(password) => {
                 let password = php_raw_url_decode(password);
@@ -322,9 +326,21 @@ fn login(
         command(req, control, b"PASS", Some(&password));
         reply = get_result(req, control)?;
         if reply.class() == Class::Completion {
-            notifier::info(req, ctx, Code::AuthResult, Some(&reply.line), reply.code)?;
+            notify_info(
+                req,
+                ctx,
+                NotifyCode::AuthResult,
+                Some(&reply.line),
+                reply.code,
+            )?;
         } else {
-            notifier::error(req, ctx, Code::AuthResult, Some(&reply.line), reply.code)?;
+            notify_error(
+                req,
+                ctx,
+                NotifyCode::AuthResult,
+                Some(&reply.line),
+                reply.code,
+            )?;
         }
     }
     Ok(reply.class() == Class::Completion)
@@ -368,7 +384,12 @@ fn secure_control(
 /// `context`, and, where `ssl_on_data`, its crypto set up and enabled; a
 /// connection that could not be secured is closed after php's log, and
 /// `false`.
-fn data_secured(req: &mut Request, data: Stream, ctx: Option<Resource>, ssl_on_data: bool) -> bool {
+fn data_secured(
+    req: &mut Request,
+    data: Stream,
+    ctx: Option<StreamCtx>,
+    ssl_on_data: bool,
+) -> bool {
     data.set_ctx(req, ctx);
     if ssl_on_data && !secured(req, data) {
         req.wrapper_log_error("Unable to activate SSL mode");
@@ -543,7 +564,7 @@ enum Prepared {
 fn prepare(
     req: &mut Request,
     control: Stream,
-    ctx: Option<Resource>,
+    ctx: Option<StreamCtx>,
     transfer: Transfer,
     file: &[u8],
 ) -> Result<Prepared, Thrown> {
@@ -562,13 +583,21 @@ fn prepare(
             let mut file_size = 0;
             if let Some(space) = cstr(&last.line).iter().position(|b| *b == b' ') {
                 file_size = usize::try_from(strtol(&last.line[space + 1..])).unwrap_or(0);
-                notifier::file_size(req, ctx, file_size, cstr(&last.line), last.code)?;
+                notify(
+                    req,
+                    ctx,
+                    Notification::FileSize {
+                        size: file_size,
+                        message: cstr(&last.line),
+                        message_code: last.code,
+                    },
+                )?;
             }
             Ok(Prepared::Ready { last, file_size })
         }
         Transfer::Write => {
             let overwrite = match ctx {
-                Some(ctx) => match stream_ctx_option(req, ctx, b"ftp", b"overwrite")? {
+                Some(ctx) => match ctx.option(req, b"ftp", b"overwrite") {
                     Some(value) => truthy(req, &value),
                     None => false,
                 },
@@ -621,6 +650,7 @@ fn prepare(
 /// bool(false)
 /// string(%d) "fopen(ftp://127.0.0.1:1/x): Failed to open stream: FTP proxy may only be used in read mode"
 /// ```
+#[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
 fn open(
     req: &mut Request,
     path: &[u8],
@@ -636,7 +666,7 @@ fn open(
     };
     let ctx = req.stream_ctx();
     if let Some(ctx) = ctx
-        && stream_ctx_option(req, ctx, b"ftp", b"proxy")?.is_some()
+        && ctx.option(req, b"ftp", b"proxy").is_some()
     {
         if transfer == Transfer::Read {
             return url_wrap_http(req, "ftp", path, mode, opening);
@@ -657,7 +687,7 @@ fn open(
                    reply: Reply,
                    data_error: Option<String>|
      -> Result<Option<Stream>, Thrown> {
-        notifier::error(req, ctx, Code::Failure, Some(&reply.line), reply.code)?;
+        notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code)?;
         control.free(req);
         if !cstr(&reply.line).is_empty() {
             let mut message = b"FTP server reports ".to_vec();
@@ -678,7 +708,7 @@ fn open(
     };
     if transfer == Transfer::Read
         && let Some(ctx) = ctx
-        && let Some(value) = stream_ctx_option(req, ctx, b"ftp", b"resume_pos")?
+        && let Some(value) = ctx.option(req, b"ftp", b"resume_pos")
         && let ValueRef::Int(at) = value.as_ref()
         && at > 0
     {
@@ -696,14 +726,13 @@ fn open(
     let mut transport = b"tcp://".to_vec();
     transport.extend_from_slice(&host);
     transport.extend_from_slice(format!(":{}", passive.port).as_bytes());
-    let (socket, context) = socket_options(req, ctx)?;
     let timeout = timeval(default_timeout(req).trunc());
     let xport = Xport::Client {
         timeout,
         connect: true,
         persistent: None,
-        socket,
-        context,
+        socket: SocketOptions::default(),
+        context: ctx,
     };
     let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
@@ -714,8 +743,11 @@ fn open(
         data.free(req);
         return refused(req, reply, None);
     }
-    notifier::attach(req, data, ctx);
-    notifier::progress_init(req, ctx, 0, file_size)?;
+    let init = Notification::ProgressInit {
+        sofar: 0,
+        max: file_size,
+    };
+    notify(req, ctx, init)?;
     if !data_secured(req, data, ctx, ssl_on_data) {
         return refused(req, Reply::default(), None);
     }
@@ -753,7 +785,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         return Ok(None);
     };
     let refused = |req: &mut Request, reply: Reply| -> Result<Option<DirListing>, Thrown> {
-        notifier::error(req, ctx, Code::Failure, Some(&reply.line), reply.code)?;
+        notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code)?;
         control.free(req);
         if !cstr(&reply.line).is_empty() {
             let mut message = b"FTP server reports ".to_vec();
@@ -806,7 +838,6 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     if !data_secured(req, data, ctx, ssl_on_data) {
         return refused(req, Reply::default());
     }
-    notifier::attach(req, data, ctx);
     let mut names = Vec::new();
     while !data.eof(req) {
         let Some(line) = data.get_line(req, Some(MAXPATHLEN))? else {

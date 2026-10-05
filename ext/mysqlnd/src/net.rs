@@ -10,11 +10,11 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use php_ext::abi::Callable;
-use php_ext::coerce::callable_checked;
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, SocketOptions, Stream, StreamOption, Streams as _, Xport};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::request::{
+    Persisted, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _, Xport,
+};
+use php_ext::values::{PhpString, Value};
 
 use crate::consts::{MAX_PACKET_SIZE, cr};
 use crate::error::{ErrorInfo, SERVER_GONE};
@@ -69,6 +69,10 @@ impl VioOptions {
 #[allow(clippy::struct_excessive_bools)] // php's flags, `vio->data->ssl` and the frame codec's two
 pub(crate) struct Net {
     stream: Option<Stream>,
+    /// A persistent connection's socket while no request holds the
+    /// connection: out of every request and of the engine's persistent
+    /// list, the connection's alone, as php's mysqlnd owns its stream.
+    kept: Option<Persisted>,
     /// Whether the stream is a unix socket, which `caching_sha2_password` counts as
     /// a secure stream (`is_secure_transport`).
     pub(crate) unix: bool,
@@ -181,43 +185,28 @@ impl Net {
     }
 
     /// The stream of a persistent connection taken up by a request: the
-    /// socket the engine kept under the connection's `persistent_id`, a
-    /// live one, with the options `post_connect_set_opt` gave it; a stream
-    /// holding no socket where none was kept, over which every command
-    /// fails as one over a dead link does.
-    pub(crate) fn take_up(&mut self, req: &mut Request, scheme: &[u8]) -> Result<(), Thrown> {
+    /// socket the connection kept, lent to the request under its
+    /// `persistent_id`, with the options `post_connect_set_opt` gave it; a
+    /// connection that kept none takes up holding no stream, over which
+    /// every command fails as one over a dead link does.
+    pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
         self.stream = None;
-        let made = req.xport_create(
-            scheme,
-            Xport::Client {
-                timeout: None,
-                connect: false,
-                persistent: self.persistent_id.clone(),
-                socket: SocketOptions::default(),
-                context: None,
-            },
-        )?;
-        if let Ok(stream) = made {
-            self.stream = Some(stream);
-            self.post_connect(req, stream);
-        }
+        let (Some(kept), Some(key)) = (self.kept.take(), self.persistent_id.clone()) else {
+            return Ok(());
+        };
+        let stream = req.stream_lend(key, kept)?;
+        self.stream = Some(stream);
+        self.post_connect(req, stream);
         Ok(())
     }
 
     /// The stream of a persistent connection let go as the request gives
-    /// the connection back, so that nothing of the request's is left on
-    /// it: the request's end keeps its socket under the connection's
-    /// `persistent_id`. Answered to the caller, which holds it again
-    /// ([`Net::hold`]) where the pool answers the connection past its
-    /// bound.
-    pub(crate) fn give_back(&mut self) -> Option<Stream> {
-        self.stream.take()
-    }
-
-    /// The stream [`Net::give_back`] let go held again, by the request that
-    /// let it go, to close the connection over it.
-    pub(crate) fn hold(&mut self, stream: Option<Stream>) {
-        self.stream = stream;
+    /// the connection back, nothing of the request's left on it: its
+    /// socket kept by the connection ([`Stream::keep`]), out of the
+    /// request and out of the engine's persistent list, so the one list
+    /// the connection waits in is its owner's.
+    pub(crate) fn give_back(&mut self, req: &mut Request) {
+        self.kept = self.stream.take().and_then(|stream| stream.keep(req));
     }
 
     /// `post_connect_set_opt` and the error suppression php sets beside it.
@@ -469,45 +458,18 @@ impl Net {
             return Ok(false);
         };
         let o = self.options.clone();
-        let mut ssl = PhpArray::new(req)?;
-        let mut any = false;
-        let string_options: [(&[u8], &Option<Vec<u8>>); 6] = [
-            (b"local_pk", &o.ssl_key),
-            (b"local_cert", &o.ssl_cert),
-            (b"cafile", &o.ssl_ca),
-            (b"capath", &o.ssl_capath),
-            (b"passphrase", &o.ssl_passphrase),
-            (b"ciphers", &o.ssl_cipher),
-        ];
-        for (name, value) in string_options {
-            if let Some(value) = value {
-                any = true;
-                let text = Value::string(PhpString::new(req, value)?);
-                set(req, &mut ssl, name, text)?;
-                if name == b"local_cert" && o.ssl_key.is_none() {
-                    let text = Value::string(PhpString::new(req, value)?);
-                    set(req, &mut ssl, b"local_pk", text)?;
-                }
+        let context = StreamCtx::alloc(req)?;
+        let set = ssl_options(req, context, &o);
+        let peer = match set {
+            Ok(peer) => peer,
+            Err(thrown) => {
+                req.release(context.resource().as_value());
+                return Err(thrown);
             }
-        }
-        let peer = match o.ssl_verify_peer {
-            SslPeer::Default if any => SslPeer::Verify,
-            SslPeer::Default => SslPeer::DontVerify,
-            other => other,
         };
         self.options.ssl_verify_peer = peer;
-        let verify = peer == SslPeer::Verify;
-        set(req, &mut ssl, b"verify_peer", Value::bool(verify))?;
-        set(req, &mut ssl, b"verify_peer_name", Value::bool(verify))?;
-        if peer == SslPeer::DontVerify {
-            set(req, &mut ssl, b"allow_self_signed", Value::bool(true))?;
-        }
-        let Some(context) = context_of(req, ssl)? else {
-            return Ok(false);
-        };
-        let resource = context.as_resource().copied();
-        stream.set_ctx(req, resource);
-        req.release(context);
+        stream.set_ctx(req, Some(context));
+        req.release(context.resource().as_value());
         let secured = stream.crypto_setup(req, TLS_CLIENT, None)
             && matches!(
                 stream.crypto_enable(req, true),
@@ -526,33 +488,49 @@ impl Net {
     }
 }
 
-/// One entry of the `ssl` options array.
-fn set(req: &mut Request, ssl: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
-    ssl.set(req, key, value)
-}
-
-/// `php_stream_context_alloc` with the `ssl` options set on it, through
-/// `stream_context_create`.
-fn context_of(req: &mut Request, ssl: PhpArray) -> Result<Option<Value>, Thrown> {
-    let name = Value::string(PhpString::new(req, b"stream_context_create")?);
-    let callable: Result<Callable, String> = callable_checked(req, &name);
-    req.release(name);
-    let Ok(callable) = callable else {
-        return Ok(None);
+/// The `ssl` options `mysqlnd_vio::enable_ssl` sets on the `context` it
+/// allocates, in its order: the key, the certificate (and it as the key
+/// where none is given), the CA file and path, the passphrase and the
+/// ciphers, then `verify_peer` and `verify_peer_name` as the peer check
+/// it settles on, which it answers, and `allow_self_signed` where it
+/// checks none.
+fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<SslPeer, Thrown> {
+    let mut any = false;
+    let string_options: [(&[u8], &Option<Vec<u8>>); 6] = [
+        (b"local_pk", &o.ssl_key),
+        (b"local_cert", &o.ssl_cert),
+        (b"cafile", &o.ssl_ca),
+        (b"capath", &o.ssl_capath),
+        (b"passphrase", &o.ssl_passphrase),
+        (b"ciphers", &o.ssl_cipher),
+    ];
+    let put = |req: &mut Request, name: &[u8], value: &[u8]| {
+        let text = Value::string(PhpString::new(req, value)?);
+        let set = context.set_option(req, b"ssl", name, &text);
+        req.release(text);
+        set
     };
-    let mut options = PhpArray::new(req)?;
-    let key = Key::Str(PhpString::new(req, b"ssl")?);
-    options.set(req, key, Value::array(ssl))?;
-    let options = Value::array(options);
-    let context = php_ext::call::call(req, &callable, std::slice::from_ref(&options));
-    req.release(options);
-    let context = context?;
-    if context.as_resource().is_none() {
-        req.release(context);
-        return Ok(None);
+    for (name, value) in string_options {
+        if let Some(value) = value {
+            any = true;
+            put(req, name, value)?;
+            if name == b"local_cert" && o.ssl_key.is_none() {
+                put(req, b"local_pk", value)?;
+            }
+        }
     }
-    Ok(Some(context))
+    let peer = match o.ssl_verify_peer {
+        SslPeer::Default if any => SslPeer::Verify,
+        SslPeer::Default => SslPeer::DontVerify,
+        other => other,
+    };
+    let verify = Value::bool(peer == SslPeer::Verify);
+    context.set_option(req, b"ssl", b"verify_peer", &verify)?;
+    context.set_option(req, b"ssl", b"verify_peer_name", &verify)?;
+    if peer == SslPeer::DontVerify {
+        context.set_option(req, b"ssl", b"allow_self_signed", &Value::bool(true))?;
+    }
+    Ok(peer)
 }
 
 /// `uint3korr`.

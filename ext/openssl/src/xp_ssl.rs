@@ -22,10 +22,11 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
 use php_ext::request::{
-    Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, Streams as _, XportFactory,
+    Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
+    XportFactory,
 };
-use php_ext::values::{Key, PhpArray, Resource, Value, ValueRef};
-use php_ext_standard::{UriParser, stream_ctx_option, stream_ctx_set_option};
+use php_ext::values::{Key, PhpArray, Value, ValueRef};
+use php_ext_standard::UriParser;
 
 use crate::decode::{Origin, check_path};
 use crate::ffi::ssl::{Ctx, Setup, Tls};
@@ -377,15 +378,8 @@ struct SslOptions {
 }
 
 /// `php_stream_context_get_option(context, "ssl", name)`.
-fn option(
-    req: &mut Request,
-    context: Option<Resource>,
-    name: &[u8],
-) -> Result<Option<Value>, Thrown> {
-    match context {
-        Some(context) => stream_ctx_option(req, context, b"ssl", name),
-        None => Ok(None),
-    }
+fn option(req: &Request, context: Option<StreamCtx>, name: &[u8]) -> Option<Value> {
+    context.and_then(|context| context.option(req, b"ssl", name))
 }
 
 /// `try_convert_to_string` of a value.
@@ -398,23 +392,23 @@ fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
 
 impl SslOptions {
     /// Every option the layer reads, off `context`.
-    fn read(req: &mut Request, context: Option<Resource>) -> Result<SslOptions, Thrown> {
+    fn read(req: &mut Request, context: Option<StreamCtx>) -> Result<SslOptions, Thrown> {
         let mut o = SslOptions::default();
         let Some(context) = context else {
             return Ok(o);
         };
         let ctx = Some(context);
         let flag = |req: &mut Request, name: &[u8]| -> Result<Option<bool>, Thrown> {
-            Ok(option(req, ctx, name)?.map(|v| truthy(req, &v)))
+            Ok(option(req, ctx, name).map(|v| truthy(req, &v)))
         };
         let long = |req: &mut Request, name: &[u8]| -> Result<Option<i64>, Thrown> {
-            match option(req, ctx, name)? {
+            match option(req, ctx, name) {
                 Some(v) => Ok(Some(to_long(req, &v)?)),
                 None => Ok(None),
             }
         };
         let text = |req: &mut Request, name: &[u8]| -> Result<Option<Vec<u8>>, Thrown> {
-            match option(req, ctx, name)? {
+            match option(req, ctx, name) {
                 Some(v) => Ok(Some(string_of(req, &v)?)),
                 None => Ok(None),
             }
@@ -433,12 +427,12 @@ impl SslOptions {
         o.alpn_protocols = text(req, b"alpn_protocols")?;
         o.local_cert = text(req, b"local_cert")?;
         o.local_pk = text(req, b"local_pk")?;
-        o.rsa_key_size = option(req, ctx, b"rsa_key_size")?.is_some();
+        o.rsa_key_size = option(req, ctx, b"rsa_key_size").is_some();
         o.dh_param = text(req, b"dh_param")?;
         o.single_dh_use = flag(req, b"single_dh_use")?;
         o.honor_cipher_order = flag(req, b"honor_cipher_order")?;
         o.sni_enabled = flag(req, b"SNI_enabled")?;
-        o.sni_server_certs = match option(req, ctx, b"SNI_server_certs")? {
+        o.sni_server_certs = match option(req, ctx, b"SNI_server_certs") {
             Some(v) => Some(sni_option(req, &v)?),
             None => None,
         };
@@ -447,7 +441,7 @@ impl SslOptions {
         o.peer_name = text(req, b"peer_name")?;
         o.capture_peer_cert = flag(req, b"capture_peer_cert")?.unwrap_or(false);
         o.capture_peer_cert_chain = flag(req, b"capture_peer_cert_chain")?.unwrap_or(false);
-        o.peer_fingerprint = option(req, ctx, b"peer_fingerprint")?.map(|v| fingerprint(&v));
+        o.peer_fingerprint = option(req, ctx, b"peer_fingerprint").map(|v| fingerprint(&v));
         o.allow_self_signed = flag(req, b"allow_self_signed")?.unwrap_or(false);
         o.verify_depth = long(req, b"verify_depth")?;
         Ok(o)
@@ -565,7 +559,7 @@ fn factory(
     proto: &str,
     target: &[u8],
     timeout: Option<Duration>,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
 ) -> Result<Box<dyn Crypto>, Thrown> {
     let on_connect = match proto {
         "ssl" | "tls" => Some(crypto_method(req, context, TLS_ANY_CLIENT)?),
@@ -591,10 +585,10 @@ fn factory(
 /// the client bit, or the default.
 fn crypto_method(
     req: &mut Request,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     default: i64,
 ) -> Result<i64, Thrown> {
-    match option(req, context, b"crypto_method")? {
+    match option(req, context, b"crypto_method") {
         Some(value) => Ok(to_long(req, &value)? | IS_CLIENT),
         None => Ok(default),
     }
@@ -606,7 +600,7 @@ fn crypto_method(
 fn url_name(
     req: &mut Request,
     target: &[u8],
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     let Some(parser) = UriParser::of_ctx(req, context, b"ssl")? else {
         let text = format!(
@@ -1237,14 +1231,14 @@ impl Layer {
     fn capture_peer_certs(
         &self,
         req: &mut Request,
-        context: Resource,
+        context: StreamCtx,
         tls: &Tls,
         peer: &Certificate,
     ) -> Result<(), Thrown> {
         if self.options.capture_peer_cert {
             let object = object_of(req, peer.clone())?;
             let value = object.object().as_value();
-            stream_ctx_set_option(req, context, b"ssl", b"peer_certificate", &value)?;
+            context.set_option(req, b"ssl", b"peer_certificate", &value)?;
             req.release(value);
         }
         if self.options.capture_peer_cert_chain {
@@ -1259,7 +1253,7 @@ impl Layer {
                 }
                 None => Value::null(),
             };
-            stream_ctx_set_option(req, context, b"ssl", b"peer_certificate_chain", &value)?;
+            context.set_option(req, b"ssl", b"peer_certificate_chain", &value)?;
             req.release(value);
         }
         Ok(())
@@ -1426,7 +1420,7 @@ impl Layer {
         socket: &CryptoSocket<'_>,
         tls: &mut Tls,
     ) -> Result<(), Thrown> {
-        let callback = option(req, socket.ctx, b"reneg_limit_callback")?;
+        let callback = option(req, socket.ctx, b"reneg_limit_callback");
         let Some(callback) = callback else {
             warn(
                 req,

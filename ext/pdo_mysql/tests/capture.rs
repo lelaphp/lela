@@ -221,3 +221,45 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
     let served = engine.serve_capture(&second, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), "gone");
 }
+
+/// A persistent connection waits between requests in one list, PDO's,
+/// with its socket, as php's `pdo_dbh_t` in `EG(persistent_list)` holds the
+/// `MYSQLND` and mysqlnd deletes its stream from that list (#1805): the
+/// first request fills the engine's pool of persistent streams to its
+/// bound of 1024 with `pfsockopen` sockets before it connects, and the next
+/// request still takes up the same server thread, where a connection whose
+/// socket waited in that pool lost it past the bound and connected again.
+/// Against the server of `ci/mysql/compose.yaml`; with none listening the
+/// test says so and passes.
+#[test]
+fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_pdo_mysql::extension(),
+        ])
+        .build();
+    let open = "$db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+        echo $db->query('SELECT CONNECTION_ID()')->fetchColumn();";
+    let first = format!(
+        "<?php $s = stream_socket_server('tcp://127.0.0.1:0');
+        $port = explode(':', stream_socket_get_name($s, false))[1];
+        for ($i = 0; $i < 1024; $i++) {{
+            $kept[] = pfsockopen(\"127.0.0.1:$port/$i\", -1);
+            $accepted[] = stream_socket_accept($s, 1);
+        }}
+        {open}"
+    );
+    let served = engine.serve_capture(&first, Capture::default());
+    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    assert!(thread.parse::<u64>().is_ok(), "{thread}");
+    let served = engine.serve_capture(&format!("<?php {open}"), Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), thread);
+}
