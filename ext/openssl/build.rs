@@ -10,6 +10,7 @@
 //! written to `$OUT_DIR/header.rs` as Rust constants, and a header that
 //! cannot be read fails the build.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,27 +29,24 @@ fn run() -> Result<(), String> {
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unset")?);
     let number = env::var("DEP_OPENSSL_VERSION_NUMBER")
         .map_err(|_| "openssl-sys set no DEP_OPENSSL_VERSION_NUMBER: the headers it found are not OpenSSL's (design §7.2)")?;
-    let number = i64::from_str_radix(&number, 16)
+    let number = u32::from_str_radix(&number, 16)
         .map_err(|error| format!("DEP_OPENSSL_VERSION_NUMBER `{number}`: {error}"))?;
     let include = env::var_os("DEP_OPENSSL_INCLUDE").map(PathBuf::from);
-    if let Some(include) = &include {
-        println!(
-            "cargo::rerun-if-changed={}",
-            include.join("openssl/opensslv.h").display()
-        );
-    }
     let text = expand(&out, include.as_deref())?;
+    let (high, low) = (number >> 16, number & 0xffff);
     let header = format!(
         "/// `OPENSSL_VERSION_TEXT` of the headers this build compiled against.\n\
          pub(crate) const OPENSSL_VERSION_TEXT: &str = {text:?};\n\
          /// `OPENSSL_VERSION_NUMBER` of the same headers, `0xMNN00PP0L`.\n\
-         pub(crate) const OPENSSL_VERSION_NUMBER: i64 = {number:#x};\n"
+         pub(crate) const OPENSSL_VERSION_NUMBER: i64 = 0x{high:04x}_{low:04x};\n"
     );
     fs::write(out.join("header.rs"), header).map_err(|error| format!("header.rs: {error}"))
 }
 
 /// `OPENSSL_VERSION_TEXT` as the C preprocessor expands it, its adjacent
-/// quoted strings joined.
+/// quoted strings joined. The `opensslv.h` it read, named by its line
+/// markers, is watched, so that a changed header rebuilds the crate as it
+/// would rebuild php.
 fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
     let source = out.join("opensslv.c");
     fs::write(&source, SOURCE).map_err(|error| format!("opensslv.c: {error}"))?;
@@ -61,6 +59,15 @@ fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
         .try_expand()
         .map_err(|error| format!("preprocessing <openssl/opensslv.h>: {error}"))?;
     let expanded = String::from_utf8_lossy(&expanded);
+    let read: BTreeSet<&str> = expanded
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .filter_map(|line| line.split('"').nth(1))
+        .filter(|path| path.ends_with("/opensslv.h"))
+        .collect();
+    for path in read {
+        println!("cargo::rerun-if-changed={path}");
+    }
     expanded
         .lines()
         .find_map(|line| line.trim().strip_prefix("php_openssl_header"))
@@ -69,27 +76,17 @@ fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
 }
 
 /// The adjacent quoted C strings of `tokens` as one string, as the
-/// compiler joins them; `None` where anything else is there, or an escape
-/// other than `\\` and `\"`.
+/// compiler joins them; `None` where anything else is there, or an escape.
 fn quoted(tokens: &str) -> Option<String> {
     let mut out = String::new();
-    let mut chars = tokens.trim().chars();
-    let mut any = false;
-    loop {
-        match chars.find(|c| !c.is_whitespace()) {
-            None => return any.then_some(out),
-            Some('"') => any = true,
-            Some(_) => return None,
+    let mut rest = tokens.trim();
+    while let Some(open) = rest.strip_prefix('"') {
+        let (text, after) = open.split_once('"')?;
+        if text.contains('\\') {
+            return None;
         }
-        loop {
-            match chars.next()? {
-                '"' => break,
-                '\\' => match chars.next()? {
-                    escaped @ ('\\' | '"') => out.push(escaped),
-                    _ => return None,
-                },
-                c => out.push(c),
-            }
-        }
+        out.push_str(text);
+        rest = after.trim_start();
     }
+    (rest.is_empty() && !out.is_empty()).then_some(out)
 }

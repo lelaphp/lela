@@ -46,7 +46,6 @@ mod xp_ssl;
 /// `build.rs` off the headers openssl-sys found, as php's `@cvalue` reads
 /// the macro at its build (#1974): after the library is upgraded without
 /// a rebuild, these keep the headers' version as php's do.
-#[allow(clippy::unreadable_literal)] // `0x30600040`, the layout `0xMNN00PP0L` names
 mod header {
     include!(concat!(env!("OUT_DIR"), "/header.rs"));
 }
