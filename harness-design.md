@@ -187,6 +187,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **80. Revision 80 (2026-10-05).** §4.3 states how a crate row's oracle variant is read, settled by Mitchell on #1948. #1782 ruled that a crate may be read under a build of the pinned tag with configure flags of its own, pinned per platform, a Linux build by "an image digest and the binary's md5", and #1890 built the grammar with two facts the ruling did not name: every platform's table carries a `path`, since a digest names where a binary came from and not where it is, and a row naming a variant the pin lacks fails that crate and not the manifest. #1889's recipe raised a third, what a Linux table's `image` names: the base image the build is made from, from which a runner rebuilds the binary and holds its md5 with no registry, or the image built, from which a runner could copy the binary only once it is pushed to a registry, whose choice and credentials are a person's. Mitchell ruled that the grammar stands as #1890 built it: every platform's table carries `path`, the install prefix #1889 builds to (`/opt/dax-php/oracle/<variant>/bin/php`); a Linux table's `image` names the base image's manifest digest, which #1889 pins and rebuilds from, and the lane checks the binary by its md5; an unknown variant fails that crate's readings, not the manifest. §4.3 carries the ruling in **What a crate row's oracle variant is**, after the recipe's environment, and `[variant.zend-test]` stands in `oracle.toml` under it (e6219e9e). The paragraph says a variant's regimes are the main oracle's and nothing of what a regime carries, which is #1933's. Nothing is reversed, so there is no ADR. Check: `cargo test -p xtask` runs `oracle::variant`'s `a_linux_build_names_its_image_and_the_macos_build_names_none` and `a_relative_path_is_the_pins_directorys_and_an_absolute_one_is_kept`, and `--test variant` runs `the_fixture_whose_row_names_a_variant_the_pin_lacks_fails_its_crate` and `the_fixture_whose_variant_binary_differs_from_its_md5_refuses_the_run`; each Linux `image` in `oracle.toml` is the base image's digest `scripts/oracle-build.py` names for its platform. A platform's table read without a `path`, a Linux `image` naming the built image rather than the base image's manifest digest, or a manifest refused over one row's variant, is this paragraph wrong.
 
+**81. Revision 81 (2026-10-05).** The bundle's order is held as features against requirements, settled by Mitchell on #1778 and landed by #1821: the edge example of §4.1 and the "No second registry" row read `order = "registration"`, checked as features against requirements. Two more sentences say the bundle order is held as topological, §3's "Dependency direction" row and §4.1's paragraph on what `api-check` reads; the ruling names neither, so they stand until a person settles them (#2039). `api-check` learned the value in #1882 and the manifest carries it since 0a3809e5; the order itself is php's registration order sorted as `zend_sort_modules` sorts it (design revision 85), held by a witness against the oracle rather than by the crate graph. Rejected, as in the design: the oracle's literal list as data, and topological order with a divergence row. Nothing that an ADR records is reversed, so there is no ADR. Check: the edge example and the "No second registry" row read `order = "registration"`, and `api-check` fails `xtask/fixtures/api-check/registration`, a bundle whose feature omits a requirement.
+
 ---
 
 ## 2. Vocabulary
@@ -274,7 +276,7 @@ adr = "0006"
 [[edge]]
 from = "php_bundle"
 to = ["ext/*", "php_ext", "php_jit"]
-order = "topological"
+order = "registration"
 adr = ["0004", "0006"]
 [[edge]]
 from = "php_engine::{executor,kernels}"
@@ -500,7 +502,7 @@ The constraint table of revision 1 stands, with its column of where each rule no
 | No interface growth without a lock line | `api-check`; `permit` note | at the tool call, per commit | `[[seam]]`, `api.lock-line` |
 | Only a macro expansion names `api::__private` | a `deny_pattern` over `ext/*` sources; `permit` at the edit | at the tool call, per commit | a manifest rule a person adds (design revision 34) |
 | No hand-authored exit status in a witness | `witness --accept` the only writer; `permit` | at the tool call, pre-commit | `witness.exit-authored` |
-| No second registry | bundle order checked against the crate graph | per commit | `[[edge]]` `php_bundle`, `order = "topological"` |
+| No second registry | bundle features checked against requirements | per commit | `[[edge]]` `php_bundle`, `order = "registration"` |
 | No committed generated code, except the generated config | `budget` path check; `ext/clippy.toml` regenerated and diffed | per commit | `[[crate]]` |
 | No process weight | `docs/**` and the three living documents under `[budget] docs`; `.claude/**` and `harness-plugins/**` hand-written under `[budget] harness` | per commit | `[budget]` |
 | An agent does not touch the harness's own configuration | `permit` | at the tool call | `harness.self` |

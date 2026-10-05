@@ -17,15 +17,6 @@ use crate::streams::persistent::Held;
 use crate::streams::{FilterCall, Registered};
 use crate::wrapper::StatCache;
 
-/// Where a row registered while the extensions start stands among the
-/// others: the engine's own at zero, an extension's at one past its place
-/// in php's startup order ([`startup_rank`]), and one registered once
-/// the program runs after every other.
-pub(crate) type Rank = usize;
-
-/// The rank of what is registered once the program runs.
-pub(crate) const RUNNING: Rank = Rank::MAX;
-
 /// One request's streams.
 pub(crate) struct State {
     /// The resource types the layer registered as the state was built.
@@ -34,10 +25,11 @@ pub(crate) struct State {
     /// [`crate::streams::Located::Ext`] row names by its place.
     pub(crate) wrappers: Vec<StreamWrapper>,
     /// `url_stream_wrappers_hash`: the table every request starts with,
-    /// the layer's own wrappers and the extensions' in php's startup
-    /// order, each row under its [`Rank`], the layer's three standing
-    /// first until the extension that registers them places them.
-    pub(crate) url_stream_wrappers: Vec<(Rank, Registered)>,
+    /// the layer's own wrappers and then the extensions' in the order
+    /// they registered them, which is php's startup order since the
+    /// extensions activate in it; the layer's three stand first until
+    /// the extension that registers them moves them to its place.
+    pub(crate) url_stream_wrappers: Vec<Registered>,
     /// `FG(stream_wrappers)`: the request's own wrapper table once a
     /// program changed it, `None` while it has the built-in one.
     pub(crate) url_wrappers: Option<Vec<Registered>>,
@@ -60,10 +52,10 @@ pub(crate) struct State {
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
-    /// `FG(stream_filters)`: each filter name and its factory under its
-    /// [`Rank`], the extensions' in php's startup order and a program's
-    /// after.
-    pub(crate) filters: Vec<(Rank, (Vec<u8>, FilterFactory))>,
+    /// `FG(stream_filters)`: each filter name and its factory in the
+    /// order they were registered, the extensions' in php's startup
+    /// order and a program's after.
+    pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,
@@ -151,8 +143,6 @@ pub(crate) trait Layer {
     fn streams_ref(&self) -> Option<&State>;
     /// The three resource types, registered as the state is built.
     fn types(&mut self) -> Types;
-    /// The [`Rank`] a row registered now takes.
-    fn rank(&self) -> Rank;
     /// `fclose()` reaching one of the constants' streams: the host's fd
     /// under it closed, and the constant's stream forgotten.
     fn close_standard(&mut self, closed: Resource);
@@ -187,12 +177,6 @@ impl Layer for Request {
         let types = register_types(self);
         self.streams().types = Some(types);
         types
-    }
-
-    fn rank(&self) -> Rank {
-        self.activating()
-            .and_then(|extension| self.extension_name(extension))
-            .map_or(RUNNING, |name| startup_rank(name) + 1)
     }
 
     fn close_standard(&mut self, closed: Resource) {
@@ -237,52 +221,15 @@ fn register_types(req: &mut Request) -> Types {
     }
 }
 
-/// The layer's own wrappers, `php`, `file` and `data`, at rank zero: the
-/// table every request starts from until an extension places them.
-pub(crate) fn layer_wrappers() -> Vec<(Rank, Registered)> {
+/// The layer's own wrappers, `php`, `file` and `data`: the table every
+/// request starts from until `standard`, which registers them, moves
+/// them to its place.
+pub(crate) fn layer_wrappers() -> Vec<Registered> {
     [
         EngineWrapper::Php,
         EngineWrapper::Plain,
         EngineWrapper::Data,
     ]
-    .map(|which| (0, Registered::engine(which)))
+    .map(Registered::engine)
     .into()
-}
-
-/// `rows` with `row` placed at `rank`: after every row of a rank no
-/// later, which leaves each rank's rows in the order they came, as a
-/// stable sort by rank of the rows in registration order would.
-pub(crate) fn place<T>(rows: &mut Vec<(Rank, T)>, rank: Rank, row: T) {
-    let at = rows.partition_point(|(placed, _)| *placed <= rank);
-    rows.insert(at, (rank, row));
-}
-
-/// The extensions of the pinned build in the order `internal_functions.c`
-/// starts them, what its `php -n` answers `get_loaded_extensions()` in
-/// past `Core`: the order php's `MINIT`s register their stream wrappers
-/// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The engine starts the
-/// bundle's order as its `sort_modules` leaves it, which is not the
-/// pinned build's (`openssl` after `standard`, `random` near the front),
-/// so each row an extension's `rinit` registers is placed by this order
-/// ([`place`]).
-#[rustfmt::skip]
-const MODULE_STARTUP: [&str; 65] = [
-    "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
-    "curl", "dba", "uri", "json", "mbstring", "SPL", "FFI", "fileinfo", "filter", "ftp", "gd",
-    "gettext", "gmp", "hash", "iconv", "intl", "session", "ldap", "standard", "libxml", "mysqlnd",
-    "mysqli", "odbc", "Zend OPcache", "pcntl", "PDO", "pdo_dblib", "pdo_mysql", "PDO_ODBC",
-    "pdo_pgsql", "pdo_sqlite", "pgsql", "Phar", "posix", "random", "readline", "Reflection",
-    "exif", "shmop", "SimpleXML", "snmp", "soap", "sockets", "sodium", "sysvmsg", "sysvsem",
-    "sysvshm", "tidy", "tokenizer", "dom", "xml", "xmlreader", "xmlwriter", "xsl", "zip",
-];
-
-/// Where php starts the extension `name`, [`MODULE_STARTUP`]'s place
-/// for it, the names compared without regard to case as php compares
-/// them; one php does not build starts after every one it does.
-fn startup_rank(name: &str) -> usize {
-    MODULE_STARTUP
-        .iter()
-        .position(|started| started.eq_ignore_ascii_case(name))
-        .unwrap_or(MODULE_STARTUP.len())
 }
