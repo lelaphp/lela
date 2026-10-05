@@ -8,15 +8,17 @@
 //! `php_cli_server_do_event_loop` serves them (#1884, as #1779 ruled). No
 //! request is ever in flight beside another, so a `pcntl_fork` from one
 //! forks as under the CLI, and the child serves on in the loop it was
-//! forked from, as php's does. `PHP_CLI_SERVER_WORKERS`, for which php
-//! forks the server into worker processes before it serves, is not read
-//! yet (#1885). The log is php's: the startup line, one
-//! line as each connection is accepted and closed, one per response, each
+//! forked from, as php's does. `PHP_CLI_SERVER_WORKERS` forks the server
+//! into worker processes before it serves, each through the engine's
+//! one home for fork and each with a loop of its own on the same socket
+//! ([`workers`], #1885). The log is php's: the startup line, one line as
+//! each connection is accepted and closed, one per response, each
 //! after the local time `asctime` writes, on stderr, as many as the level
 //! `-q` lowers leaves.
 
 mod client;
 mod log;
+mod workers;
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
@@ -69,9 +71,12 @@ struct Site {
 /// `do_cli_server` (`Z/sapi/cli/php_cli_server.c:2808`): the document root
 /// `-t` names, which must be a directory and is served by its real path,
 /// or the working directory; the router after the switches; the address
-/// parsed and listened on; the startup line; and then each connection
-/// served until a `SIGINT` stops the loop, as
-/// `php_cli_server_sigint_handler` stops it. The exit code: 0 once
+/// parsed and listened on; the workers `PHP_CLI_SERVER_WORKERS` asks
+/// for forked; the startup line, in each process; and then each
+/// connection served until a `SIGINT` stops the loop, as
+/// `php_cli_server_sigint_handler` stops it, after which the listening
+/// socket is closed and each worker this process forked waited for, as
+/// `php_cli_server_dtor` closes and waits. The exit code: 0 once
 /// stopped, 1 where the wait failed, what refused it where it does not
 /// start.
 pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
@@ -88,7 +93,7 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         }
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    let log = Log::new(LOG_LEVEL.saturating_sub(server.quiet).max(1), color);
+    let mut log = Log::new(LOG_LEVEL.saturating_sub(server.quiet).max(1), color);
     let address = String::from_utf8_lossy(&server.address).into_owned();
     let Some((host, port)) = parse_address(&address) else {
         return refuse(&format!("Invalid address: {address}\n"));
@@ -115,6 +120,10 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         log.write(Type::Error, "Failed to make server socket non-blocking");
         return 1;
     }
+    let workers = workers::Workers::start(&log);
+    if workers.many() {
+        log.name_processes();
+    }
     let (open, close) = if host.contains(':') {
         ("[", "]")
     } else {
@@ -137,7 +146,10 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         port,
         log,
     });
-    serve_until_stopped(&site, &listener)
+    let status = serve_until_stopped(&site, &listener);
+    drop(listener);
+    workers.wait();
+    status
 }
 
 /// `php_cli_server_do_event_loop` (`Z/sapi/cli/php_cli_server.c:2770-2797`):

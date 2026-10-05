@@ -151,6 +151,46 @@ pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
     Ok(ready)
 }
 
+/// `php_cli_server_worker_install_pdeathsig`
+/// (`Z/sapi/cli/php_cli_server.c:2486`) in a worker the server forked
+/// from `parent`: `SIGTERM` asked for once the parent dies, where the
+/// system offers it (`PR_SET_PDEATHSIG`), and the worker ended at once
+/// where the parent already died between the fork and the ask. Nothing
+/// where the system offers no such signal, as php's build without
+/// `prctl` or `procctl` does nothing.
+pub(crate) fn end_with_parent(parent: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `prctl(PR_SET_PDEATHSIG)` reads its two integer
+        // arguments and touches no memory of ours.
+        let _ = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+        // SAFETY: `getppid(2)` takes nothing and touches no memory.
+        let now = unsafe { libc::getppid() };
+        if u32::try_from(now).ok() != Some(parent) {
+            std::process::exit(1);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = parent;
+}
+
+/// The loop of `php_cli_server_dtor` over one worker
+/// (`Z/sapi/cli/php_cli_server.c:2395-2405`): `waitpid` until the worker
+/// `pid` exited or a signal ended it, given up where the wait fails.
+pub(crate) fn wait_for_end(pid: i32) {
+    let mut status = 0;
+    loop {
+        // SAFETY: `waitpid(2)` writes the one `c_int` it is handed, live
+        // for the call.
+        if unsafe { libc::waitpid(pid, &raw mut status, 0) } == -1 {
+            return;
+        }
+        if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+            return;
+        }
+    }
+}
+
 /// `php_cli_server_get_system_time` (`Z/sapi/cli/php_cli_server.c:267`):
 /// the time now in the process's local zone, `php_localtime_r` and
 /// `php_asctime_r`, as `Wed Jun  1 21:49:08 2026` without the line end
