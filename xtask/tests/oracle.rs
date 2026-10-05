@@ -167,14 +167,6 @@ fn a_regime_adds_its_ini_after_the_recipe() {
     );
 }
 
-/// The row #1780 ruled a person writes, word for word: a regime of
-/// arguments alone, for what no ini setting reaches.
-const EXTENDED_INFO: &str = "
-[regime.extended-info]
-# php's -e (ZEND_COMPILE_EXTENDED_INFO), which no ini setting reaches (#1780)
-args = [\"-e\"]
-";
-
 /// A file standing where a binary would that writes each argument it was
 /// handed on a line of its own, and the tree that holds it.
 fn argv_echo() -> (Tree, PathBuf) {
@@ -190,8 +182,9 @@ fn argv_echo() -> (Tree, PathBuf) {
     (dir, path)
 }
 
-/// A regime may carry `args` (#1780, #1887): the pin reads a block of
-/// arguments alone, as the row a person writes has it, and a regime of ini
+/// A regime may carry `args` (#1780, #1887): the tracked pin's
+/// `[regime.extended-info]`, the row #1780 ruled, is a block of arguments
+/// alone, and a regime of ini
 /// alone carries none. A regime's arguments stand after the recipe's, as
 /// its ini stands after the recipe's, ahead of every `-d` and of the
 /// lane's flags and the program; a run under no regime, or under one of
@@ -200,7 +193,7 @@ fn argv_echo() -> (Tree, PathBuf) {
 #[test]
 fn a_regimes_args_stand_after_the_recipes_and_ahead_of_every_ini() {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
-    let pin = Pin::parse(&format!("{text}{EXTENDED_INFO}")).unwrap();
+    let pin = Pin::parse(&text).unwrap();
     let extended = pin.regime("extended-info").unwrap();
     assert_eq!(extended.args, ["-e"]);
     assert!(extended.ini.is_empty(), "{extended:?}");

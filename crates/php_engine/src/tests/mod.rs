@@ -11,4 +11,5 @@ mod observer;
 mod observer_notices;
 mod periodic;
 mod pool;
+mod stepped;
 pub(crate) mod test_ext;

@@ -70,6 +70,7 @@ use crate::exec::{
     cleanup_live_vars, cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors,
     restore_silenced,
 };
+use crate::observer::OnThrow;
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 use php_unit::Opcode;
@@ -10318,7 +10319,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
     if req.user_function(function).is_some() {
         return enter(req, frame, code, op, function);
     }
-    let served = req.serve_native(function);
+    let served = req.serve_native(function, OnThrow::Nothing);
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
     // native returns, with the call still on the stack, which is where
     // a signal the native delivered to its own process is dispatched
@@ -10705,7 +10706,11 @@ fn frameless_call(
         coerced: Vec::new(),
         beneath: 0,
     });
-    let served = req.serve_native(Function(entry.function));
+    // php falls back to a full call where the callee is observed,
+    // `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
+    // the call laid down here already is, and ends it with the result
+    // whether the native threw or not (`Z/Zend/zend_execute.c:1597`).
+    let served = req.serve_native(Function(entry.function), OnThrow::ReturnValue);
     req.pop_call();
     let at = req.vm().opline(frame);
     let width = if arguments.len() == 3 { 2 } else { 1 };

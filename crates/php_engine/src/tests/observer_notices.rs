@@ -320,6 +320,7 @@ fn a_fatal_is_told_before_it_is_rendered_and_the_frames_ended() {
             events.get(at + 1..)
                 == Some(&[
                     Ext(0, Error("Foo error".to_owned())),
+                    Ext(0, End("trigger_error".to_owned(), None)),
                     Ext(0, End("foo".to_owned(), None)),
                     Ext(0, End("file 'main.php'".to_owned(), None)),
                 ])
