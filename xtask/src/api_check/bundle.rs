@@ -5,7 +5,9 @@
 //!   extension it depends on, a dev-dependency included, as the order
 //!   has been held since revision 4.
 //! - `"registration"`, as #1778 ruled: the order written is php's
-//!   registration order, which Cargo edges do not constrain, and each
+//!   registration order for the oracle's enabled set, which the engine
+//!   sorts as `zend_sort_modules` does and `php_bundle`'s witness holds
+//!   to the oracle, and which Cargo edges do not constrain; each
 //!   extension's feature switches on the features of every extension its
 //!   library links, so a build that registers an extension registers what
 //!   it requires (#1882). A dev- or build-dependency links into the
