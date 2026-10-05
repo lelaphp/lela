@@ -4,8 +4,9 @@
 //! read and keep, its notices and the handlers added while a request is
 //! served, a periodic interrupt as an extension sees it (#1806), the
 //! pool's drain, a handler that blocks with the time limit suspended
-//! (#1814), and allocations as an extension observes them (design
-//! §7.1).
+//! (#1814), allocations as an extension observes them (design §7.1),
+//! and the statements a Zend extension is told of under extended info
+//! (#1823).
 
 use crate::api;
 
@@ -16,6 +17,7 @@ mod observer;
 mod observer_notices;
 mod periodic;
 mod pool;
+mod statements;
 mod stepped;
 pub(crate) mod test_ext;
 mod time_limit;

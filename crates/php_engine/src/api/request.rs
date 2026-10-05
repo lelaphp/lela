@@ -374,6 +374,10 @@ pub struct Request {
     /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
     /// extended info ([`Request::host_string`]).
     pub(crate) compiling_host_string: bool,
+    /// `EG(no_extensions)`: set while a string the host evaluates of its
+    /// own is served, so no Zend extension is told of a statement it
+    /// reaches ([`Request::serve_host_string`], [`crate::statement`]).
+    pub(crate) no_extensions: bool,
     /// `CG(script_encoding_list)` where an `ini_set()` of
     /// `zend.script_encoding` moved it this request; the engine's where
     /// none did.
@@ -648,6 +652,7 @@ impl Request {
             record: recording::Record::default(),
             keys_made: 0,
             compiling_host_string: false,
+            no_extensions: false,
             script_encodings: None,
             buckets,
             aliases: tables.aliases,

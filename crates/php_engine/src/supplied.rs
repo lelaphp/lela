@@ -13,7 +13,7 @@
 //!   `zend_post_startup_cb`, `php_rfc1867_callback`);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`,
 //!   `zend_observers_fcall_list`, the observer's three notice lists and
-//!   its three fiber lists);
+//!   its three fiber lists, the statement handlers of `zend_extensions`);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
 //!   functions, the CLI's shell callbacks);
@@ -46,6 +46,7 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
 use crate::api::values::PhpString;
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
+use crate::statement::StatementHandler;
 
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
@@ -123,6 +124,10 @@ pub(crate) struct Supplies {
     pub(crate) fiber_init: Vec<FiberHandler>,
     pub(crate) fiber_switch: Vec<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Vec<FiberHandler>,
+    /// The Zend extension row's `statement_handler`, which
+    /// [`ExtensionBuilder::build`](crate::api::abi::ExtensionBuilder::build)
+    /// takes from it.
+    pub(crate) statement_handler: Option<StatementHandler>,
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -214,6 +219,11 @@ pub(crate) struct Resolved {
     pub(crate) fiber_init: Listed<FiberHandler>,
     pub(crate) fiber_switch: Listed<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Listed<FiberHandler>,
+    /// `zend_extensions` as `ZEND_EXT_STMT` walks it, each one's
+    /// `statement_handler` in the order they were registered
+    /// (`zend_register_extension`, `Z/Zend/zend_extensions.c:150`), which a
+    /// Zend extension's phase keeps ([`crate::statement`]).
+    pub(crate) statement_handlers: Listed<StatementHandler>,
     /// Served once the primary program has ended.
     pub(crate) program_ended: Listed<fn(&mut Request)>,
     /// The unit cache's one question, which opcache's
@@ -280,6 +290,7 @@ impl Resolved {
             table.fiber_init.install_all(own.fiber_init);
             table.fiber_switch.install_all(own.fiber_switch);
             table.fiber_destroy.install_all(own.fiber_destroy);
+            table.statement_handlers.install(own.statement_handler);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);
@@ -757,6 +768,7 @@ mod tests {
                 author: String::new(),
                 url: String::new(),
                 copyright: String::new(),
+                statement_handler: None,
             })
             .build(name)
     }
