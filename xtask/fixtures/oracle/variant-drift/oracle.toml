@@ -1,0 +1,35 @@
+# The fixture's pin (#1890): the grammar's least, a main oracle nowhere on
+# any machine, and the variant `drift` pinned for every platform at the
+# shell file beside this one, a relative path being the pin's directory's,
+# by an md5 that file does not have.
+[oracle]
+version = "8.5.9"
+path = "/nowhere/php"
+md5 = "00000000000000000000000000000000"
+
+[source]
+tag = "php-8.5.9"
+commit = "dd6e76cc"
+path = "/nowhere/php-src"
+phpt_files = 0
+
+[recipe]
+script_name = "witness.php"
+preamble = "<?php\n"
+args = ["-n"]
+ini = []
+env_clear = true
+
+[recipe.limits]
+timeout_s = 60
+
+[recipe.normalise]
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+[variant.drift]
+flags = ["--enable-zend-test"]
+darwin-arm64 = { path = "php", md5 = "00000000000000000000000000000000" }
+linux-x86_64 = { path = "php", md5 = "00000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+linux-aarch64 = { path = "php", md5 = "00000000000000000000000000000000", image = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }

@@ -124,7 +124,7 @@ use anyhow::{Context, Result, bail};
 use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Oracle, Pin, Regime, Runner};
+use crate::oracle::{Oracle, Oracles, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -523,6 +523,29 @@ pub fn run(
     run_in(root, manifest, registry, ask, None)
 }
 
+/// The crates `ask` names, every crate where it names none, or with
+/// `--staged` the crates a staged change touches; none where `--staged`
+/// finds no such change, which is said and runs nothing.
+fn asked(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<String>>> {
+    for name in &ask.crates {
+        if manifest.crate_named(name).is_none() {
+            bail!("the manifest has no crate named {name:?}");
+        }
+    }
+    if !ask.staged {
+        return Ok(Some(ask.crates.clone()));
+    }
+    if !ask.crates.is_empty() {
+        bail!("witness: --staged names its own crates; drop --crate");
+    }
+    let touched = sources::staged_crates(root, manifest)?;
+    if touched.is_empty() {
+        println!("witness: no crate has a staged change");
+        return Ok(None);
+    }
+    Ok(Some(touched))
+}
+
 /// [`run`], each snippet's start and end and each crate's reading
 /// appended to `journal` where there is one ([`watch`]).
 fn run_in(
@@ -532,28 +555,16 @@ fn run_in(
     ask: &Ask,
     journal: Option<&Journal>,
 ) -> Result<Vec<Reading>> {
-    for name in &ask.crates {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
-    let crates = if ask.staged {
-        if !ask.crates.is_empty() {
-            bail!("witness: --staged names its own crates; drop --crate");
-        }
-        let touched = sources::staged_crates(root, manifest)?;
-        if touched.is_empty() {
-            println!("witness: no crate has a staged change");
-            return Ok(Vec::new());
-        }
-        touched
-    } else {
-        ask.crates.clone()
+    let Some(crates) = asked(root, manifest, ask)? else {
+        return Ok(Vec::new());
     };
     let rule = coverage_rule(manifest);
-    // One oracle for the run: the digest is asserted before the first
-    // snippet and never per witness or per crate (harness §4.3).
-    let oracle = manifest.pin.oracle();
+    // One oracle for the run, and one for each variant a row names: each
+    // digest is asserted before the first snippet under it and never per
+    // witness or per crate (harness §4.3). A crate whose row names a
+    // variant is read under it (#1782).
+    let variants = manifest.variants();
+    let oracles = Oracles::new(&manifest.pin, &variants);
     // One binary for the fences marked `process`, built at the first.
     let binary = Binary::of(root);
     let mut readings = Vec::new();
@@ -578,12 +589,16 @@ fn run_in(
             readings.push(unrun);
             continue;
         }
-        let found = match extract(root, krate, rule, Target::built()) {
-            Ok(found) => ask.scope.narrow(found),
-            // A source the grammar could not read: the crate's reading
-            // fails and names it, since `done` asks the crate for a
-            // witness reading and a pass over sources never seen would
-            // say the crate was measured when it was not.
+        let picked = oracles
+            .of(krate.oracle.as_deref())
+            .and_then(|oracle| Ok((oracle, extract(root, krate, rule, Target::built())?)));
+        let (oracle, found) = match picked {
+            Ok((oracle, found)) => (oracle, ask.scope.narrow(found)),
+            // A source the grammar could not read, or an oracle variant
+            // the pin does not carry: the crate's reading fails and names
+            // it, since `done` asks the crate for a witness reading and a
+            // pass over sources never seen, or never held to an oracle,
+            // would say the crate was measured when it was not.
             Err(unread) => {
                 let mut failed = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule)
                     .under(&manifest.pin);
@@ -598,7 +613,7 @@ fn run_in(
         }
         served += found.witnesses.len();
         let watch = journal.map(|j| j.over(&krate.name));
-        let tally = judge(&oracle, &binary, registry, ask, &found, watch)?;
+        let tally = judge(oracle, &binary, registry, ask, &found, watch)?;
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -631,7 +646,13 @@ fn run_in(
                 tally.witnesses.judged.len()
             );
         }
-        let judged = reading(&tally, root, krate, rule)?.under(&manifest.pin);
+        let mut judged = reading(&tally, root, krate, rule)?.under(&manifest.pin);
+        if let Some(variant) = oracle.pin().oracle.variant() {
+            judged.message = format!(
+                "{}; read under the oracle variant {variant}",
+                judged.message
+            );
+        }
         if let Some(journal) = journal {
             journal.judged(&judged)?;
         }
@@ -729,16 +750,13 @@ pub(crate) fn judge(
     // the whole run (§4.3), never caught per witness as a bork. A binary
     // that is not at the path is no refusal: nothing runs, each witness is
     // a snippet that did not run, and the reading says why (#65).
-    let pinned = &oracle.pin().oracle.path;
-    let oracle_absent = if pinned.is_file() {
+    let oracle_absent = oracle.pin().oracle.absent();
+    if oracle_absent.is_none() {
         oracle.asserted()?;
         if found.witnesses.iter().any(|w| w.server) {
             crate::phpt::server::version(oracle, "the witnesses marked mysql")?;
         }
-        None
-    } else {
-        Some(format!("the pinned php is not at {}", pinned.display()))
-    };
+    }
     // Which regime each witness stands under, read off the pin before
     // anything runs and without php: a fence names one `[regime.<name>]`
     // and the values are the pin's, so a name the pin does not carry is a

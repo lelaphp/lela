@@ -71,6 +71,7 @@ manifest::Crate::optional
 manifest::Crate::path
 manifest::Crate::subsets
 manifest::Crate::with_feature
+manifest::Crate::with_oracle
 manifest::Crate::with_phpt
 manifest::Edge
 manifest::Edge::between
@@ -91,6 +92,8 @@ manifest::Manifest::parse
 manifest::Manifest::rule
 manifest::Manifest::rule_checked_by
 manifest::Manifest::scope_path
+manifest::Manifest::variant_of
+manifest::Manifest::variants
 manifest::Measure
 manifest::OneOrMany
 manifest::OneOrMany::adr_cited
@@ -123,7 +126,10 @@ new_ext::Laid
 new_ext::run
 new_sapi::run
 oracle::Binary
+oracle::Binary::absent
 oracle::Binary::file
+oracle::Binary::variant
+oracle::Build
 oracle::ENGINE
 oracle::Host
 oracle::Hosts
@@ -137,6 +143,10 @@ oracle::Oracle::asserted
 oracle::Oracle::pin
 oracle::Oracle::run
 oracle::Oracle::run_under
+oracle::Oracles
+oracle::Oracles::main
+oracle::Oracles::new
+oracle::Oracles::of
 oracle::PROMISE_VARIABLE
 oracle::Pin
 oracle::Pin::digest
@@ -146,6 +156,10 @@ oracle::Pin::on_this_machine
 oracle::Pin::oracle
 oracle::Pin::parse
 oracle::Pin::regime
+oracle::Pin::variant
+oracle::Platform
+oracle::Platform::key
+oracle::Platform::this
 oracle::Program
 oracle::Promise
 oracle::Promise::or_skip
@@ -169,6 +183,8 @@ oracle::Source::tree
 oracle::Stdin
 oracle::Streams
 oracle::TREE_VARIABLE
+oracle::Variant
+oracle::Variant::build
 oracle::Verdict
 oracle::compare
 oracle::diff
