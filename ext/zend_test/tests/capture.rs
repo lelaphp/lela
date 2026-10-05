@@ -98,3 +98,25 @@ fn execute_internal_names_each_native_as_it_is_entered() {
         "<!-- internal enter function_exists() -->\ny"
     );
 }
+
+#[test]
+fn observe_function_names_set_by_a_request_moves_the_handlers() {
+    let out = served(
+        &[("enabled", "1"), ("observe_function_names", "f")],
+        "<?php function f() {} function g() {} f(); g(); \
+         ini_set('zend_test.observer.observe_function_names', 'g'); f(); g();",
+    );
+    assert_eq!(out.matches("<f>").count(), 1, "{out}");
+    assert_eq!(out.matches("<g>").count(), 1, "{out}");
+    assert!(out.rfind("<g>") > out.rfind("<f>"), "{out}");
+}
+
+#[test]
+fn observe_declaring_names_each_function_and_class_declared() {
+    let out = served(
+        &[("enabled", "1"), ("observe_declaring", "1")],
+        "<?php if (true) { function F() {} class C {} }",
+    );
+    assert!(out.contains("<!-- declared function 'f' -->"), "{out}");
+    assert!(out.contains("<!-- declared class 'c' -->"), "{out}");
+}

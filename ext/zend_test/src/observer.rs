@@ -30,10 +30,10 @@
 //! starts, each written as it is told of one before its handler runs.
 
 use php_ext::abi::{
-    ExtensionBuilder, FiberStatus, Observed, ObservedFiber, ObserverHandlers, Opcodes, Refusal,
-    Start,
+    ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Opcodes,
+    Refusal, Start,
 };
-use php_ext::call::Function;
+use php_ext::call::{Function, lookup_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{FrameView, Raised, Request};
@@ -105,6 +105,8 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .fiber_init(fiber_init)
         .fiber_switch(fiber_switch)
         .fiber_destroy(fiber_destroy)
+        .function_declared_observer(declared_function)
+        .class_linked_observer(declared_class)
 }
 
 /// The table as the extension declares it.
@@ -134,6 +136,7 @@ struct Switches {
     observe_all: bool,
     observe_includes: bool,
     observe_functions: bool,
+    observe_declaring: bool,
     show_return_type: bool,
     show_return_value: bool,
     show_init_backtrace: bool,
@@ -161,6 +164,7 @@ impl Switches {
             observe_all: switch("observe_all"),
             observe_includes: switch("observe_includes"),
             observe_functions: switch("observe_functions"),
+            observe_declaring: switch("observe_declaring"),
             show_return_type: switch("show_return_type"),
             show_return_value: switch("show_return_value"),
             show_init_backtrace: switch("show_init_backtrace"),
@@ -289,13 +293,64 @@ impl Observing {
 /// `ZEND_INI_MH(zend_test_observer_OnUpdateCommaList)`: refused while
 /// the observer is not enabled, as `ZT_G(observer_enabled)` reads
 /// whenever the handler runs. The table php keeps is the entry's value
-/// here, which [`fcall_init`] reads.
+/// here, which [`fcall_init`] reads. While a request runs, each function
+/// the old value names has the observer's handlers taken out of its slot
+/// and each the new value names has them added, as
+/// `zend_observer_remove_begin_handler` and `zend_observer_add_begin_handler`
+/// do; a function not called yet has no slot, and is answered by
+/// [`fcall_init`] on its first call.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
-fn on_update_function_names(req: &mut Request, _value: Option<&[u8]>) -> Result<bool, Thrown> {
-    Ok(req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool))
+fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    if !req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
+        return Ok(false);
+    }
+    if req.ini_stage() != IniStage::Runtime {
+        return Ok(true);
+    }
+    let named = |req: &Request, names: Option<&[u8]>| -> Vec<Function> {
+        names
+            .filter(|names| !names.is_empty())
+            .into_iter()
+            .flat_map(|names| names.split(|&b| b == b','))
+            .filter_map(|name| lookup_function(req, name))
+            .collect()
+    };
+    for function in named(req, req.ini_get(OBSERVE_FUNCTION_NAMES)) {
+        let _ = req.remove_begin_handler(function, begin);
+        let _ = req.remove_end_handler(function, end);
+    }
+    for function in named(req, value) {
+        req.add_begin_handler(function, begin);
+        req.add_end_handler(function, end);
+    }
+    Ok(true)
+}
+
+/// `declared_function_observer`: `<!-- declared function 'f' -->` under
+/// `observe_declaring`, by the lowered name it is declared under.
+fn declared_function(req: &mut Request, _function: Function, name: &[u8]) {
+    show_declared(req, "function", name);
+}
+
+/// `declared_class_observer`: `<!-- declared class 'c' -->` under
+/// `observe_declaring`.
+fn declared_class(req: &mut Request, _class: ClassId, name: &[u8]) {
+    show_declared(req, "class", name);
+}
+
+fn show_declared(req: &mut Request, what: &str, name: &[u8]) {
+    let switches = Switches::of(req);
+    if !(switches.enabled && switches.observe_declaring) {
+        return;
+    }
+    let mut line = indent(req.state::<Observing>().depth);
+    line.extend_from_slice(format!("<!-- declared {what} '").as_bytes());
+    line.extend_from_slice(name);
+    line.extend_from_slice(b"' -->\n");
+    req.write(&line);
 }
 
 /// What an observed frame serves: a function, a method or a native,
