@@ -44,6 +44,7 @@ use crate::api::abi::{
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
 use crate::api::values::PhpString;
+use crate::observer::OpcodeObserver;
 
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
@@ -118,6 +119,7 @@ pub(crate) struct Supplies {
     pub(crate) fiber_init: Vec<FiberHandler>,
     pub(crate) fiber_switch: Vec<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Vec<FiberHandler>,
+    pub(crate) opcodes: Option<OpcodeObserver>,
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -197,6 +199,12 @@ pub(crate) struct Resolved {
     pub(crate) fiber_init: Listed<FiberHandler>,
     pub(crate) fiber_switch: Listed<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Listed<FiberHandler>,
+    /// `zend_user_opcode_handlers`, one handler per opcode, which an
+    /// extension that sets one over another's saves and calls after its
+    /// own, as xdebug's `xdebug_set_opcode_handler` does: from the top,
+    /// every link, each declaring at engine start the opcodes it
+    /// observes ([`crate::observer::ObservedOpcodes`]).
+    pub(crate) opcodes: Chain<OpcodeObserver>,
     /// Served once the primary program has ended.
     pub(crate) program_ended: Listed<fn(&mut Request)>,
     /// The unit cache's one question, which opcache's
@@ -260,6 +268,7 @@ impl Resolved {
             table.fiber_init.install_all(own.fiber_init);
             table.fiber_switch.install_all(own.fiber_switch);
             table.fiber_destroy.install_all(own.fiber_destroy);
+            table.opcodes.install(own.opcodes);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);

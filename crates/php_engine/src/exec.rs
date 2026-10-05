@@ -1775,6 +1775,8 @@ pub(crate) fn skip_passed(req: &mut Request, callee: FrameRef, function: Functio
 /// The design's entry safepoint stands after the last of them either
 /// way (§5.6, the accepted `trace:entry-counter-typed-recv` row), which
 /// is why this runs before the loop is asked for the frame's activation.
+/// php dispatches each through its VM, so an extension observing `RECV`
+/// is told of each one served here (design §7.1).
 ///
 /// `Some` is the frame a `RECV` raised on, whose throwable is pending;
 /// the caller decides what a raise before the activation means to it.
@@ -1803,6 +1805,7 @@ pub(crate) fn parameter_prologue(
         let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
             break;
         };
+        crate::observer::told_before(req, callee, prologue.opcode);
         let stepped = match prologue.opcode {
             php_unit::Opcode::Recv => {
                 crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?

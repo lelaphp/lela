@@ -31,7 +31,7 @@ mod marshal;
 
 pub use crate::observer::{
     BeginHandler, EndHandler, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
-    ObservedFiber, ObserverHandlers, ObserverInit,
+    ObservedFiber, ObserverHandlers, ObserverInit, OpcodeHandler, Opcodes, OpcodesDeclared,
 };
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
@@ -1332,6 +1332,29 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
         self.supplies.observers.push(init);
+        self
+    }
+
+    /// Observation of a declared set of opcodes (design §7.1, as #1780
+    /// ruled), php's `zend_set_user_opcode_handler` with a handler that
+    /// answers `ZEND_USER_OPCODE_DISPATCH`: `declared` is asked once, as
+    /// the engine starts, which opcodes the extension observes, handed
+    /// what its `MINIT` is; `handler` is told of each opline of one of
+    /// them the loop dispatches, before the opcode's handler runs, handed
+    /// the frame standing at it and the opcode's name. The opcode's
+    /// handler always runs after it: no extension replaces one. Two
+    /// extensions that declare one opcode are each told, the later
+    /// first, as php's handler that saved the one it set over calls it
+    /// after its own work; a second declaration of one extension stands
+    /// over its first. With none declared, a serving reads one word as
+    /// its loop is entered and each opline pays a test of it.
+    #[must_use]
+    pub fn opcodes(
+        mut self,
+        declared: OpcodesDeclared,
+        handler: OpcodeHandler,
+    ) -> ExtensionBuilder {
+        self.supplies.opcodes = Some(crate::observer::OpcodeObserver { declared, handler });
         self
     }
 

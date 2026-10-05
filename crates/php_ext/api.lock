@@ -97,6 +97,7 @@ abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::opcodes
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::process_state
@@ -221,6 +222,11 @@ abi::ObservedFiber::threw
 abi::ObserverHandlers
 abi::ObserverInit
 abi::OnModify
+abi::OpcodeHandler
+abi::Opcodes
+abi::Opcodes::insert
+abi::Opcodes::is_empty
+abi::OpcodesDeclared
 abi::OrFalse
 abi::Passed
 abi::Path

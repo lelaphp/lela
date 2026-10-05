@@ -94,6 +94,8 @@
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
 
+mod opcodes;
+
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -103,6 +105,9 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{FrameView, Request};
 use crate::api::values::{ClassId, PhpObject, Value};
+
+pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, told_before};
+pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
 /// frame the loop serves, a function's or an included, evaluated or main

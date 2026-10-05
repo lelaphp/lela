@@ -692,6 +692,11 @@ pub(crate) struct Shared {
     /// at the engine's build and read at every call and return home
     /// ([`crate::observer`]); zero while none is declared.
     pub(crate) observers: u32,
+    /// The opcodes the bundle observes (design §7.1, #1780), declared as
+    /// the engine starts and fixed after it, which a serving reads once
+    /// as its loop is entered ([`crate::observer::Declared`]); empty
+    /// while none is declared.
+    pub(crate) opcodes: crate::observer::ObservedOpcodes,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
     /// destructor's or a callback's frame through, bound to the same
@@ -2753,6 +2758,7 @@ impl EngineBuilder {
                 shebang,
                 hooked: self.hooked,
                 observers: supplied.observers.count(),
+                opcodes: crate::observer::ObservedOpcodes::default(),
                 supplied,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -3350,6 +3356,10 @@ impl Engine {
             let failed = format!("Unable to start {} module", extension.name);
             shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
             break;
+        }
+        if shared.refused.is_none() {
+            shared.opcodes =
+                crate::observer::ObservedOpcodes::start(&shared.supplied.opcodes, &start);
         }
         shared.startup_raised = raised;
     }
