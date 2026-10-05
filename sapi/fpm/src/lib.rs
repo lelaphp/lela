@@ -272,7 +272,7 @@ pub fn main() -> ExitCode {
             };
             let mut sink = Stdout;
             // A request whose start fails is `FPM_EXIT_SOFTWARE`
-            // (`Z/sapi/fpm/fpm/fpm_main.c:1709-1713`).
+            // (`Z/sapi/fpm/fpm/fpm_main.c:1727-1734`).
             if engine(&ini).serve(description, &mut sink).start_failed {
                 crate::master::EXIT_SOFTWARE
             } else {

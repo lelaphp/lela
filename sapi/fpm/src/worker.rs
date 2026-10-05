@@ -644,11 +644,11 @@ impl Worker {
             *CURRENT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&wire));
-            let start_failed = self.serve(begun.params, &wire, peer);
+            let served = self.serve(begun.params, &wire, peer);
             *CURRENT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            if start_failed {
+            if served == Served::StartFailed {
                 // `fcgi_finish_request(request, 1)`, then
                 // `php_module_shutdown` and `FPM_EXIT_SOFTWARE` out of
                 // `main` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`): what the
@@ -771,6 +771,19 @@ impl php_proto::cgi::Files for Disk {
     }
 }
 
+/// How a request the child served ended.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// It started, and ended with its access log line written.
+    Ended,
+    /// Its start failed, an extension's `rinit` having raised (#1775):
+    /// it ends before `fpm_request_end` writes the scoreboard and the
+    /// access log, and the child ends after it
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`).
+    StartFailed,
+}
+
 /// What a request is, past the variables: the program the engine
 /// serves, a page the host answers, or php's refusal text.
 enum Program {
@@ -787,18 +800,15 @@ enum Program {
 }
 
 impl Worker {
-    /// One request, from its variables to its access log line; whether
-    /// its start failed, an extension's `rinit` having raised (#1775),
-    /// which ends it before `fpm_request_end` writes the scoreboard and
-    /// the access log (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`).
+    /// One request, from its variables to its access log line, and how
+    /// it ended.
     #[allow(clippy::too_many_lines)] // `fpm_main`'s loop body, kept as one
-    #[must_use]
     fn serve(
         &mut self,
         params: Environment,
         wire: &Arc<Mutex<Wire>>,
         peer: Option<IpAddr>,
-    ) -> bool {
+    ) -> Served {
         let mut env = params;
         let settings = Settings {
             fix_pathinfo: self.flag(b"cgi.fix_pathinfo", true),
@@ -891,7 +901,7 @@ impl Worker {
                 }
                 let served = self.engine.serve(description, &mut response);
                 if served.start_failed {
-                    return true;
+                    return Served::StartFailed;
                 }
                 let status = wire
                     .lock()
@@ -940,7 +950,7 @@ impl Worker {
                 },
             );
         }
-        false
+        Served::Ended
     }
 
     /// An entry read as `OnUpdateBool` reads it.
