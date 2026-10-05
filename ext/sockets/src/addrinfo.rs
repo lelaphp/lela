@@ -2,14 +2,12 @@
 //! `getaddrinfo(3)`: one object per entry of the list, holding the entry
 //! as `php_addrinfo` copies it.
 
-use std::cmp::Ordering;
 use std::ffi::CString;
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Refusals};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::Function;
 use php_ext::coerce::{float_to_long, numeric_string, type_name};
-use php_ext::raising::{Thrown, argument_error, throw_error};
+use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -97,20 +95,11 @@ pub(crate) struct Handlers;
 pub(crate) static ADDRESS_INFO: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE
+            .construction(Some("socket_addrinfo_lookup()"))
+            .cloning()
+            .comparison()
     }
 
     /// `address_info_free_obj`: `ai_canonname` and `ai_addr` given back.
@@ -124,16 +113,6 @@ impl ObjectHandlers for Handlers {
             }
             held.addr.free(req);
         }
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

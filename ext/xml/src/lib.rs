@@ -26,13 +26,13 @@ mod compat;
 mod natives;
 
 use php_ext::abi::{
-    Callable, CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers,
+    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Refusals,
     Std,
 };
-use php_ext::call::{Function, known_method};
+use php_ext::call::known_method;
 use php_ext::coerce::{callable_checked, coerce_param};
 use php_ext::decl::{Name, Type as DeclType};
-use php_ext::raising::{Level, Thrown, arg_type_error, clear, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_type_error, clear, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Position, PushParser};
@@ -332,27 +332,11 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        let message = "Cannot directly construct XMLParser, use xml_parser_create() or xml_parser_create_ns() instead";
-        Err(throw_error(req, "Error", message))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    /// `zend_objects_not_comparable`.
-    fn compare(
-        &self,
-        _req: &mut Request,
-        _left: &Value,
-        _right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        Ok(None)
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE
+            .construction(Some("xml_parser_create() or xml_parser_create_ns()"))
+            .cloning()
+            .comparison()
     }
 
     /// `xml_parser_get_gc`: the object, each callable's owner and the two

@@ -5,7 +5,7 @@
 
 use std::ffi::c_long;
 
-use php_ext::abi::{Instance, OrFalse, Path, Ref, Union, Untyped};
+use php_ext::abi::{Instance, OrFalse, Path, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
@@ -21,8 +21,8 @@ use crate::decode::{
 use crate::ffi::x509::{Csr, Extended, add_extensions};
 use crate::ffi::{self, Bio, Certificate, PKey};
 use crate::key::{Half, OpenSSLAsymmetricKey, key_from, object_of as key_object};
+use crate::store_errors;
 use crate::x509::{OpenSSLCertificate, name_entries, object_of as cert_object};
-use crate::{Handlers, store_errors};
 
 /// A `php_openssl_request_object`: the request it holds.
 #[derive(Default)]
@@ -60,9 +60,7 @@ pub(crate) struct OpenSSLCertificateSigningRequest;
 impl OpenSSLCertificateSigningRequest {}
 
 /// `php_openssl_request_object_handlers`.
-pub(crate) static HANDLERS: Handlers = Handlers(
-    "Cannot directly construct OpenSSLCertificateSigningRequest, use openssl_csr_new() instead",
-);
+pub(crate) const HANDLERS: Refusals = crate::refusals("openssl_csr_new()");
 
 /// A new `OpenSSLCertificateSigningRequest` holding the request.
 fn object_of(
