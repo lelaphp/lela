@@ -44,7 +44,7 @@ mod hash;
 mod keys;
 
 use php_ext::abi::{
-    CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
@@ -257,9 +257,12 @@ pub(crate) struct SodiumException;
 /// the trace `zend_default_exception_new` has written.
 pub(crate) struct SodiumHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for SodiumHandlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

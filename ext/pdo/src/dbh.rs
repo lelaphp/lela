@@ -4,8 +4,7 @@
 //! the error state where php does, in php's order.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Static, Std,
-    This, Variadic,
+    Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
@@ -256,7 +255,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `pdo_dbh_new` past the allocation: the property table built at
     /// once, `zend_std_get_properties_ex(&dbh->std)`.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -328,25 +334,6 @@ impl ObjectHandlers for Handlers {
                 conn.gc(visit);
             }
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        None
-    }
-
-    /// `zend_objects_not_comparable`.
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 
     /// `dbh_method_get`: the class's own method, else one the connection's

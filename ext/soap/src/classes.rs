@@ -4,11 +4,11 @@
 //! `set_soap_fault` and `add_soap_fault`, which every fault is made by.
 
 use php_ext::abi::ConstValue;
-use php_ext::abi::{ObjectHandlers, Passed, Std, This, Union};
+use php_ext::abi::{ObjectHandlers, Passed, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_class, read_prop};
 use php_ext::coerce::{to_long, to_string};
-use php_ext::raising::{Thrown, arg_value_error, argument_error, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -588,48 +588,27 @@ pub(crate) struct SdlPayload {
     pub(crate) sdl: Option<std::sync::Arc<crate::model::Sdl>>,
 }
 
-/// The handlers `Soap\Url` and `Soap\Sdl` share: no constructor, no clone,
-/// never comparable; `Soap\Url` casts to `int` as its object number, as php's
-/// typo leaves `Soap\Sdl` with the standard cast.
-pub(crate) struct OpaqueHandlers {
-    url: bool,
-}
+/// What `Soap\Url`'s and `Soap\Sdl`'s handlers refuse: construction in
+/// php's bare words, cloning and comparison. `Soap\Sdl` has nothing else
+/// to override, php's typo leaving it the standard cast.
+const OPAQUE: Refusals = Refusals::NONE.construction(None).cloning().comparison();
 
-pub(crate) static URL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: true };
-pub(crate) static SDL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: false };
+/// `soap_url_object_handlers`: [`OPAQUE`]'s refusals, and a cast to `int`
+/// as the object's number.
+pub(crate) struct UrlHandlers;
 
-impl ObjectHandlers for OpaqueHandlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> R<Option<php_ext::call::Function>> {
-        let name = if self.url { "Soap\\Url" } else { "Soap\\Sdl" };
-        Err(throw_error(
-            req,
-            "Error",
-            &format!("Cannot directly construct {name}"),
-        ))
-    }
+pub(crate) static URL_HANDLERS: UrlHandlers = UrlHandlers;
 
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
+impl ObjectHandlers for UrlHandlers {
+    fn refusals(&self) -> Refusals {
+        OPAQUE
     }
 
     fn cast_object(&self, req: &mut Request, object: PhpObject, to: TypeTag) -> R<Option<Value>> {
-        if self.url && to == TypeTag::Int {
+        if to == TypeTag::Int {
             return Ok(Some(Value::int(i64::from(object.index()))));
         }
         Std.cast_object(req, object, to)
-    }
-
-    fn compare(
-        &self,
-        _req: &mut Request,
-        _left: &Value,
-        _right: &Value,
-    ) -> R<Option<std::cmp::Ordering>> {
-        Ok(None)
     }
 }
 
@@ -721,7 +700,7 @@ impl Url {}
     final,
     not_serializable,
     payload = SdlPayload,
-    handlers = SDL_HANDLERS,
+    handlers = OPAQUE,
     dynamic_properties = forbidden
 )]
 pub(crate) struct Sdl;

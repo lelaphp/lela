@@ -3,7 +3,7 @@
 //! ([`Step`]), and the methods of `class SQLite3Stmt` in
 //! `sqlite3.stub.php`'s order.
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Ref, This, True, Union};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Ref, Refusals, This, True, Union};
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Thrown, argument_error};
@@ -380,7 +380,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `php_sqlite3_stmt_object_free_storage`: the parameters given up,
     /// the statement out of its list and finalized, the `SQLite3` let go.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -394,10 +401,6 @@ impl ObjectHandlers for Handlers {
         if let Some(db) = s.db {
             req.release(db.as_value());
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 }
 
