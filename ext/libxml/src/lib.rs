@@ -113,11 +113,14 @@ pub fn extension() -> Extension {
 struct Initialized;
 
 /// `php_libxml_initialize` (`Z/ext/libxml/libxml.c:934-958`), which
-/// php's `MINIT` runs once per process: `xmlInitParser`, then php's
-/// external entity loader set over the library's default, for every
-/// parse of the process. It cannot fail.
+/// php's `MINIT` runs once per process: `xmlInitParser` and, as php's
+/// threaded build does, the schema type tables, then php's external
+/// entity loader set over the library's default, for every parse of the
+/// process. Its table of exports is `ExtensionBuilder::register`'s. It
+/// cannot fail.
 fn initialize() -> Initialized {
     ffi::Library::init();
+    ffi::Library::init_types();
     ffi::Library::install_loader();
     Initialized
 }
