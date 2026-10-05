@@ -108,13 +108,13 @@ impl Target {
     /// Whether the target stands for `subset` as it is now: it holds a
     /// verdict for each of `tests`, the subset's files, so it predates none
     /// of them (#1644), a test that redirects to a set by a verdict kept
-    /// through it. What `phpt --unkept` asks before the control runs a
+    /// through it for each test of the set ([`redirect::set_kept`]). What `phpt --unkept` asks before the control runs a
     /// subset again (#1830).
     pub(crate) fn stands_for(&self, subset: &Subset, tests: &[PathBuf]) -> bool {
         let verdicts = &self.0.verdicts;
         tests.iter().all(|test| {
             let id = subset.id(test);
-            verdicts.contains_key(&id) || verdicts.keys().any(|key| redirect::through(key, &id))
+            verdicts.contains_key(&id) || redirect::set_kept(subset, &id, verdicts.keys())
         })
     }
 

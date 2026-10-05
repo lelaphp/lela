@@ -972,7 +972,7 @@ pub fn run(
         .iter()
         .map(|subset| runners.side(manifest, &oracles, subset))
         .collect();
-    let todo = unkept(ask, (manifest, &runs), &subsets, &sides)?;
+    let todo = to_run(ask, (manifest, &runs), &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
         && !sides.iter().flatten().any(Side::runs)
@@ -1082,7 +1082,7 @@ pub fn run(
 /// copies no tree and runs nothing. Only the control keeps a target, and
 /// only outside a tier's lane (`Runs::target_of`), so `--unkept` is
 /// refused where the binary is no subset's control or a lane is named.
-fn unkept<'a, 'r, 'o>(
+fn to_run<'a, 'r, 'o>(
     ask: &Ask,
     (manifest, runs): (&Manifest, &against::Runs),
     subsets: &'a [Subset],
@@ -1137,11 +1137,21 @@ fn unkept<'a, 'r, 'o>(
 
 /// Whether the target kept for `subset` under `pin` stands for it as it
 /// is now ([`Target::stands_for`]); a target or a subset that cannot be
-/// read is one that does not, so the control runs the subset again.
+/// read is one that does not, said, so the control runs the subset again.
 fn stands(runs: &against::Runs, pin: &Pin, subset: &Subset) -> bool {
-    match (runs.kept_target(pin, &subset.scope), subset.tests()) {
-        (Ok(Some(target)), Ok(tests)) => target.stands_for(subset, &tests),
-        _ => false,
+    let read = runs
+        .kept_target(pin, &subset.scope)
+        .and_then(|target| Ok((target, subset.tests()?)));
+    match read {
+        Ok((Some(target), tests)) => target.stands_for(subset, &tests),
+        Ok((None, _)) => false,
+        Err(why) => {
+            println!(
+                "phpt: {}: its target is run again, as it could not be read: {why:#}",
+                subset.scope
+            );
+            false
+        }
     }
 }
 
