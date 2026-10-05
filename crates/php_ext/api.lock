@@ -71,6 +71,7 @@ abi::ExtensionBuilder::build
 abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
+abi::ExtensionBuilder::class_linked_observer
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
@@ -84,7 +85,9 @@ abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_end
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::error
+abi::ExtensionBuilder::error_observer
 abi::ExtensionBuilder::fatal_logged
+abi::ExtensionBuilder::function_declared_observer
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info

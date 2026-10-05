@@ -41,13 +41,22 @@
 //! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
 //! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
+//! Beside the calls stand php's notices, three lists the bundle
+//! declares as it declares observers, each told in declaration order
+//! and checked by one test of its list where php reads its
+//! `zend_observer_*_observed` word: [`error`], every diagnostic before
+//! the user's handler and `zend_error_cb`; [`function_declared`] and
+//! [`class_linked`], at each declaration a request makes, told for a
+//! unit's load as php with and without opcache tells them
+//! ([`declared_at_load`]).
+//!
 //! What is not here yet, each built on the same slot and chain:
 //! natives (#1810), a generator's resume and yield and a fiber's own
 //! chain (#1811; a generator's frame is never begun at its call, as
-//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
-//! notices and adding and removing handlers while a request is served
-//! (#1812), the stepping function's events (#1813), and a frame
-//! reference a handler may keep (#1827).
+//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`),
+//! adding and removing handlers while a request is served (#1812), the
+//! stepping function's events (#1813), and a frame reference a handler
+//! may keep (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
@@ -56,8 +65,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef};
+use php_unit::Unit;
 
 use crate::api::call::Function;
+use crate::api::raising::Level;
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Value};
 
@@ -284,5 +295,168 @@ pub(crate) fn end_all(req: &mut Request) {
     }
     for frame in req.take_observed() {
         call_end_handlers(req, frame, None);
+    }
+}
+
+/// `zend_observer_error_cb` (`Z/Zend/zend_observer.h:152`): told of a
+/// diagnostic, its level, file, line and message, as php's
+/// `zend_error_impl` tells every one registered before it hands the
+/// diagnostic to the user's handler or to `zend_error_cb`.
+pub(crate) type ErrorObserver = fn(&mut Request, Level, &[u8], u32, &[u8]);
+
+/// `zend_observer_function_declared_cb` (`Z/Zend/zend_observer.h:131`):
+/// told of a function declared, and the lowered name it is declared
+/// under.
+pub(crate) type FunctionDeclared = fn(&mut Request, Function, &[u8]);
+
+/// `zend_observer_class_linked_cb` (`Z/Zend/zend_observer.h:141`): told
+/// of a class linked into the request's table, and the lowered name it
+/// stands under, an alias's for `class_alias()`.
+pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
+
+/// `zend_observer_error_notify` (`Z/Zend/zend_observer.h:156-160`): each
+/// error observer the bundle declared told of the diagnostic, in
+/// declaration order. php calls it in `zend_error_impl` once the
+/// diagnostic is past the compile's record and any pending throwable it
+/// reports, beside and before `zend_error_cb` (`Z/Zend/zend.c:1528`),
+/// and in `zend_exception_error` before an uncaught throwable reaches
+/// `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`). It is not
+/// `zend_error_cb`'s chain ([`crate::supplied::ErrorBeneath`]): an error
+/// observer is a list told of every diagnostic, whether the user's
+/// handler takes it or `error_reporting` hides it, and it changes
+/// nothing of how the diagnostic is served; a link of `zend_error_cb`
+/// serves the diagnostics the user's handler leaves, and may serve one
+/// in place of php's own `php_error_cb`. Nothing more than one check of
+/// the list while none is declared.
+#[inline]
+pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+    if req.shared.supplied.error_observers.is_empty() {
+        return;
+    }
+    notify_error(req, level, file, line, message);
+}
+
+#[cold]
+#[inline(never)]
+fn notify_error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.error_observers.iter() {
+        observer(req, level, file, line, message);
+    }
+}
+
+/// `zend_observer_function_declared_notify`
+/// (`Z/Zend/zend_observer.h:136-140`): each observer of declared
+/// functions told of `function`, declared under `lowered`, in
+/// declaration order. php tells them where `do_bind_function` binds a
+/// `DECLARE_FUNCTION`'s function (`Z/Zend/zend_compile.c:1300`) and
+/// where a file's top-level function is declared as the file loads
+/// ([`declared_at_load`]).
+pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: &[u8]) {
+    if req.shared.supplied.functions_declared.is_empty() {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.functions_declared.iter() {
+        observer(req, function, lowered);
+    }
+}
+
+/// `zend_observer_class_linked_notify` (`Z/Zend/zend_observer.h:146-150`):
+/// each observer of linked classes told of `class`, standing under
+/// `lowered`, in declaration order. php tells them where
+/// `zend_bind_class_in_slot` binds a `DECLARE_CLASS`'s class
+/// (`Z/Zend/zend_compile.c:1326`, `:1332`), where a user class is given
+/// an alias (`Z/Zend/zend_API.c:3635`), and where a file's classes are
+/// linked as it loads ([`declared_at_load`]); an anonymous class's
+/// `DECLARE_ANON_CLASS` tells none.
+pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
+    if req.shared.supplied.classes_linked.is_empty() {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.classes_linked.iter() {
+        observer(req, class, lowered);
+    }
+}
+
+/// What a unit's load bound before its main op array runs, for the
+/// notices of [`declared_at_load`]: the indices of the classes of
+/// [`Unit::classes`] linked, in the order linked, and whether opcache
+/// served the unit, which orders the notices.
+#[derive(Debug, Default)]
+pub(crate) struct LinkedAtLoad {
+    pub(crate) accelerated: bool,
+    pub(crate) classes: Vec<u32>,
+}
+
+/// The notices of a unit's load, its top-level functions declared and
+/// the classes linked early, in php's order: where opcache serves the
+/// unit, as `zend_accel_load_script` copies the cached file's tables
+/// (`Z/ext/opcache/zend_accelerator_util_funcs.c:392-410`), every
+/// function, then every class linked, then the delayed early bindings,
+/// which `linked` already holds in that order; on a cache hit and on
+/// the miss that compiled the file alike, since opcache compiles with
+/// `ZEND_COMPILE_IGNORE_OBSERVER` and tells them at the load
+/// (`Z/ext/opcache/ZendAccelerator.c:1816`). Where it does not, php
+/// tells each as its compile finishes it (`Z/Zend/zend_compile.c:8627`,
+/// `:9386`, `Z/Zend/zend_inheritance.c:3937-4039`): in source order,
+/// which is the order the declarations end in, since no top-level
+/// declaration holds another. A function and a class that end on one
+/// line are told the function first; php tells first the one written
+/// first. The engine's units are shared and kept like opcache's, so a
+/// unit served again from the engine's cache is told again, as each
+/// request's compile or load tells php's observers again.
+pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &LinkedAtLoad) {
+    let shared = &req.shared.supplied;
+    if shared.functions_declared.is_empty() && shared.classes_linked.is_empty() {
+        return;
+    }
+    let functions: Vec<(u32, Vec<u8>)> = unit
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|&(at, _)| {
+            let body = crate::exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+            !req.preloaded_function(unit, body)
+        })
+        .map(|(_, (decl, _))| (decl.end_line, decl.name.0.to_ascii_lowercase()))
+        .collect();
+    let classes: Vec<(u32, Vec<u8>)> = linked
+        .classes
+        .iter()
+        .filter_map(|&at| unit.classes.get(usize::try_from(at).ok()?))
+        .map(|decl| (decl.end_line, decl.name.0.to_ascii_lowercase()))
+        .collect();
+    let mut told: Vec<(bool, Vec<u8>)> = Vec::with_capacity(functions.len() + classes.len());
+    if linked.accelerated {
+        told.extend(functions.into_iter().map(|(_, name)| (true, name)));
+        told.extend(classes.into_iter().map(|(_, name)| (false, name)));
+    } else {
+        let mut functions = functions.into_iter().peekable();
+        let mut classes = classes.into_iter().peekable();
+        loop {
+            let function_first = match (functions.peek(), classes.peek()) {
+                (Some(function), Some(class)) => function.0 <= class.0,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let next = if function_first {
+                functions.next().map(|(_, name)| (true, name))
+            } else {
+                classes.next().map(|(_, name)| (false, name))
+            };
+            told.extend(next);
+        }
+    }
+    for (function, name) in told {
+        if function {
+            if let Some(declared) = req.function_named(&name) {
+                function_declared(req, declared, &name);
+            }
+        } else if let Some(class) = req.class_named(&name) {
+            class_linked(req, class, &name);
+        }
     }
 }

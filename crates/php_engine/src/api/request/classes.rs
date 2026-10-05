@@ -17,6 +17,7 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value};
 use crate::engine::Shared;
 use crate::exec;
+use crate::observer::LinkedAtLoad;
 
 use super::{
     Declared, Deprecations, Keyed, Member, MemberAt, Request, UserFunction, lowered_key, preload,
@@ -167,7 +168,15 @@ impl Request {
     ///
     /// Fatal error: Cannot redeclare class Foo (previously declared in %s:2) in %s on line 3
     /// ```
-    pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
+    ///
+    /// What the load linked is answered, the classes in the order linked
+    /// and whether opcache served the unit, for the observers' notices
+    /// ([`crate::observer::declared_at_load`]): every class bound early,
+    /// each delayed one the load bound, and an anonymous class linked
+    /// here only where opcache serves the unit, whose load copies the
+    /// class `link_unbound` linked with the rest, where php's own
+    /// compiler tells no observer of it. None where the request ended.
+    pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> Option<LinkedAtLoad> {
         let delayed: Vec<Vec<u8>> = unit
             .main
             .oplines
@@ -184,6 +193,10 @@ impl Request {
             .collect();
         let accelerated = self.preloading.is_some()
             || (self.accel_loaded.take()).is_some_and(|loaded| Arc::ptr_eq(&loaded, unit));
+        let mut linked = LinkedAtLoad {
+            accelerated,
+            classes: Vec::new(),
+        };
         let mut tried = Vec::new();
         for (at, decl) in unit.classes.iter().enumerate() {
             // A saved script of the preload, whose classes the preload
@@ -199,16 +212,16 @@ impl Request {
                 self.buckets
                     .reserve(unit, u32::try_from(at).unwrap_or(u32::MAX));
                 if decl.flags.is_anonymous {
-                    if !self.link_unbound(unit, at, decl) {
-                        return false;
+                    if self.link_unbound(unit, at, decl)? && accelerated {
+                        linked.classes.extend(u32::try_from(at).ok());
                     }
                     continue;
                 }
                 if delayed.iter().any(|delayed| **delayed == *key.0) {
                     if accelerated {
                         tried.push((at, decl));
-                    } else if !self.bind_at_load(unit, at, decl) {
-                        return false;
+                    } else if self.bind_at_load(unit, at, decl)? {
+                        linked.classes.extend(u32::try_from(at).ok());
                     }
                 }
                 continue;
@@ -217,16 +230,18 @@ impl Request {
                 let message = self.redeclaration(existing);
                 let file = decl.file.0.to_vec();
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
-                return false;
+                return None;
             }
-            let Ok(at) = u32::try_from(at) else {
-                return false;
-            };
+            let at = u32::try_from(at).ok()?;
             self.bind_declared(unit, at, None);
+            linked.classes.push(at);
         }
-        tried
-            .into_iter()
-            .all(|(at, decl)| self.bind_at_load(unit, at, decl))
+        for (at, decl) in tried {
+            if self.bind_at_load(unit, at, decl)? {
+                linked.classes.extend(u32::try_from(at).ok());
+            }
+        }
+        Some(linked)
     }
 
     /// One entry of `zend_accel_do_delayed_early_binding`: the class at
@@ -236,25 +251,25 @@ impl Request {
     /// ([`Request::link_declared`] under `early`), and recorded so its
     /// opline passes over it. A link that cannot resolve yet leaves the
     /// class to the opline; one that is refused ends the request before
-    /// the file runs, as php's compile-time early bind would. False when
-    /// the request ended.
-    fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> bool {
+    /// the file runs, as php's compile-time early bind would. None when
+    /// the request ended, and whether the class was bound otherwise.
+    fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
         if self.class_named(&decl.name.0).is_some() {
-            return true;
+            return Some(false);
         }
         if let Some(parent) = &decl.parent
             && self.class_named(&parent.0).is_none()
         {
-            return true;
+            return Some(false);
         }
         match self.link_declared(unit, at, decl, true) {
             Ok(true) => {
                 let at = u32::try_from(at).unwrap_or(u32::MAX);
                 self.classes.bound_at_load.push((Arc::clone(unit), at));
-                true
+                Some(true)
             }
-            Ok(false) => true,
-            Err(_) => false,
+            Ok(false) => Some(false),
+            Err(_) => None,
         }
     }
 
@@ -265,7 +280,8 @@ impl Request {
     /// its `DECLARE_ANON_CLASS` finds it by name
     /// ([`Request::declare_anonymous`]); any other is linked by the
     /// opline. A name already bound is the same unit loaded again, whose
-    /// class stands. False when the link ended the request.
+    /// class stands. None when the link ended the request, and whether
+    /// this link bound the class otherwise.
     ///
     /// ```php
     /// $before = array_map(fn($c) => strstr($c, "\0", true) ?: $c, array_slice(get_declared_classes(), -2));
@@ -281,12 +297,12 @@ impl Request {
     ///   string(1) "Q"
     /// }
     /// ```
-    fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> bool {
+    fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
         let unbound = decl.parent.is_none() && decl.interfaces.is_empty() && decl.traits.is_empty();
         if !unbound || self.class_named(&decl.name.0).is_some() {
-            return true;
+            return Some(false);
         }
-        self.link_declared(unit, at, decl, true).is_ok()
+        self.link_declared(unit, at, decl, true).ok()
     }
 
     /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
@@ -308,7 +324,37 @@ impl Request {
             self.classes.bound_at_load.swap_remove(bound);
             return Ok(());
         }
-        self.bind_class(unit, key)
+        self.bind_class_in_slot(unit, key)
+    }
+
+    /// `zend_bind_class_in_slot` (`Z/Zend/zend_compile.c:1304-1345`), what a
+    /// `DECLARE_CLASS` and a `DECLARE_CLASS_DELAYED` the load did not
+    /// bind make: the class bound ([`Request::bind_class`]), and the
+    /// observers told it is linked under its lowered name, which
+    /// `DECLARE_ANON_CLASS`'s own bind does not tell.
+    pub(crate) fn bind_class_in_slot(
+        &mut self,
+        unit: &Arc<Unit>,
+        key: &[u8],
+    ) -> Result<(), Thrown> {
+        self.bind_class(unit, key)?;
+        let at = unit
+            .runtime_keys
+            .iter()
+            .find(|(filed, _)| *filed.0 == *key)
+            .and_then(|(_, at)| usize::try_from(*at).ok());
+        // The opline of a class the preload holds is a `NOP`, which tells
+        // nothing.
+        let name = at
+            .filter(|&at| !self.preloaded_class(unit, at))
+            .and_then(|at| unit.classes.get(at))
+            .map(|decl| decl.name.0.to_ascii_lowercase());
+        if let Some(name) = name
+            && let Some(class) = self.class_named(&name)
+        {
+            crate::observer::class_linked(self, class, &name);
+        }
+        Ok(())
     }
 
     /// `zend_class_redeclaration_error`'s two wordings, which name the
@@ -1134,6 +1180,11 @@ impl Request {
             member: None,
             flags: dynamic_flags(unit, at),
         });
+        // `do_bind_function`'s `zend_observer_function_declared_notify`
+        // (`Z/Zend/zend_compile.c:1300`).
+        if let Some(declared) = self.user_function_id(self.user_functions.len() - 1) {
+            crate::observer::function_declared(self, declared, lowered);
+        }
         Ok(())
     }
 
@@ -1485,14 +1536,20 @@ impl Request {
     /// `EG(class_table)`: `class` under the lowered name `alias`, and
     /// `false` where the table has that name already, a class's or
     /// another alias's, and nothing is added. The name is the caller's
-    /// to have lowered and held to php's reserved names.
+    /// to have lowered and held to php's reserved names. A class of the
+    /// program's given its alias is linked under it for the observers
+    /// (`Z/Zend/zend_API.c:3633-3636`), and an extension's class is not,
+    /// as php tells none of an alias registered at `MINIT`.
     pub(crate) fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
         if self.class_named(alias).is_some() {
             return false;
         }
         let place = self.buckets.take();
-        self.aliases
-            .push((place, alias.to_ascii_lowercase(), class));
+        let lowered = alias.to_ascii_lowercase();
+        self.aliases.push((place, lowered.clone(), class));
+        if !self.native_class(class) {
+            crate::observer::class_linked(self, class, &lowered);
+        }
         true
     }
 }

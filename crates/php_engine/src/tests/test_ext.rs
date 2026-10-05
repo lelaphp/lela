@@ -34,9 +34,10 @@ use super::api::abi::{
     Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Observed, ObserverHandlers,
     Refusal, Start, StringBeneath,
 };
+use super::api::call::Function;
 use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
-use super::api::values::{PhpObject, Resource, Value};
+use super::api::values::{ClassId, PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +123,15 @@ pub(crate) enum Phase {
     /// what it returned as [`returned_name`] renders it: `None` where
     /// it returned nothing, on an unwind or at a fatal.
     End(String, Option<String>),
+    /// Its error observer was told of a diagnostic, its level and
+    /// message ([`TestExt::observing`]).
+    ErrorObserved(Level, String),
+    /// Its observer of declared functions was told of one, the lowered
+    /// name it was declared under.
+    Declared(String),
+    /// Its observer of linked classes was told of one, the lowered name
+    /// it stands under.
+    Linked(String),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -358,10 +368,41 @@ impl<const N: u8> TestExt<N> {
     /// frame a request serves would then show in each sequence a test of
     /// the lifecycle spells out whole, and a bundle with no observer
     /// declared is the one the plain test is measured on.
+    ///
+    /// It observes php's notices too, as `zend_test`'s observer does under
+    /// `zend_test.observer.observe_declaring`: diagnostics, declared
+    /// functions and linked classes, each recorded as told.
     pub(crate) fn observing() -> Extension {
+        Self::observing_builder().build(&format!("test_ext_{N}"))
+    }
+
+    /// [`TestExt::observing`]'s declarations, for a test that adds or
+    /// replaces one before it builds.
+    pub(crate) fn observing_builder() -> ExtensionBuilder {
         Self::builder()
             .observer(Self::observer_init)
-            .build(&format!("test_ext_{N}"))
+            .error_observer(Self::error_observed)
+            .function_declared_observer(Self::declared)
+            .class_linked_observer(Self::linked)
+    }
+
+    fn error_observed(_: &mut Request, level: Level, _: &[u8], _: u32, message: &[u8]) {
+        let message = String::from_utf8_lossy(message).into_owned();
+        record(N, Phase::ErrorObserved(level, message));
+    }
+
+    fn declared(_: &mut Request, _: Function, lowered: &[u8]) {
+        record(
+            N,
+            Phase::Declared(String::from_utf8_lossy(lowered).into_owned()),
+        );
+    }
+
+    fn linked(_: &mut Request, _: ClassId, lowered: &[u8]) {
+        record(
+            N,
+            Phase::Linked(String::from_utf8_lossy(lowered).into_owned()),
+        );
     }
 
     fn observer_init(observed: &mut Observed<'_>) -> ObserverHandlers {
