@@ -89,6 +89,7 @@ mod site_override;
 mod table;
 mod temporary;
 pub use temporary::TemporaryGuard;
+mod ticks;
 mod unit_cache;
 pub(crate) use unit_cache::HandlePath;
 mod variables;
@@ -718,17 +719,6 @@ struct DirtyTemporary {
     held: php_heap::ZvalType,
 }
 
-/// One entry of `BG(user_tick_functions)`, php's
-/// `user_tick_function_entry`: the callable and the arguments it is
-/// served with, each held by one owner, and whether a round is serving
-/// it now (`calling`), which keeps a `ZEND_TICKS` inside it from serving
-/// it again and `unregister_tick_function()` from dropping it.
-struct TickFunction {
-    callback: Callable,
-    arguments: Vec<Value>,
-    calling: bool,
-}
-
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -975,11 +965,8 @@ pub struct Request {
     exception_handlers: Vec<Option<Callable>>,
     /// `BG(user_shutdown_function_names)`.
     shutdown_functions: shutdown::ShutdownFunctions,
-    /// `BG(user_tick_functions)`, in registration order.
-    tick_functions: Vec<TickFunction>,
-    /// `EG(ticks_count)`: the `ZEND_TICKS` passed since the functions
-    /// they serve were last served.
-    ticks_count: u32,
+    /// `BG(user_tick_functions)` and `EG(ticks_count)` ([`ticks::Ticks`]).
+    ticks: ticks::Ticks,
     /// The function each `name(...)` of a constant expression found the
     /// first time this request evaluated it, php's `zend_ast_fcc.fptr`
     /// map pointer, by the node's unit and number
@@ -1614,8 +1601,7 @@ impl Request {
             exception_handler: None,
             exception_handlers: Vec::new(),
             shutdown_functions: shutdown::ShutdownFunctions::default(),
-            tick_functions: Vec::new(),
-            ticks_count: 0,
+            ticks: ticks::Ticks::default(),
             function_callables: Vec::new(),
             autoloaders: Vec::new(),
             in_autoload: None,
@@ -17291,17 +17277,7 @@ impl Request {
         // `PHP_RSHUTDOWN(basic)`'s `zend_llist_destroy` of
         // `BG(user_tick_functions)`, and `SG(callback_func)` where the
         // header block was never sent.
-        for TickFunction {
-            callback,
-            arguments,
-            ..
-        } in std::mem::take(&mut self.tick_functions)
-        {
-            callback.release(self);
-            for value in arguments {
-                self.release(value);
-            }
-        }
+        self.free_tick_functions();
         if let Some(callback) = self.header_callback.take() {
             callback.release(self);
         }
@@ -19379,53 +19355,6 @@ impl Request {
         set.is_ok_and(|previous| previous.is_some())
     }
 
-    /// `register_tick_function()`: the callable and its arguments held,
-    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
-    /// `BG(user_tick_functions)`.
-    pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
-        callback.addref(self);
-        for value in &arguments {
-            self.addref(value);
-        }
-        self.tick_functions.push(TickFunction {
-            callback,
-            arguments,
-            calling: false,
-        });
-        true
-    }
-
-    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
-    /// entry for the same callee, scope and object dropped and its
-    /// owners given up; php's `Error` where that entry is the one being
-    /// served (`user_tick_function_compare`).
-    pub fn unregister_tick_function(&mut self, callback: &Callable) -> Result<bool, Thrown> {
-        let Some(at) = self
-            .tick_functions
-            .iter()
-            .position(|entry| entry.callback == *callback)
-        else {
-            return Ok(false);
-        };
-        if self.tick_functions[at].calling {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                "Registered tick function cannot be unregistered while it is being executed",
-            ));
-        }
-        let TickFunction {
-            callback: held,
-            arguments,
-            ..
-        } = self.tick_functions.remove(at);
-        held.release(self);
-        for value in arguments {
-            self.release(value);
-        }
-        Ok(true)
-    }
-
     /// The function a `name(...)` node found earlier in this request,
     /// `ZEND_MAP_PTR_GET(fcc_ast->fptr)`.
     pub(crate) fn kept_callable(&self, unit: &php_unit::UnitCell, at: u32) -> Option<Function> {
@@ -19439,51 +19368,6 @@ impl Request {
     /// found, kept for the rest of the request.
     pub(crate) fn keep_callable(&mut self, unit: &php_unit::UnitCell, at: u32, function: Function) {
         self.function_callables.push((unit.clone(), at, function));
-    }
-
-    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`
-    /// stepped, and where it reaches `every` it starts again and the
-    /// round is served, `zend_ticks_function` as `php_run_ticks`
-    /// runs `PG(tick_functions)`: each extension's hook in bundle order,
-    /// then each function `register_tick_function()` kept, in
-    /// registration order, one already running passed over
-    /// (`user_tick_function_call`), all with fiber switching blocked
-    /// (`zend_fiber_switch_block`). The first throw ends the round, as
-    /// php's `zend_call_function` calls nothing while one is pending.
-    pub(crate) fn tick(&mut self, every: u32) -> Result<(), Thrown> {
-        self.ticks_count = self.ticks_count.saturating_add(1);
-        if self.ticks_count < every {
-            return Ok(());
-        }
-        self.ticks_count = 0;
-        self.with_fiber_switch_blocked(Request::serve_ticks)
-    }
-
-    /// [`Request::tick`]'s round, while fiber switching is blocked.
-    fn serve_ticks(&mut self) -> Result<(), Thrown> {
-        let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.ticks.iter() {
-            hook(self)?;
-        }
-        let mut at = 0;
-        while let Some(entry) = self.tick_functions.get_mut(at) {
-            at += 1;
-            if entry.calling {
-                continue;
-            }
-            entry.calling = true;
-            let (callback, arguments) = (entry.callback.clone(), entry.arguments.clone());
-            let called = crate::api::call::call(self, &callback, &arguments);
-            if let Some(entry) = self
-                .tick_functions
-                .iter_mut()
-                .find(|entry| entry.calling && entry.callback == callback)
-            {
-                entry.calling = false;
-            }
-            self.release(called?);
-        }
-        Ok(())
     }
 }
 
