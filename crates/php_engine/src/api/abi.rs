@@ -349,6 +349,16 @@ pub(crate) type TicksHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
 /// it: the source a file compiles from, where the extension replaces it.
 pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+/// The string compile hook, php's `zend_compile_string` as an extension
+/// overrides it: [`ExtensionBuilder::compile_string`].
+pub(crate) type CompileStringHook = fn(&mut Request, StringBeneath<'_>) -> Result<Compiled, Thrown>;
+/// The error hook, php's `zend_error_cb` as an extension overrides it:
+/// [`ExtensionBuilder::error`].
+pub(crate) type ErrorHook = fn(&mut Request, ErrorBeneath<'_>);
+/// The cycle collection hook, php's `gc_collect_cycles` pointer as an
+/// extension overrides it: [`ExtensionBuilder::gc_collect`].
+pub(crate) type GcCollectHook = fn(&mut Request, GcBeneath<'_>) -> i64;
+pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
@@ -968,6 +978,53 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
         self.supplies.compile_file = Some(hook);
+        self
+    }
+
+    /// `zend_compile_string` overridden, as the tracers and profilers
+    /// override it to time a string's compile and read what it
+    /// declared: every string compiled as an `eval` compiles it, by
+    /// `eval`, the CLI's `-r`, `-B`, `-R` and `-E`, the shell or the
+    /// debugger, is served by `hook`, handed the one beneath
+    /// ([`StringBeneath`]) to serve where its work is to stand, with
+    /// the source it compiles, the string's or one of its own. What it
+    /// throws is raised where the string was to compile, as php raises
+    /// `EG(exception)` where the pointer answers `NULL`. Two extensions'
+    /// hooks chain as php's saved pointer does: the later is served
+    /// first and the earlier when the later serves the one beneath.
+    #[must_use]
+    pub fn compile_string(mut self, hook: CompileStringHook) -> ExtensionBuilder {
+        self.supplies.compile_string = Some(hook);
+        self
+    }
+
+    /// `zend_error_cb` overridden, as soap's `MINIT` overrides it with
+    /// `soap_error_handler`: every diagnostic the user's error handler
+    /// does not take, and every uncaught throwable rendered, is served
+    /// by `hook`, handed the one beneath ([`ErrorBeneath`]), which ends
+    /// in php's own `php_error_cb` that stores, logs and displays it.
+    /// A hook that does not serve the one beneath has served the
+    /// diagnostic itself; a fatal ends the request all the same. Two
+    /// extensions' hooks chain as php's saved pointer does: the later is
+    /// served first and the earlier when the later serves the one
+    /// beneath.
+    #[must_use]
+    pub fn error(mut self, hook: ErrorHook) -> ExtensionBuilder {
+        self.supplies.error = Some(hook);
+        self
+    }
+
+    /// The `gc_collect_cycles` pointer overridden, as xdebug's and the
+    /// profilers' `MINIT` override it to measure each collection: every cycle
+    /// collection, by `gc_collect_cycles()` or by a full root buffer, is
+    /// served by `hook`, handed the one beneath ([`GcBeneath`]) to
+    /// serve where its work is to stand; what it answers is the collection's
+    /// count. Two extensions' hooks chain as php's saved pointer does:
+    /// the later is served first and the earlier when the later serves
+    /// the one beneath.
+    #[must_use]
+    pub fn gc_collect(mut self, hook: GcCollectHook) -> ExtensionBuilder {
+        self.supplies.gc_collect = Some(hook);
         self
     }
 

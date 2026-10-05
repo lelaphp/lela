@@ -171,6 +171,7 @@ HeapHooks::free_native
 HeapHooks::free_reference
 HeapHooks::free_resource
 HeapHooks::gc_children
+HeapHooks::gc_collect_cycles
 HeapHooks::gc_destructors_in_fiber
 HeapHooks::gc_live_temporaries
 HeapHooks::gc_weakly_keyed

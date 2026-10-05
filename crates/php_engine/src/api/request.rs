@@ -7280,12 +7280,38 @@ impl Request {
         };
         let served = !self.user_error_handler(level, string, file, line);
         if served {
-            self.error_cb(level, string, message, file, line);
+            self.zend_error_cb(level, string, message, file, line);
         }
         if made {
             self.release(Value::string(string));
         }
         served
+    }
+
+    /// `zend_error_cb`: the links the bundle supplied
+    /// ([`ExtensionBuilder::error`]) from the top, each serving the one
+    /// beneath where it will, and php's own [`Request::error_cb`]
+    /// beneath them all.
+    ///
+    /// [`ExtensionBuilder::error`]: crate::api::abi::ExtensionBuilder::error
+    fn zend_error_cb(
+        &mut self,
+        level: Level,
+        string: PhpString,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) {
+        let shared = Arc::clone(&self.shared);
+        let top = crate::supplied::ErrorBeneath {
+            links: shared.supplied.error.links(),
+            level,
+            string,
+            message,
+            file,
+            line,
+        };
+        top.serve(self);
     }
 
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
@@ -7317,7 +7343,14 @@ impl Request {
     /// 160
     /// 376
     /// ```
-    fn error_cb(&mut self, level: Level, string: PhpString, message: &str, file: &[u8], line: u32) {
+    pub(crate) fn error_cb(
+        &mut self,
+        level: Level,
+        string: PhpString,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) {
         if !self.displayed(string, file, line) {
             return;
         }
@@ -7759,7 +7792,7 @@ impl Request {
         // `zend_strpprintf`'s message, handed to `zend_error_cb` and
         // released after.
         if let Ok(string) = PhpString::new(self, message.as_bytes()) {
-            self.error_cb(level, string, message, file, line);
+            self.zend_error_cb(level, string, message, file, line);
             self.release(Value::string(string));
         }
         self.end_at_level(level, message, file, line);
@@ -17981,11 +18014,48 @@ impl Request {
         }
         let mut name = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         name.extend_from_slice(format!("({}) : eval()'d code", self.current_line()).as_bytes());
+        Ok(Opened::Unit(self.compile_eval(code, &name)?))
+    }
+
+    /// `zend_compile_string`, every string compiled as an `eval`
+    /// compiles it: the links the bundle supplied
+    /// ([`ExtensionBuilder::compile_string`]) from the top, each serving
+    /// the one beneath where it will, and php's own `compile_string`
+    /// beneath them all, from after an open tag ([`SourceKind::Eval`]).
+    /// The `Err` is what a link threw; the unit, or the compiler's
+    /// refusal for the caller to raise, is the `Ok`.
+    ///
+    /// [`ExtensionBuilder::compile_string`]: crate::api::abi::ExtensionBuilder::compile_string
+    pub(crate) fn compile_string(
+        &mut self,
+        code: &[u8],
+        name: &[u8],
+    ) -> Result<Result<Arc<Unit>, CompileError>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        match shared.compile_for(self, code, &name, SourceKind::Eval) {
-            Ok(unit) => Ok(Opened::Unit(unit)),
-            Err(refused) => Err(self.refused_include(&refused, &name, SourceKind::Eval)),
-        }
+        let links = shared.supplied.compile_string.links();
+        let top = crate::supplied::StringBeneath {
+            links,
+            source: code,
+            name,
+        };
+        Ok(top.compile(self, code)?.0)
+    }
+
+    /// php's own `compile_string`, beneath every link of the pointer:
+    /// `source` compiled under `name` as the request's own unit.
+    pub(crate) fn compile_string_own(
+        &mut self,
+        source: &[u8],
+        name: &[u8],
+    ) -> Result<Arc<Unit>, CompileError> {
+        Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval)
+    }
+
+    /// [`Request::compile_string`] with the compiler's refusal raised as
+    /// an included file's is, at `name`.
+    pub(crate) fn compile_eval(&mut self, code: &[u8], name: &[u8]) -> Result<Arc<Unit>, Thrown> {
+        self.compile_string(code, name)?
+            .map_err(|refused| self.refused_include(&refused, name, SourceKind::Eval))
     }
 
     /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's
@@ -22705,10 +22775,20 @@ impl Request {
         self.heap.reset_peak();
     }
 
-    /// `gc_collect_cycles()`, `zend_gc_collect_cycles` over the
-    /// request's heap (design §5.12): the values the collection freed, as php
-    /// 8.5 counts them.
+    /// `gc_collect_cycles()` through php's pointer: the top link the
+    /// bundle supplied ([`ExtensionBuilder::gc_collect`]), or with none
+    /// `zend_gc_collect_cycles` over the request's heap (design §5.12);
+    /// the values the collection freed, as php 8.5 counts them.
+    ///
+    /// [`ExtensionBuilder::gc_collect`]: crate::api::abi::ExtensionBuilder::gc_collect
     pub fn gc_collect(&mut self) -> i64 {
+        let shared = Arc::clone(&self.shared);
+        crate::supplied::GcBeneath(shared.supplied.gc_collect.links()).collect(self)
+    }
+
+    /// `zend_gc_collect_cycles`, the heap's own collection beneath every
+    /// link of the pointer.
+    pub(crate) fn gc_collect_own(&mut self) -> i64 {
         Heap::gc_collect_cycles(&mut Hooks(self))
     }
 
@@ -23349,6 +23429,13 @@ pub(crate) struct RefSource {
 impl HeapHooks for Hooks<'_> {
     fn heap(&mut self) -> &mut Heap {
         &mut self.0.heap
+    }
+
+    /// The pointer through the links the bundle supplied, where it
+    /// supplied any.
+    fn gc_collect_cycles(&mut self) -> Option<i64> {
+        let linked = !self.0.shared.supplied.gc_collect.links().is_empty();
+        linked.then(|| self.0.gc_collect())
     }
 
     /// `dtor_obj`, through the table of the object's class (design §5.4).

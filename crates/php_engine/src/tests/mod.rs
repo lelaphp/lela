@@ -4,4 +4,4 @@
 use crate::api;
 
 mod lifecycle;
-mod test_ext;
+pub(crate) mod test_ext;
