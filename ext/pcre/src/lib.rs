@@ -221,9 +221,13 @@ pub(crate) mod constants {
     /// `PCRE2_MINOR` of the header the pinned php was built against,
     /// 10.47's, not the linked library's minor.
     pub(crate) const PCRE_VERSION_MINOR: i64 = 47;
-    pub(crate) fn PCRE_JIT_SUPPORT() -> bool {
-        ffi::jit_supported()
-    }
+    /// `PCRE_JIT_SUPPORT`, `@cvalue PHP_PCRE_JIT_SUPPORT`: the macro
+    /// `php_pcre.c` defines from `HAVE_PCRE_JIT_SUPPORT`, as `configure`
+    /// decided it at build: `build.rs` compiles and starts `config0.m4`'s
+    /// program against the library and sets the cfg `pcre_jit` where its
+    /// `PCRE2_CONFIG_JIT` is 1, not `pcre2_config` of the library loaded
+    /// later.
+    pub(crate) const PCRE_JIT_SUPPORT: bool = cfg!(pcre_jit);
 }
 
 /// What `Z_PARAM_ARRAY_HT_OR_STR` holds, `array|string`: the pattern,
@@ -402,8 +406,10 @@ fn preg_quote(
 }
 
 /// `PHP_MINFO_FUNCTION(pcre)`: the library's version, its Unicode
-/// version and `PCRE2_CONFIG_JIT`, then `DISPLAY_INI_ENTRIES`, `pcre.jit` shown as
-/// the boolean displayer shows it.
+/// version and, where the build has `PCRE_JIT_SUPPORT`, the
+/// loaded library's `PCRE2_CONFIG_JIT` and its target, then
+/// `DISPLAY_INI_ENTRIES`, `pcre.jit` shown as the boolean displayer shows
+/// it.
 ///
 /// ```php
 /// ob_start(); (new ReflectionExtension('pcre'))->info(); $info = ob_get_clean();
@@ -427,12 +433,18 @@ fn preg_quote(
 fn pcre_info(req: &mut Request) {
     let version = ffi::version();
     let unicode = ffi::unicode_version();
-    let jit = if ffi::jit_supported() {
-        "enabled"
+    // `#ifdef HAVE_PCRE_JIT_SUPPORT`: the loaded library's answer and
+    // target where the build has the JIT, "not compiled in" where not.
+    let (jit, target) = if cfg!(pcre_jit) {
+        let jit = if ffi::jit_supported() {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        (jit, ffi::jit_target())
     } else {
-        "disabled"
+        ("not compiled in", None)
     };
-    let target = ffi::jit_target();
     let mut rows: Vec<[&str; 2]> = vec![
         [
             "PCRE (Perl Compatible Regular Expressions) Support",

@@ -20,9 +20,11 @@ php_ext = { path = "../../crates/php_ext" }
 pcre2-sys = { workspace = true }
 
 # `build.rs` fails the build where pkg-config finds no libpcre2-8, rather
-# than let pcre2-sys fall back to the source it bundles.
+# than let pcre2-sys fall back to the source it bundles, and compiles and
+# runs `config0.m4`'s JIT program for `PCRE_JIT_SUPPORT` (#1974).
 [build-dependencies]
 pkg-config = { workspace = true }
+cc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
