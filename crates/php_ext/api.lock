@@ -205,6 +205,7 @@ abi::Observed
 abi::Observed::filename
 abi::Observed::function
 abi::Observed::function_scope
+abi::Observed::suspend_time_limit
 abi::ObserverHandlers
 abi::ObserverInit
 abi::OnModify
@@ -730,6 +731,7 @@ request::Request::status_line
 request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
+request::Request::suspend_time_limit
 request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
@@ -883,6 +885,7 @@ request::Streams::wrapper_url_stat
 request::Streams::xport_create
 request::Syslog
 request::TemporaryGuard
+request::TimeLimitSuspended
 request::UnitCache
 request::UnitCache::compile
 request::UnitCache::holds

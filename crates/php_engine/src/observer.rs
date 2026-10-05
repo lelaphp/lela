@@ -58,7 +58,7 @@ use std::sync::Arc;
 use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
-use crate::api::request::Request;
+use crate::api::request::{Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, Value};
 
 /// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once of each function, on its first
@@ -105,6 +105,14 @@ impl DerefMut for Observed<'_> {
     }
 }
 
+impl AsMut<Request> for Observed<'_> {
+    /// The request whose time limit a [`TimeLimitSuspended`] over the
+    /// frame suspends.
+    fn as_mut(&mut self) -> &mut Request {
+        self.req
+    }
+}
+
 impl Observed<'_> {
     /// `EX(func)` where the frame serves a function or a method; `None`
     /// for an included, evaluated or main file's op array, which php
@@ -119,6 +127,13 @@ impl Observed<'_> {
     #[must_use]
     pub fn function_scope(&self) -> Option<ClassId> {
         self.req.frame_scope(self.frame)
+    }
+
+    /// [`Request::suspend_time_limit`] over the observed frame: the
+    /// guard derefs to this, so the frame's reads stay the handler's while
+    /// it blocks, a debugger's answers to its client among them.
+    pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {
+        TimeLimitSuspended::over(self)
     }
 
     /// `EX(func)->op_array.filename`: the file the op array was compiled

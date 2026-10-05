@@ -1,7 +1,8 @@
 //! The engine's tests that belong to no one file of it: the Extension
 //! seam's adapter, `TestExt`, the lifecycle it records (design §4.3),
 //! the observer's order and pairing (seam 9), a periodic interrupt as
-//! an extension sees it (#1806), and the pool's drain.
+//! an extension sees it (#1806), the pool's drain, and a handler that
+//! blocks with the time limit suspended (#1814).
 
 use crate::api;
 
@@ -10,3 +11,4 @@ mod observer;
 mod periodic;
 mod pool;
 pub(crate) mod test_ext;
+mod time_limit;
