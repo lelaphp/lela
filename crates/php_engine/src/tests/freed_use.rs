@@ -6,6 +6,11 @@
 //! sensing point when the native ran inside the program, and where the
 //! request ends when it ran outside the loop, in a request-end function
 //! or in a start that then failed.
+//!
+//! And the debug quarantine that makes the guard deterministic (#1991):
+//! a value used after its block is freed and one of its size made is
+//! refused the first time it happens, and a write into a freed block while its
+//! bin holds it back is found as the block leaves.
 
 use php_heap::Zval;
 use php_macros::php_function;
@@ -17,11 +22,11 @@ use crate::api::values::{PhpString, Value};
 use crate::engine::{Engine, RequestDescription};
 use crate::test::Capture;
 
-/// A value of `kind` made out of the request's heap and its one owner
-/// given up, so the block it names is freed; `None` for a kind that is
-/// not one of the five refcounted kinds.
-fn freed(req: &mut Request, kind: &[u8]) -> Option<Zval> {
-    let made = match kind {
+/// A value of `kind` made out of the request's heap, with its one
+/// owner; `None` for a kind that is not one of the five refcounted
+/// kinds.
+fn made(req: &mut Request, kind: &[u8]) -> Option<Zval> {
+    match kind {
         b"string" => req
             .heap_mut()
             .string(b"a string of its own block")
@@ -42,7 +47,13 @@ fn freed(req: &mut Request, kind: &[u8]) -> Option<Zval> {
             req.heap_mut().resource(kind).ok().map(Zval::resource)
         }
         _ => None,
-    }?;
+    }
+}
+
+/// A value of `kind` made and its one owner given up, so the block it
+/// names is freed.
+fn freed(req: &mut Request, kind: &[u8]) -> Option<Zval> {
+    let made = made(req, kind)?;
     req.release(Value::of_zval(made));
     Some(made)
 }
@@ -79,9 +90,40 @@ fn freed_addref_at_rshutdown(req: &mut Request) {
     }
 }
 
+/// `freed_then_made(string $kind): void`, faulty on purpose: a value
+/// of `$kind` freed, one more of its kind and size made, and then one
+/// more owner of the freed one taken, the slot-reuse pattern of #1984's
+/// union. A free list that handed the freed block straight back would
+/// have the stale owner count the new value one more.
+#[php_function]
+fn freed_then_made(req: &mut Request, kind: PhpString) {
+    let Some(stale) = freed(req, kind.as_bytes()) else {
+        return;
+    };
+    let made = made(req, kind.as_bytes());
+    addref_by_kind(stale);
+    if let Some(made) = made {
+        req.release(Value::of_zval(made));
+    }
+}
+
+/// `freed_protected(): void`, faulty on purpose: an array freed and then
+/// a walk's recursion guard set on it, a write into the freed block that
+/// moves no refcount.
+#[php_function]
+fn freed_protected(req: &mut Request) {
+    if let Some(a) = freed(req, b"array").and_then(Zval::as_arr) {
+        a.protect();
+    }
+}
+
 fn faulty() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![freed_addref::declared()])
+        .functions(vec![
+            freed_addref::declared(),
+            freed_then_made::declared(),
+            freed_protected::declared(),
+        ])
         .build("freed_use")
 }
 
@@ -170,4 +212,57 @@ fn an_addref_of_a_freed_block_before_a_failed_start_is_raised_where_it_ends() {
     assert!(stdout.contains(REFUSED), "{stdout}");
     assert!(stdout.contains(SITE), "{stdout}");
     assert!(!stdout.contains("ran"), "{stdout}");
+}
+
+/// The most recently freed slot of its bin is held back, so a stale
+/// owner taken after a value of its size was made still names a freed
+/// block and is refused the first time, for each of the five kinds.
+#[test]
+fn a_use_of_the_most_recently_freed_slot_is_refused_the_first_time() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    for kind in ["string", "array", "object", "reference", "resource"] {
+        let served = engine.serve_capture(
+            &format!("<?php echo 'a';\nfreed_then_made('{kind}');\necho 'went on';\n"),
+            Capture::default(),
+        );
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            stdout.starts_with(&format!("a\n{REFUSED}")),
+            "{kind}: {stdout}"
+        );
+        assert!(stdout.contains(SITE), "{kind}: {stdout}");
+        assert!(!stdout.contains("went on"), "{kind}: {stdout}");
+        assert_eq!(served.exit_code, 255, "{kind}");
+    }
+}
+
+/// A write into a freed array its bin holds back is found as the block
+/// leaves the quarantine: by `gc_mem_caches()`, whose sweep drains it
+/// first, and by sixteen more arrays of its size freed after it. The
+/// request goes on until then and ends in the `InternalError` naming the
+/// block at the handler that evicted it.
+#[test]
+fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    for evict in [
+        "gc_mem_caches();",
+        "$a = []; for ($i = 0; $i < 20; $i++) { $a[] = [$i]; }\nunset($a);",
+    ] {
+        let served = engine.serve_capture(
+            &format!("<?php freed_protected(); echo 'went on';\n{evict}\necho 'and on';\n"),
+            Capture::default(),
+        );
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+        assert!(
+            before.starts_with("went on\nFatal error: InternalError: a write into the "),
+            "{evict}: {stdout}"
+        );
+        assert!(
+            after.contains(" after the heap freed it, found as it left the quarantine in "),
+            "{evict}: {stdout}"
+        );
+        assert!(!stdout.contains("and on"), "{evict}: {stdout}");
+        assert_eq!(served.exit_code, 255, "{evict}");
+    }
 }

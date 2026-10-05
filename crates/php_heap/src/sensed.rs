@@ -39,6 +39,10 @@ pub(crate) enum Sensed {
         op: RefOp,
         site: &'static std::panic::Location<'static>,
     },
+    /// A write into a freed bin slot while its bin's quarantine held it
+    /// (`crate::mm`), found as the slot left: the block and its bin's
+    /// size. Nothing names the line that wrote.
+    FreedWrite { at: usize, size: usize },
 }
 
 impl Sensed {
@@ -55,6 +59,9 @@ impl Sensed {
                     "InternalError: {op} of the block at {at:#x}, which the heap has freed, at {site}"
                 ))
             }
+            Sensed::FreedWrite { at, size } => Fatal::Error(format!(
+                "InternalError: a write into the {size}-byte block at {at:#x} after the heap freed it, found as it left the quarantine"
+            )),
         }
     }
 }
