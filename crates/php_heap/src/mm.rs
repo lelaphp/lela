@@ -172,6 +172,11 @@ struct Chunk {
     /// `map`: what starts at each page, `ZEND_MM_FRUN`, `ZEND_MM_LRUN`,
     /// `ZEND_MM_SRUN` or `ZEND_MM_NRUN`.
     map: [u32; PAGES as usize],
+    /// A debug build's way from a block to its heap's sensed record,
+    /// what php's `heap` field is to its checks: the [`Mm::sensed`] of
+    /// the heap that laid the chunk down.
+    #[cfg(debug_assertions)]
+    sensed: *const crate::sensed::Record,
 }
 
 /// The header takes page zero and nothing more, which is what
@@ -237,6 +242,12 @@ pub(crate) struct Mm {
     /// The profilers told of what the entries serve, `alloc`, `realloc`,
     /// `free` and `gc`, and of nothing the heap does on its own behalf.
     observers: Observers,
+    /// A debug build's record of what its sensors found
+    /// ([`crate::sensed`]), boxed so the address every chunk's header
+    /// holds stands while the heap moves, and dropped after the chunks
+    /// are given back.
+    #[cfg(debug_assertions)]
+    sensed: Box<crate::sensed::Record>,
 }
 
 impl Mm {
@@ -262,9 +273,11 @@ impl Mm {
             limit: NO_LIMIT,
             overflow: false,
             observers: Observers::default(),
+            #[cfg(debug_assertions)]
+            sensed: Box::default(),
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
-            chunk_init(chunk, 0);
+            mm.chunk_init(chunk, 0);
             mm.chunks.push(chunk);
             mm.peak_chunks_count = 1;
             mm.real_size = CHUNK_SIZE;
@@ -873,7 +886,7 @@ impl Mm {
             .chunks
             .last()
             .map_or(0, |last| unsafe { &*last.as_ptr() }.num + 1);
-        chunk_init(chunk, num);
+        self.chunk_init(chunk, num);
         self.chunks.push(chunk);
         self.peak_chunks_count = self.peak_chunks_count.max(self.chunks.len());
         Ok(chunk)
@@ -1167,15 +1180,39 @@ fn size_to_bin(size: usize) -> usize {
     (t1 >> t2) + ((t2 - 3) << 2)
 }
 
+impl Mm {
+    /// What a debug build's sensors found in this heap since the engine
+    /// last asked, taken ([`crate::sensed`]).
+    #[cfg(debug_assertions)]
+    pub(crate) fn take_sensed(&mut self) -> Option<crate::Fatal> {
+        self.sensed.take()
+    }
+
+    /// `chunk` laid down as one of this heap's ([`chunk_init`]), its
+    /// header naming this heap's sensed record in a debug build.
+    fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {
+        #[cfg(debug_assertions)]
+        chunk_init(chunk, num, &raw const *self.sensed);
+        #[cfg(not(debug_assertions))]
+        chunk_init(chunk, num);
+    }
+}
+
 /// `zend_mm_chunk_init` (`Z/Zend/zend_alloc.c:870`): page zero is the
 /// header and every other page is free.
-fn chunk_init(chunk: NonNull<Chunk>, num: u32) {
+fn chunk_init(
+    chunk: NonNull<Chunk>,
+    num: u32,
+    #[cfg(debug_assertions)] sensed: *const crate::sensed::Record,
+) {
     let mut header = Chunk {
         free_pages: PAGES - FIRST_PAGE,
         free_tail: FIRST_PAGE,
         num,
         free_map: [0; PAGE_MAP_LEN],
         map: [0; PAGES as usize],
+        #[cfg(debug_assertions)]
+        sensed,
     };
     header.free_map[0] = (1 << FIRST_PAGE) - 1;
     header.map[0] = IS_LRUN | FIRST_PAGE;
@@ -1546,11 +1583,29 @@ pub(crate) mod freed {
     /// so the two words are inside it.
     pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
         let mark = mark_at(at);
-        // SAFETY: `at` names a refcounted block of this heap, live or
-        // freed into a bin or a `run` of a chunk still mapped, so its
-        // second and third words are readable; a block freed back to the
-        // system is the defect this read exists to name, and reading it
-        // is the refcount operation's own read, made one step earlier.
+        // SAFETY: `at` names a refcounted value whose count is about to
+        // move: a block of this heap, live or freed into a bin or a `run`
+        // of a chunk still mapped, or a live persistent string out of the
+        // process's allocator, so its second and third words are
+        // readable; a block freed back to the system is the defect this
+        // read exists to name, and reading it is the refcount
+        // operation's own read, made one step earlier.
         unsafe { mark.read() == MARK }
+    }
+
+    /// `sensed` kept in the record of the heap the freed block at `at`
+    /// belongs to, reached through the header of its chunk, php's
+    /// `chunk->heap`. Only a block [`is_freed`] found marked is passed,
+    /// and only a slot of a chunk carries the mark.
+    pub(crate) fn record(at: NonNull<u8>, sensed: crate::sensed::Sensed) {
+        let chunk = super::chunk_of(at);
+        // SAFETY: the block carries the mark, so it is a slot or a `run`
+        // of a chunk its heap still holds mapped, and that chunk's page
+        // zero is the header `chunk_init` wrote.
+        let record = unsafe { (*chunk.as_ptr()).sensed };
+        // SAFETY: the header names the record its heap boxed, which the
+        // heap drops only after it has given every chunk back, so the
+        // record stands while the chunk is mapped.
+        unsafe { &*record }.record(sensed);
     }
 }

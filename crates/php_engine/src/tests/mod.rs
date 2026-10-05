@@ -6,14 +6,17 @@
 //! opcodes an extension observes, a periodic interrupt as an extension
 //! sees it (#1806), the pool's drain, a handler that blocks with the
 //! time limit suspended (#1814), allocations as an extension observes
-//! them (design §7.1), and the statements a Zend extension is told of
-//! under extended info (#1823).
+//! them (design §7.1), the statements a Zend extension is told of
+//! under extended info (#1823), and a debug build's freed-use guard
+//! as a program meets it (#1990).
 
 use crate::api;
 
 mod allocations;
 mod frame_writes;
 mod frames;
+#[cfg(debug_assertions)]
+mod freed_use;
 mod lifecycle;
 mod observer;
 mod observer_notices;

@@ -12,6 +12,32 @@ use std::cell::Cell;
 
 use crate::ZvalType;
 
+/// A debug build's freed-use guard, asked before a refcount moves:
+/// whether the refcounted block at `at` is one the heap has freed
+/// ([`crate::mm::freed`]). One that is is recorded in its heap's sensed
+/// record ([`crate::sensed`]), with the operation and the line that
+/// asked for it, and the operation is refused, so nothing is written
+/// over the free list's link in the block's first word.
+#[cfg(debug_assertions)]
+pub(crate) fn refuses_freed(
+    at: std::ptr::NonNull<u8>,
+    op: crate::sensed::RefOp,
+    site: &'static std::panic::Location<'static>,
+) -> bool {
+    if !crate::mm::freed::is_freed(at) {
+        return false;
+    }
+    crate::mm::freed::record(
+        at,
+        crate::sensed::Sensed::FreedUse {
+            at: at.as_ptr().addr(),
+            op,
+            site,
+        },
+    );
+    true
+}
+
 /// `zend_refcounted_h`: the first eight bytes of every refcounted value.
 #[derive(Debug)]
 #[repr(C)]
@@ -120,11 +146,18 @@ impl Refcounted {
         self.refcount.get()
     }
 
-    /// `GC_ADDREF`: one more owner, and the new count.
-    pub(crate) fn addref(&self) -> u32 {
-        let count = self.refcount.get().saturating_add(1);
-        self.refcount.set(count);
-        count
+    /// `GC_ADDREF`: one more owner. This and [`Refcounted::delref`] are
+    /// the chokepoint every refcount change reaches, whichever type's or
+    /// the heap's own addref asked for it, so a debug build's freed-use
+    /// guard ([`refuses_freed`]) sits here: an addref of a block the heap has
+    /// freed is recorded and does nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn addref(&self) {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Addref) {
+            return;
+        }
+        self.refcount.set(self.refcount.get().saturating_add(1));
     }
 
     /// `GC_SET_REFCOUNT`: the count as `zend_objects_store_del` holds it
@@ -134,11 +167,31 @@ impl Refcounted {
     }
 
     /// `GC_DELREF`: one owner fewer, and the count that is left. A count
-    /// already at zero stays there, so a double release cannot wrap.
+    /// already at zero stays there, so a double release cannot wrap. A
+    /// debug build refuses a decrement of a block the heap has freed as
+    /// it refuses the increment, and answers one owner left, so no
+    /// caller frees the block a second time.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn delref(&self) -> u32 {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Release) {
+            return 1;
+        }
         let count = self.refcount.get().saturating_sub(1);
         self.refcount.set(count);
         count
+    }
+
+    /// The freed-use guard over this header, which is the first eight
+    /// bytes of its block, for the line that asked.
+    #[cfg(debug_assertions)]
+    #[track_caller]
+    fn refuses(&self, op: crate::sensed::RefOp) -> bool {
+        refuses_freed(
+            std::ptr::NonNull::from(self).cast(),
+            op,
+            std::panic::Location::caller(),
+        )
     }
 
     /// `GC_FLAGS`.
