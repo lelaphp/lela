@@ -59,7 +59,11 @@ impl Request {
     /// among them, taken from the pending slot as a native's call hands
     /// one back, or the `exit` or fatal it ended in. With something
     /// pending already nothing is served and the value is `null`, as
-    /// `zend_execute` serves nothing while `EG(exception)` stands. `None`
+    /// `zend_execute` serves nothing while `EG(exception)` stands; a
+    /// debugger that evaluates there sets what is pending aside first
+    /// ([`Request::take_pending`]), as xdebug's `xdebug_do_eval` does. A
+    /// backtrace taken in the evaluated code lists the frames above the
+    /// one evaluated in, where php's starts at it (#2036). `None`
     /// where the frame is not one this reaches: popped, suspended, or
     /// below a fiber.
     pub fn eval_in_frame(
