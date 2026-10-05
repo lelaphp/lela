@@ -236,9 +236,13 @@ fn walk(
     }
     // `Z_PARAM_FUNC` after `Z_PARAM_ARRAY_OR_OBJECT_EX`, in php's order.
     let callback = callback.hold(req)?;
-    let userdata = match arg {
-        Passed::Given(userdata) => Some(userdata),
-        Passed::Omitted => None,
+    let walking = Walk {
+        callback: &callback,
+        userdata: match arg {
+            Passed::Given(userdata) => Some(userdata),
+            Passed::Omitted => None,
+        },
+        recursive,
     };
     // A value where a reference was asked for, past the notice: the
     // walk is over a cell of its own, which nobody reads after.
@@ -248,7 +252,7 @@ fn walk(
         req.addref(&target);
         PhpRef::new(req, target)?
     };
-    let walked = walk_holder(req, holder, &callback, userdata, recursive);
+    let walked = walk_holder(req, holder, &walking);
     if given.reference().is_none() {
         req.release(holder.as_value());
     }
@@ -256,20 +260,24 @@ fn walk(
     Ok(True)
 }
 
+/// What every level of a walk hands on, php's `php_array_walk_context`
+/// with the two arguments `php_array_walk` passes beside it: the
+/// callback, the `$arg` it is given third, and whether an element that
+/// is an array is descended into.
+struct Walk<'a> {
+    callback: &'a Callable,
+    userdata: Option<Value>,
+    recursive: bool,
+}
+
 /// One level of `php_array_walk` over what the cell `holder` holds: an
 /// array walked by a hash iterator registered at its first element
 /// (`zend_hash_iterator_add`), whatever the array's own pointer says,
 /// and given up on every way out (`zend_hash_iterator_del`).
-fn walk_holder(
-    req: &mut Request,
-    holder: PhpRef,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
-) -> Result<(), Thrown> {
+fn walk_holder(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thrown> {
     let start = holder.get();
     if let Some(object) = start.as_object().copied() {
-        return walk_object(req, object, callback, userdata, recursive);
+        return walk_object(req, object, walk);
     }
     let Some(table) = holder.separate_array(req)? else {
         return Ok(());
@@ -279,7 +287,7 @@ fn walk_holder(
         return Ok(());
     };
     let at = HashIterator::new(req, &table, first);
-    let walked = walk_buckets(req, holder, table, at, callback, userdata, recursive);
+    let walked = walk_buckets(req, holder, table, at, walk);
     at.release(req);
     walked
 }
@@ -299,9 +307,7 @@ fn walk_buckets(
     holder: PhpRef,
     mut table: PhpArray,
     at: HashIterator,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
+    walk: &Walk,
 ) -> Result<(), Thrown> {
     let mut pos = at.position(req, &table);
     loop {
@@ -316,12 +322,7 @@ fn walk_buckets(
         let reference = if let Some(reference) = value.as_php_ref() {
             *reference
         } else {
-            let Some(separated) = holder.separate_array(req)? else {
-                return Err(fatal(
-                    req,
-                    "InternalError: array_walk's variable holds no array",
-                ));
-            };
+            let separated = held_array(req, holder)?;
             if !separated.is_same(table) {
                 table = separated;
                 pos = at.position(req, &table);
@@ -337,22 +338,16 @@ fn walk_buckets(
         let next = found.saturating_add(1);
         pos = table.live_from(next).map_or(next, |(next, _, _)| next);
         at.set_position(req, pos);
-        visit(req, reference, &key, callback, userdata, recursive)?;
+        visit(req, reference, &key, walk)?;
         // "Reload array and position -- both may have changed".
         let now = holder.get();
         if let Some(now) = now.as_array().copied() {
             if !now.is_same(table) {
-                let Some(separated) = holder.separate_array(req)? else {
-                    return Err(fatal(
-                        req,
-                        "InternalError: array_walk's variable holds no array",
-                    ));
-                };
-                table = separated;
+                table = held_array(req, holder)?;
             }
             pos = at.position(req, &table);
         } else if let Some(object) = now.as_object().copied() {
-            return walk_object(req, object, callback, userdata, recursive);
+            return walk_object(req, object, walk);
         } else {
             return Err(throw_error(
                 req,
@@ -363,20 +358,25 @@ fn walk_buckets(
     }
 }
 
+/// The array the cell `holder` holds, separated: what the walk writes
+/// once it has read that the cell holds an array.
+fn held_array(req: &mut Request, holder: PhpRef) -> Result<PhpArray, Thrown> {
+    match holder.separate_array(req)? {
+        Some(table) => Ok(table),
+        None => Err(fatal(
+            req,
+            "InternalError: array_walk's variable holds no array",
+        )),
+    }
+}
+
 /// One element of `php_array_walk`, made a reference in place: under
 /// `recursive` an array it holds separated and walked in its turn,
 /// guarded against an array that holds itself, and otherwise the cell
 /// handed to the callback with its key, and `$arg` third where it was
 /// given.
-fn visit(
-    req: &mut Request,
-    reference: PhpRef,
-    key: &Key,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
-) -> Result<(), Thrown> {
-    if recursive && reference.get().as_array().is_some() {
+fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result<(), Thrown> {
+    if walk.recursive && reference.get().as_array().is_some() {
         call_stack_end(req)?;
         let Some(nested) = reference.separate_array(req)? else {
             return Ok(());
@@ -386,7 +386,7 @@ fn visit(
         }
         req.addref(&reference.as_value());
         nested.protect();
-        let walked = walk_holder(req, reference, callback, userdata, true);
+        let walked = walk_holder(req, reference, walk);
         if reference.get().as_array() == Some(&nested) {
             nested.unprotect();
         }
@@ -400,10 +400,10 @@ fn visit(
     req.addref(&cell);
     req.addref(&key);
     let mut arguments = vec![cell, key];
-    if let Some(userdata) = userdata {
+    if let Some(userdata) = walk.userdata {
         arguments.push(userdata);
     }
-    let answer = call(req, callback, &arguments);
+    let answer = call(req, walk.callback, &arguments);
     req.release(key);
     req.release(cell);
     req.release(answer?);
@@ -453,13 +453,7 @@ fn visit(
 ///   int(50)
 /// }
 /// ```
-fn walk_object(
-    req: &mut Request,
-    object: PhpObject,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
-) -> Result<(), Thrown> {
+fn walk_object(req: &mut Request, object: PhpObject, walk: &Walk) -> Result<(), Thrown> {
     let mut visited: HashSet<Key> = HashSet::new();
     loop {
         let pending: Vec<Key> = object
@@ -478,7 +472,7 @@ fn walk_object(
                 continue;
             }
             let cell = object.typed_row_ref(req, &key)?;
-            let visited_row = visit(req, cell, &key, callback, userdata, recursive);
+            let visited_row = visit(req, cell, &key, walk);
             req.release(cell.as_value());
             visited_row?;
         }
