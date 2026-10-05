@@ -566,6 +566,9 @@ impl Request {
                 Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
             )
         {
+            // The error observers are told before `zend_error_cb`, the
+            // first link of which is `php_error_cb`'s throw here.
+            crate::observer::error(self, level, file, line, message.as_bytes());
             if self.raised.is_none() && self.diagnostics.error_handling_thrown.is_none() {
                 let thrown = crate::api::raising::throw(self, &class, message);
                 self.diagnostics.error_handling_thrown = Some(thrown);
@@ -600,6 +603,10 @@ impl Request {
                 Err(_) => return false,
             },
         };
+        // `zend_observer_error_notify` (`Z/Zend/zend.c:1528`): every
+        // diagnostic past the record and the pending throwable's report,
+        // before the user's handler and `zend_error_cb` are asked.
+        crate::observer::error(self, level, file, line, string.as_bytes());
         let served = !self.user_error_handler(level, string, file, line);
         if served {
             self.zend_error_cb(level, string, message, file, line);
