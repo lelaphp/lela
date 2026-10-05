@@ -120,3 +120,28 @@ fn observe_declaring_names_each_function_and_class_declared() {
     assert!(out.contains("<!-- declared function 'f' -->"), "{out}");
     assert!(out.contains("<!-- declared class 'c' -->"), "{out}");
 }
+
+/// `zend_test.zend_mm_custom_handlers.enabled` is a request's to set and
+/// takes the value it is set to, and observing writes past what the
+/// request writes: what the program writes, `memory_get_usage()` among it, is
+/// what it writes with the switch off.
+#[test]
+fn the_allocation_switch_is_taken_and_leaves_what_the_program_writes_alone() {
+    let program = |on: u8| {
+        format!(
+            "<?php $m = memory_get_usage();\n\
+             var_dump(ini_set('zend_test.zend_mm_custom_handlers.enabled', '{on}'), ini_get('zend_test.zend_mm_custom_handlers.enabled'));\n\
+             $m = memory_get_usage(); $s = \"$m$m$m$m\"; $t = $s . $s; unset($s); gc_mem_caches();\n\
+             echo memory_get_usage() - $m, \"\\n\";\n\
+             ini_set('zend_test.zend_mm_custom_handlers.enabled', '0');\n"
+        )
+    };
+    let off = served(&[], &program(0));
+    let on = served(&[], &program(1));
+    assert!(
+        off.starts_with("string(1) \"0\"\nstring(1) \"0\"\n"),
+        "{off}"
+    );
+    assert!(on.starts_with("string(1) \"0\"\nstring(1) \"1\"\n"), "{on}");
+    assert_eq!(on.lines().nth(2), off.lines().nth(2), "{on}\n{off}");
+}

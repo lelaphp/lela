@@ -101,7 +101,6 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .ini(ini())
         .on_modify(OBSERVE_FUNCTION_NAMES, on_update_function_names)
         .engine_state(Switches::start)
-        .request_state::<Observing>()
         .observer(fcall_init)
         .observer(execute_internal_init)
         .opcodes(observed_opcodes, show_opcode_in_user_handler)
@@ -231,7 +230,7 @@ fn show_opcode_in_user_handler(observed: &mut Observed<'_>, opcode: &'static str
     if !Switches::of(observed).show_output {
         return;
     }
-    let mut line = indent(observed.state::<Observing>().depth);
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(opcode.as_bytes());
     line.extend_from_slice(b"' in user handler -->\n");
@@ -248,7 +247,7 @@ fn show_opcode(observed: &mut Observed<'_>) {
     let Some(opcode) = observed.frame().map(|frame| frame.opcode()) else {
         return;
     };
-    let mut line = indent(observed.state::<Observing>().depth);
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
     line.extend_from_slice(b"<!-- opcode: '");
     line.extend_from_slice(opcode.as_bytes());
     line.extend_from_slice(b"' -->\n");
@@ -260,7 +259,7 @@ fn show_opcode(observed: &mut Observed<'_>) {
 /// below it, php's `fiber->caller` links, which a switch handler reads to
 /// tell a resumption from a suspension.
 #[derive(Debug, Default)]
-struct Observing {
+pub(crate) struct Observing {
     depth: usize,
     /// The fibers standing above the request's own stack, the running
     /// one last, each by its object's number.
@@ -360,7 +359,7 @@ fn show_declared(req: &mut Request, what: &str, name: &[u8]) {
     if !(switches.enabled && switches.observe_declaring) {
         return;
     }
-    let mut line = indent(req.state::<Observing>().depth);
+    let mut line = indent(req.state::<crate::State>().observer.depth);
     line.extend_from_slice(format!("<!-- declared {what} '").as_bytes());
     line.extend_from_slice(name);
     line.extend_from_slice(b"' -->\n");
@@ -493,7 +492,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
     let Serves::Function { scope, name } = Serves::of(observed) else {
         return;
     };
-    let mut line = indent(observed.state::<Observing>().depth);
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
     line.extend_from_slice(b"<!-- internal enter ");
     line.extend(Serves::function(scope.as_deref(), &name));
     line.extend_from_slice(b"() -->\n");
@@ -503,7 +502,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
 /// `observer_show_init`: `<!-- init f() -->`, `<!-- init C::m() -->`
 /// or `<!-- init 'file' -->`.
 fn show_init(req: &mut Request, serves: &Serves) {
-    let depth = req.state::<Observing>().depth;
+    let depth = req.state::<crate::State>().observer.depth;
     let mut line = indent(depth);
     line.extend_from_slice(b"<!-- init ");
     match serves {
@@ -526,7 +525,7 @@ fn show_init(req: &mut Request, serves: &Serves) {
 /// natives' calls and a fiber's bottom frame among them, `f()`,
 /// `C::m()` or `{main} file`, four spaces in from the tag.
 fn show_init_backtrace(observed: &mut Observed<'_>) {
-    let depth = observed.state::<Observing>().depth;
+    let depth = observed.state::<crate::State>().observer.depth;
     let mut out = indent(depth);
     out.extend_from_slice(b"<!--\n");
     for frame in observed.walk() {
@@ -560,7 +559,7 @@ fn begin(observed: &mut Observed<'_>) {
         return;
     }
     let serves = Serves::of(observed);
-    let state = observed.state::<Observing>();
+    let state = &mut observed.state::<crate::State>().observer;
     let mut line = indent(state.depth);
     state.depth += 1;
     line.push(b'<');
@@ -586,7 +585,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     if !switches.show_output {
         return;
     }
-    let depth = observed.state::<Observing>().depth;
+    let depth = observed.state::<crate::State>().observer.depth;
     if let Some(raised) = observed.raised() {
         let class = match raised {
             Raised::Throwable(throwable) => observed.class_name(throwable.class()),
@@ -601,7 +600,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     }
     show_opcode(observed);
     let depth = depth.saturating_sub(1);
-    observed.state::<Observing>().depth = depth;
+    observed.state::<crate::State>().observer.depth = depth;
     let mut line = indent(depth);
     match Serves::of(observed) {
         Serves::Function { scope, name } => {
@@ -693,7 +692,10 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
         return;
     }
     let key = |fiber: ObservedFiber| fiber.fiber().map(|object| object.index());
-    let resumes = req.state::<Observing>().switched(key(from), key(to));
+    let resumes = req
+        .state::<crate::State>()
+        .observer
+        .switched(key(from), key(to));
     if !switches.fiber_switch {
         return;
     }
