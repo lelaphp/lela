@@ -124,7 +124,7 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::request::{FrameView, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, PhpObject, Value};
 
-pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, told_before};
+pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, tell_before};
 pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a

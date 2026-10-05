@@ -1814,7 +1814,7 @@ pub(crate) fn parameter_prologue(
         let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
             break;
         };
-        crate::observer::told_before(req, callee, prologue.opcode);
+        crate::observer::tell_before(req, callee, prologue.opcode);
         let stepped = match prologue.opcode {
             php_unit::Opcode::Recv => {
                 crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?

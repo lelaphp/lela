@@ -20,7 +20,7 @@
 //! The loop tells it where it dispatches ([`Declared::before`]); a
 //! stepping host's [`crate::tier::step`] where it does, and a frame's
 //! parameter prologue at each `RECV*` it serves, which php's VM
-//! dispatches ([`told_before`]); so each of those is php's set.
+//! dispatches ([`tell_before`]); so each of those is php's set.
 //!
 //! The declared set is the engine's, fixed as it starts
 //! ([`ObservedOpcodes`]): a unit is shared by every engine and holds no
@@ -204,10 +204,8 @@ impl Declared {
 /// none is declared.
 #[inline(always)] // as `Declared::before`
 #[allow(clippy::inline_always)]
-pub(crate) fn told_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
-    if req.shared.opcodes.observing && req.shared.opcodes.any.contains(opcode) {
-        tell(req, frame, opcode);
-    }
+pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
+    Declared::of(req).before(req, frame, opcode);
 }
 
 /// php's `ZEND_USER_OPCODE` handler up to its dispatch: every observer
