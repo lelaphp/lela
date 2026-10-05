@@ -16,7 +16,9 @@
 //! `dba_close` leaves it open; at the request's end it is given back to
 //! the engine's pool (design §4.10, revision 55) with its fds and the
 //! `flock(2)` they hold, and lent to the next request asking the key, as
-//! php's `EG(persistent_list)` keeps it for the life of a php-fpm worker.
+//! php's `EG(persistent_list)` keeps it for the life of a php-fpm worker;
+//! at engine end every link the pool keeps is closed, a cdb being made
+//! finished, as `zend_shutdown` destroys that list (ADR-0010).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -86,6 +88,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
         .deactivate(deactivate)
+        .engine_end(engine_end)
         .ini(vec![IniDecl {
             name: Name(DEFAULT_HANDLER.into()),
             default: Some(b"flatfile".as_slice().into()),
@@ -209,6 +212,29 @@ fn deactivate(req: &mut Request) {
         if let Some(back) = back
             && let Ok(link) = back.take_up(req)
         {
+            link.close(req);
+        }
+    }
+}
+
+/// What php's `zend_shutdown` does to dba's persistent links when it
+/// destroys `EG(persistent_list)` (`Z/Zend/zend.c:1166`): each idle link
+/// the pool keeps closed through `close_pconnection`
+/// (`Z/ext/dba/dba.c:285`), so a cdb being made with `dba_popen` is
+/// finished, its hash tables and bucket heads written, and the next
+/// process reads what the requests wrote; in a forked child that ends its
+/// engine too, as php's child calls `php_module_shutdown`
+/// (`Z/main/main.c:2490`) over the list the fork copied. A link whose
+/// streams cannot be made again, the memory limit met on the shutdown
+/// request, has its fds closed unfinished: php's list holds the streams
+/// themselves and has no such step.
+fn engine_end(req: &mut Request) {
+    let idle = req
+        .engine::<Pooled>()
+        .map(|Pooled(pool)| pool.drain())
+        .unwrap_or_default();
+    for (_, kept) in idle {
+        if let Ok(link) = kept.take_up(req) {
             link.close(req);
         }
     }
