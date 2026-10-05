@@ -415,7 +415,25 @@ impl StreamCtx {
     }
 
     /// `php_stream_notify_completed(context)`: the counts as they stand,
-    /// what a stream's read or write that changed its `eof` tells.
+    /// what a stream's read or write that changed its `eof` tells. Any
+    /// stream that keeps a `context` tells it, a socket client's among
+    /// them, once, as the read that meets the end changes `eof`; nothing
+    /// counts progress until a wrapper's `progress_init` asks for it.
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $ctx = stream_context_create([], ['notification' => function (...$a) { echo json_encode($a), "\n"; }]);
+    /// $c = stream_socket_client('tcp://' . stream_socket_get_name($s, false), $e, $m, 1, STREAM_CLIENT_CONNECT, $ctx);
+    /// $a = stream_socket_accept($s);
+    /// fwrite($a, "hello"); fclose($a);
+    /// var_dump(stream_get_contents($c), fread($c, 1), feof($c));
+    /// ```
+    /// ```expect
+    /// [8,0,null,0,0,0]
+    /// string(5) "hello"
+    /// string(0) ""
+    /// bool(true)
+    /// ```
     pub(crate) fn completed(self, req: &mut Request) -> Result<(), Thrown> {
         let Some(n) = self.notifier_mut(req) else {
             return Ok(());
