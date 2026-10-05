@@ -28,7 +28,7 @@
 //!
 //! `-e` builds the engine with extended info, as `main` sets
 //! `ZEND_COMPILE_EXTENDED_INFO` once the module has started
-//! (`php_cli.c:1366`), for the built-in server's engine as for the CLI's
+//! (`Z/sapi/cli/php_cli.c:1366`), for the built-in server's engine as for the CLI's
 //! ([`php_sapi::EngineBuilder::extended_info`]). The switches taken and
 //! changing nothing: `-H`, which blanks copies
 //! of the arguments nothing reads again; `-C` and `-q`, php's own no-ops. `--ini=diff` is refused with

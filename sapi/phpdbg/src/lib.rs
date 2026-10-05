@@ -99,7 +99,7 @@ struct Line {
     exec: Option<Vec<u8>>,
     args: Vec<Vec<u8>>,
     /// `-e`, `ext_stmt`: the engine compiles with extended info
-    /// (`phpdbg.c:1250`, `:1498`).
+    /// (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`).
     extended_info: bool,
 }
 

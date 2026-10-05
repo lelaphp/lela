@@ -63,7 +63,7 @@ fn ran(name: &str, flags: &[&str], source: &str) -> (String, String, Option<i32>
     )
 }
 
-/// `-e` compiles with extended info (`phpdbg.c:1250`, `:1498`): the
+/// `-e` compiles with extended info (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`): the
 /// main op array of `f(1)`'s echo is eight oplines with its `EXT_STMT`,
 /// `EXT_FCALL_BEGIN` and `EXT_FCALL_END`, and five without (the pinned
 /// phpdbg's `print exec` context line under `phpdbg -qIb -n -e`, #1822;

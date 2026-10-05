@@ -149,7 +149,7 @@ pub struct Options {
     /// a blank line on stdout before it serves whatever the mode is.
     pub interactive: bool,
     /// `-e` taken, `main`'s `use_extended_info`: the engine compiles
-    /// with extended info (`php_cli.c:1317`, `:1366`).
+    /// with extended info (`Z/sapi/cli/php_cli.c:1317`, `:1366`).
     pub extended_info: bool,
     pub ask: Ask,
 }
