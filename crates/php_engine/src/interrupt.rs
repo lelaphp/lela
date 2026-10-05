@@ -104,6 +104,11 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// build without ZTS does. A `hard_timeout` of zero arms nothing past
 /// the first.
 ///
+/// While a handler holds the time limit suspended
+/// ([`Request::suspend_time_limit`], #1814) the execution timer is no
+/// deadline but the time it had left, which neither stage counts down,
+/// and the resume makes it a deadline again that much from then.
+///
 /// ```php
 /// set_time_limit(1);
 /// register_shutdown_function(function () { echo "shutdown\n"; for (;;) {} });
@@ -221,10 +226,15 @@ pub(crate) struct Timer {
     /// The thread, from the change that set a deadline to the one that
     /// leaves none, a fork or the drop.
     thread: Option<crate::fork::Thread>,
-    /// The process that started the thread, the only one it is in.
+    /// The process that started the thread, the only one it is in, or
+    /// that suspended the time limit while no thread ran: the one the
+    /// schedule is for.
     started_in: Process,
     /// How many periodic interrupts were started, which numbers the next.
     periodics: u32,
+    /// How many [`Request::suspend_time_limit`] guards stand: while any
+    /// does, the execution timer is held as the time it has left.
+    suspended: u32,
 }
 
 /// The shortest period a periodic interrupt is counted in, which one
@@ -242,6 +252,7 @@ impl Timer {
             thread: None,
             started_in: Process::default(),
             periodics: 0,
+            suspended: 0,
         }
     }
 
@@ -250,16 +261,22 @@ impl Timer {
     /// timeout where `hard` is above zero; none at all for a `seconds`
     /// that is zero or below, which is php's `max_execution_time = 0`
     /// and the CLI's own default, or so far off no clock reaches it.
+    /// While the time limit is suspended the whole `seconds` are kept as
+    /// the time left, and count from the resume.
     pub(crate) fn arm(&mut self, seconds: i64, hard: i64) {
-        let execution = u64::try_from(seconds)
+        let left = u64::try_from(seconds)
             .ok()
             .filter(|s| *s > 0)
-            .and_then(|s| Instant::now().checked_add(Duration::from_secs(s)))
-            .map(|deadline| Execution {
-                deadline,
-                seconds,
-                hard: u64::try_from(hard).ok().filter(|h| *h > 0),
-            });
+            .map(Duration::from_secs)
+            .filter(|left| Instant::now().checked_add(*left).is_some());
+        let mut execution = left.map(|left| Execution {
+            due: Due::Left(left),
+            seconds,
+            hard: u64::try_from(hard).ok().filter(|h| *h > 0),
+        });
+        if self.suspended == 0 {
+            execution = execution.and_then(|execution| execution.resumed(Instant::now()));
+        }
         self.change(|schedule| schedule.execution = execution);
         // The old deadline is gone from the schedule, so whatever it
         // raised is raised already, and is cleared here.
@@ -278,6 +295,40 @@ impl Timer {
             }
         });
         self.interrupt.timer_unset();
+    }
+
+    /// [`Request::suspend_time_limit`]: the execution timer's deadline
+    /// taken out of the schedule and the time it had left kept, by the
+    /// first of the guards that stand; the thread is joined where nothing
+    /// else is scheduled, and serves the periodic interrupts on where
+    /// something is. A timeout already raised stays raised.
+    pub(crate) fn suspend(&mut self) {
+        self.forget_if_forked();
+        self.suspended = self.suspended.saturating_add(1);
+        if self.suspended == 1 {
+            if self.thread.is_none() {
+                self.started_in = Process::current();
+            }
+            let now = Instant::now();
+            self.change(|schedule| {
+                schedule.execution = schedule.execution.map(|execution| execution.suspended(now));
+            });
+        }
+    }
+
+    /// The guard's drop: by the last of the guards that stand, the
+    /// execution timer put back in the schedule at the time it had left
+    /// from now, and the thread started where it had none.
+    pub(crate) fn resume(&mut self) {
+        self.suspended = self.suspended.saturating_sub(1);
+        if self.suspended == 0 {
+            let now = Instant::now();
+            self.change(|schedule| {
+                schedule.execution = schedule
+                    .execution
+                    .and_then(|execution| execution.resumed(now));
+            });
+        }
     }
 
     /// [`Request::start_periodic`]. `None` where no thread could be
@@ -379,12 +430,16 @@ impl Timer {
     /// In a process forked from the one that started the thread other
     /// than through [`Timer::forked`], the thread and its schedule
     /// forgotten (see [`Timer`]), so what follows starts afresh.
+    /// A suspended time limit with no thread is the forked child's to
+    /// forget as well, so it is untimed after the resume as it is with
+    /// none suspended.
     fn forget_if_forked(&mut self) {
-        if self.thread.is_some() && !self.started_in.is_current() {
+        if (self.thread.is_some() || self.suspended > 0) && !self.started_in.is_current() {
             if let Some(thread) = self.thread.take() {
                 thread.forget();
             }
             std::mem::forget(std::mem::take(&mut self.shared));
+            self.started_in = Process::current();
         }
     }
 }
@@ -463,11 +518,54 @@ struct Period {
 /// The execution timer, armed.
 #[derive(Debug, Clone, Copy)]
 struct Execution {
-    deadline: Instant,
+    due: Due,
     /// What it was armed with, php's `EG(timeout_seconds)`.
     seconds: i64,
     /// `EG(hard_timeout)`, where it is above zero.
     hard: Option<u64>,
+}
+
+/// When the execution timer is due: at a deadline the thread waits for,
+/// or, while the time limit is suspended (#1814), never, with the time
+/// it had left kept for the resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Due {
+    At(Instant),
+    Left(Duration),
+}
+
+impl Execution {
+    /// The deadline the thread waits for, `None` while suspended.
+    fn deadline(self) -> Option<Instant> {
+        match self.due {
+            Due::At(deadline) => Some(deadline),
+            Due::Left(_) => None,
+        }
+    }
+
+    /// Suspended at `now`: the deadline become the time it had left, none
+    /// where it had passed, so a resume finds it due at once.
+    fn suspended(self, now: Instant) -> Execution {
+        match self.due {
+            Due::At(deadline) => Execution {
+                due: Due::Left(deadline.saturating_duration_since(now)),
+                ..self
+            },
+            Due::Left(_) => self,
+        }
+    }
+
+    /// Resumed at `now`: the time left become a deadline that far off,
+    /// and `None` where no clock reaches it, as [`Timer::arm`] arms none.
+    fn resumed(self, now: Instant) -> Option<Execution> {
+        match self.due {
+            Due::At(_) => Some(self),
+            Due::Left(left) => Some(Execution {
+                due: Due::At(now.checked_add(left)?),
+                ..self
+            }),
+        }
+    }
 }
 
 impl Schedule {
@@ -475,7 +573,7 @@ impl Schedule {
     fn next(&self) -> Option<Instant> {
         let periodic = self.periodic.iter().filter_map(|period| period.next);
         self.execution
-            .map(|execution| execution.deadline)
+            .and_then(Execution::deadline)
             .into_iter()
             .chain(periodic)
             .min()
@@ -498,7 +596,7 @@ impl Schedule {
     /// The count waits for the extension's hook to read it.
     fn elapse(&mut self, interrupt: &Interrupt, now: Instant) {
         if let Some(execution) = &mut self.execution
-            && execution.deadline <= now
+            && execution.deadline().is_some_and(|deadline| deadline <= now)
         {
             if let Some(hard) = execution.hard
                 && interrupt.timed_out()
@@ -510,7 +608,7 @@ impl Schedule {
                 .hard
                 .and_then(|hard| now.checked_add(Duration::from_secs(hard)))
             {
-                Some(deadline) => execution.deadline = deadline,
+                Some(deadline) => execution.due = Due::At(deadline),
                 None => self.execution = None,
             }
         }
@@ -699,9 +797,10 @@ mod tests {
             .ini("max_execution_time", "1")
             .tier::<Nop>()
             .build();
+        // Before the request, whose start arms the timer.
+        let armed = Instant::now();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
         let frame = req.pushed(looping());
-        let armed = Instant::now();
 
         assert_eq!(
             execute::<Nop>(&mut req, frame),
@@ -880,6 +979,115 @@ mod tests {
             timer.stop_periodic(periodic);
         }
         assert!(serving(&timer).is_some(), "the execution timer is left");
+    }
+
+    /// The execution timer's due time, as the schedule holds it.
+    fn due(timer: &Timer) -> Option<Due> {
+        timer.shared.held().execution.map(|execution| execution.due)
+    }
+
+    /// #1814: a suspend takes the deadline out of the schedule and keeps
+    /// the time it had left, joining the thread that served nothing else;
+    /// guards nest, and the outermost resume puts the deadline back that
+    /// far from then, on a thread started again.
+    #[test]
+    fn a_suspend_keeps_the_time_left_and_the_last_resume_puts_it_back() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(30, 2);
+        timer.suspend();
+        let left = match due(&timer) {
+            Some(Due::Left(left)) => left,
+            _ => Duration::ZERO,
+        };
+        assert!(
+            left > Duration::from_secs(29) && left <= Duration::from_secs(30),
+            "suspended with the time left, not {:?}",
+            due(&timer)
+        );
+        assert_eq!(
+            serving(&timer),
+            None,
+            "nothing else scheduled, so no thread"
+        );
+        timer.suspend();
+        timer.resume();
+        assert_eq!(
+            due(&timer),
+            Some(Due::Left(left)),
+            "an inner resume resumes nothing"
+        );
+        let resumed = Instant::now();
+        timer.resume();
+        let due_again = due(&timer);
+        assert!(
+            matches!(due_again, Some(Due::At(deadline))
+                if deadline >= resumed + left && deadline <= Instant::now() + left),
+            "resumed at the time left from now, not {due_again:?}"
+        );
+        assert!(serving(&timer).is_some(), "served again");
+    }
+
+    /// `set_time_limit()` while suspended keeps its seconds whole for the
+    /// resume, and arms no deadline before it.
+    #[test]
+    fn a_limit_set_while_suspended_counts_from_the_resume() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::new(&interrupt);
+        timer.suspend();
+        timer.arm(5, 2);
+        assert_eq!(due(&timer), Some(Due::Left(Duration::from_secs(5))));
+        assert_eq!(serving(&timer), None);
+        timer.resume();
+        assert!(matches!(due(&timer), Some(Due::At(_))));
+        assert!(serving(&timer).is_some());
+    }
+
+    /// #1814's notes: with a periodic interrupt scheduled, a suspend and
+    /// a resume are writes to the schedule the same thread serves on.
+    #[test]
+    fn a_suspend_beside_a_periodic_interrupt_keeps_its_thread() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::new(&interrupt);
+        let _periodic =
+            timer.start_periodic(Duration::from_secs(30), Some(Duration::from_secs(30)));
+        timer.arm(30, 2);
+        let first = serving(&timer);
+        timer.suspend();
+        assert_eq!(serving(&timer), first);
+        timer.resume();
+        assert_eq!(serving(&timer), first);
+    }
+
+    /// Past the limit and past its hard stage, suspended, nothing is
+    /// raised and the process goes on; resumed, the time left is what is
+    /// waited before the timeout.
+    #[test]
+    fn a_suspended_limit_raises_nothing_until_its_time_left_after_the_resume() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(1, 1);
+        timer.suspend();
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            !interrupt.raised().load(Ordering::Relaxed),
+            "suspended, nothing raised"
+        );
+        let resumed = Instant::now();
+        timer.resume();
+        while !interrupt.raised().load(Ordering::Relaxed) {
+            assert!(
+                resumed.elapsed() < Duration::from_secs(10),
+                "the timer never fired"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            resumed.elapsed() >= Duration::from_millis(900),
+            "{:?}",
+            resumed.elapsed()
+        );
+        assert_eq!(interrupt.taken(), Some(1));
     }
 
     /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
