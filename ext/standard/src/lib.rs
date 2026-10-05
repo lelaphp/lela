@@ -121,33 +121,22 @@ pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_ses
 
 /// What `file.h` declares `PHPAPI PHP_FUNCTION` for `zlib.c`, whose
 /// `gz*` file natives are `ZEND_FALIAS`es of these under declarations of
-/// their own, and what `php_stream_context.h` declares for
-/// `zlib_fopen_wrapper.c`, `php_stream_context_from_zval(NULL, 0)` and
-/// `php_stream_context_get_option`, which php keeps in `main/` and this
-/// engine ports in `streamsfuncs` beside `stream_context_create`
-/// (ADR-0004; design §4.10).
+/// their own (ADR-0004; design §4.10).
 pub use file::{fclose, feof, fgetc, fgets, fpassthru, fread, fseek, ftell, fwrite, rewind};
-pub use streamsfuncs::{default_stream_ctx, stream_ctx_option};
 
-/// What `php_sdl.c` takes of `main/` beyond the option read above:
-/// `php_stream_context_alloc`, the `stream_context` it fetches a WSDL with, and
-/// `php_get_current_user`, which names its cache files (ADR-0004;
-/// design §4.10).
+/// What `php_sdl.c` takes of `standard`: `php_get_current_user`, which
+/// names its cache files (ADR-0004; design §4.10).
 pub use basic_functions::php_get_current_user;
-pub use streamsfuncs::stream_ctx_alloc;
 
 /// What `openssl.c` and `xp_ssl.c` take of `standard` (ADR-0004; design
 /// §4.10): `php_fopen_wrappers.h`'s `php_stream_http_wrapper` and
 /// `php_stream_ftp_wrapper`, which openssl's `MINIT` registers again as
-/// `https` and `ftps`; `php_stream_context.h`'s
-/// `php_stream_context_set_option`, which keeps a captured peer
-/// certificate; and `php_stream_context_get_uri_parser` with the parse it
-/// hands `php_uri.h`, which name the host a client verifies, all of which
-/// php keeps in `main/` and this engine ports in `standard` beside the
-/// wrappers.
+/// `https` and `ftps`; and `php_stream_context_get_uri_parser` with the
+/// parse it hands `php_uri.h`, which name the host a client verifies,
+/// which php keeps in `main/` and this engine ports in `standard` beside
+/// the wrappers.
 pub use ftp_fopen_wrapper::wrapper as ftp_wrapper;
 pub use http_fopen_wrapper::wrapper as http_wrapper;
-pub use streamsfuncs::stream_ctx_set_option;
 pub use url::UriParser;
 
 /// What `php_mail.h` and `exec.h` declare `PHPAPI` for `mbstring.c`,
@@ -172,7 +161,6 @@ struct State {
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
-    contexts: streamsfuncs::Contexts,
     page: Option<pageinfo::Page>,
     syslog: syslog::Log,
     browscap: browscap::Browscap,

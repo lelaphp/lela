@@ -16,6 +16,9 @@ use crate::api::abi::FromArgument;
 use crate::api::raising::{Thrown, arg_type_error, fatal};
 use crate::api::values::{ClassId, PhpArray, PhpString, Resource, Value};
 
+mod context;
+pub(crate) use context::context_dtor;
+pub use context::{Notification, NotifyCode, StreamCtx};
 mod crypto;
 pub use crypto::{Crypto, CryptoSocket, Handshake, Readiness, XportFactory};
 mod scanner_file;
@@ -183,8 +186,10 @@ impl UrlStat {
 /// stream of the `transport`'s kind holding no socket, the name not
 /// even parsed; or a server bound to the name, listening where `listen`
 /// says; each with the `context` the native resolved, which the stream
-/// keeps as `PHP_STREAM_CONTEXT(stream)` before it connects, and the
-/// `socket` options read off it. A client with a `persistent` key, php's
+/// keeps as `PHP_STREAM_CONTEXT(stream)` and whose `socket` options the
+/// `transport` reads as it connects or binds, as `xp_socket.c` does, and
+/// the `socket` options the caller sets on the socket itself
+/// ([`SocketOptions`]). A client with a `persistent` key, php's
 /// `persistent_id`, is first looked for among the persistent streams
 /// under it, and one made is kept there.
 #[derive(Clone)]
@@ -194,12 +199,12 @@ pub enum Xport {
         connect: bool,
         persistent: Option<Vec<u8>>,
         socket: SocketOptions,
-        context: Option<Resource>,
+        context: Option<StreamCtx>,
     },
     Server {
         listen: bool,
         socket: SocketOptions,
-        context: Option<Resource>,
+        context: Option<StreamCtx>,
     },
 }
 
@@ -210,11 +215,13 @@ pub enum Xport {
 /// Dropped, it closes the socket.
 pub struct Persisted(crate::streams::persistent::Entry);
 
-/// The `socket` options of a `php_stream_context`, as `xp_socket.c` and
-/// `transports.c` read them off `PHP_STREAM_CONTEXT(stream)`: each is
+/// The `socket` options of a socket, as `xp_socket.c` and `transports.c`
+/// read them off `PHP_STREAM_CONTEXT(stream)`: each is
 /// `php_stream_context_get_option(context, "socket", name)` read the way
 /// its reader reads it, and the default is the value of none, which a
-/// stream opened with no `context` has.
+/// stream opened with no `context` has. A caller of
+/// [`Request::xport_create`] hands the ones it sets on the socket itself,
+/// which the `transport` lays over those it reads off the `context`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // php's options, one flag per name
 pub struct SocketOptions {
@@ -233,6 +240,25 @@ pub struct SocketOptions {
     /// `ipv6_v6only` where it is not `null`, `zend_is_true`: the
     /// `IPV6_V6ONLY` a server's socket is given.
     pub ipv6_v6only: Option<bool>,
+}
+
+impl SocketOptions {
+    /// What a socket is made with: the options `read` off its `context`,
+    /// as php's `transport` reads them, under these, which the caller sets
+    /// on the socket itself as `mysqlnd`'s `setsockopt` and `ftp`'s
+    /// `listen` do once php's `transport` is done with the `context`: an
+    /// option either turns on, and a value the caller gives in place of
+    /// the read one.
+    pub(crate) fn under(self, read: SocketOptions) -> SocketOptions {
+        SocketOptions {
+            bindto: self.bindto.or(read.bindto),
+            listen_queue: self.listen_queue.or(read.listen_queue),
+            tcp_nodelay: self.tcp_nodelay || read.tcp_nodelay,
+            so_reuseport: self.so_reuseport || read.so_reuseport,
+            so_broadcast: self.so_broadcast || read.so_broadcast,
+            ipv6_v6only: self.ipv6_v6only.or(read.ipv6_v6only),
+        }
+    }
 }
 
 /// The `bindto` option as `php_tcp_sockop_connect` reads it: the address
@@ -476,7 +502,7 @@ impl Stream {
     /// ([`Stream::set_ctx`]); `None` for a stream that keeps none, a
     /// closed one, and one inside a call.
     #[must_use]
-    pub fn ctx(self, req: &Request) -> Option<Resource> {
+    pub fn ctx(self, req: &Request) -> Option<StreamCtx> {
         req.stream_context(self)
     }
 
@@ -509,7 +535,7 @@ impl Stream {
     /// array(0) {
     /// }
     /// ```
-    pub fn set_ctx(self, req: &mut Request, ctx: Option<Resource>) {
+    pub fn set_ctx(self, req: &mut Request, ctx: Option<StreamCtx>) {
         req.set_stream_context(self, ctx);
     }
 
@@ -748,21 +774,6 @@ impl Stream {
         crate::streams::persistent::keep(req, self).map(Persisted)
     }
 
-    /// `php_stream_context_set(stream, context)` as a wrapper sets the
-    /// `context` it opened under on a stream of the `transport`'s: the
-    /// notifier the stream's reads, writes and `eof` reach from here, the
-    /// one it had given back. A stream that is closed, or inside a call,
-    /// gives the new one back at once.
-    pub fn set_notifier(self, req: &mut Request, notifier: Box<dyn Notifier>) {
-        let mut notifier = Some(notifier);
-        let old = req
-            .stream_op(self, |_, stream| stream.set_notifier(notifier.take()))
-            .flatten();
-        for left in [old, notifier].into_iter().flatten() {
-            left.release(req);
-        }
-    }
-
     /// `stream->wrapperthis`, with the wrapper's `stream_closer` the
     /// stream's free runs over it ([`Closer`]); where the stream is closed
     /// or inside a call, it is closed at once.
@@ -931,26 +942,6 @@ pub struct StreamWrapper {
     /// the wrapper has none and the kind answers; the function's `None`
     /// is php's `-1`, as the http and ftp wrappers answer always.
     pub stream_stat: Option<fn(&mut Request, Stream) -> Option<[i64; 13]>>,
-}
-
-/// `php_stream_notifier` as a stream reaches it through
-/// `PHP_STREAM_CONTEXT(stream)`, set by [`Stream::set_notifier`], as
-/// `php_stream_context_set` sets the `context` a wrapper opened under:
-/// what a socket's reads and writes took counted into the notifier's
-/// `progress` (`php_stream_notify_progress_increment`, `xp_socket.c`),
-/// and a read or a write that changed the stream's `eof`, which notifies
-/// `PHP_STREAM_NOTIFY_COMPLETED` (`_php_stream_fill_read_buffer`,
-/// `_php_stream_write_buffer`). A throwable the callback leaves is the
-/// native's to raise once it returns, as a filter's is. The stream's
-/// free gives it back last, [`Notifier::release`], as `_php_stream_free`
-/// deletes its `context` once everything else is gone.
-pub trait Notifier: Send {
-    /// `php_stream_notify_progress_increment(context, bytes, 0)`.
-    fn progress(&mut self, req: &mut Request, bytes: usize) -> Result<(), Thrown>;
-    /// `php_stream_notify_completed(context)`.
-    fn completed(&mut self, req: &mut Request) -> Result<(), Thrown>;
-    /// `zend_list_delete(context->res)`: what the notifier holds let go.
-    fn release(self: Box<Self>, req: &mut Request);
 }
 
 /// `stream->wrapperthis` with its wrapper's `wops->stream_closer`: what a
@@ -1344,8 +1335,11 @@ pub trait Streams {
     /// }
     /// Cannot assign resource to property T::$context of type Exception
     /// ```
-    fn with_stream_ctx<R>(&mut self, ctx: Option<Resource>, f: impl FnOnce(&mut Request) -> R)
-    -> R;
+    fn with_stream_ctx<R>(
+        &mut self,
+        ctx: Option<StreamCtx>,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> R;
 
     /// The `php_stream_context *context` a wrapper's opener is handed:
     /// what [`Request::with_stream_ctx`] set around the operation being
@@ -1353,7 +1347,7 @@ pub trait Streams {
     /// `$context` to none. An extension's wrapper reads its options off
     /// it, as `php_stream_gzopen` reads `zlib`'s `level`.
     #[must_use]
-    fn stream_ctx(&self) -> Option<Resource>;
+    fn stream_ctx(&self) -> Option<StreamCtx>;
 
     /// `php_stream_wrapper_log_error` from a wrapper's opener, which php's
     /// streams layer hands `options` without `REPORT_ERRORS`: `message`
@@ -1630,7 +1624,7 @@ impl Streams for Request {
 
     fn with_stream_ctx<R>(
         &mut self,
-        ctx: Option<Resource>,
+        ctx: Option<StreamCtx>,
         f: impl FnOnce(&mut Request) -> R,
     ) -> R {
         let outer = std::mem::replace(&mut self.streams().stream_ctx, ctx);
@@ -1639,7 +1633,7 @@ impl Streams for Request {
         answer
     }
 
-    fn stream_ctx(&self) -> Option<Resource> {
+    fn stream_ctx(&self) -> Option<StreamCtx> {
         self.streams_ref().and_then(|state| state.stream_ctx)
     }
 

@@ -31,9 +31,9 @@ use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerr
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
-    StreamOption, Xport, XportFactory, XportFailure,
+    StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
 };
-use crate::api::values::{PhpString, Resource};
+use crate::api::values::PhpString;
 use crate::streams::StreamLayer;
 use crate::streams::persistent::Persistent;
 
@@ -181,7 +181,7 @@ pub(crate) struct Socket {
     /// which php allocates persistent.
     data: Vec<Emalloc>,
     crypto: Option<Box<dyn Crypto>>,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     own: Option<Stream>,
     sock: Option<Sock>,
     label: &'static str,
@@ -197,8 +197,8 @@ pub(crate) struct Socket {
 /// `php_stream_xport_create` sets on a stream it bound
 /// (`Z/main/streams/transports.c:175`), with the `tcp_nodelay` option
 /// the server was made with, which `php_tcp_sockop_accept` gives each
-/// client it accepts; read when the server is made, since the stream
-/// keeps no `PHP_STREAM_CONTEXT` here.
+/// client it accepts; read when the server is made, where php reads it
+/// off the server's `PHP_STREAM_CONTEXT` at each accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Peer,
@@ -326,7 +326,7 @@ impl Socket {
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`, as the stream set it, for the layer.
-    pub(crate) fn set_ctx(&mut self, context: Option<Resource>) {
+    pub(crate) fn set_ctx(&mut self, context: Option<StreamCtx>) {
         self.context = context;
     }
 
@@ -1386,16 +1386,13 @@ impl Transports for Request {
                 ),
             }));
         };
-        let (context, role) = match &xport {
-            Xport::Client { context, .. } => (*context, Role::Peer),
-            Xport::Server {
-                socket, context, ..
-            } => (
-                *context,
-                Role::Server {
-                    accept_nodelay: socket.tcp_nodelay,
-                },
-            ),
+        let xport = context_options(self, xport)?;
+        let (Xport::Client { context, .. } | Xport::Server { context, .. }) = xport;
+        let role = match &xport {
+            Xport::Client { .. } => Role::Peer,
+            Xport::Server { socket, .. } => Role::Server {
+                accept_nodelay: socket.tcp_nodelay,
+            },
         };
         let (label, crypto) = match found {
             Found::Engine(label) => (label, None),
@@ -1460,6 +1457,23 @@ impl Transports for Request {
         }
         Ok(Ok(stream))
     }
+}
+
+/// The `socket` options `xp_socket.c` reads off `PHP_STREAM_CONTEXT(stream)`
+/// as it connects or binds, laid under what the caller of
+/// [`Request::xport_create`] sets on the socket itself.
+fn context_options(req: &mut Request, mut xport: Xport) -> Result<Xport, Thrown> {
+    let (Xport::Client {
+        context, socket, ..
+    }
+    | Xport::Server {
+        context, socket, ..
+    }) = &mut xport;
+    if let Some(context) = *context {
+        let read = context.socket_options(req)?;
+        *socket = std::mem::take(socket).under(read);
+    }
+    Ok(xport)
 }
 
 /// `php_network_parse_network_address_with_port` (`Z/main/network.c:560`):

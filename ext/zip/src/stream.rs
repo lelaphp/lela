@@ -243,8 +243,7 @@ fn open(
         return Ok(None);
     };
     if let Some(context) = req.stream_ctx()
-        && let Some(password) =
-            php_ext_standard::stream_ctx_option(req, context, b"zip", b"password")?
+        && let Some(password) = context.option(req, b"zip", b"password")
     {
         match password.as_str_bytes() {
             Some(p) => {

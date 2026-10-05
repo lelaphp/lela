@@ -14,7 +14,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref, warning};
 use php_ext::request::{
-    Cast, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+    Cast, Opening, Request, Stream, StreamCtx, StreamOps, StreamWrapper, Streams as _, Whence,
 };
 use php_ext::values::{PhpArray, PhpString, Resource};
 
@@ -249,7 +249,7 @@ fn gzdopen(
         return Ok(None);
     };
     if let Some(context) = req.stream_ctx()
-        && let Some(level) = php_ext_standard::stream_ctx_option(req, context, b"zlib", b"level")?
+        && let Some(level) = context.option(req, b"zlib", b"level")
     {
         let level = to_long(req, &level)?;
         if !file.set_level(level) {
@@ -331,7 +331,7 @@ fn open_plain(
     mode: &[u8],
     use_include_path: bool,
 ) -> Result<Option<Stream>, Thrown> {
-    let context = Some(php_ext_standard::default_stream_ctx(req)?);
+    let context = Some(StreamCtx::default_ctx(req)?);
     let opening = Opening {
         use_path: use_include_path,
         warn: true,

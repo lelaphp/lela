@@ -9,12 +9,10 @@
 
 use std::time::Duration;
 
-use php_ext::abi::Callable;
-use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Streams as _, Xport,
-    XportFailure,
+    Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _,
+    Xport, XportFailure,
 };
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -132,7 +130,7 @@ enum Pasv {
 
 /// FTPS on the session: none, asked for by `ftp_ssl_connect` and set up at
 /// login, or up, with whether the data connections are secured too, and
-/// the `stream_context_create` value whose `ssl` options every connection is made under.
+/// the `context` whose `ssl` options every connection is made under.
 #[derive(Debug)]
 enum Tls {
     Off,
@@ -203,9 +201,9 @@ pub(crate) struct Ftp {
     pub(crate) autoseek: bool,
     pub(crate) usepasvaddress: bool,
     tls: Tls,
-    /// The `stream_context_create` value holding `verify_peer` off, as php's `SSL_CTX` checks
-    /// no peer; an owner the session keeps.
-    context: Option<Value>,
+    /// The `context` holding `verify_peer` off, as php's `SSL_CTX` checks
+    /// no peer ([`unverified`]); an owner the session keeps.
+    context: Option<StreamCtx>,
     /// The transfer `ftp_nb_*` left in flight.
     pub(crate) nb: Option<Nb>,
 }
@@ -294,37 +292,22 @@ fn send(req: &mut Request, stream: Stream, bytes: &[u8]) -> bool {
     stream.write(req, bytes) == Some(bytes.len())
 }
 
-/// `stream_context_create(["ssl" => ["verify_peer" => false,`
-/// `"verify_peer_name" => false, "allow_self_signed" => true]])`: the
-/// options php's `SSL_CTX_new` has, which checks no peer.
-fn unverified(req: &mut Request) -> Result<Option<Value>, Thrown> {
-    let name = Value::string(PhpString::new(req, b"stream_context_create")?);
-    let callable: Result<Callable, String> = callable_checked(req, &name);
-    req.release(name);
-    let Ok(callable) = callable else {
-        return Ok(None);
-    };
-    let mut ssl = PhpArray::new(req)?;
+/// `php_stream_context_alloc` with `ssl`'s `verify_peer` and
+/// `verify_peer_name` off and `allow_self_signed` on: the options php's
+/// `SSL_CTX_new` has, which checks no peer; the one owner the caller's.
+fn unverified(req: &mut Request) -> Result<StreamCtx, Thrown> {
+    let context = StreamCtx::alloc(req)?;
     for (option, value) in [
         (&b"verify_peer"[..], false),
         (b"verify_peer_name", false),
         (b"allow_self_signed", true),
     ] {
-        let key = Key::Str(PhpString::new(req, option)?);
-        ssl.set(req, key, Value::bool(value))?;
+        if let Err(thrown) = context.set_option(req, b"ssl", option, &Value::bool(value)) {
+            req.release(context.resource().as_value());
+            return Err(thrown);
+        }
     }
-    let mut options = PhpArray::new(req)?;
-    let key = Key::Str(PhpString::new(req, b"ssl")?);
-    options.set(req, key, Value::array(ssl))?;
-    let options = Value::array(options);
-    let context = php_ext::call::call(req, &callable, std::slice::from_ref(&options));
-    req.release(options);
-    let context = context?;
-    if context.as_resource().is_none() {
-        req.release(context);
-        return Ok(None);
-    }
-    Ok(Some(context))
+    Ok(context)
 }
 
 impl Ftp {
@@ -341,7 +324,7 @@ impl Ftp {
             0 => 21,
             port => port,
         };
-        let context = if tls { unverified(req)? } else { None };
+        let context = if tls { Some(unverified(req)?) } else { None };
         let mut name = b"tcp://".to_vec();
         name.extend_from_slice(cstr(host));
         let target = String::from_utf8_lossy(&name[6..]).into_owned();
@@ -358,11 +341,11 @@ impl Ftp {
             connect: true,
             persistent: None,
             socket: SocketOptions::default(),
-            context: context.as_ref().and_then(Value::as_resource).copied(),
+            context,
         };
         let Ok(control) = req.xport_create(&name, xport)? else {
             if let Some(context) = context {
-                req.release(context);
+                req.release(context.resource().as_value());
             }
             return Ok(None);
         };
@@ -404,7 +387,7 @@ impl Ftp {
         self.abort(req);
         self.control.free(req);
         if let Some(context) = self.context.take() {
-            req.release(context);
+            req.release(context.resource().as_value());
         }
     }
 
@@ -813,7 +796,7 @@ impl Ftp {
         if self.pasv != Pasv::Off && !self.pasv(req, true)? {
             return Ok(None);
         }
-        let context = self.context.as_ref().and_then(Value::as_resource).copied();
+        let context = self.context;
         if let Pasv::Ready(target) = &self.pasv {
             let target = target.clone().into_bytes();
             self.pasv = Pasv::On;
