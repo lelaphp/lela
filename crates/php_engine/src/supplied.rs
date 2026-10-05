@@ -434,6 +434,11 @@ impl<H: Copy> Listed<H> {
         self.0.iter().copied()
     }
 
+    /// Whether no supplier appended to the list.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// How many the list holds, as a `u32`.
     pub(crate) fn count(&self) -> u32 {
         u32::try_from(self.0.len()).unwrap_or(u32::MAX)

@@ -212,8 +212,10 @@ abi::Observed::filename
 abi::Observed::function
 abi::Observed::function_scope
 abi::ObservedFiber
+abi::ObservedFiber::destroyed
 abi::ObservedFiber::fiber
 abi::ObservedFiber::status
+abi::ObservedFiber::threw
 abi::ObserverHandlers
 abi::ObserverInit
 abi::OnModify

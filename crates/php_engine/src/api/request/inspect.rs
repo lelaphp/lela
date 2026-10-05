@@ -210,7 +210,7 @@ impl Request {
         self.own_lent_receivers();
         let frames = self.stack.set_aside();
         let vm = std::mem::take(&mut self.vm);
-        let mut observing = crate::api::request::Observing::default();
+        let mut observing = super::Observing::default();
         self.swap_observing(&mut observing);
         let served = f(self);
         self.swap_observing(&mut observing);

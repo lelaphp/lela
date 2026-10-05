@@ -295,7 +295,8 @@ pub(crate) fn returned_name(returned: &Value) -> String {
 
 /// A fiber as a fiber observer is handed it: `main` for the request's
 /// own stack, and `#n` for a `Fiber`, `n` its object's number as
-/// `spl_object_id()` reads it; then its status.
+/// `spl_object_id()` reads it; then its status, and ` threw` or
+/// ` destroyed` where the fiber is marked so.
 pub(crate) fn fiber_name(fiber: ObservedFiber) -> String {
     let status = match fiber.status() {
         FiberStatus::Init => "init",
@@ -303,9 +304,15 @@ pub(crate) fn fiber_name(fiber: ObservedFiber) -> String {
         FiberStatus::Suspended => "suspended",
         FiberStatus::Dead => "dead",
     };
+    let flags = match (fiber.threw(), fiber.destroyed()) {
+        (true, true) => " threw destroyed",
+        (true, false) => " threw",
+        (false, true) => " destroyed",
+        (false, false) => "",
+    };
     match fiber.fiber() {
-        Some(object) => format!("#{} {status}", object.index()),
-        None => format!("main {status}"),
+        Some(object) => format!("#{} {status}{flags}", object.index()),
+        None => format!("main {status}{flags}"),
     }
 }
 

@@ -868,11 +868,148 @@ fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
             begin(0, "inner"),
             switch(0, &fiber("running"), "main suspended"),
             end(0, file, Some("1")),
-            switch(0, "main running", &fiber("suspended")),
+            switch(0, "main running", &fiber("suspended destroyed")),
             end(0, "inner", None),
             end(0, closure, None),
-            switch(0, &fiber("dead"), "main suspended"),
-            destroy(0, &fiber("dead")),
+            switch(0, &fiber("dead destroyed"), "main suspended"),
+            destroy(0, &fiber("dead destroyed")),
+        ]
+    );
+}
+
+/// Two fibers still suspended as the request ends, one held by the
+/// other's closure (`observer_fiber_05.phpt`): the outer is destroyed,
+/// and the inner as the outer's frame gives it up, each switched into
+/// marked destroyed, and each switched out of dead in the reverse order,
+/// php's `destroying`, `destroying`, `destroyed`, `destroyed`; and a
+/// fiber `Fiber::throw()` resumed that does not catch
+/// (`observer_fiber_06.phpt`) leaves dead marked as having thrown, php's `threw`.
+#[test]
+fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_flags");
+    rec.mark("nested");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\n$fiber = new Fiber(function () {\n\
+         Fiber::suspend();\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
+         $fiber->start();\nFiber::suspend(); });\n$fiber->start();\n$fiber->resume();\n",
+    );
+    rec.mark("thrown");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n$fiber->start();\n\
+         try { $fiber->throw(new Exception); } catch (Exception $e) {}\n",
+    );
+    rec.mark("end");
+    let switched = |events: &Events| -> Vec<Event> {
+        observed(events)
+            .into_iter()
+            .filter(|e| matches!(e, Ext(_, FiberSwitch(..) | FiberDestroy(_))))
+            .collect()
+    };
+    let events = rec.events();
+
+    let nested = observed(&events.between("nested", "thrown"));
+    let (fibers, _) = named_in(&nested);
+    assert_eq!(fibers.len(), 2, "two fibers: {nested:?}");
+    let at = |i: usize| fibers.get(i).cloned().unwrap_or_default();
+    let (outer, inner) = (at(0), at(1));
+    let outer = |status: &str| format!("{outer} {status}");
+    let inner = |status: &str| format!("{inner} {status}");
+    assert_eq!(
+        switched(&events.between("nested", "thrown")),
+        [
+            switch(0, "main running", &outer("init")),
+            switch(0, &outer("running"), "main suspended"),
+            switch(0, "main running", &outer("suspended")),
+            switch(0, &outer("running"), &inner("init")),
+            switch(0, &inner("running"), &outer("suspended")),
+            switch(0, &outer("running"), "main suspended"),
+            switch(0, "main running", &outer("suspended destroyed")),
+            switch(
+                0,
+                &outer("running destroyed"),
+                &inner("suspended destroyed")
+            ),
+            switch(0, &inner("dead destroyed"), &outer("suspended destroyed")),
+            destroy(0, &inner("dead destroyed")),
+            switch(0, &outer("dead destroyed"), "main suspended"),
+            destroy(0, &outer("dead destroyed")),
+        ]
+    );
+
+    let thrown = observed(&events.between("thrown", "end"));
+    let (fiber, _) = one_named_in(&thrown);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    assert_eq!(
+        switched(&events.between("thrown", "end")),
+        [
+            switch(0, "main running", &fiber("init")),
+            switch(0, &fiber("running"), "main suspended"),
+            switch(0, "main running", &fiber("suspended")),
+            switch(0, &fiber("dead threw"), "main suspended"),
+            destroy(0, &fiber("dead threw")),
+        ]
+    );
+}
+
+/// The resumptions a generator is served by other than `foreach`, each
+/// a begin and an end as php's `zend_generator_resume` makes them: a
+/// `yield from` over an array, ended at the `YIELD_FROM` with what it
+/// yielded last and its values served unobserved; `Generator::throw()`
+/// into it, caught inside; a generator destroyed suspended in a `try`,
+/// whose `finally` is served by a resumption that is ended with nothing,
+/// as php's forced close leaves it through
+/// `zend_dispatch_try_catch_finally_helper`'s uncaught arm; and a
+/// generator resumed inside a fiber, begun and ended there, and given up
+/// suspended outside any `try`, which resumes nothing.
+#[test]
+fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_paths");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { yield 0; yield from [1, 2];\n\
+         try { yield 3; } catch (Exception $e) { echo 'c'; }\n\
+         try { yield 4; } finally { echo 'f'; } }\n\
+         function run() { $g = foo(); foreach ($g as $v) { echo $v; if ($v === 3) { $g->throw(new Exception); echo $g->current(); break; } } }\n\
+         run();\n\
+         $fiber = new Fiber(function () { $g = foo(); echo $g->current(); });\n$fiber->start();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "0123c4f0");
+    let events = observed(&rec.events().between("built", "served"));
+    let foo: Vec<Event> = events
+        .iter()
+        .filter(|e| matches!(e, Ext(_, Begin(n) | End(n, _)) if n == "foo"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        foo,
+        [
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("3")),
+            begin(0, "foo"),
+            end(0, "foo", Some("4")),
+            begin(0, "foo"),
+            end(0, "foo", None),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
         ]
     );
 }
