@@ -226,7 +226,9 @@ fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) ->
 /// after every extension's `RSHUTDOWN`, so a session save handler's
 /// `write` still has them: every persistent connection the request holds
 /// given back to the engine's pool, nothing of the request's left on it;
-/// one past the pool's bound is closed.
+/// one past the pool's bound is closed with this request, the
+/// connector's `closer` as `dbh_free` calls it (ADR-0010's amendment of
+/// ADR-0005).
 ///
 /// php frees each `PDO` there, and `pdo_dbh_free_storage` rolls back the
 /// transaction it left open before the connection waits in
@@ -245,8 +247,14 @@ pub(crate) fn deactivate(req: &mut Request) {
         if let Conn::Open(conn) = &mut dbh.conn {
             conn.give_back(req);
         }
-        if let Some(Pooled(pool)) = req.engine::<Pooled>() {
-            drop(pool.give_back(key, dbh));
+        let past = match req.engine::<Pooled>() {
+            Some(Pooled(pool)) => pool.give_back(key, dbh),
+            None => Some(dbh),
+        };
+        if let Some(mut dbh) = past
+            && let Conn::Open(conn) = &mut dbh.conn
+        {
+            conn.close(req);
         }
     }
 }

@@ -643,14 +643,8 @@ impl Connection for Db {
     /// int(1)
     /// ```
     fn check_liveness(&mut self, req: &mut Request) -> bool {
-        if let Some((mut h, key)) = self.idle.take() {
-            let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
-                return false;
-            };
-            h.server = server;
-            let state = req.state::<State>();
-            self.id = state.handles.len();
-            state.handles.push(Some(h));
+        if !self.take_up(req) {
+            return false;
         }
         let Some(h) = handle(req, self.id) else {
             return false;
@@ -680,8 +674,10 @@ impl Connection for Db {
         }
     }
 
-    /// `mysql_handle_closer`.
+    /// `mysql_handle_closer`, over a connection the request gave back
+    /// taken up first, as PDO closes one past its pool's bound.
     fn close(&mut self, req: &mut Request) {
+        let _ = self.take_up(req);
         if let Some(h) = handle(req, self.id) {
             let _ = h
                 .server
@@ -694,6 +690,23 @@ impl Connection for Db {
 }
 
 impl Db {
+    /// A connection given back to the engine's pool held in the request's
+    /// table again, with the connection mysqlnd keeps under its key: false
+    /// where mysqlnd keeps none there; true where nothing was given back.
+    fn take_up(&mut self, req: &mut Request) -> bool {
+        let Some((mut h, key)) = self.idle.take() else {
+            return true;
+        };
+        let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
+            return false;
+        };
+        h.server = server;
+        let state = req.state::<State>();
+        self.id = state.handles.len();
+        state.handles.push(Some(h));
+        true
+    }
+
     /// `mysql_handle_autocommit` after the attribute changed.
     fn set_attribute_autocommit(&self, req: &mut Request) -> Result<(), Failure> {
         let h = self.h(req)?;
