@@ -1,0 +1,91 @@
+//! The request leak sensor's walk (design §5.1, §10): php's
+//! `zend_mm_check_leaks` (`Z/Zend/zend_alloc.c:2311`), which a debug
+//! build of php runs from `zend_mm_shutdown` once the request's state is
+//! freed. Every block the heap still holds there is one nothing freed,
+//! and the walk names them through the heap's sensed record
+//! ([`crate::sensed`]), the one path a debug sensor reports by.
+//!
+//! php reads a block's state from the debug trailer every allocation of
+//! its debug heap carries. This heap carries none, so a bin slot is held
+//! where it is on no free list, and a large `run` or a huge block is held
+//! while it stands at all. The walk sweeps first (`zend_mm_gc`), so a
+//! `run` wholly free is given back before it is read, and a slot a debug
+//! build keeps back from reuse is on its free list again when it is.
+
+use std::collections::HashSet;
+use std::ptr::NonNull;
+
+use super::{
+    BIN_DATA_SIZE, BIN_ELEMENTS, BIN_PAGES, FIRST_PAGE, IS_SRUN, LRUN_PAGES_MASK, Mm, PAGE_SIZE,
+    SRUN_BIN_NUM_MASK, bitset_is_set,
+};
+use crate::sensed::{Held, Sensed};
+
+impl Mm {
+    /// `zend_mm_check_leaks`: every block this heap still holds, recorded
+    /// as one [`Sensed::Leak`] naming how many there are, the bytes the
+    /// accounting counts in them and the first the walk met, in php's
+    /// order: the huge blocks, then each chunk from its first page up.
+    /// Nothing is recorded for a heap that holds nothing.
+    pub(crate) fn sense_leaks(&mut self) {
+        self.gc_heap();
+        let mut free = HashSet::new();
+        for &head in &self.free_slot {
+            let mut next = NonNull::new(head);
+            while let Some(slot) = next {
+                free.insert(slot.addr().get());
+                // SAFETY: a slot on a free list is free memory of this
+                // heap, whose first word is the next free slot.
+                next = NonNull::new(unsafe { slot.as_ref() }.next);
+            }
+        }
+        let mut blocks = 0;
+        let mut first = None;
+        let mut held = |at: usize, size: usize| {
+            blocks += 1;
+            first.get_or_insert(Held { at, size });
+        };
+        for huge in &self.huge {
+            // The node is the block's own and goes with it, as php's walk
+            // frees it with the block (`zend_mm_check_leaks`).
+            free.insert(huge.node.addr().get());
+            held(huge.at.addr().get(), huge.size);
+        }
+        for &chunk in &self.chunks {
+            // SAFETY: every chunk on the list is one this heap mapped and
+            // initialised, and nothing writes its header while it is read.
+            let header = unsafe { &*chunk.as_ptr() };
+            let base = chunk.addr().get();
+            let mut page_num = FIRST_PAGE;
+            while page_num < header.free_tail {
+                let info = header.map[page_num as usize];
+                if !bitset_is_set(&header.free_map, page_num) {
+                    page_num += 1;
+                    continue;
+                }
+                let run = base + page_num as usize * PAGE_SIZE;
+                if info & IS_SRUN == 0 {
+                    let pages = (info & LRUN_PAGES_MASK).max(1);
+                    held(run, pages as usize * PAGE_SIZE);
+                    page_num += pages;
+                    continue;
+                }
+                let bin_num = (info & SRUN_BIN_NUM_MASK) as usize;
+                let size = BIN_DATA_SIZE[bin_num];
+                for slot in (0..BIN_ELEMENTS[bin_num]).map(|i| run + i * size) {
+                    if !free.contains(&slot) {
+                        held(slot, size);
+                    }
+                }
+                page_num += BIN_PAGES[bin_num];
+            }
+        }
+        if let Some(first) = first {
+            self.sensed.record(Sensed::Leak {
+                bytes: self.size,
+                blocks,
+                first,
+            });
+        }
+    }
+}
