@@ -412,7 +412,7 @@ pub fn extension() -> Extension {
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
-        .engine_state(|_| Ok(started()))
+        .process_state(|| Ok(initialize()))
         .request_state::<State>()
         .rinit(rinit)
         .info(info)
@@ -451,13 +451,16 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
     Ok(false)
 }
 
-/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`, called
-/// once as the engine is built: nothing is kept but the mark of the call.
-struct Started;
+/// The process scope's proof that the library is started (ADR-0010).
+struct Initialized;
 
-fn started() -> Started {
+/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`
+/// (`Z/ext/openssl/openssl.c:421`, `Z/ext/openssl/openssl_backend_v3.c:27-34`),
+/// the process start: called once for the process, the first time an
+/// engine carrying openssl is built. It cannot fail.
+fn initialize() -> Initialized {
     ffi::start();
-    Started
+    Initialized
 }
 
 /// The library's error queue emptied as a request starts: it is the

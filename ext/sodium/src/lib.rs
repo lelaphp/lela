@@ -44,11 +44,12 @@ mod hash;
 mod keys;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusals,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusal,
+    Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
-use php_ext::raising::{Thrown, argument_error, arity, throw};
+use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -275,14 +276,30 @@ static SODIUM_EXCEPTION: SodiumHandlers = SodiumHandlers;
 #[php_class]
 impl SodiumException {}
 
+/// The process scope's proof that libsodium is started (ADR-0010).
+struct Initialized;
+
+/// `PHP_MINIT_FUNCTION(sodium)`'s first call, `sodium_init()`
+/// (`Z/ext/sodium/libsodium.c:159-161`), the process start: called once
+/// for the process, the first time an engine carrying sodium is built.
+/// Only `-1` is a failure, which php answers with
+/// `zend_error_noreturn(E_ERROR, "sodium_init()")`: the fatal is raised
+/// before the refusal here, and the engine then says
+/// `Unable to start sodium module`, where php's `zend_error_noreturn` aborts the process
+/// after the fatal. The library fails only where it cannot read
+/// randomness, so the difference is not met in practice.
+fn initialize() -> Result<Initialized, Refusal> {
+    if ffi::init() {
+        Ok(Initialized)
+    } else {
+        Err(Refusal::new().raise(Level::Error, "sodium_init()"))
+    }
+}
+
 /// The extension value (design §7.1): `sodium_module_entry`, after
 /// `standard` (`ZEND_MOD_REQUIRED("standard")`), its constants, its
-/// functions in the stub's order and `SodiumException`. `sodium_init`
-/// is `PHP_MINIT_FUNCTION(sodium)`'s first call, made here, where the
-/// engine builds the extension; libsodium makes it safe to call from any
-/// thread and more than once, and only `-1` is a failure, which php
-/// answers with a startup `E_ERROR` this engine has no stage to raise
-/// from, so the functions then answer libsodium's own refusals.
+/// functions in the stub's order and `SodiumException`, and
+/// `sodium_init` as its process start (`initialize`).
 ///
 /// ```php
 /// var_dump(extension_loaded('sodium'), count(get_extension_funcs('sodium')), class_exists('SodiumException'));
@@ -296,8 +313,8 @@ impl SodiumException {}
 /// ```
 #[allow(clippy::too_many_lines)] // one line per function of the stub
 pub fn extension() -> Extension {
-    let _ready = ffi::init();
     ExtensionBuilder::default()
+        .process_state(initialize)
         .dependencies(vec![Dependency {
             name: String::from("standard"),
             kind: DependencyKind::Required,

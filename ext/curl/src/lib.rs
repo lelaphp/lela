@@ -33,7 +33,7 @@ mod options;
 mod share;
 mod version;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, Refusal};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 
@@ -828,9 +828,30 @@ pub fn extension() -> Extension {
             per_dir: false,
             system: true,
         }])
+        .process_state(initialize)
         .request_state::<State>()
         .info(version::curl_info)
         .build("curl")
+}
+
+/// The process scope's proof that libcurl's global state stands
+/// (ADR-0010).
+struct Initialized;
+
+/// `PHP_MINIT_FUNCTION(curl)`'s `curl_global_init(CURL_GLOBAL_DEFAULT)`
+/// (`Z/ext/curl/interface.c:357-359`), the process start: called once for
+/// the process, the first time an engine carrying curl is built, before
+/// any `CURL *` is made. Where the library refuses, php's `MINIT` returns
+/// `FAILURE` with nothing raised before it, and the engine says
+/// `Unable to start curl module`. php's `curl_global_cleanup` at `MSHUTDOWN` has
+/// no counterpart: no host ends the process scope, and the call is
+/// documented unsafe while another thread may use the library.
+fn initialize() -> Result<Initialized, Refusal> {
+    if ffi::global_init() {
+        Ok(Initialized)
+    } else {
+        Err(Refusal::new())
+    }
 }
 
 /// `curl.cainfo`, `PHP_INI_SYSTEM`.
