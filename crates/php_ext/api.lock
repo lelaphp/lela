@@ -282,6 +282,10 @@ abi::Start::host
 abi::Start::ini
 abi::Start::process
 abi::StartupIni
+abi::Statement
+abi::Statement::frame
+abi::Statement::suspend_time_limit
+abi::StatementHandler
 abi::Static
 abi::Std
 abi::StreamHooks
@@ -615,7 +619,6 @@ request::Reentry::take_lent
 request::Refused
 request::Request
 request::Request::absolutize
-request::Request::activating
 request::Request::active_function_name
 request::Request::add_begin_handler
 request::Request::add_end_handler

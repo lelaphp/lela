@@ -18,11 +18,11 @@
 # read over the other (harness §7). `xtask new-ext <name>` appends the
 # dependency and the feature and lists the crate in `default`; a person
 # removes a non-default extension from `default` when porting it.
-# `api-check` holds `enabled()` to the crate graph. Each extension's
-# feature switches on the features of every `ext/*` crate its library
-# links, so a build that registers an extension registers what it
-# requires (#1882); `api-check` holds that once a person sets the row's
-# `order = "registration"` in `seams.toml`, as #1778 ruled.
+# `enabled()` lists php's registration order, which a witness holds to the
+# oracle (#1778). Each extension's feature switches on the features of
+# every `ext/*` crate its library links, so a build that registers an
+# extension registers what it requires (#1882), which `api-check` holds
+# under the row's `order = "registration"` in `seams.toml`.
 [package]
 name = "php_bundle"
 version = "0.0.0"
@@ -86,13 +86,13 @@ linked = [
     "zend_test",
 ]
 standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
-spl = ["dep:php_ext_spl", "pcre", "standard"] # php_spl.c: ZEND_MOD_REQUIRED("pcre"); standard, which the crate links (#1882)
+spl = ["dep:php_ext_spl", "json", "pcre", "standard"] # php_spl.c: ZEND_MOD_REQUIRED("json"), which the extension declares (#1914); pcre and standard, which the crate links (#1882)
 date = ["dep:php_ext_date"]
 reflection = ["dep:php_ext_reflection"]
 pcre = ["dep:php_ext_pcre"]
 mbstring = ["dep:php_ext_mbstring", "pcre", "standard"]
 session = ["dep:php_ext_session", "standard"]
-pdo = ["dep:php_ext_pdo"]
+pdo = ["dep:php_ext_pdo", "spl"] # pdo.c: ZEND_MOD_REQUIRED("spl"), which the extension declares (#1914)
 dom = ["dep:php_ext_dom", "lexbor", "libxml"]
 random = ["dep:php_ext_random"]
 pdo_mysql = ["dep:php_ext_pdo_mysql", "pdo", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-pdo-mysql; php_pdo_mysql_int.h includes ext/mysqlnd/mysqlnd.h, and pdo_mysql.c ZEND_MOD_REQUIRED("pdo") (#1366)
@@ -127,7 +127,7 @@ ftp = ["dep:php_ext_ftp", "openssl"] # the `php` binary and the phpt lane, as ph
 xml = ["dep:php_ext_xml", "libxml", "standard"]
 xmlreader = ["dep:php_ext_xmlreader", "dom", "libxml"]
 xmlwriter = ["dep:php_ext_xmlwriter", "libxml"]
-mysqlnd = ["dep:php_ext_mysqlnd"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366)
+mysqlnd = ["dep:php_ext_mysqlnd", "standard"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366); php_mysqlnd.c: ZEND_MOD_REQUIRED("standard"), which the extension declares (#1914)
 mysqli = ["dep:php_ext_mysqli", "spl", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-mysqli; mysqli.c ZEND_MOD_REQUIRED("spl") and ZEND_MOD_REQUIRED("mysqlnd") (#1367)
 sqlite3 = ["dep:php_ext_sqlite3", "pdo_sqlite"] # sqlite3.c over the libsqlite3 ext/pdo_sqlite binds (#1501); php requires no module of it, but the crate links pdo_sqlite, so the feature switches it on (#1882)
 fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166, #1451)

@@ -17,7 +17,9 @@
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
 //! key (#1185), so a run says why a test missed without being run again.
-//! A run kept before the field was is read with none.
+//! A run kept before the field was is read with none. Each test that
+//! skipped keeps the reason it was given under `skips`, so a target says
+//! why the oracle left a test out of it (#2033).
 //!
 //! **What gives no verdict.** A comparison is made or it is a skip that
 //! says why, and never a pass: no run stored at the commit, a run at the
@@ -90,6 +92,12 @@ pub(crate) struct Run {
     /// bork and unread verdict has one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub misses: BTreeMap<String, Miss>,
+    /// Why each test that skipped skipped, by the same key: the reason its
+    /// `SKIPIF` or the runner gave, so the target names it beside each
+    /// test the oracle left out (#2033). A run kept before the field was
+    /// is read with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skips: BTreeMap<String, String>,
 }
 
 /// What a head's run comes to against the stored one.
@@ -222,10 +230,28 @@ impl Runs {
         self.kept(tally, engine)
     }
 
+    /// Where the engine's run of `scope` is kept after it, relative to the
+    /// workspace's root, where it will be: the engine judged every test the
+    /// subset holds. What a reading held to a target points to for the met
+    /// tests it does not name (#2033); `after` keeps it there unless the
+    /// sources moved while it ran.
+    pub(crate) fn run_kept_at(
+        &self,
+        scope: &Scope,
+        (tally, runner): (&Tally, &Runner),
+    ) -> Option<PathBuf> {
+        let engine = matches!(runner, Runner::Engine(_) | Runner::Linked);
+        (engine && whole(tally)).then(|| {
+            Path::new(RUNS)
+                .join(&self.tree)
+                .join(format!("{scope}.json"))
+        })
+    }
+
     /// The run a tally is where it judged every test the subset holds,
     /// named by `engine`.
     fn kept(&self, tally: &Tally, engine: String) -> Option<Run> {
-        (tally.found > 0 && tally.judged.len() == tally.found).then(|| Run {
+        whole(tally).then(|| Run {
             commit: self.commit.clone(),
             corpus: self.corpus.clone(),
             engine,
@@ -238,6 +264,12 @@ impl Runs {
                 .judged
                 .iter()
                 .filter_map(|j| Some((j.id.clone(), j.miss.clone()?)))
+                .collect(),
+            skips: tally
+                .judged
+                .iter()
+                .filter(|j| j.judgement == Judgement::Skip)
+                .map(|j| (j.id.clone(), j.note.clone()))
                 .collect(),
         })
     }
@@ -302,6 +334,12 @@ fn roots(root: &Path) -> Vec<PathBuf> {
 
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
     root.join(RUNS).join(tree).join(format!("{scope}.json"))
+}
+
+/// Whether a tally judged every test its subset holds, which a run must
+/// to be kept.
+fn whole(tally: &Tally) -> bool {
+    tally.found > 0 && tally.judged.len() == tally.found
 }
 
 /// What [`carry`] did with one worktree's kept runs.

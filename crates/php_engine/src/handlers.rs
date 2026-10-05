@@ -99,11 +99,12 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
 }
 
 /// `ZEND_EXT_STMT` (`Z/Zend/zend_vm_def.h:7923`), which a compile with
-/// extended info leaves before each statement (`-e`, #1780): php tells
-/// each loaded Zend extension's `statement_handler` here and goes on, and
-/// no Zend extension is loaded in this engine (design §7.1), so the loop
-/// goes on. `op1`, the operand of a pipe the opline stands before, is
-/// read by nothing and freed by nothing, as php's handler leaves it.
+/// extended info leaves before each statement (`-e`, #1780): each Zend
+/// extension's `statement_handler` told of the statement the frame
+/// stands at, and on to the opline after, or what a handler threw
+/// raised here ([`crate::statement`]). The bundle declares none, so the
+/// loop goes on. `op1`, the operand of a pipe the opline stands before,
+/// is read by nothing and freed by nothing, as php's handler leaves it.
 ///
 /// ```php
 /// function f($a) { return $a + 1; }
@@ -126,13 +127,17 @@ pub(crate) fn ext_stmt<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
+    if let Err(thrown) = crate::statement::told(req, frame) {
+        return threw(req, frame, &thrown);
+    }
     Ok(advance(req, frame))
 }
 
 /// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7935`), before a call
 /// op compiled with extended info: php tells each loaded Zend
-/// extension's `fcall_begin_handler`, and none is loaded here
-/// ([`ext_stmt`]'s witness serves it).
+/// extension's `fcall_begin_handler`, and no Zend extension here has one:
+/// its row carries a statement handler alone (#2038; [`ext_stmt`]'s
+/// witness serves it).
 pub(crate) fn ext_fcall_begin<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -144,7 +149,8 @@ pub(crate) fn ext_fcall_begin<T: Tier>(
 
 /// `ZEND_EXT_FCALL_END` (`Z/Zend/zend_vm_def.h:7947`), after a call op
 /// compiled with extended info: php tells each loaded Zend extension's
-/// `fcall_end_handler`, and none is loaded here ([`ext_stmt`]'s witness
+/// `fcall_end_handler`, and no Zend extension here has one: its row
+/// carries a statement handler alone (#2038; [`ext_stmt`]'s witness
 /// serves it).
 pub(crate) fn ext_fcall_end<T: Tier>(
     req: &mut Request,

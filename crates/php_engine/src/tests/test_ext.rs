@@ -32,7 +32,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
     Compiled, ErrorBeneath, ErrorNotice, Extension, ExtensionBuilder, FiberStatus, GcBeneath,
-    Observed, ObservedFiber, ObserverHandlers, Refusal, Start, StringBeneath,
+    Observed, ObservedFiber, ObserverHandlers, Refusal, Start, Statement, StringBeneath,
+    ZendExtension,
 };
 use super::api::call::Function;
 use super::api::decl::{IniDecl, Name};
@@ -145,6 +146,10 @@ pub(crate) enum Phase {
     /// served, while its `test_ext_N.observe_allocations` entry was on
     /// ([`TestExt::observing_allocations`]).
     Allocation(Allocation),
+    /// Its Zend extension's statement handler was told of a statement
+    /// ([`TestExt::stepping`]): where the frame stands, as
+    /// [`statement_name`] renders it.
+    Statement(String),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -296,6 +301,16 @@ pub(crate) fn observed_name(observed: &Observed<'_>) -> String {
     format!("file '{}'", String::from_utf8_lossy(base))
 }
 
+/// Where a statement handler's frame stands, as a debugger reads a line
+/// breakpoint off it: the file, after its last `/`, and the line,
+/// `EX(opline)->lineno`.
+pub(crate) fn statement_name(statement: &Statement<'_>) -> String {
+    let frame = statement.frame();
+    let file = frame.filename();
+    let base = file.rsplit(|&b| b == b'/').next().unwrap_or(file);
+    format!("{}:{}", String::from_utf8_lossy(base), frame.line())
+}
+
 /// What a frame returned, as the end handler was handed it: an int or a
 /// string as `var_export` writes it, and the type's name otherwise.
 pub(crate) fn returned_name(returned: &Value) -> String {
@@ -442,6 +457,35 @@ impl<const N: u8> TestExt<N> {
             .fiber_init(Self::fiber_init)
             .fiber_switch(Self::fiber_switch)
             .fiber_destroy(Self::fiber_destroy)
+    }
+
+    /// [`TestExt::builder`] as a Zend extension with a statement handler,
+    /// as a debugger is one, that records where each statement it is
+    /// told of stands. Not in [`TestExt::builder`], since only a Zend
+    /// extension has one, and being one is listed under `[Zend Modules]`.
+    pub(crate) fn stepping() -> Extension {
+        Self::builder()
+            .zend_extension(Self::zend_row(Self::statement))
+            .build(&format!("test_ext_{N}"))
+    }
+
+    /// The Zend extension row of `test_ext_N`, its statement handler
+    /// `statement_handler`, for a test that declares a handler of its own.
+    pub(crate) fn zend_row(statement_handler: super::api::abi::StatementHandler) -> ZendExtension {
+        ZendExtension {
+            name: format!("test_ext_{N}"),
+            version: String::from("0"),
+            author: String::new(),
+            url: String::new(),
+            copyright: String::new(),
+            statement_handler: Some(statement_handler),
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn statement(statement: &mut Statement<'_>) -> Result<(), Thrown> {
+        record(N, Phase::Statement(statement_name(statement)));
+        Ok(())
     }
 
     fn error_observed(_: &mut Request, notice: &ErrorNotice<'_>) {

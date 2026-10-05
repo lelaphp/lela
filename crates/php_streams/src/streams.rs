@@ -3657,34 +3657,23 @@ impl StreamLayer for Request {
     /// with, in the order they were registered: the engine's own where
     /// `standard` places them, among the extensions' (#920).
     fn global_wrappers(&self) -> Vec<Registered> {
-        let rows = |table: &[(crate::state::Rank, Registered)]| {
-            table.iter().map(|(_, row)| row.clone()).collect()
-        };
         match self.streams_ref() {
-            Some(state) => rows(&state.url_stream_wrappers),
-            None => rows(&crate::state::layer_wrappers()),
+            Some(state) => state.url_stream_wrappers.clone(),
+            None => crate::state::layer_wrappers(),
         }
     }
 
-    /// `php_register_url_stream_wrapper`'s insert: the row placed by the
-    /// extension starting ([`crate::state::place`]), or at the end of the
-    /// global table once the program runs; `false` where its scheme is
-    /// taken, while the extensions start by the one starting alone,
-    /// whose registration places a row an earlier one registered.
+    /// `php_register_url_stream_wrapper`'s insert, `zend_hash_add` on
+    /// the global table: the row appended, or `false` where its scheme
+    /// is taken. The extensions activate in php's startup order, so the
+    /// rows they register stand in the order php's `MINIT`s registered
+    /// them, and one registered once the program runs after every other.
     fn add_url_wrapper(&mut self, row: Registered) -> bool {
-        let rank = self.rank();
-        let starting = rank != crate::state::RUNNING;
         let rows = &mut self.streams().url_stream_wrappers;
-        let taken = rows
-            .iter()
-            .any(|(placed, held)| (!starting || *placed == rank) && held.scheme == row.scheme);
-        if taken {
+        if rows.iter().any(|held| held.scheme == row.scheme) {
             return false;
         }
-        if starting {
-            rows.retain(|(_, held)| held.scheme != row.scheme);
-        }
-        crate::state::place(rows, rank, row);
+        rows.push(row);
         true
     }
 

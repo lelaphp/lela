@@ -35,6 +35,7 @@ pub use crate::observer::{
     Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
+pub use crate::statement::{Statement, StatementHandler};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
@@ -454,14 +455,18 @@ impl<K: PartialEq, V> Lent<K, V> {
 /// opcache's `zend_extension_entry` stands beside its
 /// `opcache_module_entry`: what `php -m` lists under `[Zend Modules]`,
 /// `get_loaded_extensions(true)` answers and `ReflectionZendExtension`
-/// reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// reads, and the handlers php's struct carries beside them.
+#[derive(Debug, Clone)]
 pub struct ZendExtension {
     pub name: String,
     pub version: String,
     pub author: String,
     pub url: String,
     pub copyright: String,
+    /// `statement_handler`: told at each statement of a unit compiled
+    /// with extended info, before it runs ([`Statement`]); every Zend
+    /// extension's in the order they start.
+    pub statement_handler: Option<StatementHandler>,
 }
 
 pub(crate) use crate::api::__private::Entry;
@@ -1758,8 +1763,11 @@ impl ExtensionBuilder {
             deactivate: self.deactivate,
             post_deactivate: self.post_deactivate,
             engine_end: self.engine_end,
+            supplies: Supplies {
+                statement_handler: self.zend.as_ref().and_then(|row| row.statement_handler),
+                ..self.supplies
+            },
             zend: self.zend,
-            supplies: self.supplies,
             info: self.info,
             constants_link: self.constants_link,
             class_constants: self.class_constants,

@@ -432,16 +432,6 @@ impl Request {
             .get(usize::try_from(extension.0).ok()?)
     }
 
-    /// The extension whose `rinit` is being served, as
-    /// `zend_activate_modules` walks the extensions in startup order;
-    /// `None` before the first and once the last is served. What the stream layer
-    /// places the wrappers and filters an extension registers by, in
-    /// php's startup order.
-    #[must_use]
-    pub fn activating(&self) -> Option<ExtensionId> {
-        self.activating
-    }
-
     /// `PHP_FUNCTION(dl)`, which php exports `PHPAPI` for each host to
     /// name in its `additional_functions`, and `php_load_extension`'s
     /// checks before it opens anything (`Z/ext/standard/dl.c`):
