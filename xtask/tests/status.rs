@@ -54,7 +54,7 @@ fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, 
 #[test]
 fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
     let root = scratch("rules");
-    let text = "Extension state is request-scoped or immutable";
+    let text = "Extension state is request-scoped, immutable engine-scoped or process-scoped";
     let (ok, md, err) = status(&root, &["--section", "rules"]);
     assert!(ok, "{err}");
     assert!(

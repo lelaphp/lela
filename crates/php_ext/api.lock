@@ -202,7 +202,9 @@ abi::ObjectHandlers::write_dimension
 abi::ObjectHandlers::write_overloaded
 abi::ObjectHandlers::write_property
 abi::Observed
+abi::Observed::caller
 abi::Observed::filename
+abi::Observed::frame
 abi::Observed::function
 abi::Observed::function_scope
 abi::Observed::suspend_time_limit
@@ -499,6 +501,14 @@ request::FilterFlags
 request::FilterStatus
 request::Forked
 request::FormatDate
+request::FrameId
+request::FrameView
+request::FrameView::caller
+request::FrameView::filename
+request::FrameView::function
+request::FrameView::function_scope
+request::FrameView::id
+request::FrameView::line
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
@@ -615,6 +625,7 @@ request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::fork
 request::Request::frame_args
+request::Request::frame_of
 request::Request::frame_vars
 request::Request::frameless
 request::Request::function_decl
