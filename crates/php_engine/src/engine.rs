@@ -2275,7 +2275,11 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// `CG(function_table)`'s natives once every `MINIT` has registered its
 /// own and `php_module_startup` has called `zend_disable_functions` over
 /// the startup ini's `disable_functions` (`Z/main/main.c:2370`): the engine's own
-/// and then each extension's in bundle order, the host's `additional`
+/// and then each extension's in the order it was registered,
+/// `registered`, its places in start order as [`sort_modules`] answers
+/// them, since `zend_register_module_ex` registers an extension's functions
+/// as it is handed the extension and `zend_startup_modules` sorts
+/// `module_registry` after; the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
 /// The natives the engine declares for `standard` ([`crate::natives::standard`])
@@ -2286,6 +2290,7 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 fn function_table(
     core: &Extension,
     extensions: &[Extension],
+    registered: &[usize],
     additional: Vec<(FunctionDecl, Entry)>,
     ini: &[(Vec<u8>, Option<Vec<u8>>)],
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
@@ -2317,7 +2322,11 @@ fn function_table(
                 .map(|(_, native)| (None, native)),
         );
     }
-    for (e, at) in extensions.iter().zip(1u32..) {
+    let started = registered.iter().filter_map(|&at| {
+        let number = u32::try_from(at + 1).ok()?;
+        Some((extensions.get(at)?, number))
+    });
+    for (e, at) in started {
         let id = Some(ExtensionId(at));
         let own = e.functions.iter().cloned();
         match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
@@ -2613,7 +2622,7 @@ impl EngineBuilder {
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
-        sort_modules(&mut extensions);
+        let registered = sort_modules(&mut extensions);
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
@@ -2687,7 +2696,7 @@ impl EngineBuilder {
             _ => self.shebang,
         };
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
-            function_table(&core, &extensions, additional, &ini);
+            function_table(&core, &extensions, &registered, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
         let replaced = intercept(&functions, &mut entries, &supplied.intercepts);
         let function_flags = functions
@@ -3036,9 +3045,15 @@ fn host_ini(
 /// bool(true)
 /// ```
 ///
+/// What it answers is the order the modules were registered in, each
+/// extension's place in start order listed in the order it was handed:
+/// the order `zend_register_module_ex` filled the function table in,
+/// before the sort ([`function_table`]).
+///
 /// php loops for ever over a cycle of dependencies; the walk here stops
 /// after as many trades as a list of its length can need without one.
-fn sort_modules(modules: &mut [Extension]) {
+fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
+    let mut handed: Vec<usize> = (0..modules.len()).collect();
     let mut trades = modules.len() * modules.len();
     let mut at = 0;
     while at < modules.len() {
@@ -3053,11 +3068,15 @@ fn sort_modules(modules: &mut [Extension]) {
         match later {
             Some(other) if trades > 0 => {
                 modules.swap(at, other);
+                handed.swap(at, other);
                 trades -= 1;
             }
             _ => at += 1,
         }
     }
+    let mut registered: Vec<usize> = (0..modules.len()).collect();
+    registered.sort_by_key(|&started| handed[started]);
+    registered
 }
 
 /// One extension's `MINIT` (ADR-0010): its process start, called once
