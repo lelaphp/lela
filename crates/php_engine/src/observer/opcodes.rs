@@ -52,10 +52,14 @@ impl Opcodes {
     /// number whose name opens with `name`, so `ZEND_BEGIN` is
     /// `ZEND_BEGIN_SILENCE`; `false`, and nothing added, where no
     /// opcode's does, for which php's `zend_test` warns
-    /// `Invalid opcode name`.
+    /// `Invalid opcode name`. php's search stops one short of the length
+    /// of its table of names, so its last opcode,
+    /// `ZEND_DECLARE_ATTRIBUTED_CONST`, is never found.
     pub fn insert(&mut self, name: &[u8]) -> bool {
+        let last = (0..=u8::MAX).rev().find_map(Opcode::from_u8);
         let found = (0..=u8::MAX)
             .filter_map(Opcode::from_u8)
+            .take_while(|opcode| Some(*opcode) != last)
             .find(|opcode| opcode.name().as_bytes().starts_with(name));
         let Some(opcode) = found else {
             return false;

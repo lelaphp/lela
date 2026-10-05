@@ -300,4 +300,6 @@ fn an_opcode_is_named_as_php_finds_it() {
     assert!(!opcodes.contains(Opcode::AssignDim));
     assert!(opcodes.contains(Opcode::BeginSilence));
     assert!(!opcodes.contains(Opcode::EndSilence));
+    // php's search stops short of its last opcode, which no name finds.
+    assert!(!opcodes.insert(b"ZEND_DECLARE_ATTRIBUTED_CONST"));
 }
