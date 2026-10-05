@@ -152,6 +152,16 @@ pub(crate) struct Fpm {
     pub(crate) force_stderr: bool,
     pub(crate) parent_pid: i32,
     pub(crate) test_successful: bool,
+    /// The calling process of a daemonizing start, once the master it
+    /// forked acknowledged its start: it ends with `FPM_EXIT_OK` after
+    /// `fpm_cleanups_run(FPM_CLEANUP_PARENT_EXIT)`, which ends its engine
+    /// (`Z/sapi/fpm/fpm/fpm_unix.c:661-664`).
+    acknowledged: bool,
+    /// The master's engine, from the end of `fpm_init` until the master
+    /// exits or execs a reload, each of which ends it first, as
+    /// `fpm_php_cleanup` runs `php_module_shutdown` there
+    /// (`Z/sapi/fpm/fpm/fpm_php.c:187-194`).
+    pub(crate) engine: Option<php_sapi::Engine>,
     pub(crate) state: State,
     pub(crate) signal_sent: Option<Signal>,
     pub(crate) stderr_original: Option<OwnedFd>,
@@ -184,7 +194,9 @@ pub(crate) struct Args {
 pub(crate) enum Init {
     /// `FPM_INIT_CONTINUE`: the master runs.
     Continue(Box<Fpm>),
-    /// `FPM_INIT_EXIT_OK`: `-t` found the configuration good.
+    /// `FPM_INIT_EXIT_OK`: `-t` found the configuration good, or this is
+    /// the calling process of a daemonizing start and the master
+    /// acknowledged its start.
     ExitOk,
     /// `FPM_INIT_ERROR`, with the pipe a daemonizing parent waits on.
     Error(Option<OwnedFd>),
@@ -233,6 +245,8 @@ impl Fpm {
             force_stderr: args.force_stderr,
             parent_pid: 0,
             test_successful: false,
+            acknowledged: false,
+            engine: None,
             state: State::Normal,
             signal_sent: None,
             stderr_original: None,
@@ -260,7 +274,7 @@ impl Fpm {
             && fpm.sockets_init_main()
             && fpm.event_init_main();
         if !ok {
-            if fpm.test_successful {
+            if fpm.test_successful || fpm.acknowledged {
                 return Init::ExitOk;
             }
             zlog!(Error @ fpm_init:72, "FPM initialization failed");
@@ -565,7 +579,10 @@ impl Fpm {
                             Debug @ fpm_unix_init_main:662,
                             "I received a valid acknowledge from the master process, I can exit without error"
                         );
-                        std::process::exit(i32::from(EXIT_OK))
+                        // Returned up to `run`, which ends with
+                        // `FPM_EXIT_OK` once its engine is ended.
+                        self.acknowledged = true;
+                        false
                     }
                     Ok(_) => {
                         zlog!(Debug @ fpm_unix_init_main:666, "The master process returned an error !");

@@ -269,6 +269,23 @@ impl<K: Hash + Eq, V> Pool<K, V> {
         idle.entry(key).or_default().push(entry);
         None
     }
+
+    /// Every idle entry, with its key, taken out for the caller to close
+    /// outside the `Mutex`: what an extension's engine-end function does
+    /// with its pools (ADR-0010), and the engine with its own before any
+    /// engine-end function, as `zend_shutdown` destroys
+    /// `EG(persistent_list)` before `zend_destroy_modules`
+    /// (`Z/Zend/zend.c:1166-1170`).
+    #[must_use]
+    pub fn drain(&self) -> Vec<(K, V)>
+    where
+        K: Clone,
+    {
+        self.idle()
+            .drain()
+            .flat_map(|(key, entries)| entries.into_iter().map(move |entry| (key.clone(), entry)))
+            .collect()
+    }
 }
 
 /// php's `EG(persistent_list)`, the engine's [`Pool`] the stream layer
@@ -346,8 +363,9 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
-/// The function of one end phase, `RSHUTDOWN` or `deactivate`: served
-/// in reverse bundle order, each in a `zend_try` of its own (ADR-0010).
+/// The function of one end phase, `RSHUTDOWN`, `deactivate`,
+/// `post_deactivate` or the engine end: served in reverse bundle order,
+/// each in a `zend_try` of its own (ADR-0010).
 pub(crate) type EndFunction = fn(&mut Request);
 /// The interrupt hook, php's `zend_interrupt_function`.
 pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
@@ -691,6 +709,10 @@ pub struct Extension {
     pub(crate) rshutdown: Option<EndFunction>,
     /// What [`ExtensionBuilder::deactivate`] was handed.
     pub(crate) deactivate: Option<EndFunction>,
+    /// What [`ExtensionBuilder::post_deactivate`] was handed.
+    pub(crate) post_deactivate: Option<EndFunction>,
+    /// What [`ExtensionBuilder::engine_end`] was handed.
+    pub(crate) engine_end: Option<EndFunction>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What the builder methods of the supplied kinds were handed
@@ -782,6 +804,8 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<EndFunction>,
     deactivate: Option<EndFunction>,
+    post_deactivate: Option<EndFunction>,
+    engine_end: Option<EndFunction>,
     zend: Option<ZendExtension>,
     supplies: Supplies,
     info: Option<Info>,
@@ -985,6 +1009,40 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.deactivate = Some(hook);
+        self
+    }
+
+    /// Served after the request's `shutdown_executor`, php's
+    /// `post_deactivate_func` (`zend_post_deactivate_modules`, step 11 of
+    /// `php_request_shutdown`, `Z/main/main.c:2026-2029`): after every
+    /// `deactivate`, with the request's resources closed, its objects
+    /// freed and its ini entries restored, every extension's hook in
+    /// reverse bundle order and each in a `zend_try` of its own, with
+    /// every request state still live. No PHP code runs here, so what it
+    /// hands back to the engine, an entry lent from a pool, has outlived
+    /// every object that could reach it. An end that only releases is
+    /// the request state's `Drop` (ADR-0010).
+    #[must_use]
+    pub fn post_deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.post_deactivate = Some(hook);
+        self
+    }
+
+    /// The engine-end function, php's `MSHUTDOWN` as `php_module_shutdown`
+    /// serves it (`zend_destroy_modules`, `Z/Zend/zend.c:1170`): served
+    /// once, from the drop of the engine's last clone, on a request the
+    /// engine lays for it, the mirror of the startup request; every
+    /// extension's hook in reverse bundle order and each in a `zend_try`
+    /// of its own, before any engine state drops. That request reaches
+    /// the engine states, builds request states as every request does,
+    /// serves no program, and what it writes reaches no host. Where an
+    /// extension drains its pools and closes what they hold, or
+    /// finishes a file it kept open across requests (ADR-0010); an end
+    /// that only releases stays the engine state's `Drop`. An engine
+    /// whose start was refused is not ended.
+    #[must_use]
+    pub fn engine_end(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.engine_end = Some(hook);
         self
     }
 
@@ -1331,6 +1389,8 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             deactivate: self.deactivate,
+            post_deactivate: self.post_deactivate,
+            engine_end: self.engine_end,
             zend: self.zend,
             supplies: self.supplies,
             info: self.info,

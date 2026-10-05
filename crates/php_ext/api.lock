@@ -71,6 +71,7 @@ abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::deactivate
 abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::encodings
+abi::ExtensionBuilder::engine_end
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::fatal_logged
 abi::ExtensionBuilder::functions
@@ -80,6 +81,7 @@ abi::ExtensionBuilder::input_filter
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::program_ended
 abi::ExtensionBuilder::register
@@ -187,6 +189,7 @@ abi::Passed
 abi::Path
 abi::PersistentList
 abi::Pool
+abi::Pool::drain
 abi::Pool::give
 abi::Pool::idle_len
 abi::Pool::new

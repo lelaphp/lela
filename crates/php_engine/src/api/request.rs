@@ -243,6 +243,9 @@ pub(crate) enum Phase {
     Running,
     Shutdown,
     ResourceShutdown,
+    /// The shutdown request the engine end is served on, which
+    /// `php_during_module_shutdown()` names.
+    EngineEnd,
 }
 
 /// One `ob_*` operation on the request's buffer stack.
