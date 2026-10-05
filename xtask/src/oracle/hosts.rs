@@ -1,4 +1,5 @@
-//! The engine's hosts a lane runs a program through (ADR-0008, #1908):
+//! The engine's hosts a lane runs a program through (ADR-0008, #1908),
+//! beside the pinned php's own (`oracle::Hosts`, `[sapi]` of the pin):
 //! the one statement of each host's crate, the binary the phpt lane runs
 //! or finds beside the binary under test, as upstream's runner finds
 //! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and the
@@ -61,58 +62,34 @@ pub(crate) const HOSTS: [EngineHost; 4] = [CLI, CGI, FPM, PHPDBG];
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::path::Path;
 
     use super::*;
 
-    /// Each `sapi/*` crate the workspace holds that builds a binary, by its
-    /// manifest name, with its package and the names of its binaries.
-    fn sapi_crates() -> Vec<(String, String, BTreeSet<String>)> {
+    /// Each host is a crate of the workspace, and its package, its binary
+    /// and its witness build are what the crate's Cargo.toml declares. A
+    /// `sapi/*` crate the lane hands no test to is not asked to be one.
+    #[test]
+    fn every_host_is_a_sapi_crate_of_the_workspace_as_its_cargo_toml_declares_it() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let mut crates = Vec::new();
-        for dir in std::fs::read_dir(root.join("sapi")).unwrap().flatten() {
-            let Ok(text) = std::fs::read_to_string(dir.path().join("Cargo.toml")) else {
-                continue;
-            };
+        for host in HOSTS {
+            let text = std::fs::read_to_string(root.join(host.krate).join("Cargo.toml"))
+                .unwrap_or_else(|e| panic!("{}: {e}", host.krate));
             let cargo: toml::Table = toml::from_str(&text).unwrap();
-            let package = cargo["package"]["name"].as_str().unwrap().to_owned();
-            let bins: BTreeSet<String> = cargo
-                .get("bin")
-                .and_then(toml::Value::as_array)
+            assert_eq!(
+                cargo["package"]["name"].as_str(),
+                Some(host.package().as_str()),
+                "{}",
+                host.krate
+            );
+            let bins: Vec<&str> = cargo["bin"]
+                .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|bin| bin.get("name").and_then(toml::Value::as_str))
-                .map(str::to_owned)
                 .collect();
-            if !bins.is_empty() {
-                let name = format!("sapi/{}", dir.file_name().to_string_lossy());
-                crates.push((name, package, bins));
-            }
-        }
-        crates
-    }
-
-    /// The table is the workspace's: every `sapi/*` crate that builds a
-    /// binary is a host of it, and each host's package, binary and witness
-    /// build are what its crate's Cargo.toml declares.
-    #[test]
-    fn every_host_is_a_sapi_crate_of_the_workspace_and_every_such_crate_a_host() {
-        let crates = sapi_crates();
-        let named: BTreeSet<&str> = crates.iter().map(|(name, _, _)| name.as_str()).collect();
-        let hosted: BTreeSet<&str> = HOSTS.iter().map(|host| host.krate).collect();
-        assert_eq!(
-            named, hosted,
-            "the sapi/* crates with a binary are the hosts"
-        );
-        for host in HOSTS {
-            let (_, package, bins) = crates
-                .iter()
-                .find(|(name, _, _)| name == host.krate)
-                .unwrap();
-            assert_eq!(&host.package(), package, "{}", host.krate);
-            assert!(bins.contains(host.binary), "{}: {bins:?}", host.krate);
-            assert!(bins.contains(host.witness), "{}: {bins:?}", host.krate);
+            assert!(bins.contains(&host.binary), "{}: {bins:?}", host.krate);
+            assert!(bins.contains(&host.witness), "{}: {bins:?}", host.krate);
         }
     }
 }

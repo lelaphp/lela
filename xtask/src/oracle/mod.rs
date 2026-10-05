@@ -1096,7 +1096,7 @@ impl<'a> Oracle<'a> {
 }
 
 /// The engine's binary, the one `sapi/cli` builds (design §4.1,
-/// ADR-0008): the first of [`hosts::HOSTS`].
+/// ADR-0008): [`hosts::CLI`]'s.
 pub const ENGINE: &str = hosts::CLI.binary;
 
 /// The cargo line that builds every host of [`hosts::HOSTS`]: their crates

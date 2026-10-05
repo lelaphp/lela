@@ -18,7 +18,8 @@ use std::sync::OnceLock;
 use anyhow::Result;
 
 use super::file::Phpt;
-use crate::oracle::{self, Host, Pin};
+use crate::oracle::hosts::PHPDBG;
+use crate::oracle::{Host, Pin};
 
 /// The flags before the program: no banner, no init file, no colours
 /// (run-tests.php:1908).
@@ -37,7 +38,7 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     let host = if control || binary == pin.oracle.path {
         pin.sapi.phpdbg.as_ref().map(|dbg| dbg.path.clone())
     } else {
-        Some(binary.with_file_name(oracle::hosts::PHPDBG.binary))
+        Some(binary.with_file_name(PHPDBG.binary))
     };
     host.filter(|path| path.is_file())
 }

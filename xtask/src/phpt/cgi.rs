@@ -41,13 +41,15 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     host.filter(|path| path.is_file())
 }
 
+/// Where run-tests.php finds php-cgi in a build tree, php-src's layout and
+/// not this workspace's.
+const BESIDE: &str = "sapi/cgi/php-cgi";
+
 /// `binary` under the name php-cgi: a link of that name to it at
-/// `sapi/cgi/php-cgi` under `root`, the crate's directory and its binary
-/// ([`CGI`]), which is where run-tests.php finds php-cgi in a build tree;
-/// the witness lane's `php-cgi-witness` run under the name php-cgi builds
-/// it by.
+/// [`BESIDE`] under `root`, the witness lane's `php-cgi-witness` run
+/// under the name php-cgi builds it by.
 pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
-    let link = root.join(CGI.krate).join(CGI.binary);
+    let link = root.join(BESIDE);
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }

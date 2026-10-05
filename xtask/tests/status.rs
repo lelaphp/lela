@@ -581,15 +581,9 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         })
         .collect();
     assert_eq!(
-        hosts.first().map(|h| h.2.as_str()),
-        Some("php"),
-        "{hosts:?}"
-    );
-    let crates: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
-    assert_eq!(
-        crates,
-        ["sapi/cli", "sapi/cgi", "sapi/fpm", "sapi/phpdbg"],
-        "{hosts:?}"
+        hosts.first().map(|h| h.0.as_str()),
+        Some("sapi/cli"),
+        "the binary under test first: {hosts:?}"
     );
     for (krate, package, binary) in &hosts {
         let cargo: toml::Table = toml::from_str(
@@ -612,7 +606,14 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     assert!(md.contains(&format!("| key | {key} |")), "{md}");
     assert!(md.contains("/sapi/*/tests/"), "{md}");
     assert!(
-        md.contains("| hosts | php_sapi_cli php_sapi_cgi php_sapi_fpm php_sapi_phpdbg |"),
+        md.contains(&format!(
+            "| hosts | {} |",
+            hosts
+                .iter()
+                .map(|h| h.1.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
         "{md}"
     );
     assert!(
