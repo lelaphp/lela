@@ -1,8 +1,8 @@
 //! The server's log (`sapi_cli_server_log_write`,
 //! `Z/sapi/cli/php_cli_server.c:768`): each entry at one of php's three
 //! types, written while the level is at or above it, on stderr as
-//! `[<asctime of the local time>] <entry>`, one `write` a line so lines
-//! from connections served at once do not interleave.
+//! `[<asctime of the local time>] <entry>`, one `write` a line so a line
+//! is never split by another process writing to the same stream.
 
 use std::io::Write;
 

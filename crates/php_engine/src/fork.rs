@@ -16,9 +16,10 @@
 //! one no fork waits for, and a thread started through it that a fork
 //! does not join first leaves the fork refused rather than a child that
 //! hangs. What the engine cannot see is a host's own thread that holds
-//! no request, such as today's `php -S` accept loop; no host that forks
-//! or carries pcntl may keep one, which is why `php -S` becomes php's
-//! one-threaded event loop (#1884).
+//! no request, such as the accept loop `php -S` kept beside its
+//! connections' threads; no host that forks or carries pcntl may keep
+//! one, which is why `php -S` serves in php's one-threaded event loop
+//! (#1884).
 //!
 //! Two ways in, as the ruling has them. pcntl asks through the request,
 //! [`Request::fork`](crate::api::request::Request::fork): the request's

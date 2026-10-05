@@ -11,7 +11,7 @@ mod title;
 pub(crate) use title::save_ps_args;
 
 use std::mem::MaybeUninit;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 /// fds 0, 1 and 2 as the request's own, each where it is open: what
 /// `cli_register_file_handles` opens `php://stdin`, `stdout` and `stderr`
@@ -60,14 +60,15 @@ pub(crate) fn write_stdout(mut bytes: &[u8]) -> std::io::Result<()> {
 /// write, a minute at most, `default_socket_timeout` at its default, and
 /// the write tried again either way, as php's loop tries it.
 fn wait_writable() {
-    let mut fd = libc::pollfd {
-        fd: 1,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    // SAFETY: `poll(2)` reads and writes the one `pollfd` it is handed,
-    // which is live for the call.
-    let _ = unsafe { libc::poll(&raw mut fd, 1, 60_000) };
+    let _ = writable_within(1, 60_000);
+}
+
+/// `php_pollfd_for(fd, POLLOUT, timeout)`: whether `fd` takes a write
+/// within `millis`; false where the wait ran out, failed or a signal cut
+/// it short.
+pub(crate) fn writable_within(fd: RawFd, millis: i32) -> bool {
+    let mut polled = [Polled::new(fd, Interest::Write)];
+    poll(&mut polled, millis).is_ok_and(|ready| ready > 0)
 }
 
 /// Set by the built-in server's `SIGINT` handler ([`stop_on_sigint`]).
@@ -90,19 +91,59 @@ pub(crate) fn stop_on_sigint() -> &'static std::sync::atomic::AtomicBool {
     &SIGINT_RAISED
 }
 
-/// `php_cli_server_poller_poll` over the one listening socket `fd`: true
-/// where it has a connection to accept within `millis`, false where the
-/// wait ran out or a signal cut it short.
-pub(crate) fn wait_readable(fd: std::os::fd::RawFd, millis: i32) -> bool {
-    let mut polled = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
+/// What a [`Polled`] fd is waited for: a read, as the built-in server's
+/// poller watches a listening socket and a request being read, or a
+/// write, as it watches a response it sends itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interest {
+    Read,
+    Write,
+}
+
+/// One fd as `poll(2)` takes it, `php_cli_server_poller`'s `rfds` or
+/// `wfds` for one fd, with what the wait found.
+#[repr(transparent)]
+pub(crate) struct Polled(libc::pollfd);
+
+impl Polled {
+    pub(crate) fn new(fd: RawFd, interest: Interest) -> Polled {
+        let events = match interest {
+            Interest::Read => libc::POLLIN,
+            Interest::Write => libc::POLLOUT,
+        };
+        Polled(libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        })
+    }
+
+    pub(crate) fn fd(&self) -> RawFd {
+        self.0.fd
+    }
+
+    /// Whether the wait found the fd ready for what it was waited for:
+    /// as `select(2)` reports it, a peer that hung up or an error on the
+    /// socket counted as ready, so the read or write that follows says
+    /// which.
+    pub(crate) fn ready(&self) -> bool {
+        self.0.revents & (self.0.events | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    }
+}
+
+/// `php_cli_server_poller_poll` (`Z/sapi/cli/php_cli_server.c:876`): a
+/// wait of at most `millis` for any of `fds` to be ready, and how many
+/// are; the error where the wait failed, `EINTR` where a signal cut it
+/// short.
+pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
+    let Ok(count) = libc::nfds_t::try_from(fds.len()) else {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     };
-    // SAFETY: `poll(2)` reads and writes the one `pollfd` it is handed,
-    // which is live for the call.
-    let ready = unsafe { libc::poll(&raw mut polled, 1, millis) };
-    ready > 0
+    // SAFETY: `poll(2)` reads and writes `count` `pollfd`s from the
+    // pointer, the slice's own, live and that long for the call: a
+    // `Polled` is a `pollfd` by `repr(transparent)`.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr().cast::<libc::pollfd>(), count, millis) };
+    usize::try_from(ready).map_err(|_| std::io::Error::last_os_error())
 }
 
 /// `php_cli_server_get_system_time` (`Z/sapi/cli/php_cli_server.c:267`):
