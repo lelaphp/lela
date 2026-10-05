@@ -41,13 +41,17 @@
 //! lock, sectioned or not, and a rendered lock keep no groups.
 //!
 //! An extension's `pub` items beyond `extension()` are printed in its
-//! reading, as the manifest's `ext.pub-beyond-extension` note asks.
+//! reading and set against design §4.10's list of surfaces, the names a
+//! person wrote there ([`surfaces`]), as the manifest's
+//! `ext.pub-beyond-extension` says (#1781, #1826): an item on no row fails
+//! the reading, save one a filed ticket is to list, which is named with it.
 
 mod bundle;
 mod inventory;
 pub(crate) mod lock;
 mod ops;
 pub(crate) mod row;
+mod surfaces;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,6 +66,7 @@ use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, uses};
 use lock::{Block, Diff, Lock, list};
+use surfaces::Surfaces;
 use workspace::{Crates, Present};
 
 pub(crate) const INSTRUMENT: &str = "api-check";
@@ -122,6 +127,7 @@ pub(crate) fn measure(
 ) -> Result<Vec<Reading>> {
     let crates = Crates::scan(manifest, root)?;
     let mut inventory = Inventory::new(&crates);
+    let surfaces = Surfaces::read(root)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(
@@ -140,7 +146,13 @@ pub(crate) fn measure(
         if standing.get(&krate.name).is_some() && !ordered {
             continue;
         }
-        readings.push(crate_reading(manifest, &crates, &mut inventory, krate)?);
+        readings.push(crate_reading(
+            manifest,
+            &crates,
+            &mut inventory,
+            &surfaces,
+            krate,
+        )?);
     }
     Ok(readings)
 }
@@ -510,6 +522,7 @@ fn crate_reading(
     manifest: &Manifest,
     crates: &Crates,
     inventory: &mut Inventory<'_>,
+    surfaces: &Surfaces,
     krate: &Present,
 ) -> Result<Reading> {
     let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, crates.root())?;
@@ -582,9 +595,9 @@ fn crate_reading(
         }
     }
 
-    // What an extension exports beyond `extension()` (design §4.10), the
-    // manifest's `ext.pub-beyond-extension` note.
-    if krate.name.starts_with("ext/") {
+    // What an extension exports beyond `extension()`, each item held to
+    // design §4.10's list of surfaces (`ext.pub-beyond-extension`, #1826).
+    if let Some(producer) = krate.name.strip_prefix("ext/") {
         reading.rule = String::from("ext.pub-beyond-extension");
         let beyond: Vec<String> = inventory
             .public_items(krate)?
@@ -592,7 +605,9 @@ fn crate_reading(
             .filter(|item| item != "extension")
             .collect();
         if !beyond.is_empty() {
-            notes.push(format!("pub beyond extension(): {}", list(&beyond, 12)));
+            let held = surfaces.hold(producer, &beyond);
+            problems.extend(held.problem);
+            notes.extend(held.notes);
         }
     }
 
