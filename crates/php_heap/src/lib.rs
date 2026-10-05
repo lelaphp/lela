@@ -1067,6 +1067,45 @@ mod tests {
             hooks.heap.take_sensed(),
             Some(Fatal::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
         ));
+
+        // The string's own release, which decrements through the type
+        // and not through `Heap::release`, is refused at the header the
+        // same way. The bin's list is the two blocks just given back,
+        // the later first, and still hands out exactly those two.
+        let given_back: Vec<usize> = {
+            let a = hooks.heap.string(b"a string of its own block");
+            let b = hooks.heap.string(b"a string of its own block");
+            let both = [a, b].into_iter().flatten().collect::<Vec<_>>();
+            let at: Vec<usize> = both.iter().map(|s| s.address().as_ptr().addr()).collect();
+            for s in both {
+                hooks.heap.release_string(s);
+            }
+            at.into_iter().rev().collect()
+        };
+        assert!(given_back.contains(&at));
+        hooks.heap.release_string(s);
+        let site = line!() - 1;
+        assert_eq!(
+            hooks.heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: a release of the block at {at:#x}, which the heap has freed, at {}:{site}:20",
+                file!()
+            )))
+        );
+        let handed: Vec<Str> = (0..2)
+            .filter_map(|_| hooks.heap.string(b"a string of its own block").ok())
+            .collect();
+        assert_eq!(
+            handed
+                .iter()
+                .map(|s| s.address().as_ptr().addr())
+                .collect::<Vec<_>>(),
+            given_back,
+            "the free list's link was not written over"
+        );
+        for s in handed {
+            hooks.heap.release_string(s);
+        }
     }
 
     /// One more owner through the type's own addref, the path
