@@ -1,7 +1,7 @@
 //! Frame reads for extensions (#1827): an observer's handler reads the
 //! frame it is handed, and the frames below it, through a borrowed
 //! [`FrameView`], and keeps a frame past the handler as a [`FrameId`],
-//! which [`Request::frame`] checks against the stacks that stand before
+//! which [`Request::frame_of`] checks against the stacks that stand before
 //! it reads: a frame that left them is refused, and never read as the
 //! frame that stands at its old place now. A generator's frame is
 //! taken off the stack at each yield and pushed where its next resumer

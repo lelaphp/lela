@@ -15,7 +15,6 @@
 //! [`free_operand`].
 
 use std::cell::Cell;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use php_heap::{FrameRef, MapPtr, MapTable, Zval};
@@ -469,7 +468,7 @@ pub(crate) struct FrameState {
     /// generator's frame keeps it across its resumptions as php's
     /// `execute_data` is one, and a frame pushed later where this one
     /// stood has none or another.
-    pub(crate) identity: Cell<Option<NonZeroU64>>,
+    pub(crate) identity: Cell<Option<crate::api::request::Identity>>,
 }
 
 /// One op array's runtime cache for one request, what

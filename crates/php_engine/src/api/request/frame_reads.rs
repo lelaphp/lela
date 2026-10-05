@@ -21,8 +21,9 @@
 //! it, and refuses it where it stands on none: a frame popped, a
 //! suspended generator's, a suspended fiber's.
 //!
-//! A frame's identity is given lazily, so a call pays nothing for it
-//! until an extension asks.
+//! A frame's identity is given lazily: a push writes the state's one
+//! more word as none, and the number is given the first time an
+//! extension asks.
 //!
 //! [`Observed::frame`]: crate::api::abi::Observed::frame
 
@@ -47,8 +48,15 @@ pub struct FrameId {
     /// Where the frame stood when the identity was read: where
     /// [`Request::frame_of`] looks first.
     at: FrameRef,
-    id: NonZeroU64,
+    /// The frame's identity, which [`FrameState`] holds.
+    id: Identity,
 }
+
+/// The number a request gives one frame and no other, held in the
+/// frame's state from the first time it is asked
+/// ([`FrameView::id`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Identity(NonZeroU64);
 
 impl PartialEq for FrameId {
     fn eq(&self, other: &FrameId) -> bool {
@@ -68,18 +76,22 @@ impl Hash for FrameId {
 /// it stands, the frame below it, and its [`FrameId`] to keep.
 #[derive(Clone, Copy)]
 pub struct FrameView<'a> {
+    /// The request borrowed, so no stack moves while the view is held.
     req: &'a Request,
-    /// The stack the frame stands on, counted down the chain: the
-    /// running one is zero, the resumer of the innermost fiber one.
-    below: usize,
+    /// The stack the frame stands on, counted down the chain
+    /// [`Request::executions`] walks: the running one is zero, the
+    /// resumer of the innermost fiber one.
+    stack: usize,
+    /// That stack's engine state.
     vm: &'a Vm,
+    /// The frame's position on that stack.
     at: FrameRef,
 }
 
 impl std::fmt::Debug for FrameView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameView")
-            .field("below", &self.below)
+            .field("stack", &self.stack)
             .field("at", &self.at)
             .finish_non_exhaustive()
     }
@@ -148,15 +160,15 @@ impl<'a> FrameView<'a> {
     /// `EG(current_execute_data)` past it.
     #[must_use]
     pub fn caller(&self) -> Option<FrameView<'a>> {
-        let mut below = self.below;
+        let mut stack = self.stack;
         let mut vm = self.vm;
         let mut at = self.at.0 as usize;
         loop {
             if let Some(lower) = at.checked_sub(1) {
                 at = lower;
             } else {
-                below += 1;
-                vm = self.req.executions().nth(below)?.1;
+                stack += 1;
+                vm = self.req.executions().nth(stack)?.1;
                 at = vm.frames().len();
                 continue;
             }
@@ -164,7 +176,7 @@ impl<'a> FrameView<'a> {
             if vm.at(frame).is_some_and(|state| !state.leaving) {
                 return Some(FrameView {
                     req: self.req,
-                    below,
+                    stack,
                     vm,
                     at: frame,
                 });
@@ -173,16 +185,17 @@ impl<'a> FrameView<'a> {
     }
 }
 
-/// The identities the request has given, the last one's number.
+/// How many identities the request has given.
 #[derive(Debug, Default)]
 pub(super) struct FrameIds(Cell<u64>);
 
 impl FrameIds {
-    /// A number no frame of the request was given before.
-    fn give(&self) -> NonZeroU64 {
-        let next = self.0.get().saturating_add(1);
-        self.0.set(next);
-        NonZeroU64::new(next).unwrap_or(NonZeroU64::MAX)
+    /// A number no frame of the request was given before: one past the
+    /// count, which no request lives long enough to exhaust.
+    fn give(&self) -> Identity {
+        let next = NonZeroU64::MIN.saturating_add(self.0.get());
+        self.0.set(next.get());
+        Identity(next)
     }
 }
 
@@ -190,30 +203,33 @@ impl Request {
     /// The frame `id` names, where it stands on the running stack or a
     /// resumer's below it; `None` where it stands on none, so a frame
     /// that has left them is refused and never read as the frame at its
-    /// old place.
+    /// old place. The position it was kept at is looked at first, on
+    /// each stack; past that every frame of every stack is, so a
+    /// generator's frame pushed back elsewhere is found and a refusal
+    /// walks the whole chain.
     #[must_use]
     pub fn frame_of(&self, id: FrameId) -> Option<FrameView<'_>> {
         let names = |state: &FrameState| !state.leaving && state.identity.get() == Some(id.id);
         let found = self
             .executions()
             .enumerate()
-            .find_map(|(below, (_, vm))| {
+            .find_map(|(stack, (_, vm))| {
                 vm.at(id.at)
                     .is_some_and(names)
-                    .then_some((below, vm, id.at))
+                    .then_some((stack, vm, id.at))
             })
             .or_else(|| {
                 // A generator's frame pushed back where another resumer
                 // stands.
-                self.executions().enumerate().find_map(|(below, (_, vm))| {
+                self.executions().enumerate().find_map(|(stack, (_, vm))| {
                     let at = vm.frames().iter().rposition(names)?;
-                    Some((below, vm, FrameRef(u32::try_from(at).ok()?)))
+                    Some((stack, vm, FrameRef(u32::try_from(at).ok()?)))
                 })
             });
-        let (below, vm, at) = found?;
+        let (stack, vm, at) = found?;
         Some(FrameView {
             req: self,
-            below,
+            stack,
             vm,
             at,
         })
@@ -224,7 +240,7 @@ impl Request {
     pub(crate) fn frame_view(&self, frame: FrameRef) -> FrameView<'_> {
         FrameView {
             req: self,
-            below: 0,
+            stack: 0,
             vm: &self.vm,
             at: frame,
         }
