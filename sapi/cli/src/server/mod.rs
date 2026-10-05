@@ -11,9 +11,12 @@
 mod client;
 mod log;
 
-use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
 
 use php_sapi::{Engine, PHP_VERSION};
 
@@ -40,8 +43,9 @@ struct Site {
 /// `-t` names, which must be a directory and is served by its real path,
 /// or the working directory; the router after the switches; the address
 /// parsed and listened on; the startup line; and then each connection
-/// served until the process is ended. The exit code where it does not
-/// start.
+/// served until a `SIGINT` stops the loop, as
+/// `php_cli_server_sigint_handler` stops it. The exit code: 0 once
+/// stopped, what refused it where it does not start.
 pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
     let document_root = match &server.document_root {
         Some(root) => {
@@ -98,24 +102,57 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         port,
         log,
     });
-    for accepted in listener.incoming() {
-        match accepted {
-            Ok(stream) => {
-                let Ok(peer) = stream.peer_addr() else {
-                    continue;
-                };
-                let site = Arc::clone(&site);
+    serve_until_stopped(&site, &listener);
+    0
+}
+
+/// `php_cli_server_do_event_loop` (`Z/sapi/cli/php_cli_server.c:2770-2797`)
+/// with each connection served on a thread of its own: a wait of at most
+/// a second for a connection, the flag a `SIGINT` sets read after each,
+/// and once it is set no connection accepted any more, every one still
+/// open told nothing more is read from it, as `php_cli_server_dtor`
+/// closes the clients, and every thread joined, so the request a thread
+/// was serving finishes as php's one loop finishes it. The engine is then
+/// held by `site` alone, and the caller's drop of it ends the engine, as
+/// the CLI's `php_module_shutdown` follows `do_cli_server`.
+fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) {
+    let stop = crate::ffi::stop_on_sigint();
+    let _ = listener.set_nonblocking(true);
+    let mut clients: Vec<(Option<TcpStream>, JoinHandle<()>)> = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        if !crate::ffi::wait_readable(listener.as_raw_fd(), 1000) {
+            continue;
+        }
+        clients.retain(|(_, thread)| !thread.is_finished());
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                let _ = stream.set_nonblocking(false);
+                let held = stream.try_clone().ok();
+                let site = Arc::clone(site);
                 let name = peer_name(peer);
                 site.log.write(Type::Message, &format!("{name} Accepted"));
-                std::thread::spawn(move || client::serve(&site, stream, name));
+                let thread = std::thread::spawn(move || client::serve(&site, stream, name));
+                clients.push((held, thread));
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
             Err(error) => site.log.write(
                 Type::Error,
                 &format!("Failed to accept a client (reason: {})", strerror(&error)),
             ),
         }
     }
-    0
+    for (held, _) in &clients {
+        if let Some(stream) = held {
+            let _ = stream.shutdown(Shutdown::Read);
+        }
+    }
+    for (_, thread) in clients {
+        let _ = thread.join();
+    }
 }
 
 /// A line on stderr before the server starts, and exit 1.

@@ -1,8 +1,9 @@
 //! What the CLI host asks of the C library that Rust's standard library
 //! does not answer, the host's one `unsafe` home (ADR-0008): the
 //! process's own fds 0, 1 and 2, which `do_cli` registers its standard
-//! streams over, the area `ps` shows its title from ([`title`]), and the
-//! local time the built-in server's log writes.
+//! streams over, the area `ps` shows its title from ([`title`]), the
+//! local time the built-in server's log writes, and the `SIGINT` and the
+//! wait its loop serves between.
 //! Each `unsafe` block is one operation with its `SAFETY` comment.
 
 mod title;
@@ -67,6 +68,41 @@ fn wait_writable() {
     // SAFETY: `poll(2)` reads and writes the one `pollfd` it is handed,
     // which is live for the call.
     let _ = unsafe { libc::poll(&raw mut fd, 1, 60_000) };
+}
+
+/// Set by the built-in server's `SIGINT` handler ([`stop_on_sigint`]).
+static SIGINT_RAISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `php_cli_server_sigint_handler`: the flag the event loop reads.
+extern "C" fn on_sigint(_: libc::c_int) {
+    SIGINT_RAISED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `signal(SIGINT, php_cli_server_sigint_handler)`
+/// (`Z/sapi/cli/php_cli_server.c:2900-2902`): from here a `SIGINT` sets
+/// the flag answered, which the built-in server's loop reads between
+/// waits, where it would have ended the process.
+pub(crate) fn stop_on_sigint() -> &'static std::sync::atomic::AtomicBool {
+    let handler = on_sigint as extern "C" fn(libc::c_int);
+    // SAFETY: `signal(2)` installs a handler that only stores to an
+    // atomic, which is async-signal-safe, and touches no memory of ours.
+    let _ = unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) };
+    &SIGINT_RAISED
+}
+
+/// `php_cli_server_poller_poll` over the one listening socket `fd`: true
+/// where it has a connection to accept within `millis`, false where the
+/// wait ran out or a signal cut it short.
+pub(crate) fn wait_readable(fd: std::os::fd::RawFd, millis: i32) -> bool {
+    let mut polled = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `poll(2)` reads and writes the one `pollfd` it is handed,
+    // which is live for the call.
+    let ready = unsafe { libc::poll(&raw mut polled, 1, millis) };
+    ready > 0
 }
 
 /// `php_cli_server_get_system_time` (`Z/sapi/cli/php_cli_server.c:267`):
