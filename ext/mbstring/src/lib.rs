@@ -156,7 +156,7 @@ pub fn extension() -> Extension {
         .info(info)
         .treat_data(http::treat_data)
         .encodings(zend::bind)
-        .engine_state(|_| Ok(regex::startup()))
+        .process_state(|| Ok(regex::startup()))
         .request_state::<State>()
         .rshutdown(rshutdown);
     for (name, handler) in settings::handlers() {

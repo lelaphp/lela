@@ -258,13 +258,16 @@ pub(crate) fn rshutdown(req: &mut Request) {
     }
 }
 
-/// `PHP_MINIT_FUNCTION(mb_regex)`'s `onig_init`, as the engine is built.
+/// `PHP_MINIT_FUNCTION(mb_regex)`'s `onig_init`, the process start
+/// (ADR-0010): called once for the process, the first time an engine
+/// carrying mbstring is built. php's `onig_end` at `MSHUTDOWN` has no
+/// counterpart, since no host ends the process scope.
 pub(crate) fn startup() -> Startup {
     onig::init();
     Startup
 }
 
-/// What startup leaves: nothing but the library initialised.
+/// What the process start leaves: nothing but the library initialised.
 pub(crate) struct Startup;
 
 /// `PHP_MINFO_FUNCTION(mb_regex)`.
