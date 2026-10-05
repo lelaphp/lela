@@ -219,3 +219,28 @@ fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
         "fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709"
     );
 }
+
+/// #1986: `array_walk` holds no key of an element it has yet to visit.
+/// The callback unsets the elements ahead, which frees their runtime
+/// keys, and then builds keys of the same size in the reverse order, so
+/// each takes the slot a freed key had. php's iterator walks the
+/// buckets, the new ones in the order they were appended; a walk that
+/// kept the freed keys read them as the new ones, in the old order.
+#[test]
+fn array_walk_holds_no_key_of_an_element_the_callback_unset() {
+    let (stdout, fatal) = served(
+        r#"<?php
+$a = [];
+for ($i = 0; $i < 4; $i++) { $a["kkk" . $i] = $i; }
+array_walk($a, function ($v, $k) use (&$a) {
+    echo $k, " ";
+    if ($v === 0) {
+        unset($a["kkk1"], $a["kkk2"], $a["kkk3"]);
+        for ($n = 3; $n >= 1; $n--) { $a["ZZZ" . $n] = $n; }
+    }
+});
+echo implode(",", array_keys($a));"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "kkk0 ZZZ3 ZZZ2 ZZZ1 kkk0,ZZZ3,ZZZ2,ZZZ1");
+}
