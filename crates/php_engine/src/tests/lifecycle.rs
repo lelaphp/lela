@@ -209,6 +209,9 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
 /// `accel_post_startup` refuses a configuration it cannot start under:
 /// the request laid to ask builds every request state in bundle order,
 /// serves nothing, and drops them in reverse, as a served one does.
+/// The engine's drop then ends no extension, as no host of php's calls
+/// `php_module_shutdown` once `php_module_startup` failed
+/// (`Z/sapi/cli/php_cli.c:1341-1350`); its engine states only drop.
 #[test]
 fn a_refused_request_drops_its_request_state_in_reverse() {
     fn refuse<const N: u8>(_: &mut Request) -> Answer {
@@ -239,6 +242,16 @@ fn a_refused_request_drops_its_request_state_in_reverse() {
             Ext(2, RequestStateDropped),
             Ext(1, RequestStateDropped),
             Ext(0, RequestStateDropped),
+        ]
+    );
+    drop(engine);
+    rec.mark("dropped");
+    assert_eq!(
+        rec.events().between("refused", "dropped").0,
+        [
+            Ext(2, EngineStateDropped(0)),
+            Ext(1, EngineStateDropped(0)),
+            Ext(0, EngineStateDropped(0)),
         ]
     );
 }

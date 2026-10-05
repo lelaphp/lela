@@ -3041,7 +3041,9 @@ pub struct Engine {
 /// extension sees it, served once, from the drop of the engine's last
 /// clone, so no host can forget it and a forked child that drops its
 /// engine ends it too, as php's `php_module_shutdown` runs in each
-/// php-fpm child. Armed once the engine has started; an engine whose
+/// php-fpm child: there the engine the child serves on, which the host
+/// builds for its pool, while the master's copy the fork made is the
+/// master's to end. Armed once the engine has started; an engine whose
 /// start was refused is not ended.
 #[derive(Default)]
 struct EngineEnd(OnceLock<(Arc<Shared>, &'static str)>);
@@ -3055,16 +3057,25 @@ impl EngineEnd {
 }
 
 impl Drop for EngineEnd {
-    /// The shutdown request, the mirror of the startup request: request
+    /// `php_module_shutdown`'s `zend_shutdown` (`Z/Zend/zend.c:1162-1170`):
+    /// the shutdown request, the mirror of the startup request: request
     /// states built in bundle order, each extension's engine-end function
     /// in reverse ([`end_phase`]), the request dropped with its states in
-    /// reverse, and then, with the last owner of what every request
-    /// shares, the engine states in reverse (`zend_destroy_modules`).
-    /// What the request writes reaches no host.
+    /// reverse; and then, with the last owner of what every request shares, the
+    /// engine states in reverse (`zend_destroy_modules`). What the
+    /// request writes reaches no host. A start the extensions'
+    /// post-startup refused ends nothing, as no host of php's calls
+    /// `php_module_shutdown` once `php_module_startup` failed.
     fn drop(&mut self) {
         let Some((shared, sapi_name)) = self.0.take() else {
             return;
         };
+        if matches!(
+            shared.started.get(),
+            Some(crate::preload::Started::Refused(_))
+        ) {
+            return;
+        }
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()
