@@ -21,6 +21,10 @@
 //!   `zend_dispatch_try_catch_finally_helper` (`:8157-8161`), which is
 //!   `handlers::unwind_from`.
 //!
+//! Both homes stand where no tier's type parameter reaches, so a
+//! stepping host's [`crate::tier::step`] and [`crate::tier::unwind`]
+//! raise them as the loop does (#1813).
+//!
 //! That is the plain test #1808 measured, which #1954 ruled stands: the test
 //! lives in these two functions alone, so php's observer-specialised call
 //! and return handlers, the escape design §4.3 names, would change no
@@ -46,8 +50,7 @@
 //! chain (#1811; a generator's frame is never begun at its call, as
 //! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
 //! notices and adding and removing handlers while a request is served
-//! (#1812), the stepping function's events (#1813), and a frame
-//! reference a handler may keep (#1827).
+//! (#1812), and a frame reference a handler may keep (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer

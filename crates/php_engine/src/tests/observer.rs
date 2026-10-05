@@ -16,7 +16,7 @@ use Phase::{Begin, End, Error, ObserverInit};
 
 /// The observer's events alone, and the diagnostics `zend_error_cb`
 /// was handed among them, in the order recorded.
-fn observed(events: &Events) -> Vec<Event> {
+pub(super) fn observed(events: &Events) -> Vec<Event> {
     events
         .only(&[
             ObserverInit(String::new()),
@@ -41,7 +41,7 @@ fn end(n: u8, name: &str, returned: Option<&str>) -> Event {
 
 /// A directory of its own for one test's files, under the target's
 /// temporary directory, emptied first.
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("php_engine_observer_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -50,7 +50,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// `source` served as `main.php` in `dir`.
-fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
+pub(super) fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
     let _ = std::fs::write(&main, source);
     engine.serve_capture_in(

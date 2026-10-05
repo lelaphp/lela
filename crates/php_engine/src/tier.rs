@@ -400,7 +400,11 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 
 /// Exactly one handler, the one at the frame's opline, with `Nop` at the
 /// safepoints; what it did to the frame chain is reported, and a
-/// throwable it raised is left pending.
+/// throwable it raised is left pending. `Nop` keeps the stepping host's
+/// own `safepoint` from being asked inside its stepping; the observer's
+/// begin and end (seam 9) are raised as the loop raises them, at the
+/// push a call steps into and the return it steps out of, since their
+/// homes take no tier.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = standing(req, frame)?;
     let code = code_of(&serving, frame)?;
@@ -421,6 +425,9 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// `Popped` of its caller, which goes on past the call, or `Done` where
 /// it is the serving's entry frame, its return value `UNDEF`, which a
 /// tier hands back with `Flow::Returned`.
+/// A frame where nothing takes the throwable is ended for its
+/// observers (seam 9) at the unwinder's uncaught arm, as the loop ends
+/// it, once, the entry frame too.
 /// On the entry frame of the serving, which the unwinder does not
 /// leave, `Threw` of that frame says nothing took it; a tier hands that
 /// frame back with `Flow::Resume` and the loop ends the serving, so one
