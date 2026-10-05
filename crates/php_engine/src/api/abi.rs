@@ -1394,9 +1394,11 @@ impl ExtensionBuilder {
     /// the frame standing at it and the opcode's name. The opcode's
     /// handler always runs after it: no extension replaces one. Two
     /// extensions that declare one opcode are each told, the later
-    /// first, as php's handler that saved the one it set over calls it
-    /// after its own work; a second declaration of one extension stands
-    /// over its first. With none declared, a serving reads one word as
+    /// first: php keeps one handler per opcode, the later set over the
+    /// earlier, and tells the earlier only where the later saved it and
+    /// calls it after its own work, as xdebug's does; here every
+    /// declaration is told, as if each saved the one beneath. A second
+    /// declaration of one extension stands over its first. With none declared, a serving reads one word as
     /// its loop is entered and each opline pays a test of it.
     #[must_use]
     pub fn opcodes(
