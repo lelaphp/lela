@@ -226,7 +226,9 @@ pub(crate) struct Timer {
     /// The thread, from the change that set a deadline to the one that
     /// leaves none, a fork or the drop.
     thread: Option<crate::fork::Thread>,
-    /// The process that started the thread, the only one it is in.
+    /// The process that started the thread, the only one it is in, or
+    /// that suspended the time limit while no thread ran: the one the
+    /// schedule is for.
     started_in: Process,
     /// How many periodic interrupts were started, which numbers the next.
     periodics: u32,
@@ -262,22 +264,19 @@ impl Timer {
     /// While the time limit is suspended the whole `seconds` are kept as
     /// the time left, and count from the resume.
     pub(crate) fn arm(&mut self, seconds: i64, hard: i64) {
-        let now = Instant::now();
-        let suspended = self.suspended > 0;
-        let execution = u64::try_from(seconds)
+        let left = u64::try_from(seconds)
             .ok()
             .filter(|s| *s > 0)
             .map(Duration::from_secs)
-            .and_then(|left| Some((left, now.checked_add(left)?)))
-            .map(|(left, deadline)| Execution {
-                due: if suspended {
-                    Due::Left(left)
-                } else {
-                    Due::At(deadline)
-                },
-                seconds,
-                hard: u64::try_from(hard).ok().filter(|h| *h > 0),
-            });
+            .filter(|left| Instant::now().checked_add(*left).is_some());
+        let mut execution = left.map(|left| Execution {
+            due: Due::Left(left),
+            seconds,
+            hard: u64::try_from(hard).ok().filter(|h| *h > 0),
+        });
+        if self.suspended == 0 {
+            execution = execution.and_then(|execution| execution.resumed(Instant::now()));
+        }
         self.change(|schedule| schedule.execution = execution);
         // The old deadline is gone from the schedule, so whatever it
         // raised is raised already, and is cleared here.
@@ -304,15 +303,15 @@ impl Timer {
     /// else is scheduled, and serves the periodic interrupts on where
     /// something is. A timeout already raised stays raised.
     pub(crate) fn suspend(&mut self) {
+        self.forget_if_forked();
         self.suspended = self.suspended.saturating_add(1);
         if self.suspended == 1 {
+            if self.thread.is_none() {
+                self.started_in = Process::current();
+            }
             let now = Instant::now();
             self.change(|schedule| {
-                if let Some(execution) = &mut schedule.execution
-                    && let Due::At(deadline) = execution.due
-                {
-                    execution.due = Due::Left(deadline.saturating_duration_since(now));
-                }
+                schedule.execution = schedule.execution.map(|execution| execution.suspended(now));
             });
         }
     }
@@ -325,14 +324,9 @@ impl Timer {
         if self.suspended == 0 {
             let now = Instant::now();
             self.change(|schedule| {
-                if let Some(execution) = &mut schedule.execution
-                    && let Due::Left(left) = execution.due
-                {
-                    match now.checked_add(left) {
-                        Some(deadline) => execution.due = Due::At(deadline),
-                        None => schedule.execution = None,
-                    }
-                }
+                schedule.execution = schedule
+                    .execution
+                    .and_then(|execution| execution.resumed(now));
             });
         }
     }
@@ -436,12 +430,16 @@ impl Timer {
     /// In a process forked from the one that started the thread other
     /// than through [`Timer::forked`], the thread and its schedule
     /// forgotten (see [`Timer`]), so what follows starts afresh.
+    /// A suspended time limit with no thread is the forked child's to
+    /// forget as well, so it is untimed after the resume as it is with
+    /// none suspended.
     fn forget_if_forked(&mut self) {
-        if self.thread.is_some() && !self.started_in.is_current() {
+        if (self.thread.is_some() || self.suspended > 0) && !self.started_in.is_current() {
             if let Some(thread) = self.thread.take() {
                 thread.forget();
             }
             std::mem::forget(std::mem::take(&mut self.shared));
+            self.started_in = Process::current();
         }
     }
 }
@@ -536,15 +534,46 @@ enum Due {
     Left(Duration),
 }
 
+impl Execution {
+    /// The deadline the thread waits for, `None` while suspended.
+    fn deadline(self) -> Option<Instant> {
+        match self.due {
+            Due::At(deadline) => Some(deadline),
+            Due::Left(_) => None,
+        }
+    }
+
+    /// Suspended at `now`: the deadline become the time it had left, none
+    /// where it had passed, so a resume finds it due at once.
+    fn suspended(self, now: Instant) -> Execution {
+        match self.due {
+            Due::At(deadline) => Execution {
+                due: Due::Left(deadline.saturating_duration_since(now)),
+                ..self
+            },
+            Due::Left(_) => self,
+        }
+    }
+
+    /// Resumed at `now`: the time left become a deadline that far off,
+    /// and `None` where no clock reaches it, as [`Timer::arm`] arms none.
+    fn resumed(self, now: Instant) -> Option<Execution> {
+        match self.due {
+            Due::At(_) => Some(self),
+            Due::Left(left) => Some(Execution {
+                due: Due::At(now.checked_add(left)?),
+                ..self
+            }),
+        }
+    }
+}
+
 impl Schedule {
     /// The earliest deadline, `None` where none is set.
     fn next(&self) -> Option<Instant> {
         let periodic = self.periodic.iter().filter_map(|period| period.next);
         self.execution
-            .and_then(|execution| match execution.due {
-                Due::At(deadline) => Some(deadline),
-                Due::Left(_) => None,
-            })
+            .and_then(Execution::deadline)
             .into_iter()
             .chain(periodic)
             .min()
@@ -567,8 +596,7 @@ impl Schedule {
     /// The count waits for the extension's hook to read it.
     fn elapse(&mut self, interrupt: &Interrupt, now: Instant) {
         if let Some(execution) = &mut self.execution
-            && let Due::At(deadline) = execution.due
-            && deadline <= now
+            && execution.deadline().is_some_and(|deadline| deadline <= now)
         {
             if let Some(hard) = execution.hard
                 && interrupt.timed_out()

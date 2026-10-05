@@ -303,9 +303,10 @@ impl Request {
     /// request through it, PHP code it calls among what it does, all of
     /// it untimed; [`Observed::suspend_time_limit`] is the same guard
     /// over an observer's frame. Dropping it is the only resume, so a
-    /// handler cannot leave the limit suspended: not by returning early,
-    /// and not by a fatal under it, since a `zend_bailout` here is a
-    /// value the handler returns through, never a jump past its drop.
+    /// handler does not leave the limit suspended by returning early, nor
+    /// by a fatal under it, since a `zend_bailout` here is a value the
+    /// handler returns through, never a jump past its drop; a guard
+    /// handed to `mem::forget` leaves the request untimed to its end.
     /// Guards nest, and the outermost one's drop is the resume.
     ///
     /// The deadline is taken out of the request's timer and its time
@@ -313,17 +314,14 @@ impl Request {
     /// joined until the resume, and a periodic interrupt an extension
     /// started counts on through it: a profiler's clock is its own. A
     /// limit set while it is suspended, `set_time_limit()` from PHP code
-    /// the handler calls, is kept whole for the resume, and a timeout
-    /// raised before the suspend is still raised at the loop's next
-    /// check, since its time was up. The limit counts wall-clock time,
-    /// as php's does on the oracle's platform (`ITIMER_REAL` on an Apple
-    /// Silicon Mac) and in its threaded build (`CLOCK_BOOTTIME`,
-    /// `Z/Zend/zend_max_execution_timer.c:48`), so a handler that blocks
-    /// spends it. Where php counts CPU time, `ITIMER_PROF` in a build
-    /// without threads elsewhere, a handler blocked in a wait spends none,
-    /// but one that polls its client spends it all the same, and the
-    /// hard stage is armed on the same clock: the suspend is the
-    /// handler's say on every clock.
+    /// the handler calls, is kept whole for the resume and, as any
+    /// `set_time_limit()` does, clears a timeout raised and not yet
+    /// taken, where xdebug refuses the call during a session; a timeout
+    /// raised before the suspend and not cleared so is still raised at
+    /// the loop's next check, since its time was up. The limit counts
+    /// wall-clock time, as php's does on the oracle's platform
+    /// (`ITIMER_REAL`) and in its threaded build (`CLOCK_BOOTTIME`); a
+    /// handler that polls its client would spend even a CPU clock.
     ///
     /// [`Observed::suspend_time_limit`]: crate::api::abi::Observed::suspend_time_limit
     pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_> {
