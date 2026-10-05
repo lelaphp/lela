@@ -13,16 +13,29 @@
 //! `memory_get_usage()` counts every one a native builds (design
 //! §5.13).
 //!
-//! **Ownership, as design §5.1 decides it.** Every face is `Copy` and
-//! has no `Drop`; copying a `Value` is php's `ZVAL_COPY_VALUE`, a
-//! bitwise copy that touches no refcount, and the engine's `addref`
-//! beside it is what makes the two `ZVAL_COPY`.
-//! Owners are taken and given up explicitly, by the engine, where php's
-//! handlers do it: a value the engine hands a native is the frame's, a
-//! value a native hands back is the engine's from the moment it is
-//! returned, and a native releases nothing. What a native builds and
-//! drops without returning is freed with the request's memory at its
-//! end.
+//! **Ownership, as design §5.1 decides it, in the words Mitchell settled
+//! for it on #1980: a native gives up exactly the owners it took and did
+//! not hand on.** The kinds here are views:
+//! each is `Copy` and has no `Drop`, and copying a `Value` is php's
+//! `ZVAL_COPY_VALUE`, a bitwise copy that touches no refcount and
+//! carries no owner, good while an owner elsewhere keeps the value
+//! alive. An owner is an [`Owner`], one counted claim on a value,
+//! neither `Copy` nor `Clone`: [`Owner::take`] is the one conversion
+//! from a view, `Z_TRY_ADDREF`, and an owner leaves a native in one of
+//! two ways, handed to a sink, a call that takes it from its caller,
+//! the engine taking a native's return among them, or given up with
+//! [`Owner::give_up`], `zval_ptr_dtor`. Only the engine names an owner
+//! it did not take. What the engine hands a native is the frame's, a
+//! view the native takes an owner of where it keeps the value past the
+//! call or hands it on. A native that drops an owner unconsumed is
+//! wrong: a debug build reports it with the line that made it, and a
+//! release build runs nothing on drop, so what it kept is freed with
+//! the request's memory at its end.
+//!
+//! The constructors and sinks move to [`Owner`] one sink at a time
+//! (#1980): until a constructor returns one, the view it returns is the
+//! one owner the value was made with, and a sink that takes a view, or
+//! a native that returns one, takes that owner with it.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -36,9 +49,11 @@ use crate::api::request::Request;
 
 mod emalloc;
 mod fresh;
+mod owner;
 mod smart_str;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
+pub use owner::{Owner, View};
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one

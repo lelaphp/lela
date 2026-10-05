@@ -8,7 +8,8 @@
 //! time limit suspended (#1814), allocations as an extension observes
 //! them (design §7.1), the statements a Zend extension is told of
 //! under extended info (#1823), and a debug build's freed-use guard
-//! as a program meets it (#1990).
+//! as a program meets it (#1990), and the owner type as one
+//! meets it (#1995).
 
 use crate::api;
 
@@ -22,6 +23,7 @@ mod observer;
 mod observer_notices;
 mod op_arrays;
 mod opcodes;
+mod owners;
 mod periodic;
 mod pool;
 mod statements;

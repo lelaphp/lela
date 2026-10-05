@@ -155,6 +155,7 @@ Heap::resource_persistent
 Heap::resource_sized
 Heap::resource_with
 Heap::resources
+Heap::sensor
 Heap::separate
 Heap::set_memory_limit
 Heap::stored
@@ -263,6 +264,8 @@ Res::resource_type
 ResourceType
 Scalar
 Scalar::is_true
+Sensor
+Sensor::unconsumed
 Slot
 SockOpt
 SortEntry

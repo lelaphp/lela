@@ -1104,6 +1104,9 @@ values::Key::from_string
 values::Key::to_prop_name
 values::Layout
 values::Laziness
+values::Owner
+values::Owner::give_up
+values::Owner::take
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains
@@ -1266,4 +1269,5 @@ values::Value::tag
 values::Value::type_name
 values::Value::unpassed
 values::ValueRef
+values::View
 values::zend_sort
