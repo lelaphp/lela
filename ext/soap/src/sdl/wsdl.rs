@@ -6,10 +6,9 @@
 //! `wsdl_soap_binding_header`, `wsdl_message`).
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::{Resource, Value, ValueRef};
+use php_ext::request::{Request, StreamCtx};
+use php_ext::values::{Value, ValueRef};
 use php_ext_libxml::ffi::{Node, Raised};
-use php_ext_standard::{stream_ctx_option, stream_ctx_set_option};
 
 use crate::classes::string;
 use crate::model::{
@@ -47,7 +46,7 @@ pub(crate) struct Ctx {
     services: Table<Node>,
     pub(crate) attributes: Option<Table<crate::model::Attribute>>,
     pub(crate) attribute_groups: Option<Table<crate::model::TypeId>>,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     old_header: Option<Value>,
 }
 
@@ -175,8 +174,10 @@ pub(crate) fn sdl_set_uri_credentials(
     let Some(resource) = context.and_then(|c| c.as_resource().copied()) else {
         return Ok(());
     };
+    // `php_stream_context_from_zval(context_ptr, 1)`.
+    let resource = StreamCtx::fetch(req, resource)?;
     ctx.context = Some(resource);
-    let Some(header) = stream_ctx_option(req, resource, b"http", b"header")? else {
+    let Some(header) = resource.option(req, b"http", b"header") else {
         return Ok(());
     };
     let ValueRef::Str(s) = header.as_ref() else {
@@ -201,7 +202,7 @@ pub(crate) fn sdl_set_uri_credentials(
     req.addref(&header);
     ctx.old_header = Some(header);
     let value = string(req, &new_header)?;
-    let set = stream_ctx_set_option(req, resource, b"http", b"header", &value);
+    let set = resource.set_option(req, b"http", b"header", &value);
     req.release(value);
     set
 }
@@ -211,7 +212,7 @@ pub(crate) fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> R
     let context = ctx.context.take();
     if let Some(old) = ctx.old_header.take() {
         let set = match context {
-            Some(c) => stream_ctx_set_option(req, c, b"http", b"header", &old),
+            Some(c) => c.set_option(req, b"http", b"header", &old),
             None => Ok(()),
         };
         req.release(old);

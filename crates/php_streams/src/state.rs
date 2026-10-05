@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::api::abi::PersistentList;
 use php_engine::api::values::ResourceType;
 
-use crate::api::request::{EngineWrapper, FilterFactory, Request, Standard, StreamWrapper};
+use crate::api::request::{
+    EngineWrapper, FilterFactory, Request, Standard, StreamCtx, StreamWrapper, context_dtor,
+};
 use crate::api::values::Resource;
 use crate::streams::persistent::Held;
 use crate::streams::{FilterCall, Registered};
@@ -46,7 +48,11 @@ pub(crate) struct State {
     /// The `php_stream_context` the stream operation in progress was
     /// handed (`Streams::with_stream_ctx`), which a user-space wrapper's
     /// instance is given as its `$context`; `None` is php's `NULL`.
-    pub(crate) stream_ctx: Option<Resource>,
+    pub(crate) stream_ctx: Option<StreamCtx>,
+    /// `FG(default_context)`, made on its first use
+    /// ([`StreamCtx::default_ctx`]); where php keeps it is not
+    /// observable, so the layer keeps it beside the `context` (#1777).
+    pub(crate) default_context: Option<StreamCtx>,
     /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
     /// is opening for an include under `allow_url_include=0`, so the
     /// opens it makes are held to `allow_url_include` as an include's are.
@@ -89,13 +95,14 @@ pub(crate) struct State {
     pub(crate) pool: Option<Arc<PersistentList>>,
 }
 
-/// The three resource types `PHP_MINIT(streams)` and
-/// `PHP_MINIT(user_filters)` register: `le_stream`, `le_pstream` and
-/// `le_stream_filter`.
+/// The four resource types `PHP_MINIT(streams)`, `PHP_MINIT(file)` and
+/// `PHP_MINIT(user_filters)` register: `le_stream`, `le_pstream`,
+/// `le_stream_context` and `le_stream_filter`.
 #[derive(Clone, Copy)]
 pub(crate) struct Types {
     pub(crate) stream: ResourceType,
     pub(crate) pstream: ResourceType,
+    pub(crate) context: ResourceType,
     pub(crate) filter: ResourceType,
 }
 
@@ -108,6 +115,7 @@ impl Default for State {
             url_wrappers: None,
             user_stream_current: None,
             stream_ctx: None,
+            default_context: None,
             in_user_include: false,
             pclose_ret: 0,
             filters: Vec::new(),
@@ -162,13 +170,8 @@ impl Layer for Request {
     /// registers the plain files wrapper has started.
     fn streams(&mut self) -> &mut State {
         if self.state_ref::<State>().is_none() {
-            let (stream, pstream) = crate::streams::register(self.resources());
-            let filter = self.resources().register_type(b"stream filter", None);
-            self.state::<State>().types = Some(Types {
-                stream,
-                pstream,
-                filter,
-            });
+            let types = register_types(self);
+            self.state::<State>().types = Some(types);
         }
         self.state::<State>()
     }
@@ -181,13 +184,7 @@ impl Layer for Request {
         if let Some(types) = self.streams().types {
             return types;
         }
-        let (stream, pstream) = crate::streams::register(self.resources());
-        let filter = self.resources().register_type(b"stream filter", None);
-        let types = Types {
-            stream,
-            pstream,
-            filter,
-        };
+        let types = register_types(self);
         self.streams().types = Some(types);
         types
     }
@@ -222,6 +219,21 @@ impl Layer for Request {
         self.streams_ref()
             .is_some_and(|state| state.standard_streams.iter().any(Option::is_some))
             && self.host_fds_are_process()
+    }
+}
+
+/// The layer's resource types, registered as its state is built.
+fn register_types(req: &mut Request) -> Types {
+    let (stream, pstream) = crate::streams::register(req.resources());
+    let context = req
+        .resources()
+        .register_type(b"stream-context", Some(context_dtor));
+    let filter = req.resources().register_type(b"stream filter", None);
+    Types {
+        stream,
+        pstream,
+        context,
+        filter,
     }
 }
 

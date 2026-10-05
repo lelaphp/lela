@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_function};
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
-use php_ext::request::Request;
+use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 use php_ext_libxml::ffi::{Library, Node, Save};
 
@@ -753,19 +753,6 @@ fn set_str(req: &mut Request, this: PhpObject, which: ClientSlot, v: Value) -> R
     set_client_slot(req, this, which, v)
 }
 
-/// `stream_context_create()`: a fresh stream option set, `php_stream_context_alloc`.
-fn new_context(req: &mut Request) -> R<Option<Resource>> {
-    let Some(f) = lookup_function(req, b"stream_context_create") else {
-        return Ok(None);
-    };
-    let name = Value::string(PhpString::new(req, b"stream_context_create")?);
-    let callable = php_ext::coerce::to_callable(req, &name);
-    req.release(name);
-    let _ = f;
-    let made = php_ext::call::call(req, &callable?, &[])?;
-    Ok(made.as_resource().copied())
-}
-
 /// `SoapClient::__construct`'s body.
 #[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
 fn construct(
@@ -807,15 +794,17 @@ fn construct(
                 set_client_slot(req, this, ClientSlot::Use, Value::int(u))?;
             }
         }
-        let mut context: Option<Resource> = None;
-        if let Some(v) = ht.find(b"stream_context").map(|v| v.deref())
+        // `php_stream_context_from_zval(tmp, 1)` and one owner more, or
+        // `php_stream_context_alloc()`.
+        let context = if let Some(v) = ht.find(b"stream_context").map(|v| v.deref())
             && let Some(r) = v.as_resource().copied()
         {
+            let context = StreamCtx::fetch(req, r)?;
             req.addref(&v);
-            context = Some(r);
+            context
         } else {
-            context = new_context(req)?.or(context);
-        }
+            StreamCtx::alloc(req)?
+        };
         match str_option(*ht, b"location") {
             Some(v) => set_str(req, this, ClientSlot::Location, v)?,
             None if wsdl.is_none() => {
@@ -863,14 +852,9 @@ fn construct(
             }
         }
         if let Some(cert) = str_option(*ht, b"local_cert") {
-            if context.is_none() {
-                context = new_context(req)?;
-            }
-            if let Some(ctx) = context {
-                php_ext_standard::stream_ctx_set_option(req, ctx, b"ssl", b"local_cert", &cert)?;
-                if let Some(pp) = str_option(*ht, b"passphrase") {
-                    php_ext_standard::stream_ctx_set_option(req, ctx, b"ssl", b"passphrase", &pp)?;
-                }
+            context.set_option(req, b"ssl", b"local_cert", &cert)?;
+            if let Some(pp) = str_option(*ht, b"passphrase") {
+                context.set_option(req, b"ssl", b"passphrase", &pp)?;
             }
         }
         if let Some(t) = ht.find(b"trace").map(|v| v.deref())
@@ -944,9 +928,8 @@ fn construct(
                 set_client_slot(req, this, ClientSlot::ConnectionTimeout, Value::int(n))?;
             }
         }
-        if let Some(ctx) = context {
-            set_client_slot(req, this, ClientSlot::StreamContext, ctx.as_value())?;
-        }
+        let context = context.resource().as_value();
+        set_client_slot(req, this, ClientSlot::StreamCtx, context)?;
         if let Some(ValueRef::Int(c)) = ht
             .find(b"cache_wsdl")
             .map(|v| v.deref())

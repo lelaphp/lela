@@ -13,11 +13,11 @@ use php_ext::call::{call, lookup_function, new_object};
 use php_ext::coerce::{numeric_string, to_callable};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{
-    Handshake, PHP_VERSION, Request, SocketOptions, Stream, Streams as _, Xport,
+    Handshake, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx, Streams as _, Xport,
 };
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::md5::Md5;
-use php_ext_standard::{UriParser, base64, stream_ctx_option, stream_ctx_set_option};
+use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
 
 use crate::Res;
@@ -139,18 +139,18 @@ fn http_context_add_header(
 /// `http_context_headers`: the `http.header` option of `context`, a
 /// string or an array of strings, through [`http_context_add_header`].
 pub(crate) fn http_context_headers(
-    req: &mut Request,
-    context: Option<Resource>,
+    req: &Request,
+    context: Option<StreamCtx>,
     has_authorization: bool,
     has_proxy_authorization: bool,
     has_cookies: bool,
     soap_headers: &mut Vec<u8>,
-) -> Result<(), Thrown> {
+) {
     let Some(context) = context else {
-        return Ok(());
+        return;
     };
-    let Some(header) = stream_ctx_option(req, context, b"http", b"header")? else {
-        return Ok(());
+    let Some(header) = context.option(req, b"http", b"header") else {
+        return;
     };
     let flags = (has_authorization, has_proxy_authorization, has_cookies);
     match header.as_ref() {
@@ -168,7 +168,6 @@ pub(crate) fn http_context_headers(
         }
         _ => {}
     }
-    Ok(())
 }
 
 // ---- the C string reads php_http.c makes
@@ -641,7 +640,7 @@ fn http_connect(
     this: PhpObject,
     uri: &UriStruct,
     use_ssl: bool,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     use_proxy: &mut bool,
 ) -> R<Option<Stream>> {
     let proxy_host = client_slot(this, ClientSlot::ProxyHost);
@@ -687,12 +686,12 @@ fn http_connect(
     // Set `peer_name` or name verification will try to use the proxy
     // server's name.
     let given = match context {
-        Some(context) => stream_ctx_option(req, context, b"ssl", b"peer_name")?.is_some(),
+        Some(context) => context.option(req, b"ssl", b"peer_name").is_some(),
         None => false,
     };
     if !given && let Some(own) = stream.ctx(req) {
         let peer_name = Value::string(PhpString::new(req, host_of(uri))?);
-        let set = stream_ctx_set_option(req, own, b"ssl", b"peer_name", &peer_name);
+        let set = own.set_option(req, b"ssl", b"peer_name", &peer_name);
         req.release(peer_name);
         set?;
     }
@@ -961,12 +960,15 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
         };
         uri = parser.parse(req, call.location)?;
     }
-    let context = client_slot(this, ClientSlot::StreamContext)
+    // `php_stream_context_from_zval(Z_CLIENT_STREAM_CONTEXT_P(this_ptr), 0)`
+    // of a resource the slot holds.
+    let context = client_slot(this, ClientSlot::StreamCtx)
         .as_resource()
-        .copied();
+        .map(|&res| StreamCtx::fetch(req, res))
+        .transpose()?;
     let mut redirect_max: i64 = 20;
     if let Some(context) = context
-        && let Some(max) = stream_ctx_option(req, context, b"http", b"max_redirects")?
+        && let Some(max) = context.option(req, b"http", b"max_redirects")
     {
         match max.as_ref() {
             ValueRef::Str(s) => {
@@ -1168,7 +1170,7 @@ struct Head<'a> {
     uri: &'a UriStruct,
     use_ssl: bool,
     use_proxy: bool,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     soap_headers_z: &'a [u8],
     request_len: usize,
 }
@@ -1201,7 +1203,7 @@ fn request_headers(
     set_client_slot(req, this, ClientSlot::HttpUrl, Value::object(url))?;
     let http_1_1 = match context {
         Some(context) => !matches!(
-            stream_ctx_option(req, context, b"http", b"protocol_version")?
+            context.option(req, b"http", b"protocol_version")
                 .as_ref()
                 .map(Value::as_ref),
             Some(ValueRef::Float(v)) if is_one(v)
@@ -1233,10 +1235,11 @@ fn request_headers(
     } else {
         h.extend_from_slice(b"\r\nConnection: Keep-Alive\r\n");
     }
-    user_agent(req, this, context, &mut h)?;
+    user_agent(req, this, context, &mut h);
     h.extend_from_slice(head.soap_headers_z);
     let content_type = match context {
-        Some(context) => stream_ctx_option(req, context, b"http", b"content_type")?
+        Some(context) => context
+            .option(req, b"http", b"content_type")
             .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
             .filter(|v| !v.is_empty()),
         None => None,
@@ -1297,7 +1300,7 @@ fn request_headers(
         has_proxy_authorization,
         has_cookies,
         &mut h,
-    )?;
+    );
     h.extend_from_slice(b"\r\n");
     Ok(h)
 }
@@ -1305,12 +1308,7 @@ fn request_headers(
 /// `User-Agent`: the client's `user_agent`, none where it is empty; else
 /// the stream's `http.user_agent`, the same; else the `user_agent` ini
 /// entry where it has a value; else `PHP-SOAP/` and php's version.
-fn user_agent(
-    req: &mut Request,
-    this: PhpObject,
-    context: Option<Resource>,
-    h: &mut Vec<u8>,
-) -> R<()> {
+fn user_agent(req: &Request, this: PhpObject, context: Option<StreamCtx>, h: &mut Vec<u8>) {
     let line = |h: &mut Vec<u8>, agent: &[u8]| {
         h.extend_from_slice(b"User-Agent: ");
         h.extend_from_slice(agent);
@@ -1320,22 +1318,21 @@ fn user_agent(
         if !agent.is_empty() {
             line(h, agent);
         }
-        return Ok(());
+        return;
     }
     if let Some(context) = context
-        && let Some(agent) = stream_ctx_option(req, context, b"http", b"user_agent")?
+        && let Some(agent) = context.option(req, b"http", b"user_agent")
         && let Some(agent) = agent.as_str_bytes()
     {
         if !agent.is_empty() {
             line(h, agent);
         }
-        return Ok(());
+        return;
     }
     match req.ini_value(b"user_agent") {
         Some(agent) => line(h, cstr(agent)),
         None => line(h, format!("PHP-SOAP/{PHP_VERSION}").as_bytes()),
     }
-    Ok(())
 }
 
 /// `Authorization: Digest` over the challenge kept in the client's

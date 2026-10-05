@@ -10,11 +10,11 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use php_ext::abi::Callable;
-use php_ext::coerce::callable_checked;
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, SocketOptions, Stream, StreamOption, Streams as _, Xport};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::request::{
+    Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _, Xport,
+};
+use php_ext::values::{PhpString, Value};
 
 use crate::consts::{MAX_PACKET_SIZE, cr};
 use crate::error::{ErrorInfo, SERVER_GONE};
@@ -469,45 +469,18 @@ impl Net {
             return Ok(false);
         };
         let o = self.options.clone();
-        let mut ssl = PhpArray::new(req)?;
-        let mut any = false;
-        let string_options: [(&[u8], &Option<Vec<u8>>); 6] = [
-            (b"local_pk", &o.ssl_key),
-            (b"local_cert", &o.ssl_cert),
-            (b"cafile", &o.ssl_ca),
-            (b"capath", &o.ssl_capath),
-            (b"passphrase", &o.ssl_passphrase),
-            (b"ciphers", &o.ssl_cipher),
-        ];
-        for (name, value) in string_options {
-            if let Some(value) = value {
-                any = true;
-                let text = Value::string(PhpString::new(req, value)?);
-                set(req, &mut ssl, name, text)?;
-                if name == b"local_cert" && o.ssl_key.is_none() {
-                    let text = Value::string(PhpString::new(req, value)?);
-                    set(req, &mut ssl, b"local_pk", text)?;
-                }
+        let context = StreamCtx::alloc(req)?;
+        let set = ssl_options(req, context, &o);
+        let peer = match set {
+            Ok(peer) => peer,
+            Err(thrown) => {
+                req.release(context.resource().as_value());
+                return Err(thrown);
             }
-        }
-        let peer = match o.ssl_verify_peer {
-            SslPeer::Default if any => SslPeer::Verify,
-            SslPeer::Default => SslPeer::DontVerify,
-            other => other,
         };
         self.options.ssl_verify_peer = peer;
-        let verify = peer == SslPeer::Verify;
-        set(req, &mut ssl, b"verify_peer", Value::bool(verify))?;
-        set(req, &mut ssl, b"verify_peer_name", Value::bool(verify))?;
-        if peer == SslPeer::DontVerify {
-            set(req, &mut ssl, b"allow_self_signed", Value::bool(true))?;
-        }
-        let Some(context) = context_of(req, ssl)? else {
-            return Ok(false);
-        };
-        let resource = context.as_resource().copied();
-        stream.set_ctx(req, resource);
-        req.release(context);
+        stream.set_ctx(req, Some(context));
+        req.release(context.resource().as_value());
         let secured = stream.crypto_setup(req, TLS_CLIENT, None)
             && matches!(
                 stream.crypto_enable(req, true),
@@ -526,33 +499,49 @@ impl Net {
     }
 }
 
-/// One entry of the `ssl` options array.
-fn set(req: &mut Request, ssl: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
-    ssl.set(req, key, value)
-}
-
-/// `php_stream_context_alloc` with the `ssl` options set on it, through
-/// `stream_context_create`.
-fn context_of(req: &mut Request, ssl: PhpArray) -> Result<Option<Value>, Thrown> {
-    let name = Value::string(PhpString::new(req, b"stream_context_create")?);
-    let callable: Result<Callable, String> = callable_checked(req, &name);
-    req.release(name);
-    let Ok(callable) = callable else {
-        return Ok(None);
+/// The `ssl` options `mysqlnd_vio::enable_ssl` sets on the `context` it
+/// allocates, in its order: the key, the certificate (and it as the key
+/// where none is given), the CA file and path, the passphrase and the
+/// ciphers, then `verify_peer` and `verify_peer_name` as the peer check
+/// it settles on, which it answers, and `allow_self_signed` where it
+/// checks none.
+fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<SslPeer, Thrown> {
+    let mut any = false;
+    let string_options: [(&[u8], &Option<Vec<u8>>); 6] = [
+        (b"local_pk", &o.ssl_key),
+        (b"local_cert", &o.ssl_cert),
+        (b"cafile", &o.ssl_ca),
+        (b"capath", &o.ssl_capath),
+        (b"passphrase", &o.ssl_passphrase),
+        (b"ciphers", &o.ssl_cipher),
+    ];
+    let put = |req: &mut Request, name: &[u8], value: &[u8]| {
+        let text = Value::string(PhpString::new(req, value)?);
+        let set = context.set_option(req, b"ssl", name, &text);
+        req.release(text);
+        set
     };
-    let mut options = PhpArray::new(req)?;
-    let key = Key::Str(PhpString::new(req, b"ssl")?);
-    options.set(req, key, Value::array(ssl))?;
-    let options = Value::array(options);
-    let context = php_ext::call::call(req, &callable, std::slice::from_ref(&options));
-    req.release(options);
-    let context = context?;
-    if context.as_resource().is_none() {
-        req.release(context);
-        return Ok(None);
+    for (name, value) in string_options {
+        if let Some(value) = value {
+            any = true;
+            put(req, name, value)?;
+            if name == b"local_cert" && o.ssl_key.is_none() {
+                put(req, b"local_pk", value)?;
+            }
+        }
     }
-    Ok(Some(context))
+    let peer = match o.ssl_verify_peer {
+        SslPeer::Default if any => SslPeer::Verify,
+        SslPeer::Default => SslPeer::DontVerify,
+        other => other,
+    };
+    let verify = Value::bool(peer == SslPeer::Verify);
+    context.set_option(req, b"ssl", b"verify_peer", &verify)?;
+    context.set_option(req, b"ssl", b"verify_peer_name", &verify)?;
+    if peer == SslPeer::DontVerify {
+        context.set_option(req, b"ssl", b"allow_self_signed", &Value::bool(true))?;
+    }
+    Ok(peer)
 }
 
 /// `uint3korr`.
