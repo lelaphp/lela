@@ -180,6 +180,13 @@ fn serve(
         } => req.serve_method(function, this, scope, arguments, extra_named),
         Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
     };
+    without_frame(req, served)
+}
+
+/// The tail of `zend_call_function` (`Z/Zend/zend_execute_API.c:1069`):
+/// what the callee left pending, where no frame stands to take it, handed
+/// to [`Request::thrown_without_frame`].
+fn without_frame(req: &mut Request, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
     match served {
         Err(thrown) if !req.executing() => req.thrown_without_frame(&thrown),
         served => served,
@@ -781,6 +788,32 @@ pub(crate) fn handle_named_arg(
 /// the object as its receiver and the arguments as one more owner each,
 /// the frame popped whether the entry returned or threw. A name the
 /// class has no entry for is php's `Error` for an undefined method.
+/// `zend_call_method` serves it through `zend_call_function`, so what the
+/// method left pending where no frame stands to take it is rendered as
+/// the uncaught fatal where it was thrown and the call leaves by
+/// `zend_bailout`, as [`call`]'s does ([`Request::thrown_without_frame`]):
+/// a user filter's `filter()` as the request's resources are closed, and
+/// a session's `__unserialize()` in session's `rinit`, whose warning that
+/// the data did not decode then follows the fatal (#1879).
+///
+/// ```php
+/// class F extends php_user_filter { function filter($in, $out, &$consumed, $closing): int { if ($closing) throw new Exception("closing"); return PSFS_PASS_ON; } }
+/// stream_filter_register('f', 'F');
+/// $fp = fopen('php://memory', 'w');
+/// stream_filter_append($fp, 'f', STREAM_FILTER_WRITE);
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// echo "end\n";
+/// ```
+/// ```expect exit=255
+/// end
+/// shutdown
+///
+/// Fatal error: Uncaught Exception: closing in %s:2
+/// Stack trace:
+/// #0 [internal function]: F->filter(Resource id #%d, Resource id #%d, 0, true)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub fn call_method(
     req: &mut Request,
     object: &PhpObject,
@@ -799,7 +832,8 @@ pub fn call_method(
             ),
         ));
     };
-    req.serve_method(function, Some(*object), class, arguments, &[])
+    let served = req.serve_method(function, Some(*object), class, arguments, &[]);
+    without_frame(req, served)
 }
 
 /// A `zend_fcall_info_cache` filled by hand with a method the caller

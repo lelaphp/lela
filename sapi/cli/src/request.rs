@@ -179,17 +179,29 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
         Err(code) => return code,
     };
     let mut sink = Process;
-    match program {
+    let served = match program {
         Program::Direct(code) => {
-            engine
-                .command_line(description, CommandLine::Direct(code.clone()), &mut sink)
-                .exit_code
+            engine.command_line(description, CommandLine::Direct(code.clone()), &mut sink)
         }
         Program::File(_) | Program::Stdin => {
             dump(engine, &description, &mut sink);
-            engine.serve(description, &mut sink).exit_code
+            engine.serve(description, &mut sink)
         }
+    };
+    ended(&served, &mut sink)
+}
+
+/// The status `do_cli` ends a request with: where `php_request_startup`
+/// failed, an extension's `rinit` having raised (#1775), `Could not
+/// startup.` written after what the failure rendered, and 1, which `err`
+/// sets (`Z/sapi/cli/php_cli.c:919-922`, `:1188-1191`); otherwise the
+/// request's own.
+fn ended(served: &Observables, sink: &mut dyn OutputSink) -> i32 {
+    if served.start_failed {
+        let _ = sink.write(b"Could not startup.\n");
+        return 1;
     }
+    served.exit_code
 }
 
 /// `PHP_CLI_MODE_STANDARD` with `interactive` (`php_cli.c:945-950`):
@@ -201,9 +213,8 @@ pub fn shell(engine: &Engine, file: Option<&Path>, arguments: &[OsString]) -> i3
         Ok(description) => description,
         Err(code) => return code,
     };
-    engine
-        .command_line(description, CommandLine::Shell, &mut Process)
-        .exit_code
+    let served = engine.command_line(description, CommandLine::Shell, &mut Process);
+    ended(&served, &mut Process)
 }
 
 /// `PHP_CLI_MODE_PROCESS_STDIN` (`php_cli.c:996-1034`): `-B`, `-R` or
@@ -226,9 +237,8 @@ pub fn process_stdin(engine: &Engine, lines: &Lines, arguments: &[OsString]) -> 
         }),
         end: lines.end.clone(),
     };
-    engine
-        .command_line(description, command, &mut Process)
-        .exit_code
+    let served = engine.command_line(description, command, &mut Process);
+    ended(&served, &mut Process)
 }
 
 /// php's op arrays as the compiler left them, on the second stream,
@@ -273,7 +283,8 @@ fn view(
     match describe(file_of(program), arguments, *program == Program::Stdin) {
         Ok(mut description) => {
             description.file_handles = None;
-            write(description, &mut Process).exit_code
+            let served = write(description, &mut Process);
+            ended(&served, &mut Process)
         }
         Err(code) => code,
     }
@@ -297,6 +308,9 @@ pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i3
     let name = description.argv.first().cloned().unwrap_or_default();
     dump(engine, &description, sink);
     let served = engine.lint(description, sink);
+    if served.start_failed {
+        return ended(&served, sink);
+    }
     let mut line = if served.exit_code == 0 {
         b"No syntax errors detected in ".to_vec()
     } else {
@@ -349,7 +363,8 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
     match describe(file, &[], false) {
         Ok(mut description) => {
             description.file_handles = None;
-            in_request(engine, description, code)
+            let served = in_request(engine, description, code);
+            ended(&served, &mut Process)
         }
         Err(code) => code,
     }
@@ -357,11 +372,11 @@ pub fn report(engine: &Engine, report: &Report, file: Option<&Path>) -> i32 {
 
 /// `-i`, `do_cli`'s first loop (`php_cli.c:622-630`): `php_print_info`
 /// with every section but the credits, in a request started before
-/// `do_repeat` set `php_self` or an `argv`, and 0.
+/// `do_repeat` set `php_self` or an `argv`, and 0; 1 with nothing more
+/// written where the request's start failed (`goto err`).
 pub fn info(engine: &Engine) -> i32 {
     let code = b"phpinfo(INFO_ALL & ~INFO_CREDITS);".to_vec();
-    let _ = in_request(engine, unnamed(), code);
-    0
+    i32::from(in_request(engine, unnamed(), code).start_failed)
 }
 
 /// `php_module_startup` as `main` runs it before `-v`, `-m` and `-S`
@@ -401,7 +416,14 @@ pub(crate) fn started(engine: &Engine, name: &str) -> i32 {
         sapi_name: String::from(name),
         ..unnamed()
     };
-    in_request(engine, description, Vec::new())
+    let served = in_request(engine, description, Vec::new());
+    // `-m`'s `php_request_startup` failing is `goto err`, 1 with
+    // nothing more written (`php_cli.c:643-646`).
+    if served.start_failed {
+        1
+    } else {
+        served.exit_code
+    }
 }
 
 /// A request before `do_repeat` set `php_self` or an `argv`.
@@ -444,11 +466,9 @@ fn quoted(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// `code` served in `description`'s request with no program, as `do_cli`
-/// serves its reports after `php_request_startup`; the exit code.
-fn in_request(engine: &Engine, description: RequestDescription, code: Vec<u8>) -> i32 {
-    engine
-        .command_line(description, CommandLine::Direct(code), &mut Process)
-        .exit_code
+/// serves its reports after `php_request_startup`; what it observed.
+fn in_request(engine: &Engine, description: RequestDescription, code: Vec<u8>) -> Observables {
+    engine.command_line(description, CommandLine::Direct(code), &mut Process)
 }
 
 #[cfg(test)]
@@ -626,5 +646,63 @@ mod tests {
             1
         );
         assert_eq!(sink.0, b"");
+    }
+
+    /// An extension whose `rinit` throws, as session's does where its data
+    /// does not decode (#1775); the CLI reads no cookie, so no extension
+    /// of the bundle fails a CLI request's start.
+    fn failing_start() -> Engine {
+        fn throws(req: &mut php_ext::request::Request) -> Result<(), php_ext::raising::Thrown> {
+            Err(php_ext::raising::throw_error(req, "Error", "rinit threw"))
+        }
+        let failing = php_ext::abi::ExtensionBuilder::default()
+            .rinit(throws)
+            .build("failing");
+        Engine::builder()
+            .ini("html_errors", "0")
+            .extensions(&[failing])
+            .build()
+    }
+
+    /// What the failed start displays under the CLI.
+    const FAILED: &str = "\nFatal error: Uncaught Error: rinit threw in [no active file]:0\nStack trace:\n#0 {main}\n  thrown in [no active file] on line 0\n";
+
+    /// A request whose start failed ends as `do_cli` ends it: what the
+    /// failure displayed, `Could not startup.` after it, and 1, the code
+    /// never run (`php_cli.c:919-922`, `:1188-1191`).
+    #[test]
+    fn a_failed_start_is_could_not_startup_and_status_one() {
+        let engine = failing_start();
+        let described = describe(None, &[], false);
+        assert!(described.is_ok());
+        let Ok(description) = described else {
+            return;
+        };
+        let mut sink = Capture::default();
+        let served = engine.command_line(
+            description,
+            CommandLine::Direct(b"echo 'ran';".to_vec()),
+            &mut sink,
+        );
+        assert!(served.start_failed);
+        assert_eq!(ended(&served, &mut sink), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&sink.0),
+            format!("{FAILED}Could not startup.\n")
+        );
+    }
+
+    /// `-l`'s request starts as any other's, so a failed start is the same
+    /// ending in place of the verdict, its status the lint loop's.
+    #[test]
+    fn a_failed_start_under_lint_writes_no_verdict() {
+        let engine = failing_start();
+        let ok = scratch("start-failed.php", "<?php\necho 1;\n");
+        let mut sink = Capture::default();
+        assert_eq!(lint(&engine, &Program::File(ok), &mut sink), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&sink.0),
+            format!("{FAILED}Could not startup.\n")
+        );
     }
 }

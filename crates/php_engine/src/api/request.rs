@@ -5878,13 +5878,18 @@ impl Request {
     /// `sapi_module.send_headers`: the response's head handed to the
     /// sink, once, at the commit `sapi_send_headers` makes, or when the
     /// request ends where nothing committed it; nothing where the host
-    /// asked for none (`no_headers`).
+    /// asked for none (`no_headers`) once the request started, since
+    /// php-cgi sets it after `php_request_startup` returns
+    /// (`Z/sapi/cgi/cgi_main.c:2468-2471`): what an extension's `rinit`
+    /// displays commits the head under `-q` too, a failed start's fatal
+    /// among it (#1879).
     pub(crate) fn send_header_block(&mut self) {
-        if self
-            .description
-            .web
-            .as_ref()
-            .is_some_and(|web| web.no_headers)
+        if self.phase != Phase::Startup
+            && self
+                .description
+                .web
+                .as_ref()
+                .is_some_and(|web| web.no_headers)
         {
             return;
         }

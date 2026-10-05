@@ -10,7 +10,7 @@
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
-use php_sapi::{Engine, FileHandles, Observables, Primary, RequestDescription};
+use php_sapi::{Engine, FileHandles, Observables, OutputSink, Primary, RequestDescription};
 
 use crate::cmd::Command;
 use crate::out::{self, Sink};
@@ -108,6 +108,9 @@ pub fn serve(engine: &Engine) -> i32 {
         let description = describe(&s, plan);
         session::put(s);
         let observed = engine.serve(description, &mut Sink);
+        if observed.start_failed {
+            return start_failed(&mut Sink);
+        }
         let Some(mut s) = session::take() else {
             return status;
         };
@@ -116,6 +119,16 @@ pub fn serve(engine: &Engine) -> i32 {
         ended(&mut s, plan, &observed);
         session::put(s);
     }
+}
+
+/// Where `php_request_startup` failed, an extension's `rinit` having
+/// raised (#1775): `PUTS("Could not startup")` after what the failure
+/// displayed, and 1 out of `main` (`Z/sapi/phpdbg/phpdbg.c:1449-1452`),
+/// every later cycle and the prompt left.
+fn start_failed(sink: &mut dyn OutputSink) -> i32 {
+    let _ = sink.write(b"Could not startup");
+    sink.flush();
+    1
 }
 
 /// After a request: the context marked as one that does not compile
@@ -529,5 +542,61 @@ pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
             });
             s.breaks.set_file(compiled, name, line);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use php_sapi::{Aborted, ResponseHead};
+
+    /// The body the request wrote, kept.
+    #[derive(Default)]
+    struct Capture(Vec<u8>);
+
+    impl OutputSink for Capture {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+            self.0.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn flush(&mut self) {}
+        fn send_headers(&mut self, _head: &ResponseHead) {}
+        fn log(&mut self, _entry: &[u8]) {}
+        fn write_stderr(&mut self, _bytes: &[u8]) {}
+    }
+
+    /// An engine whose one extension's `rinit` throws, as session's does
+    /// where its data does not decode (#1775); phpdbg reads no cookie, so
+    /// no extension of the bundle fails its request's start.
+    fn failing_start() -> Engine {
+        fn throws(req: &mut php_ext::request::Request) -> Result<(), php_ext::raising::Thrown> {
+            Err(php_ext::raising::throw_error(req, "Error", "rinit threw"))
+        }
+        let failing = php_ext::abi::ExtensionBuilder::default()
+            .rinit(throws)
+            .build("failing");
+        Engine::builder()
+            .ini("html_errors", "0")
+            .extensions(&[failing])
+            .build()
+    }
+
+    /// The session's first request fails its start: the session ends there
+    /// with 1, no prompt read, and what the failure displayed is followed by
+    /// `Could not startup` with no newline, as phpdbg's `PUTS` writes it.
+    #[test]
+    fn a_failed_start_is_could_not_startup_and_status_one() {
+        let engine = failing_start();
+        session::install(Session::new());
+        assert_eq!(serve(&engine), 1);
+        let s = session::take().unwrap_or_default();
+        let mut sink = Capture::default();
+        let observed = engine.serve(describe(&s, Plan::Idle), &mut sink);
+        assert!(observed.start_failed);
+        assert_eq!(start_failed(&mut sink), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&sink.0),
+            "\nFatal error: Uncaught Error: rinit threw in [no active file]:0\nStack trace:\n#0 {main}\n  thrown in [no active file] on line 0\nCould not startup"
+        );
     }
 }

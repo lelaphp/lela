@@ -5,8 +5,9 @@
 
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
 use crate::api::abi::{Extension, PostStartup as Answer};
+use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::engine::Engine;
+use crate::engine::{Engine, RequestDescription};
 use crate::test::Capture;
 
 use Event::{Ext, Mark};
@@ -424,6 +425,122 @@ fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
             .between("exited", "failed")
             .handed(&RequestStateDropped),
         [2, 1, 0]
+    );
+}
+
+/// A request-start function that throws, as session's `RINIT` leaves
+/// pending what a session's data threw as it was unserialized.
+fn throws<const N: u8>(req: &mut Request) -> Result<(), Thrown> {
+    record(N, Rinit(Some(0)));
+    Err(crate::api::raising::throw_error(
+        req,
+        "Error",
+        &format!("thrown by {N}"),
+    ))
+}
+
+/// `program` as the CLI host describes a program it read from stdin.
+fn piped(program: &str) -> RequestDescription {
+    RequestDescription {
+        sapi_name: String::from("cli"),
+        script_name: Some(b"Standard input code".to_vec()),
+        source: Some(program.as_bytes().to_vec()),
+        cwd: std::env::current_dir().unwrap_or_default(),
+        ..RequestDescription::default()
+    }
+}
+
+/// An error from `rinit` is php's fatal inside `RINIT` (#1775): the
+/// throwable is rendered as php renders one thrown with no frame
+/// standing, at `[no active file]` on line zero, the extension after it
+/// is handed no start, the program is not served, and no extension is
+/// handed a request-end phase, since every php host but the built-in
+/// server goes from the failure to `php_module_shutdown` without
+/// `php_request_shutdown`. The request states drop, in reverse; the
+/// resources the started extensions' `rinit` opened are not closed, as
+/// php's `zend_close_rsrc_list` is `php_request_shutdown`'s. The host is
+/// told the start failed, with the fatal's status.
+#[test]
+fn an_error_from_rinit_fails_the_request_start_with_no_request_end_phase() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::builder()
+                .rinit(throws::<1>)
+                .build("test_ext_1"),
+            TestExt::<2>::extension(),
+        ])
+        .build();
+    rec.mark("built");
+    let mut sink = Capture::default();
+    let observed = engine.serve(piped("<?php echo 'ran';"), &mut sink);
+    rec.mark("served");
+    assert_eq!(
+        String::from_utf8_lossy(&sink.stdout),
+        "\nFatal error: Uncaught Error: thrown by 1 in [no active file]:0\nStack trace:\n#0 {main}\n  thrown in [no active file] on line 0\n"
+    );
+    assert!(observed.start_failed);
+    assert_eq!(observed.exit_code, 255);
+    assert_eq!(
+        rec.events()
+            .between("built", "served")
+            .without(&Error(String::new()))
+            .0,
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(2, RequestStateBuilt),
+            Ext(0, Rinit(Some(0))),
+            Ext(1, Rinit(Some(0))),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
+        ]
+    );
+}
+
+/// The built-in server is the one host that shuts a request whose start
+/// failed down (`php_cli_server_dispatch`,
+/// `Z/sapi/cli/php_cli_server.c:2307-2310`): the program is not served,
+/// and every request-end phase is served after the fatal, the resources
+/// closed among them; no response code is read for its log.
+#[test]
+fn the_built_in_server_ends_a_request_whose_start_failed() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::builder()
+                .rinit(throws::<1>)
+                .build("test_ext_1"),
+        ])
+        .build();
+    rec.mark("built");
+    let mut sink = Capture::default();
+    let (observed, dispatched) = engine.dispatch(piped("<?php echo 'ran';"), None, &mut sink);
+    rec.mark("served");
+    assert!(observed.start_failed);
+    assert_eq!(dispatched.code, None);
+    assert!(!String::from_utf8_lossy(&sink.stdout).contains("ran"));
+    assert_eq!(
+        rec.events()
+            .between("built", "served")
+            .without(&Error(String::new()))
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .0,
+        [
+            Ext(0, Rinit(Some(0))),
+            Ext(1, Rinit(Some(0))),
+            Ext(1, Rshutdown),
+            Ext(0, Rshutdown),
+            Ext(1, Deactivate),
+            Ext(0, Deactivate),
+            Ext(0, ResourceClosed),
+            Ext(1, PostDeactivate),
+            Ext(0, PostDeactivate),
+        ]
     );
 }
 
