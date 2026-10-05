@@ -1,13 +1,11 @@
 //! `share.c`: the `CurlShareHandle` and `CurlSharePersistentHandle`
 //! classes, each over a `CURLSH`, and their natives.
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers};
+use php_ext::abi::{Instance, Refusals};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, write_prop};
+use php_ext::call::write_prop;
 use php_ext::coerce::{numeric_string, to_long, value_name};
-use php_ext::raising::{Thrown, argument_error, throw, throw_error};
+use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -94,43 +92,15 @@ impl CurlSharePersistentHandle {
     const options: PhpArray;
 }
 
-/// `curl_share_handlers` and `curl_share_persistent_handlers`, which
-/// differ in the constructor's message.
-pub(crate) struct Handlers {
-    constructor: &'static str,
-}
+/// `curl_share_handlers`: construction, cloning and comparison refused.
+const SHARE: Refusals = Refusals::NONE
+    .construction(Some("curl_share_init()"))
+    .cloning()
+    .comparison();
 
-pub(crate) static SHARE: Handlers = Handlers {
-    constructor: "Cannot directly construct CurlShareHandle, use curl_share_init() instead",
-};
-
-pub(crate) static PERSISTENT: Handlers = Handlers {
-    constructor: "Cannot directly construct CurlSharePersistentHandle, use curl_share_init_persistent() instead",
-};
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(req, "Error", self.constructor))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
-}
+/// `curl_share_persistent_handlers`, which differ from
+/// `curl_share_handlers` in the constructor's words.
+const PERSISTENT: Refusals = SHARE.construction(Some("curl_share_init_persistent()"));
 
 /// `curl_share_init(): CurlShareHandle`.
 ///

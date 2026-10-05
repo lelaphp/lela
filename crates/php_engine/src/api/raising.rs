@@ -372,6 +372,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         crate::api::request::Phase::Shutdown | crate::api::request::Phase::ResourceShutdown => {
             "PHP Request Shutdown"
         }
+        crate::api::request::Phase::EngineEnd => "PHP Shutdown",
     };
     verror(req, level, Origin::Phase(phase), b"", message.as_bytes());
 }

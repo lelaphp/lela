@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream, Whence};
+use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::handle::{Curl, easy_of, made};

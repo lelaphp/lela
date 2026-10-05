@@ -24,7 +24,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
-use php_heap::{Block, Readiness, SockOpt};
+use crate::api::net::{Readiness, SockOpt};
+use crate::api::values::Emalloc;
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
@@ -33,6 +34,8 @@ use crate::api::request::{
     StreamOption, Xport, XportFactory, XportFailure,
 };
 use crate::api::values::{PhpString, Resource};
+use crate::streams::StreamLayer;
+use crate::streams::persistent::Persistent;
 
 /// `STREAM_OOB` and `STREAM_PEEK`, the bits of `stream_socket_sendto`'s
 /// and `stream_socket_recvfrom`'s `$flags`.
@@ -98,7 +101,7 @@ pub(crate) enum Xported {
 
 /// The socket `std` holds, one variant per shape php's `socket(2)` was
 /// asked for, and the one a stream was handed.
-enum Sock {
+pub(crate) enum Sock {
     Tcp(TcpStream),
     TcpServer(TcpListener),
     Udp(UdpSocket),
@@ -176,7 +179,7 @@ pub(crate) struct Socket {
     /// place ([`Crypto::allocations`]), on the request's heap from
     /// [`Ops::lay_down`] to the close; none for a persistent stream's,
     /// which php allocates persistent.
-    data: Vec<Block>,
+    data: Vec<Emalloc>,
     crypto: Option<Box<dyn Crypto>>,
     context: Option<Resource>,
     own: Option<Stream>,
@@ -425,7 +428,7 @@ impl Ops for Socket {
                 let (code, text) = socket_error(&error);
                 let text = format!(
                     "{}(): Send of {} bytes failed with errno={code} {text}",
-                    req.active_native(),
+                    req.active_function_name(),
                     buf.len()
                 );
                 raise(req, Level::Notice, &text);
@@ -472,7 +475,7 @@ impl Ops for Socket {
             if !dont_wait {
                 self.timeout_event = false;
                 loop {
-                    match php_heap::poll_fd(sock.fd(), Readiness::Readable, self.timeout) {
+                    match crate::api::net::poll_fd(sock.fd(), Readiness::Readable, self.timeout) {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Ok(true) | Err(_) => break,
                         Ok(false) => {
@@ -509,7 +512,7 @@ impl Ops for Socket {
         self.crypto = None;
         self.sock = None;
         for data in std::mem::take(&mut self.data) {
-            req.heap_mut().free_block(data);
+            data.free(req);
         }
         0
     }
@@ -533,8 +536,7 @@ impl Ops for Socket {
             .as_ref()
             .map_or_else(|| vec![NETSTREAM_DATA_SIZE], |layer| layer.allocations());
         for size in sizes {
-            let data = req.heap_mut().block(size);
-            self.data.push(req.fatal_of(data)?);
+            self.data.push(Emalloc::new(req, size)?);
         }
         Ok(())
     }
@@ -611,7 +613,11 @@ impl Ops for Socket {
             StreamOption::Liveness if self.crypto_active() => {
                 let readable = self.sock.as_ref().is_some_and(|sock| {
                     matches!(
-                        php_heap::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
+                        crate::api::net::poll_fd(
+                            sock.fd(),
+                            Readiness::Readable,
+                            Some(Duration::ZERO)
+                        ),
                         Ok(true)
                     )
                 });
@@ -652,7 +658,8 @@ impl Ops for Socket {
                 Xported::Sent(match sent {
                     Ok(n) => Some(n),
                     Err(error) => {
-                        let text = format!("{}(): {}\n", req.active_native(), strerror(&error));
+                        let text =
+                            format!("{}(): {}\n", req.active_function_name(), strerror(&error));
                         warning(req, &text);
                         None
                     }
@@ -728,7 +735,7 @@ impl Socket {
         };
         if matches!(self.role, Role::Server { .. })
             && !matches!(
-                php_heap::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
+                crate::api::net::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
                 Ok(true)
             )
         {
@@ -739,11 +746,11 @@ impl Socket {
             // `MSG_DONTWAIT` on a socket that blocks: made non-blocking
             // for the one call, as [`Socket::read_now`] makes it.
             let _ = sock.set_blocking(false);
-            let peeked = php_heap::peek_fd(sock.fd(), &mut byte);
+            let peeked = crate::api::net::peek_fd(sock.fd(), &mut byte);
             let _ = sock.set_blocking(true);
             peeked
         } else {
-            php_heap::peek_fd(sock.fd(), &mut byte)
+            crate::api::net::peek_fd(sock.fd(), &mut byte)
         };
         match peeked {
             Ok(n) => n > 0,
@@ -765,7 +772,7 @@ impl Socket {
         want_peer: bool,
     ) -> Result<(Socket, Option<Vec<u8>>), String> {
         let sock = self.sock.as_ref().ok_or_else(String::new)?;
-        match php_heap::poll_fd(sock.fd(), Readiness::Readable, timeout) {
+        match crate::api::net::poll_fd(sock.fd(), Readiness::Readable, timeout) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(socket_error(&std::io::Error::from_raw_os_error(ETIMEDOUT)).1);
@@ -851,7 +858,7 @@ fn recv(
             let (n, from) = s.peek_from(buf).ok()?;
             return Some((n, want_addr.then(|| inet_text(&from))));
         }
-        let n = php_heap::peek_fd(sock.fd(), buf).ok()?;
+        let n = crate::api::net::peek_fd(sock.fd(), buf).ok()?;
         return Some((n, want_addr.then(Vec::new)));
     }
     match sock {
@@ -929,7 +936,7 @@ fn addresses(req: &mut Request, host: &str, port: u16) -> Result<Vec<SocketAddr>
                 .strip_prefix("failed to lookup address information: ")
                 .unwrap_or(&text);
             let message = format!("php_network_getaddresses: getaddrinfo for {host} failed: {gai}");
-            let shown = format!("{}(): {message}", req.active_native());
+            let shown = format!("{}(): {message}", req.active_function_name());
             warning(req, &shown);
             Err(message)
         }
@@ -948,7 +955,7 @@ fn unix_path(req: &mut Request, name: &[u8]) -> std::path::PathBuf {
         path = &path[..UNIX_PATH_MAX];
         let text = format!(
             "{}(): socket path exceeded the maximum allowed length of {UNIX_PATH_MAX} bytes and was truncated",
-            req.active_native()
+            req.active_function_name()
         );
         raise(req, Level::Notice, &text);
     }
@@ -1006,20 +1013,20 @@ fn connect_inet(
                 bindto = None;
             }
         }
-        let Ok(fd) = php_heap::new_socket(&addr, udp) else {
+        let Ok(fd) = crate::api::net::new_socket(&addr, udp) else {
             continue;
         };
         if let Some((local, local_port)) = &bindto {
             bind_local(req, fd.as_fd(), &addr, local, *local_port);
         }
         if udp && options.so_broadcast {
-            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
         }
         if !udp && options.tcp_nodelay {
-            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true);
+            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true);
         }
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        match php_heap::connect_fd(
+        match crate::api::net::connect_fd(
             fd.as_fd(),
             &addr,
             left.map(|t| t.max(Duration::from_micros(1))),
@@ -1053,14 +1060,17 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
             .map(std::net::IpAddr::V6)
     };
     let Some(ip) = ip else {
-        let text = format!("{}(): Invalid IP Address: {local}", req.active_native());
+        let text = format!(
+            "{}(): Invalid IP Address: {local}",
+            req.active_function_name()
+        );
         warning(req, &text);
         return;
     };
-    if let Err(error) = php_heap::bind_fd(fd, &SocketAddr::new(ip, port)) {
+    if let Err(error) = crate::api::net::bind_fd(fd, &SocketAddr::new(ip, port)) {
         let text = format!(
             "{}(): Failed to bind to '{local}:{port}', system said: {}",
-            req.active_native(),
+            req.active_function_name(),
             socket_error(&error).1
         );
         warning(req, &text);
@@ -1089,26 +1099,26 @@ fn bind_inet(
         text: String::new(),
     };
     for addr in addrs {
-        let fd = match php_heap::new_socket(&addr, udp) {
+        let fd = match crate::api::net::new_socket(&addr, udp) {
             Ok(fd) => fd,
             Err(error) => {
                 last = failure(&error);
                 continue;
             }
         };
-        let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true);
+        let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true);
         if addr.is_ipv6()
             && let Some(only) = options.ipv6_v6only
         {
-            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only);
+            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only);
         }
         if options.so_reuseport {
-            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true);
+            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true);
         }
         if udp && options.so_broadcast {
-            let _ = php_heap::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
         }
-        if let Err(error) = php_heap::bind_fd(fd.as_fd(), &addr) {
+        if let Err(error) = crate::api::net::bind_fd(fd.as_fd(), &addr) {
             last = failure(&error);
             continue;
         }
@@ -1119,7 +1129,7 @@ fn bind_inet(
             let backlog = options.listen_queue.unwrap_or(32);
             let backlog =
                 i32::try_from(backlog).unwrap_or(if backlog < 0 { i32::MIN } else { i32::MAX });
-            php_heap::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
+            crate::api::net::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
         }
         return Ok(Sock::TcpServer(TcpListener::from(fd)));
     }
@@ -1145,34 +1155,31 @@ const TRANSPORTS: [(&str, &str); 4] = [
 /// four, by the label of its kind, or one an extension registered, which
 /// is a `tcp` socket with the extension's crypto layer.
 #[derive(Clone, Copy)]
-enum Found {
+pub(crate) enum Found {
     Engine(&'static str),
     Registered(XportFactory),
 }
 
-impl Request {
-    /// `stream_get_transports()`: the registered `transports` in the order
-    /// they were registered, `tcp`, `udp`, `unix` and `udg`, then what the
-    /// bundle's extensions registered, in bundle order, a name already
-    /// there taken over in its place as `zend_hash_update` keeps it.
-    ///
-    /// ```php
-    /// echo implode(',', array_slice(stream_get_transports(), 0, 4)), "\n";
-    /// ```
-    /// ```expect
-    /// tcp,udp,unix,udg
-    /// ```
-    #[must_use]
-    pub fn transports(&self) -> Vec<&'static str> {
-        let mut names: Vec<&'static str> = TRANSPORTS.iter().map(|(name, _)| *name).collect();
-        for transport in self.registered::<XportFactory>() {
-            if !names.contains(&transport.name) {
-                names.push(transport.name);
-            }
-        }
-        names
-    }
+pub(crate) trait Transports {
+    fn transport_named(&self, protocol: &[u8]) -> Option<Found>;
+    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure>;
+    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown>;
+    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown>;
+    fn xport_stream(
+        &mut self,
+        fd: OwnedFd,
+        name: Option<&str>,
+        blocking: bool,
+    ) -> Result<Stream, Thrown>;
+    fn transports(&self) -> Vec<&'static str>;
+    fn xport_create(
+        &mut self,
+        name: &[u8],
+        xport: Xport,
+    ) -> Result<Result<Stream, XportFailure>, Thrown>;
+}
 
+impl Transports for Request {
     /// `zend_hash_str_find_ptr(&xport_hash, protocol)`: the last
     /// registration of the name, an extension's over the engine's.
     fn transport_named(&self, protocol: &[u8]) -> Option<Found> {
@@ -1189,24 +1196,162 @@ impl Request {
             .map(|&(_, label)| Found::Engine(label))
     }
 
-    /// `_php_stream_xport_create` (`Z/main/streams/transports.c:52`) under
-    /// `REPORT_ERRORS` with an error string asked for: the `transport` read
-    /// off the front of `name`, `tcp` where it names none, one nobody
-    /// registered being php's `Unable to find the socket transport`; for
-    /// one an extension registered, its crypto layer made first, as the
-    /// factory makes the stream; then a client connected to the rest of
-    /// the name, within `timeout`, where it asked to connect, or a server
-    /// bound to it, and listening where `listen` says. A client that did
-    /// not ask holds no socket, php's `sock->socket == -1`, the rest of the
-    /// name not parsed: a write takes nothing, a read fails, and it is at
-    /// its end. The stream is `r+`, of the `transport`'s kind, with the
-    /// name as written as its `uri`, the `context` as its own and
-    /// `default_socket_timeout` as its read timeout; a connected client's
-    /// layer is then asked [`Crypto::connected`], and one that refuses
-    /// fails the connect with no text. A failure is its error code and text, which
-    /// the natives print; the `Err` is the memory limit or what the
-    /// layer's factory threw.
-    pub fn xport_create(
+    /// The socket of a `transport`'s kind, by its label: a client
+    /// connected or a server bound, `php_stream_xport_connect` and
+    /// `php_stream_xport_bind` under the kind's ops.
+    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure> {
+        match (label, xport) {
+            (
+                "tcp_socket",
+                Xport::Client {
+                    timeout, socket, ..
+                },
+            ) => connect_inet(self, rest, false, timeout, &socket),
+            (
+                "udp_socket",
+                Xport::Client {
+                    timeout, socket, ..
+                },
+            ) => connect_inet(self, rest, true, timeout, &socket),
+            ("tcp_socket", Xport::Server { listen, socket, .. }) => {
+                bind_inet(self, rest, false, listen, &socket)
+            }
+            ("udp_socket", Xport::Server { listen, socket, .. }) => {
+                bind_inet(self, rest, true, listen, &socket)
+            }
+            ("unix_socket", Xport::Client { .. }) => {
+                let path = unix_path(self, rest);
+                UnixStream::connect(path)
+                    .map(Sock::Unix)
+                    .map_err(|e| failure(&e))
+            }
+            ("unix_socket", Xport::Server { .. }) => {
+                let path = unix_path(self, rest);
+                UnixListener::bind(path)
+                    .map(Sock::UnixServer)
+                    .map_err(|_| XportFailure {
+                        code: 0,
+                        text: String::new(),
+                    })
+            }
+            ("udg_socket", Xport::Client { .. }) => {
+                let path = unix_path(self, rest);
+                UnixDatagram::unbound()
+                    .and_then(|s| s.connect(path).map(|()| Sock::Udg(s)))
+                    .map_err(|e| failure(&e))
+            }
+            (_, _) => {
+                let path = unix_path(self, rest);
+                UnixDatagram::bind(path)
+                    .map(Sock::Udg)
+                    .map_err(|_| XportFailure {
+                        code: 0,
+                        text: String::new(),
+                    })
+            }
+        }
+    }
+
+    /// `php_stream_sock_open_from_socket` (`Z/main/network.c:1020`): a
+    /// socket the stream is handed, of the `generic_socket` kind, `r+`,
+    /// blocking, with `default_socket_timeout` as its read timeout.
+    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+        self.xport_stream(fd, None, true)
+    }
+
+    /// What `php_stream_url_wrap_php` makes of a `php://` fd that is a
+    /// socket (`Z/ext/standard/php_fopen_wrapper.c:361-372`):
+    /// `php_stream_sock_open_from_socket`, then `stream->ops =
+    /// &php_stream_socket_ops`, so the stream is `tcp_socket` whatever the
+    /// socket's family and takes the `transport`'s operations, an accept
+    /// among them, which is how a CLI handed a listening socket as its
+    /// stdin accepts on it. Served by the binary (`process`), since the
+    /// child is `PHP_BINARY`.
+    ///
+    /// ```php
+    /// $path = sys_get_temp_dir() . '/' . 's' . bin2hex(random_bytes(8)) . '.sock';
+    /// $server = stream_socket_server("unix://$path");
+    /// $child = proc_open([PHP_BINARY, '-n', '-r', '$c = stream_socket_accept(fopen("php://stdin", "r")); echo stream_get_meta_data(STDIN)["stream_type"], " ", get_resource_type($c), "\n"; fwrite($c, "hi");'], [0 => $server, 1 => ['pipe', 'w']], $pipes);
+    /// $client = stream_socket_client("unix://$path");
+    /// var_dump(stream_get_contents($client), stream_get_contents($pipes[1]), proc_close($child));
+    /// unlink($path);
+    /// ```
+    /// ```expect process
+    /// string(2) "hi"
+    /// string(18) "tcp_socket stream
+    /// "
+    /// int(0)
+    /// ```
+    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+        let stream = self.socket_stream(fd)?;
+        self.stream_op(stream, |_, s| {
+            if let Some(socket) = s.ops.as_socket() {
+                socket.label = "tcp_socket";
+            }
+        });
+        Ok(stream)
+    }
+
+    /// `php_stream_xport_create(name, 0 flags)` handed a socket
+    /// afterwards, as `socket_export_stream` makes one
+    /// (`Z/ext/sockets/sockets.c:2698`): the kind the registered xport
+    /// `name` names, with `name://` as its `uri`, or
+    /// `php_stream_sock_open_from_socket`'s `generic_socket` for none;
+    /// `r+`, `blocking` as its `is_blocked` with the fd's own `O_NONBLOCK`
+    /// left as it is, and `default_socket_timeout` as its read timeout.
+    fn xport_stream(
+        &mut self,
+        fd: OwnedFd,
+        name: Option<&str>,
+        blocking: bool,
+    ) -> Result<Stream, Thrown> {
+        let found = name.and_then(|name| Some((name, self.transport_named(name.as_bytes())?)));
+        let mut crypto = None;
+        let (sock, label) = match found {
+            Some((_, Found::Registered(transport))) => {
+                let layer = (transport.layer)(self, transport.name, b"", None, None)?;
+                crypto = Some(layer);
+                (Sock::Tcp(TcpStream::from(fd)), transport.label)
+            }
+            Some((_, Found::Engine("tcp_socket"))) => {
+                (Sock::Tcp(TcpStream::from(fd)), "tcp_socket")
+            }
+            Some((_, Found::Engine("udp_socket"))) => {
+                (Sock::Udp(UdpSocket::from(fd)), "udp_socket")
+            }
+            Some((_, Found::Engine("unix_socket"))) => {
+                (Sock::Unix(UnixStream::from(fd)), "unix_socket")
+            }
+            Some((_, Found::Engine("udg_socket"))) => {
+                (Sock::Udg(UnixDatagram::from(fd)), "udg_socket")
+            }
+            _ => (Sock::Generic(UnixStream::from(fd)), GENERIC),
+        };
+        let mut kind = Socket::new(Some(sock), label, default_timeout(self));
+        kind.is_blocked = blocking;
+        kind.crypto = crypto;
+        let mut stream = PhpStream::new(Box::new(kind), b"r+");
+        stream.flags.no_seek = true;
+        let stream = self.stream_alloc(stream)?;
+        if let Some((name, _)) = found {
+            let path = format!("{name}://").into_bytes();
+            self.stream_op(stream, |req, s| s.set_orig_path(req, &path))
+                .transpose()?;
+        }
+        Ok(stream)
+    }
+
+    fn transports(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = TRANSPORTS.iter().map(|(name, _)| *name).collect();
+        for transport in self.registered::<XportFactory>() {
+            if !names.contains(&transport.name) {
+                names.push(transport.name);
+            }
+        }
+        names
+    }
+
+    fn xport_create(
         &mut self,
         name: &[u8],
         xport: Xport,
@@ -1314,151 +1459,6 @@ impl Request {
             self.hold_persistent(key, stream);
         }
         Ok(Ok(stream))
-    }
-
-    /// The socket of a `transport`'s kind, by its label: a client
-    /// connected or a server bound, `php_stream_xport_connect` and
-    /// `php_stream_xport_bind` under the kind's ops.
-    fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure> {
-        match (label, xport) {
-            (
-                "tcp_socket",
-                Xport::Client {
-                    timeout, socket, ..
-                },
-            ) => connect_inet(self, rest, false, timeout, &socket),
-            (
-                "udp_socket",
-                Xport::Client {
-                    timeout, socket, ..
-                },
-            ) => connect_inet(self, rest, true, timeout, &socket),
-            ("tcp_socket", Xport::Server { listen, socket, .. }) => {
-                bind_inet(self, rest, false, listen, &socket)
-            }
-            ("udp_socket", Xport::Server { listen, socket, .. }) => {
-                bind_inet(self, rest, true, listen, &socket)
-            }
-            ("unix_socket", Xport::Client { .. }) => {
-                let path = unix_path(self, rest);
-                UnixStream::connect(path)
-                    .map(Sock::Unix)
-                    .map_err(|e| failure(&e))
-            }
-            ("unix_socket", Xport::Server { .. }) => {
-                let path = unix_path(self, rest);
-                UnixListener::bind(path)
-                    .map(Sock::UnixServer)
-                    .map_err(|_| XportFailure {
-                        code: 0,
-                        text: String::new(),
-                    })
-            }
-            ("udg_socket", Xport::Client { .. }) => {
-                let path = unix_path(self, rest);
-                UnixDatagram::unbound()
-                    .and_then(|s| s.connect(path).map(|()| Sock::Udg(s)))
-                    .map_err(|e| failure(&e))
-            }
-            (_, _) => {
-                let path = unix_path(self, rest);
-                UnixDatagram::bind(path)
-                    .map(Sock::Udg)
-                    .map_err(|_| XportFailure {
-                        code: 0,
-                        text: String::new(),
-                    })
-            }
-        }
-    }
-
-    /// `php_stream_sock_open_from_socket` (`Z/main/network.c:1020`): a
-    /// socket the stream is handed, of the `generic_socket` kind, `r+`,
-    /// blocking, with `default_socket_timeout` as its read timeout.
-    pub(crate) fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
-        self.xport_stream(fd, None, true)
-    }
-
-    /// What `php_stream_url_wrap_php` makes of a `php://` fd that is a
-    /// socket (`Z/ext/standard/php_fopen_wrapper.c:361-372`):
-    /// `php_stream_sock_open_from_socket`, then `stream->ops =
-    /// &php_stream_socket_ops`, so the stream is `tcp_socket` whatever the
-    /// socket's family and takes the `transport`'s operations, an accept
-    /// among them, which is how a CLI handed a listening socket as its
-    /// stdin accepts on it. Served by the binary (`process`), since the
-    /// child is `PHP_BINARY`.
-    ///
-    /// ```php
-    /// $path = sys_get_temp_dir() . '/' . 's' . bin2hex(random_bytes(8)) . '.sock';
-    /// $server = stream_socket_server("unix://$path");
-    /// $child = proc_open([PHP_BINARY, '-n', '-r', '$c = stream_socket_accept(fopen("php://stdin", "r")); echo stream_get_meta_data(STDIN)["stream_type"], " ", get_resource_type($c), "\n"; fwrite($c, "hi");'], [0 => $server, 1 => ['pipe', 'w']], $pipes);
-    /// $client = stream_socket_client("unix://$path");
-    /// var_dump(stream_get_contents($client), stream_get_contents($pipes[1]), proc_close($child));
-    /// unlink($path);
-    /// ```
-    /// ```expect process
-    /// string(2) "hi"
-    /// string(18) "tcp_socket stream
-    /// "
-    /// int(0)
-    /// ```
-    pub(crate) fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
-        let stream = self.socket_stream(fd)?;
-        self.stream_op(stream, |_, s| {
-            if let Some(socket) = s.ops.as_socket() {
-                socket.label = "tcp_socket";
-            }
-        });
-        Ok(stream)
-    }
-
-    /// `php_stream_xport_create(name, 0 flags)` handed a socket
-    /// afterwards, as `socket_export_stream` makes one
-    /// (`Z/ext/sockets/sockets.c:2698`): the kind the registered xport
-    /// `name` names, with `name://` as its `uri`, or
-    /// `php_stream_sock_open_from_socket`'s `generic_socket` for none;
-    /// `r+`, `blocking` as its `is_blocked` with the fd's own `O_NONBLOCK`
-    /// left as it is, and `default_socket_timeout` as its read timeout.
-    pub(crate) fn xport_stream(
-        &mut self,
-        fd: OwnedFd,
-        name: Option<&str>,
-        blocking: bool,
-    ) -> Result<Stream, Thrown> {
-        let found = name.and_then(|name| Some((name, self.transport_named(name.as_bytes())?)));
-        let mut crypto = None;
-        let (sock, label) = match found {
-            Some((_, Found::Registered(transport))) => {
-                let layer = (transport.layer)(self, transport.name, b"", None, None)?;
-                crypto = Some(layer);
-                (Sock::Tcp(TcpStream::from(fd)), transport.label)
-            }
-            Some((_, Found::Engine("tcp_socket"))) => {
-                (Sock::Tcp(TcpStream::from(fd)), "tcp_socket")
-            }
-            Some((_, Found::Engine("udp_socket"))) => {
-                (Sock::Udp(UdpSocket::from(fd)), "udp_socket")
-            }
-            Some((_, Found::Engine("unix_socket"))) => {
-                (Sock::Unix(UnixStream::from(fd)), "unix_socket")
-            }
-            Some((_, Found::Engine("udg_socket"))) => {
-                (Sock::Udg(UnixDatagram::from(fd)), "udg_socket")
-            }
-            _ => (Sock::Generic(UnixStream::from(fd)), GENERIC),
-        };
-        let mut kind = Socket::new(Some(sock), label, default_timeout(self));
-        kind.is_blocked = blocking;
-        kind.crypto = crypto;
-        let mut stream = PhpStream::new(Box::new(kind), b"r+");
-        stream.flags.no_seek = true;
-        let stream = self.stream_alloc(stream)?;
-        if let Some((name, _)) = found {
-            let path = format!("{name}://").into_bytes();
-            self.stream_op(stream, |req, s| s.set_orig_path(req, &path))
-                .transpose()?;
-        }
-        Ok(stream)
     }
 }
 
@@ -1568,7 +1568,7 @@ impl Stream {
                 let Some(addr) = parse_network_address(text) else {
                     let shown = format!(
                         "{}(): Failed to parse `{}' into a valid network address",
-                        req.active_native(),
+                        req.active_function_name(),
                         String::from_utf8_lossy(text)
                     );
                     warning(req, &shown);
@@ -1714,7 +1714,7 @@ impl Stream {
 fn no_crypto(req: &mut Request) {
     let text = format!(
         "{}(): This stream does not support SSL/crypto",
-        req.active_native()
+        req.active_function_name()
     );
     warning(req, &text);
 }

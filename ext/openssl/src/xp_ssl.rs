@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
-use php_ext::request::{Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, XportFactory};
+use php_ext::request::{
+    Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, Streams as _, XportFactory,
+};
 use php_ext::values::{Key, PhpArray, Resource, Value, ValueRef};
 use php_ext_standard::{UriParser, stream_ctx_option, stream_ctx_set_option};
 

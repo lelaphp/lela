@@ -9,7 +9,7 @@
 use php_ext::abi::Callable;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, raise};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{PhpRef, PhpString, Value, ValueRef};
 
 use crate::charset;

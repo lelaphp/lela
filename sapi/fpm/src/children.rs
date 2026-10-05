@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use nix::sys::signal::{SigmaskHow, Signal, sigprocmask};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{ForkResult, Pid};
+use nix::unistd::Pid;
+use php_sapi::Forked;
 
 use crate::conf::Pm;
 use crate::master::{Became, Child, Fpm, State, Step};
@@ -106,8 +107,8 @@ pub(crate) fn make(
         {
             zlog!(Warning @ fpm_children_make:451, "child may miss signals");
         }
-        match crate::ffi::fork() {
-            Ok(ForkResult::Child) => {
+        match php_sapi::fork() {
+            Ok(Forked::Child) => {
                 fpm.leave_events();
                 crate::zlog::set_child();
                 scoreboard.child_use(slot, nix::unistd::getpid().as_raw());
@@ -117,11 +118,11 @@ pub(crate) fn make(
             Err(e) => {
                 zlog!(Debug @ fpm_children_make:465, "unblocking signals");
                 crate::master::unblock_all();
-                zlog_sys!(Error @ fpm_children_make:467, e, "fork() failed");
+                zlog_sys!(Error @ fpm_children_make:467, crate::conf::errno(&e), "fork() failed");
                 scoreboard.free(slot);
                 return Ok(Made::Failed);
             }
-            Ok(ForkResult::Parent { child }) => {
+            Ok(Forked::Parent { child }) => {
                 zlog!(Debug @ fpm_children_make:473, "unblocking signals, child born");
                 crate::master::unblock_all();
                 let (stdout, stderr) = match pipes {

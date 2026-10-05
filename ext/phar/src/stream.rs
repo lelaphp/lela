@@ -4,7 +4,9 @@
 //! and its directories (`phar_make_dirstream`), sorted as php sorts them.
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
+use php_ext::request::{
+    DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::archive::{self, ArchiveId, archives, lossy};

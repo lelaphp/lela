@@ -41,12 +41,24 @@ pub(super) fn commands(line: &str) -> Vec<Argv> {
     Lexer::read(line).commands
 }
 
-/// A shell line as permit reads it: the simple commands it runs, and its
-/// text less the heredoc bodies it carries as text.
+/// A shell line as permit reads it: the simple commands it runs, its text
+/// less the heredoc bodies it carries as text, those bodies, and the files
+/// its redirections write.
 #[derive(Debug)]
 pub(super) struct Line {
     commands: Vec<Argv>,
     text: String,
+    bodies: Vec<Heretext>,
+    written: Vec<String>,
+}
+
+/// One heredoc body its command reads as text, whole, beside the commands
+/// of the line that opened it, by their place in [`Line::commands`]: the
+/// program an interpreter on that line runs, or a message `cat` writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Heretext {
+    pub(super) commands: Range<usize>,
+    pub(super) text: String,
 }
 
 impl Line {
@@ -62,6 +74,8 @@ impl Line {
         Line {
             commands: lexer.commands,
             text,
+            bodies: lexer.bodies,
+            written: lexer.written,
         }
     }
 
@@ -79,6 +93,18 @@ impl Line {
     /// stricter than the argv, never looser.
     pub(super) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Every heredoc body a command reads as text, a nested line's
+    /// included, each with the commands of its line.
+    pub(super) fn bodies(&self) -> &[Heretext] {
+        &self.bodies
+    }
+
+    /// The files the line's redirections write (`>`, `>>`, `>|`, `&>`,
+    /// `<>`), a nested line's included, as the line spells them.
+    pub(super) fn written(&self) -> &[String] {
+        &self.written
     }
 }
 
@@ -106,8 +132,11 @@ enum Body {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Next {
     Argument,
-    /// The file a redirection names, which is no word of the argv.
-    Target,
+    /// The file a redirection names, which is no word of the argv;
+    /// `writes` for one the redirection writes (`>`, `>>`, `<>`, `&>`).
+    Target {
+        writes: bool,
+    },
     Delimiter {
         strip_tabs: bool,
     },
@@ -168,6 +197,10 @@ struct Lexer {
     text_bodies: Vec<Range<usize>>,
     /// The variables the line has assigned so far ([`Assigned`]).
     assigned: Assigned,
+    /// The files the line's redirections write, in order.
+    written: Vec<String>,
+    /// The heredoc bodies the line's commands read as text ([`Heretext`]).
+    bodies: Vec<Heretext>,
 }
 
 impl Lexer {
@@ -180,6 +213,8 @@ impl Lexer {
             line_start: 0,
             text_bodies: Vec::new(),
             assigned: Assigned::new(),
+            written: Vec::new(),
+            bodies: Vec::new(),
         }
     }
 
@@ -188,6 +223,21 @@ impl Lexer {
         let mut lexer = Lexer::new(line);
         lexer.list(None);
         lexer
+    }
+
+    /// A line the line runs in turn, read by a lexer of its own: its
+    /// commands, the files its redirections write and its heredoc bodies
+    /// join this one's.
+    fn nested(&mut self, line: &str) {
+        let nested = Lexer::read(line);
+        let offset = self.commands.len();
+        self.commands.extend(nested.commands);
+        self.written.extend(nested.written);
+        self.bodies
+            .extend(nested.bodies.into_iter().map(|body| Heretext {
+                commands: body.commands.start + offset..body.commands.end + offset,
+                text: body.text,
+            }));
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -242,7 +292,7 @@ impl Lexer {
                 '&' if self.eat('>') => {
                     self.end_word(&mut command);
                     self.eat('>');
-                    command.next = Next::Target;
+                    command.next = Next::Target { writes: true };
                 }
                 '(' => {
                     self.end(&mut command);
@@ -300,7 +350,7 @@ impl Lexer {
                 c => inner.push(c),
             }
         }
-        self.commands.extend(commands(&inner));
+        self.nested(&inner);
     }
 
     /// `<`, `>`, `>>`, `>&`, `>|`, `<&`, `<>`, `<<<`, `<<` and `<<-`, with
@@ -314,15 +364,26 @@ impl Lexer {
             command.word = None;
         }
         self.end_word(command);
-        command.next = Next::Target;
+        command.next = Next::Target { writes: c == '>' };
         if c == '<' && self.eat('<') {
             if !self.eat('<') {
                 command.next = Next::Delimiter {
                     strip_tabs: self.eat('-'),
                 };
             }
+        } else if c == '<' && self.eat('>') {
+            command.next = Next::Target { writes: true };
+        } else if self.eat('&') {
+            // `>&1` and `>&-` name a descriptor, not a file.
+            let descriptor = self
+                .chars
+                .get(self.at)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '-');
+            command.next = Next::Target {
+                writes: c == '>' && !descriptor,
+            };
         } else {
-            let _ = self.eat('>') || self.eat('&') || self.eat('|');
+            let _ = self.eat('>') || self.eat('|');
         }
     }
 
@@ -332,7 +393,8 @@ impl Lexer {
         };
         match std::mem::replace(&mut command.next, Next::Argument) {
             Next::Argument => command.words.push(word.text),
-            Next::Target => {}
+            Next::Target { writes: true } => self.written.push(word.text),
+            Next::Target { writes: false } => {}
             Next::Delimiter { strip_tabs } => self.heredocs.push(Heredoc {
                 delimiter: word.text,
                 strip_tabs,
@@ -350,7 +412,7 @@ impl Lexer {
             let nested = argv.nested_line();
             self.commands.push(argv);
             if let Some(line) = nested {
-                self.commands.extend(commands(&line));
+                self.nested(&line);
             }
         }
     }
@@ -367,8 +429,10 @@ impl Lexer {
         } else {
             Body::Text
         };
+        let line_commands = self.line_start..self.commands.len();
         for heredoc in std::mem::take(&mut self.heredocs) {
             let mut stdin = String::new();
+            let mut whole = String::new();
             while self.at < self.chars.len() {
                 let start = self.at;
                 let end = self.chars[start..]
@@ -396,8 +460,13 @@ impl Lexer {
                 match body {
                     Body::Text if substituted.is_empty() => {
                         self.text_bodies.push(start..self.at.min(self.chars.len()));
+                        whole.push_str(text);
+                        whole.push('\n');
                     }
-                    Body::Text => {}
+                    Body::Text => {
+                        whole.push_str(text);
+                        whole.push('\n');
+                    }
                     Body::Commands => {
                         stdin.push_str(text);
                         stdin.push('\n');
@@ -406,7 +475,12 @@ impl Lexer {
                 self.commands.append(&mut substituted);
             }
             if body == Body::Commands {
-                self.commands.extend(commands(&stdin));
+                self.nested(&stdin);
+            } else {
+                self.bodies.push(Heretext {
+                    commands: line_commands.clone(),
+                    text: whole,
+                });
             }
         }
         self.line_start = self.commands.len();
@@ -665,6 +739,22 @@ impl Argv {
     /// The words, program first.
     pub(super) fn words(&self) -> &[String] {
         &self.0
+    }
+
+    /// The program's name without its directory; empty for no words.
+    pub(super) fn program(&self) -> &str {
+        self.0.first().map_or("", |program| basename(program))
+    }
+
+    /// Whether `phrase` names this command: a program of one word by its
+    /// name, `cat`, or a program and its subcommand, `git diff`, with only
+    /// options between them ([`Argv::phrase_end`]).
+    pub(super) fn runs(&self, phrase: &str) -> bool {
+        if phrase.contains(' ') {
+            self.phrase_end(phrase).is_some()
+        } else {
+            self.program() == phrase
+        }
     }
 
     /// Whether one of the phrases names this command; none names every one.

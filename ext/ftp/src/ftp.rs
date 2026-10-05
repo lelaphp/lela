@@ -13,7 +13,8 @@ use php_ext::abi::Callable;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Xport, XportFailure,
+    Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamOption, Streams as _, Xport,
+    XportFailure,
 };
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 

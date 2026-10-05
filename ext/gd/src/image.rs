@@ -8,7 +8,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 use php_ext::values::{Emalloc, PhpObject, Value};
 
 use crate::ffi::{self, Font, Glyphs, Im, Image, Reported};

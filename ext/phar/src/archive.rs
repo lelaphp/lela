@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 use php_ext::values::{PhpString, Value};
 
 use crate::table::Table;

@@ -310,9 +310,14 @@ fn run(ini: &[Define], files: &IniFiles, args: Args) -> u8 {
         let _ = nix::unistd::write(&pipe, &1i32.to_ne_bytes());
     }
     let started = engine.startup_errors().to_owned();
-    drop(engine);
+    fpm.engine = Some(engine);
     match fpm.run() {
         Err(Became::Child(pool, slot)) => {
+            // The master's engine, which the fork copied: a child serves
+            // on an engine of its own, built for its pool, and ends that
+            // one, so the copy is let go of without ending it, which
+            // would end the master's engine once more in every child.
+            std::mem::forget(fpm.engine.take());
             let worker = worker::init(&mut fpm, pool, slot, (ini, files), &started);
             drop(fpm);
             worker.run()

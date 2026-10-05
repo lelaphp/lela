@@ -21,8 +21,11 @@
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
+use crate::api::request::Streams;
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use crate::state::Layer;
+use crate::streams::StreamLayer;
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
 /// the class every instance is of, and `wrapper.is_url`.
@@ -60,8 +63,8 @@ enum Called {
 
 /// A throwable a method raised, kept for the native that asked.
 fn defer(req: &mut Request, thrown: Thrown) {
-    if req.stream_thrown.is_none() {
-        req.stream_thrown = Some(thrown);
+    if req.stream_thrown().is_none() {
+        *req.stream_thrown() = Some(thrown);
     } else if let Some(object) = thrown.exception() {
         req.release(object.as_value());
     }
@@ -71,7 +74,7 @@ fn defer(req: &mut Request, thrown: Thrown) {
 /// the object, or the object's `__call` with the name and the arguments
 /// as an array where the class has no such method.
 fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Called {
-    if req.stream_thrown.is_some() || req.is_pending() {
+    if req.stream_thrown().is_some() || req.is_pending() {
         return Called::Threw;
     }
     let class = object.class();
@@ -144,9 +147,9 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
         }
         return Ok(None);
     }
-    let object = req.new_object(user.class)?;
+    let object = crate::api::call::new_object(req, user.class)?;
     let name = PhpString::new(req, b"context")?;
-    let context = match req.stream_ctx {
+    let context = match req.streams().stream_ctx {
         Some(context) => {
             let value = context.as_value();
             req.addref(&value);
@@ -222,25 +225,25 @@ pub(crate) fn open(
     mode: &[u8],
     options: i64,
 ) -> Result<Result<Stream, String>, Thrown> {
-    if req.user_stream_current.as_deref() == Some(path) {
+    if req.streams().user_stream_current.as_deref() == Some(path) {
         return Ok(Err(String::from("infinite recursion prevented")));
     }
-    let outer = req.user_stream_current.replace(path.to_vec());
+    let outer = req.streams().user_stream_current.replace(path.to_vec());
     // A wrapper that is no URL wrapper, opening for an include under
     // `allow_url_include=0`, holds the opens it makes to
     // `allow_url_include` as an include's are (`PG(in_user_include)`).
-    let in_user_include = req.in_user_include;
+    let in_user_include = req.streams().in_user_include;
     if !user.is_url
         && options & STREAM_OPEN_FOR_INCLUDE != 0
         && !req
             .ini_get(b"allow_url_include")
             .is_none_or(Request::ini_parse_bool)
     {
-        req.in_user_include = true;
+        req.streams().in_user_include = true;
     }
     let opened = open_with(req, user, path, mode, options);
-    req.in_user_include = in_user_include;
-    req.user_stream_current = outer;
+    req.streams().in_user_include = in_user_include;
+    req.streams().user_stream_current = outer;
     opened
 }
 
@@ -293,7 +296,7 @@ fn open_with(
     };
     if let Err(message) = answer {
         req.release(object.as_value());
-        if let Some(thrown) = req.stream_thrown.take() {
+        if let Some(thrown) = req.stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -318,12 +321,12 @@ pub(crate) fn open_dir(
     user: &UserWrapper,
     path: &[u8],
 ) -> Result<Result<Stream, String>, Thrown> {
-    if req.user_stream_current.as_deref() == Some(path) {
+    if req.streams().user_stream_current.as_deref() == Some(path) {
         return Ok(Err(String::from("infinite recursion prevented")));
     }
-    let outer = req.user_stream_current.replace(path.to_vec());
+    let outer = req.streams().user_stream_current.replace(path.to_vec());
     let opened = open_dir_with(req, user, path);
-    req.user_stream_current = outer;
+    req.streams().user_stream_current = outer;
     opened
 }
 
@@ -361,7 +364,7 @@ fn open_dir_with(
     };
     if let Err(message) = answer {
         req.release(object.as_value());
-        if let Some(thrown) = req.stream_thrown.take() {
+        if let Some(thrown) = req.stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
@@ -388,11 +391,11 @@ impl UserStream {
     fn held<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Self, &mut Request) -> R) -> R {
         let own = self.own.map(Stream::resource);
         if let Some(res) = own {
-            req.held_streams.push(res);
+            req.streams().held_streams.push(res);
         }
         let answer = f(self, req);
         if own.is_some() {
-            req.held_streams.pop();
+            req.streams().held_streams.pop();
         }
         answer
     }
@@ -996,7 +999,7 @@ fn bool_answer(req: &mut Request, called: Option<&Called>) -> Result<bool, Throw
         }
         _ => false,
     };
-    match req.stream_thrown.take() {
+    match req.stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(answer),
     }
@@ -1028,7 +1031,7 @@ pub(crate) fn url_stat(
         }
         _ => None,
     };
-    match req.stream_thrown.take() {
+    match req.stream_thrown().take() {
         Some(thrown) => Err(thrown),
         None => Ok(sb),
     }

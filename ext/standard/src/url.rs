@@ -9,7 +9,7 @@
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 

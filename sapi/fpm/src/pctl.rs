@@ -108,6 +108,9 @@ impl Fpm {
         zlog!(Notice @ fpm_pctl_exit:69, "exiting, bye-bye!");
         self.unlink_pid();
         self.sockets.unlink_all();
+        // `fpm_php_cleanup`, the last of the cleanups to run, as the
+        // first registered: the engine ended.
+        drop(self.engine.take());
         std::process::exit(0);
     }
 
@@ -147,6 +150,9 @@ impl Fpm {
                 crate::ffi::set_env(name.as_bytes(), &value);
             }
         }
+        // `fpm_cleanups_run(FPM_CLEANUP_PARENT_EXEC)`: the engine ended
+        // before the exec, as `fpm_php_cleanup` ends it.
+        drop(self.engine.take());
         crate::stdio::restore_original_stderr(self, true);
         let _ = crate::ffi::restore_defaults();
         let argv: Vec<std::ffi::CString> = self

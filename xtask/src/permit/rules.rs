@@ -225,7 +225,11 @@ fn evaluate(
     } else if p.deny == Some(true) {
         true
     } else if let Some(types) = &p.deny_types {
-        source && call.written().is_some_and(|t| mentions_a_type(t, types))
+        let macros = p.deny_macros.as_deref().unwrap_or_default();
+        source
+            && call
+                .written()
+                .is_some_and(|t| mentions_a_type(t, types) || invokes_a_macro(t, macros))
     } else if let Some(homes) = &p.allow {
         source
             && call.written().is_some_and(has_unsafe)
@@ -310,6 +314,17 @@ fn mentions_a_type(text: &str, types: &[String]) -> bool {
             regex_lite::escape(last)
         );
         regex(&pattern).is_match(text)
+    })
+}
+
+/// A `deny_macros` entry invoked in the text: its last segment, bare or
+/// behind any path, then `!` and the opening delimiter, so
+/// `thread_local! {` and `std::thread_local!(` are both the invocation of
+/// `std::thread_local` and a mention of the word in prose is not.
+fn invokes_a_macro(text: &str, macros: &[String]) -> bool {
+    macros.iter().any(|path| {
+        let last = path.rsplit("::").next().unwrap_or(path);
+        regex(&format!(r"\b{}\s*!\s*[(\[{{]", regex_lite::escape(last))).is_match(text)
     })
 }
 

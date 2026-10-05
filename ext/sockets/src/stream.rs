@@ -10,7 +10,7 @@ use std::os::fd::AsRawFd;
 use php_ext::abi::{Instance, OrFalse, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, throw_error};
-use php_ext::request::{Cast, FdStream, Request, Stream, StreamOption};
+use php_ext::request::{Cast, FdStream, Request, Stream, StreamOption, Streams as _};
 use php_ext::values::{Resource, Value};
 
 use crate::ffi;

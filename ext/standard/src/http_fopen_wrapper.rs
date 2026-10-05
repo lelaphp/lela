@@ -17,8 +17,8 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Xport,
-    XportFailure,
+    Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Streams as _,
+    Xport, XportFailure,
 };
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 use php_ext_uri::UriStruct;

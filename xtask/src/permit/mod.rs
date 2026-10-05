@@ -13,15 +13,15 @@
 //! and a refusal that hands the call on is a skip, since the candidate
 //! that rebuilds judges it (#118).
 //!
-//! What permit judges: `deny`, `deny_argv`, `deny_pattern`, `deny_types`,
-//! `allow` and `on`. The other four predicates (`check`, `deny_lints`,
-//! `avoid_from`, `generated`) are sensors that read the tree after the write
-//! and have no meaning for one call; their twins run on save and per commit
-//! (§6). A Bash line is read as the argv of each simple command it runs,
-//! quotes removed and heredoc bodies skipped, in [`argv`] (#1001), and a
-//! `deny_pattern` reads the same line less the heredoc bodies that reading
-//! skips as text (#1832); what a shell can hide beyond that is `done`'s to
-//! find at pre-push and in CI.
+//! What permit judges: `deny`, `deny_argv`, `deny_pattern`, `deny_types`
+//! (with the `deny_macros` beside it), `allow` and `on`. The other four
+//! predicates (`check`, `deny_lints`, `avoid_from`, `generated`) are sensors
+//! that read the tree after the write and have no meaning for one call;
+//! their twins run on save and per commit (§6). A Bash line is read as the
+//! argv of each simple command it runs, quotes removed and heredoc bodies
+//! skipped, in [`argv`] (#1001), and a `deny_pattern` reads the same line
+//! less the heredoc bodies that reading skips as text (#1832); what a shell
+//! can hide beyond that is `done`'s to find at pre-push and in CI.
 //!
 //! The interface is four things: [`judge`], one call against the manifest;
 //! [`run`], the command each adapter is over; [`after`], the `PostToolUse`
@@ -32,7 +32,8 @@
 //! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
 //! region-body rule in [`region`],
 //! the sensor over `harness.self`'s files around a `Bash` call in
-//! [`after`], the `unless` qualifier's sensor in [`unless`], the `exempt_label`
+//! [`after`], whether a line can write one of them in [`writes`], the
+//! `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
@@ -51,6 +52,7 @@ mod label;
 mod region;
 mod rules;
 mod unless;
+mod writes;
 
 pub use adapters::{Adapter, run};
 pub use after::after;

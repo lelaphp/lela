@@ -11,7 +11,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
 };
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Request, Stream, Streams as _};
 use php_ext::values::{
     Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
 };

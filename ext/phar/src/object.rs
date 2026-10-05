@@ -12,7 +12,7 @@ use php_ext::call::{instantiate, known_method, lookup_class};
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Request, Stream, Streams as _};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Other};
 

@@ -26,6 +26,8 @@ use crate::api::request::{
     Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence,
 };
 use crate::api::values::{Resource, Value};
+use crate::state::Layer;
+use crate::streams::StreamLayer;
 
 /// `PHP_STREAM_FILTER_READ` and `PHP_STREAM_FILTER_WRITE`.
 const FILTER_READ: i64 = 1;
@@ -150,8 +152,8 @@ impl FilterCall {
 /// A throwable a filter raised, kept for the native that asked, unless
 /// one is kept already.
 pub(super) fn defer(req: &mut Request, thrown: Thrown) {
-    if req.stream_thrown.is_none() {
-        req.stream_thrown = Some(thrown);
+    if req.stream_thrown().is_none() {
+        *req.stream_thrown() = Some(thrown);
     } else if let Some(object) = thrown.exception() {
         req.release(object.as_value());
     }
@@ -177,7 +179,7 @@ impl PhpStream {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> FilterStatus {
-        if req.stream_thrown.is_some() {
+        if req.stream_thrown().is_some() {
             return FilterStatus::ErrFatal;
         }
         let Some(stream) = self.res.map(Stream::of) else {
@@ -195,13 +197,13 @@ impl PhpStream {
             eof,
             seek: None,
         };
-        let outer = req.filtering.replace(call);
-        req.held_streams.push(stream.resource());
+        let outer = req.streams().filtering.replace(call);
+        req.streams().held_streams.push(stream.resource());
         let answered = filter
             .ops
             .filter(req, stream, input, output, consumed, flags);
-        req.held_streams.pop();
-        let call = std::mem::replace(&mut req.filtering, outer);
+        req.streams().held_streams.pop();
+        let call = std::mem::replace(&mut req.streams().filtering, outer);
         let status = match answered {
             Ok(status) => status,
             Err(thrown) => {
@@ -394,7 +396,7 @@ impl PhpStream {
             FilterStatus::ErrFatal => {
                 let text = format!(
                     "{}(): Filter failed to process pre-buffered data",
-                    req.active_native()
+                    req.active_function_name()
                 );
                 warning(req, &text);
                 return false;
@@ -510,7 +512,7 @@ fn release_filter(req: &mut Request, filter: Attached) {
         res.close(req);
         req.release(res.as_value());
     }
-    if req.stream_thrown.is_some() {
+    if req.stream_thrown().is_some() {
         return;
     }
     if let Err(thrown) = ops.close(req) {
@@ -518,7 +520,16 @@ fn release_filter(req: &mut Request, filter: Attached) {
     }
 }
 
-impl Request {
+pub(crate) trait FilterChain {
+    fn filter_create(
+        &mut self,
+        name: &[u8],
+        params: Option<&Value>,
+    ) -> Option<Box<dyn StreamFilter>>;
+    fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown>;
+}
+
+impl FilterChain for Request {
     /// `php_stream_filter_create` (`Z/main/streams/filter.c:212`): the
     /// factory registered under `name`, else under the name with its
     /// last segment and then each shorter one made `*`, asked for a
@@ -531,10 +542,11 @@ impl Request {
         params: Option<&Value>,
     ) -> Option<Box<dyn StreamFilter>> {
         let lookup = |req: &Request, wanted: &[u8]| -> Option<FilterFactory> {
-            req.filters
+            req.streams_ref()?
+                .filters
                 .iter()
-                .find(|(n, _)| n.as_slice() == wanted)
-                .map(|(_, f)| *f)
+                .find(|(_, (n, _))| n.as_slice() == wanted)
+                .map(|(_, (_, f))| *f)
         };
         // A factory that threw is php's `create_filter` answering `NULL`
         // with `EG(exception)` set: refused, and the throwable kept for
@@ -573,7 +585,7 @@ impl Request {
             };
             let text = format!(
                 "{}(): {what} \"{}\"",
-                self.active_native(),
+                self.active_function_name(),
                 String::from_utf8_lossy(name)
             );
             warning(self, &text);
@@ -581,15 +593,8 @@ impl Request {
         filter
     }
 
-    /// `stream_filter_remove`'s work (`Z/ext/standard/streamsfuncs.c:1298`)
-    /// past its parameters: the filter a `stream filter` resource names
-    /// flushed to the chain's end as the stream closing would flush it,
-    /// php's `Unable to flush filter, not removing` and `false` where that
-    /// breaks; then the resource closed and the filter taken off its
-    /// chain and freed. `None` is a resource of another type, or closed,
-    /// which is php's `TypeError` for the native to raise.
-    pub fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
-        if res.kind() != Some(self.filter_type) {
+    fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
+        if res.kind() != Some(self.types().filter) {
             return Ok(None);
         }
         let Some((stream, chain)) = res.native::<Named>(self).map(|n| (n.stream, n.chain)) else {
@@ -604,7 +609,7 @@ impl Request {
         if flushed == Some(false) {
             let text = format!(
                 "{}(): Unable to flush filter, not removing",
-                self.active_native()
+                self.active_function_name()
             );
             warning(self, &text);
             return Ok(Some(false));
@@ -621,7 +626,7 @@ impl Request {
         } else {
             res.close(self);
         }
-        match self.stream_thrown.take() {
+        match self.stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(Some(true)),
         }
@@ -648,7 +653,7 @@ impl Stream {
             let Some(ops) = req.filter_create(name, None) else {
                 let text = format!(
                     "{}(): Unable to create filter ({})",
-                    req.active_native(),
+                    req.active_function_name(),
                     String::from_utf8_lossy(name)
                 );
                 warning(req, &text);
@@ -658,7 +663,7 @@ impl Stream {
                 s.attach(req, chain, Attached { ops, res: None }, true)
             });
         }
-        match req.stream_thrown.take() {
+        match req.stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(()),
         }
@@ -700,7 +705,7 @@ impl Stream {
                 continue;
             }
             let Some(ops) = req.filter_create(name, params) else {
-                return match req.stream_thrown.take() {
+                return match req.stream_thrown().take() {
                     Some(thrown) => Err(thrown),
                     None => Ok(None),
                 };
@@ -719,7 +724,7 @@ impl Stream {
                 if let Some(filter) = taken {
                     release_filter(req, filter);
                 }
-                return match req.stream_thrown.take() {
+                return match req.stream_thrown().take() {
                     Some(thrown) => Err(thrown),
                     None => Ok(None),
                 };
@@ -729,7 +734,7 @@ impl Stream {
         let Some(chain) = last else {
             return Ok(None);
         };
-        let kind = req.filter_type;
+        let kind = req.types().filter;
         let res = Resource::new(
             req,
             kind,
@@ -750,7 +755,7 @@ impl Stream {
                 filter.res = Some(res);
             }
         });
-        match req.stream_thrown.take() {
+        match req.stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(Some(res)),
         }

@@ -138,7 +138,7 @@ use php_ext::coerce::{to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{
-    BindTo, FdStream, Handshake, Request, SocketOptions, Stream, Xport, XportFailure,
+    BindTo, FdStream, Handshake, Request, SocketOptions, Stream, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 

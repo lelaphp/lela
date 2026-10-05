@@ -151,7 +151,9 @@ use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
 };
-use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
+use php_ext::request::{
+    OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence, WrapperOp,
+};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which

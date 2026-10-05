@@ -10,7 +10,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
-use php_ext::request::{Request, Resolve};
+use php_ext::request::{Request, Resolve, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{

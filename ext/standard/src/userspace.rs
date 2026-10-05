@@ -51,7 +51,7 @@ use php_ext::abi::Raw;
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::raising::{Thrown, arg_type_error};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::PhpString;
 
 /// The constants of `userspace.stub.php` and `file.stub.php` a wrapper's

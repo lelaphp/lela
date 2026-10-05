@@ -43,7 +43,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use ffi::{Raised, Route, sys};
 pub use mime_sniff::sniff_charset_from_stream;
 
-/// Request-scoped: built at request start, dropped after `rshutdown`,
+/// Request-scoped: built at request start, dropped after `post_deactivate`,
 /// private to this crate (ADR-0005); nothing in it is shared or
 /// synchronised. php's `zend_libxml_globals`.
 #[derive(Default)]
@@ -104,6 +104,7 @@ pub fn extension() -> Extension {
         .register(image_svg::SVG)
         .request_state::<State>()
         .rshutdown(rshutdown)
+        .post_deactivate(post_deactivate)
         .info(libxml_info)
         .build("libxml")
 }
@@ -131,21 +132,31 @@ fn libxml_info(req: &mut Request) {
     ]);
 }
 
-/// `PHP_RSHUTDOWN_FUNCTION(libxml)` and `php_libxml_post_deactivate`:
-/// the loader and the stream given up, the list dropped and the
-/// library's last error reset, so a thread's next request starts clean.
+/// `PHP_RSHUTDOWN_FUNCTION(libxml)` (`Z/ext/libxml/libxml.c:1039-1046`):
+/// the loader given up, and with it the value
+/// `libxml_set_streams_context()` kept, which php leaves to the resource
+/// list: both are values of the request's, given up while its heap
+/// still stands.
 fn rshutdown(req: &mut Request) {
     let state = req.state::<State>();
     let loader = state.entity_loader.take();
     let context = state.stream_context.take();
-    state.errors = None;
-    state.buffer.clear();
     if let Some((_, value)) = loader {
         req.release(value);
     }
     if let Some(value) = context {
         req.release(value);
     }
+}
+
+/// `php_libxml_post_deactivate` (`Z/ext/libxml/libxml.c:1061-1083`),
+/// after `shutdown_executor`: the error list and the message buffer
+/// dropped, and the library's last error, which is the thread's, reset,
+/// so the thread's next request starts clean.
+fn post_deactivate(req: &mut Request) {
+    let state = req.state::<State>();
+    state.errors = None;
+    state.buffer.clear();
     ffi::Raised::reset_last();
 }
 

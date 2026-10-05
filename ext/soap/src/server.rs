@@ -13,7 +13,7 @@ use php_ext::coerce::{callable_checked, to_string, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
-use php_ext::request::{OutputOp, Request, StartHandler};
+use php_ext::request::{OutputOp, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 

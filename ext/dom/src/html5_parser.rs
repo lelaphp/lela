@@ -6,7 +6,7 @@
 //! contents a fragment of its own.
 
 use php_ext::raising::{Thrown, arg_value_error, throw};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,

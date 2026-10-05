@@ -10,6 +10,8 @@
 
 use php_ext::abi::Extension;
 
+#[cfg(doc)]
+mod handles;
 #[cfg(doctest)]
 mod refusals;
 

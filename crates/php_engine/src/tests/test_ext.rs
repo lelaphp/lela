@@ -65,9 +65,20 @@ pub(crate) enum Phase {
     Rshutdown,
     /// Its `deactivate` ran.
     Deactivate,
+    /// Its `post_deactivate` ran.
+    PostDeactivate,
+    /// Its engine-end function ran, on the shutdown request, and the
+    /// number of the engine state that request reached, `None` where it
+    /// reached none.
+    EngineEnd(Option<u32>),
     /// The resource its `rinit` opened and never released was closed:
     /// php's `zend_close_rsrc_list` at request end.
     ResourceClosed,
+    /// Its `post_startup` ran, on the request the engine lays to ask
+    /// it. [`TestExt::builder`] declares none, since one declared lays
+    /// that request before every engine's first; a test that wants one
+    /// declares its own and records this.
+    PostStartup,
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -171,15 +182,6 @@ impl Events {
             })
             .collect()
     }
-
-    /// Which extensions were handed `phase`, by number and not in the
-    /// order handed: for a property that holds whatever that order is.
-    #[must_use]
-    pub(crate) fn handed_each(&self, phase: &Phase) -> Vec<u8> {
-        let mut handed = self.handed(phase);
-        handed.sort_unstable();
-        handed
-    }
 }
 
 /// Extension `N`'s request state: recorded where it is built and where
@@ -228,6 +230,8 @@ impl<const N: u8> TestExt<N> {
             .rinit(Self::rinit)
             .rshutdown(Self::rshutdown)
             .deactivate(Self::deactivate)
+            .post_deactivate(Self::post_deactivate)
+            .engine_end(Self::engine_end)
     }
 
     /// [`TestExt::builder`] with its engine start replaced by one that
@@ -275,6 +279,15 @@ impl<const N: u8> TestExt<N> {
 
     fn deactivate(_: &mut Request) {
         record(N, Phase::Deactivate);
+    }
+
+    fn post_deactivate(_: &mut Request) {
+        record(N, Phase::PostDeactivate);
+    }
+
+    fn engine_end(req: &mut Request) {
+        let engine = req.engine::<EngineSlot<N>>().map(|state| state.engine);
+        record(N, Phase::EngineEnd(engine));
     }
 
     fn resource_closed(_: &mut Request, _: Resource) {

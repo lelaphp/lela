@@ -4,7 +4,7 @@
 //! `stream_context_create()` gives under `zip` the archive's.
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
+use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence};
 
 use crate::archive::{Archive, CREATE};
 use crate::object::{basedir_refuses, expand};
