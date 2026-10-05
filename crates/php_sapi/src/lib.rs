@@ -85,7 +85,8 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
 /// Where php writes while it starts, before any request: the body
 /// straight to the process's stdout (`php_output_direct`, which
 /// `php_output_startup` points at `php_output_stdout`), the error stream
-/// to its stderr, no head, and the log through the host's function.
+/// to its stderr, no head, and the log through the host's function, each
+/// as it is written.
 struct Starting(fn(&[u8]));
 
 impl OutputSink for Starting {
@@ -106,6 +107,13 @@ impl OutputSink for Starting {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         let _ = std::io::stderr().lock().write_all(bytes);
+    }
+
+    /// Each call reaches the process as it is made, so a diagnostic's
+    /// log line and its display stand in the order `php_error_cb` writes
+    /// them.
+    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
+        Some(Box::new(Starting(self.0)))
     }
 }
 

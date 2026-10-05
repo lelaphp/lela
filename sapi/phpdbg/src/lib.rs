@@ -162,6 +162,7 @@ pub fn main() -> ExitCode {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &line.search, true))
+        .sapi_name(NAME)
         .extensions(&extensions)
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
