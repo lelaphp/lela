@@ -1454,17 +1454,29 @@ impl PhpStream {
         self.cast_as(req, cast, Ret::Given, warn)
     }
 
-    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
-    /// to its position with the read buffer dropped only where the buffer
-    /// holds bytes; the kind's fd as a cast with no `ret` answers it.
-    fn keep_fd(&mut self, req: &mut Request) -> Option<RawFd> {
-        self.flush(req);
-        if self.readpos != self.writepos && self.ops.seekable() && !self.flags.no_seek {
+    /// A kind that seeks sought to the stream's position and the read
+    /// buffer dropped, as `_php_stream_cast` does before it hands a fd
+    /// (`Z/main/streams/cast.c:200-208`).
+    fn seek_to_position(&mut self, req: &mut Request) {
+        if self.ops.seekable() && !self.flags.no_seek {
             let Self { ops, position, .. } = self;
             let mut dummy = 0;
             let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
             self.readpos = 0;
             self.writepos = 0;
+        }
+    }
+
+    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
+    /// to its position with the read buffer dropped only where the buffer
+    /// holds bytes, the guard `_php_stream_write_buffer` puts before a
+    /// write (`Z/main/streams/streams.c:1197`), taken here once since the
+    /// buffer does not outlive the stream; the kind's fd as a cast with
+    /// no `ret` answers it.
+    fn keep_fd(&mut self, req: &mut Request) -> Option<RawFd> {
+        self.flush(req);
+        if self.readpos != self.writepos {
+            self.seek_to_position(req);
         }
         self.cast_as(req, Cast::Fd, Ret::Null, false)
     }
@@ -1488,13 +1500,7 @@ impl PhpStream {
     fn cast_as(&mut self, req: &mut Request, cast: Cast, ret: Ret, warn: bool) -> Option<RawFd> {
         if ret == Ret::Given && cast != Cast::Select {
             self.flush(req);
-            if self.ops.seekable() && !self.flags.no_seek {
-                let Self { ops, position, .. } = self;
-                let mut dummy = 0;
-                let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
-                self.readpos = 0;
-                self.writepos = 0;
-            }
+            self.seek_to_position(req);
         }
         // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
         // the crypto layer holds decrypted moved into the empty read

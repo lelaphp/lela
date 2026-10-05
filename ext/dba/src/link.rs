@@ -391,29 +391,29 @@ pub(crate) struct Kept {
     access: Access,
     handler: Handler,
     lock: Held,
-    lock_file: Option<Fd>,
-    store: Store<Fd>,
+    lock_file: Option<KeptFd>,
+    store: Store<KeptFd>,
 }
 
 /// A stream's fd between requests and the position the stream held,
 /// what php's persistent stream keeps in memory.
-pub(crate) struct Fd {
+pub(crate) struct KeptFd {
     fd: OwnedFd,
     position: i64,
 }
 
-impl Fd {
+impl KeptFd {
     /// `stream`'s fd duplicated, written out first; `None` where none
     /// could be had.
-    fn of(req: &mut Request, stream: Stream) -> Option<Fd> {
+    fn of(req: &mut Request, stream: Stream) -> Option<KeptFd> {
         let position = stream.tell(req);
         let fd = stream.dup_fd(req)?;
-        Some(Fd { fd, position })
+        Some(KeptFd { fd, position })
     }
 
     /// The stream made again over the fd at the position it held, as php's
     /// persistent stream is found again.
-    fn take_up(self, req: &mut Request, mode: &[u8]) -> Result<Stream, Thrown> {
+    fn reopen(self, req: &mut Request, mode: &[u8]) -> Result<Stream, Thrown> {
         let position = self.position;
         req.stream_from_fd(self.fd, FdStream::Kept { mode, position })
     }
@@ -425,8 +425,8 @@ impl Link {
     /// where a fd could not be had, the link closed.
     pub(crate) fn keep(self, req: &mut Request) -> Option<Kept> {
         let file = self.store.stream();
-        let file_fd = file.map(|file| Fd::of(req, file));
-        let lock_fd = self.lock_file.map(|lock| Fd::of(req, lock));
+        let file_fd = file.map(|file| KeptFd::of(req, file));
+        let lock_fd = self.lock_file.map(|lock| KeptFd::of(req, lock));
         if matches!(file_fd, Some(None)) || matches!(lock_fd, Some(None)) {
             self.close(req);
             return None;
@@ -457,9 +457,9 @@ impl Kept {
             test: false,
         }
         .file_mode();
-        let store = self.store.map(|fd| fd.take_up(req, mode))?;
+        let store = self.store.map(|fd| fd.reopen(req, mode))?;
         let lock_file = match self.lock_file {
-            Some(fd) => Some(fd.take_up(req, b"rb")?),
+            Some(fd) => Some(fd.reopen(req, b"rb")?),
             None => None,
         };
         Ok(Link {
