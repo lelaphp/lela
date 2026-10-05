@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, StartupIni};
+use php_ext::abi::{Cache, Start};
 use php_ext::raising::{Level, Thrown, docref, raise_while_pending};
 use php_ext::request::Request;
 
@@ -58,9 +58,11 @@ pub(crate) struct Patterns {
 }
 
 /// The engine state as `Engine::new` builds it.
-pub(super) fn engine_state(ini: &StartupIni) -> Patterns {
+pub(super) fn engine_state(start: &Start) -> Patterns {
     let master = crate::INI.map(|(name, default)| {
-        ini.entries
+        start
+            .ini()
+            .entries
             .iter()
             .rev()
             .find(|(n, _)| n.as_slice() == name.as_bytes())

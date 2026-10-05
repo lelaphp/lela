@@ -763,10 +763,11 @@ mod tests {
 
     /// A Zend extension installs its `zend_post_startup_cb` link after
     /// every other extension's `MINIT`, as opcache's `accel_startup`
-    /// saves ffi's (`Z/ext/opcache/ZendAccelerator.c:3220-3221`), so
-    /// ffi's link is beneath it and asked first: its refusal ends
+    /// saves ffi's (`Z/ext/opcache/ZendAccelerator.c:3220-3221`), so an
+    /// extension's link is beneath it and asked first: a refusal there ends
     /// startup and the Zend extension's preload is never asked for,
-    /// though it stands first in the bundle (#1797).
+    /// though it stands first in the bundle. ffi's own failure is its
+    /// engine start's refusal, which php never takes past `MINIT`.
     #[test]
     fn a_minit_s_post_startup_link_is_asked_before_a_zend_extension_s() {
         let extensions = [

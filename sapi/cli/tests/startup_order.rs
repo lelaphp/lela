@@ -1,10 +1,10 @@
 //! What extensions supply is installed in the order php installs it:
 //! every module's at its `MINIT`, then opcache's, a Zend extension's,
 //! after them (`Z/main/main.c:2353-2356`). Held on the binary, where
-//! the bundle's own module order stands: ffi's `zend_post_startup_cb`
-//! link is beneath opcache's and is asked first, so a failing
-//! `ffi.preload` refuses startup before opcache preloads, as the oracle
-//! does (#1797).
+//! the bundle's own module order stands: a failing `ffi.preload` is
+//! ffi's engine start refusing, php's `MINIT` failing, so startup ends
+//! there and opcache's `zend_post_startup_cb` link never preloads, as
+//! the oracle does (#1797, #1802).
 
 use std::process::{Command, Stdio};
 

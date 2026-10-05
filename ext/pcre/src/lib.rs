@@ -151,7 +151,7 @@ pub fn extension() -> Extension {
                 .collect(),
         )
         .request_state::<State>()
-        .engine_state(pattern::engine_state)
+        .engine_state(|start| Ok(pattern::engine_state(start)))
         .info(pcre_info)
         .build("pcre")
 }

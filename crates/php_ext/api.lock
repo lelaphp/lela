@@ -226,6 +226,9 @@ abi::Ref::is_given
 abi::Ref::reference
 abi::Ref::separated
 abi::Ref::set
+abi::Refusal
+abi::Refusal::new
+abi::Refusal::raise
 abi::Refusals
 abi::Refusals::NONE
 abi::Refusals::cloning
@@ -233,6 +236,9 @@ abi::Refusals::comparison
 abi::Refusals::construction
 abi::Shell
 abi::StandardHandlesHook
+abi::Start
+abi::Start::host
+abi::Start::ini
 abi::StartupIni
 abi::Static
 abi::Std
@@ -932,6 +938,7 @@ test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
 test::Engine::parse_ini
+test::Engine::refused
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as

@@ -34,7 +34,7 @@ mod ini;
 mod startup;
 
 use php_ext::abi::{
-    Admission, Extension, ExtensionBuilder, FileCache, Instance, Lookup, OrFalse, StartupIni,
+    Admission, Extension, ExtensionBuilder, FileCache, Instance, Lookup, OrFalse, Start,
     Validation, ZendExtension,
 };
 use php_ext::attr::{php_class, php_function};
@@ -89,8 +89,9 @@ struct Accelerator {
 }
 
 impl Accelerator {
-    fn start(ini: &StartupIni) -> Accelerator {
-        let filename = ini
+    fn start(start: &Start) -> Accelerator {
+        let filename = start
+            .ini()
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"opcache.blacklist_filename")
@@ -132,7 +133,7 @@ pub fn extension() -> Extension {
         24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
         46, 47, 48, 49, 50, 51, 52, 53);
     file_override::install(builder)
-        .engine_state(Accelerator::start)
+        .engine_state(|start| Ok(Accelerator::start(start)))
         .request_state::<State>()
         .rinit(rinit)
         .admission(admission)

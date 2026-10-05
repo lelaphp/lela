@@ -11,8 +11,9 @@ use crate::test::Capture;
 
 use Event::{Ext, Mark};
 use Phase::{
-    Deactivate, EngineEnd, EngineStateBuilt, EngineStateDropped, PostDeactivate, PostStartup,
-    RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
+    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped, Error,
+    PostDeactivate, PostStartup, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit,
+    Rshutdown,
 };
 
 /// Three recording extensions, in bundle order.
@@ -423,5 +424,70 @@ fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
             .between("exited", "failed")
             .handed(&RequestStateDropped),
         [2, 1, 0]
+    );
+}
+
+/// An engine start that refuses, php's `MINIT` returning `FAILURE`
+/// (ADR-0010): the extension before it starts, it is handed its start
+/// with the host's name and refuses, and the one after it never starts,
+/// as `zend_startup_module_ex` ends `zend_startup_modules`. The engine
+/// serves nothing: every request is the refusal, what the start raised
+/// and then php's `Unable to start` fatal as `php -n` writes it, with
+/// the status of php's `exit(-2)`, and no extension is handed a
+/// request's start or end. The request states built are the rendering
+/// request's, which the startup request builds too. The one engine
+/// state built drops with the engine. The `error` link of the extension
+/// that started is told both diagnostics, as php's `php_error_cb` is the
+/// error callback a link saved at `MINIT` while php starts; that the
+/// never-started extension's link is told too is #1953's, so the
+/// sequence is read without the error links.
+#[test]
+fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
+    let rec = Recording::start();
+    rec.mark("start");
+    let engine = Engine::cli_builder()
+        .sapi_name("cli")
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::refusing(),
+            TestExt::<2>::extension(),
+        ])
+        .build();
+    rec.mark("built");
+    let refused = "\nWarning: test_ext_1 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_1 module in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    for _ in 0..2 {
+        let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.exit_code, -2);
+    }
+    rec.mark("served");
+    drop(engine);
+    rec.mark("dropped");
+    let events = rec.events();
+    let requests = |from, to| {
+        events
+            .between(from, to)
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .without(&Error(String::new()))
+            .0
+    };
+    assert_eq!(
+        requests("start", "built"),
+        [Ext(0, EngineStateBuilt(0)), Ext(1, EngineStartRefused)]
+    );
+    assert_eq!(requests("built", "served"), []);
+    let told: Vec<String> = (events.between("built", "served").0.into_iter())
+        .filter_map(|e| match e {
+            Ext(0, Error(message)) => Some(message),
+            _ => None,
+        })
+        .collect();
+    let warning = "test_ext_1 refuses to start under 'cli'";
+    let fatal = "Unable to start test_ext_1 module";
+    assert_eq!(told, [warning, fatal, warning, fatal]);
+    assert_eq!(
+        events.between("served", "dropped").0,
+        [Ext(0, EngineStateDropped(0))]
     );
 }

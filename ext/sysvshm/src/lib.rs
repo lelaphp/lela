@@ -30,7 +30,7 @@ mod ffi;
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, StartupIni, True,
+    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Start, True,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
@@ -61,8 +61,9 @@ struct Config {
 impl Config {
     /// `PHP_MINIT(sysvshm)`: the entry's leading number, 10000 without
     /// one.
-    fn start(ini: &StartupIni) -> Config {
-        let init_mem = ini
+    fn start(start: &Start) -> Config {
+        let init_mem = start
+            .ini()
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"sysvshm.init_mem")
@@ -103,7 +104,7 @@ pub fn extension() -> Extension {
             shm_remove_var::declared(),
         ])
         .class::<SysvSharedMemory>()
-        .engine_state(Config::start)
+        .engine_state(|start| Ok(Config::start(start)))
         .info(sysvshm_info)
         .build("sysvshm")
 }

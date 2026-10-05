@@ -236,7 +236,6 @@ pub fn extension() -> Extension {
         .class::<decls::instance::FFI>()
         .request_state::<State>()
         .engine_state(preload::engine_state)
-        .post_startup(preload::post_startup)
         .rshutdown(call::release_callbacks)
         .interrupt(call::serve_deferred)
         .info(info)
