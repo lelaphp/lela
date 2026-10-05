@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use php_compile::{CompileError, SourceKind};
+use php_heap::Fatal;
 use php_unit::Unit;
 
 use crate::api::raising::{Level, Thrown};
@@ -525,6 +526,40 @@ impl Request {
             name,
         };
         Ok(top.compile(self, code)?.0)
+    }
+
+    /// `f` over a string the host evaluates of its own, `-r`'s code, the
+    /// shell's and a debugger's, compiled as `zend_eval_stringl` compiles
+    /// it: `CG(compiler_options)` set to `ZEND_COMPILE_DEFAULT_FOR_EVAL`
+    /// around the compile and put back after
+    /// (`Z/Zend/zend_execute_API.c:1349-1352`), so its oplines carry no
+    /// extended info whatever the engine's, and an `eval` the string
+    /// serves compiles under the engine's again.
+    pub(crate) fn host_string<T>(&mut self, f: impl FnOnce(&mut Request) -> T) -> T {
+        let outer = std::mem::replace(&mut self.compiling_host_string, true);
+        let compiled = f(self);
+        self.compiling_host_string = outer;
+        compiled
+    }
+
+    /// `served`, the serving of a string the host evaluates of its own
+    /// once it compiled, as `zend_eval_stringl` serves it: with
+    /// `EG(no_extensions)` set around its `zend_execute`, so no Zend
+    /// extension is told of a statement it reaches, its own or a
+    /// function's it calls (`Z/Zend/zend_execute_API.c:1357`, `:1382`).
+    /// As php's, the word is cleared after, not put back, and a fatal,
+    /// returned or bailing out, leaves it set, as `zend_bailout` leaves
+    /// past the clearing.
+    pub(crate) fn serve_host_string<T>(
+        &mut self,
+        served: impl FnOnce(&mut Request) -> Result<T, Fatal>,
+    ) -> Result<T, Fatal> {
+        self.no_extensions = true;
+        let served = served(self);
+        if served.is_ok() && !self.bailing_out() {
+            self.no_extensions = false;
+        }
+        served
     }
 
     /// php's own `compile_string`, beneath every link of the pointer:

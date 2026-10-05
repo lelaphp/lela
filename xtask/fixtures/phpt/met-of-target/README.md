@@ -11,4 +11,8 @@ target is `kept.phpt`, met; `missed.phpt`, missed; `xfail.phpt`, met as the
 oracle fails it; and `row.phpt`, met under a registry row though the engine
 skipped it (#1161). `--against` over the planted miss, `diverged` at the
 base and a fail past the limit at the head, is no regression once the target
-is kept. Held by the tests of `xtask/src/phpt/target.rs`.
+is kept. The control keeps what the oracle's fail keeps, its run past the
+limit, and the reason it skipped `oracle-skip.phpt`, "For Linux only", as
+`ext/zend_test`'s target keeps it for `gh10370_1..4.phpt`, so a reading held
+to the target names each test outside it with why (#2033). Held by the tests
+of `xtask/src/phpt/target.rs`.

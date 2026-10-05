@@ -10,5 +10,13 @@
     "phpt:php-src/ext/fixture/tests/oracle-skip.phpt": "skip",
     "phpt:php-src/ext/fixture/tests/row.phpt": "pass",
     "phpt:php-src/ext/fixture/tests/xfail.phpt": "xfail"
+  },
+  "misses": {
+    "phpt:php-src/ext/fixture/tests/oracle-miss.phpt": {
+      "signature": "past_limit"
+    }
+  },
+  "skips": {
+    "phpt:php-src/ext/fixture/tests/oracle-skip.phpt": "For Linux only"
   }
 }

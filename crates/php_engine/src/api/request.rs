@@ -63,6 +63,7 @@ mod execution;
 mod extensions;
 pub use extensions::InfoRow;
 mod frame_reads;
+mod frame_writes;
 pub(crate) use frame_reads::Identity;
 pub use frame_reads::{FrameId, FrameView};
 mod frames;
@@ -89,7 +90,9 @@ mod methods;
 use methods::visibility_string;
 mod objects;
 mod observing;
+mod op_arrays;
 pub(crate) use observing::ObservedChain;
+pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
@@ -292,9 +295,6 @@ pub struct Request {
     lazy: lazy::Table,
     /// Which include is being opened ([`include::Include`]).
     include: include::Include,
-    /// The extension whose `rinit` is being served, as
-    /// `zend_activate_modules` reaches it ([`Request::activating`]).
-    pub(crate) activating: Option<ExtensionId>,
     /// A throwable PHP code served by a stream's kind or filter raised
     /// inside an operation whose answer has no room for it: php's
     /// `EG(exception)` standing until the native that asked for the
@@ -369,6 +369,15 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
+    /// Whether the string compiling now is one the host evaluates of its
+    /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
+    /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
+    /// extended info ([`Request::host_string`]).
+    pub(crate) compiling_host_string: bool,
+    /// `EG(no_extensions)`: set while a string the host evaluates of its
+    /// own is served, so no Zend extension is told of a statement it
+    /// reaches ([`Request::serve_host_string`], [`crate::statement`]).
+    pub(crate) no_extensions: bool,
     /// `CG(script_encoding_list)` where an `ini_set()` of
     /// `zend.script_encoding` moved it this request; the engine's where
     /// none did.
@@ -621,7 +630,6 @@ impl Request {
             weakrefs: crate::weakrefs::Table::default(),
             lazy: lazy::Table::default(),
             include: include::Include::default(),
-            activating: None,
             stream_thrown: None,
             shutdown_functions: shutdown::ShutdownFunctions::default(),
             ticks: ticks::Ticks::default(),
@@ -642,6 +650,8 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            compiling_host_string: false,
+            no_extensions: false,
             script_encodings: None,
             buckets,
             aliases: tables.aliases,

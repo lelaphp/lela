@@ -275,6 +275,10 @@ abi::Start::host
 abi::Start::ini
 abi::Start::process
 abi::StartupIni
+abi::Statement
+abi::Statement::frame
+abi::Statement::suspend_time_limit
+abi::StatementHandler
 abi::Static
 abi::Std
 abi::StreamHooks
@@ -495,6 +499,7 @@ request::CachedFile
 request::Cast
 request::Closer
 request::Closer::close
+request::ConstIdx
 request::ContentType
 request::Crypto
 request::Crypto::accepted
@@ -532,6 +537,7 @@ request::FrameView::function
 request::FrameView::function_scope
 request::FrameView::id
 request::FrameView::line
+request::FrameView::op_array
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
@@ -555,7 +561,27 @@ request::Notification
 request::NotifyCode
 request::ObserveAllocations
 request::ObserveAllocations::observe
+request::OpArrayView
+request::OpArrayView::constant
+request::OpArrayView::filename
+request::OpArrayView::is_empty
+request::OpArrayView::len
+request::OpArrayView::lines
+request::OpArrayView::opline
+request::OpArrayView::oplines
+request::OpArrayView::variable
+request::Opcode
 request::Opening
+request::Operand
+request::OplineIdx
+request::OplineView
+request::OplineView::at
+request::OplineView::jump_targets
+request::OplineView::line
+request::OplineView::op1
+request::OplineView::op2
+request::OplineView::opcode
+request::OplineView::out
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
@@ -579,7 +605,6 @@ request::Reentry::take_lent
 request::Refused
 request::Request
 request::Request::absolutize
-request::Request::activating
 request::Request::active_function_name
 request::Request::add_begin_handler
 request::Request::add_end_handler
@@ -632,6 +657,7 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::eval_in_frame
 request::Request::eval_stringl
 request::Request::evaluated_default
 request::Request::executing
@@ -707,6 +733,7 @@ request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::native_trampoline
 request::Request::observe_allocations
+request::Request::op_array
 request::Request::open_temporary_fd
 request::Request::os_error_text
 request::Request::output_buffer_op
@@ -758,6 +785,7 @@ request::Request::set_display_errors
 request::Request::set_env
 request::Request::set_error_handler
 request::Request::set_exception_handler
+request::Request::set_frame_var
 request::Request::set_global
 request::Request::set_header_callback
 request::Request::set_local_var

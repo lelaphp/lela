@@ -545,8 +545,8 @@ impl FilterChain for Request {
             req.streams_ref()?
                 .filters
                 .iter()
-                .find(|(_, (n, _))| n.as_slice() == wanted)
-                .map(|(_, (_, f))| *f)
+                .find(|(n, _)| n.as_slice() == wanted)
+                .map(|(_, f)| *f)
         };
         // A factory that threw is php's `create_filter` answering `NULL`
         // with `EG(exception)` set: refused, and the throwable kept for

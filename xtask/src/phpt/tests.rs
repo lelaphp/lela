@@ -2110,7 +2110,7 @@ fn held_to_fixture(judged: &[(&str, Judgement)], target: &Target, registry: &Reg
     held_to(
         &mut reading,
         (&tally, "ext/fixture"),
-        (Some(target), false),
+        (Some(target), false, None),
         registry,
         (&Runner::Linked, &manifest().pin),
     )
@@ -2165,7 +2165,7 @@ fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
         "{reading:#?}"
     );
     let keeps = format!(
-        "1 of 1 target tests met, 1 outside; 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --engine {}` keeps it again",
+        "1 of 1 target tests met (ext/fixture/tests/met.phpt), 1 outside (missed by the oracle: ext/fixture/tests/oracle-miss.phpt); 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --engine {}` keeps it again",
         manifest().pin.oracle.path.display()
     );
     assert!(reading.message.contains(&keeps), "{}", reading.message);

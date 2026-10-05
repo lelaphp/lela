@@ -136,11 +136,20 @@ fn usage(argv0: &[u8]) -> String {
     )
 }
 
+/// What `main`'s line set that every engine of the process is built
+/// under, the master's and each child's: the php.ini files found, and
+/// `-e`, `use_extended_info`, which compiles with extended info
+/// (`Z/sapi/fpm/fpm/fpm_main.c:1651`, `:1775`).
+pub(crate) struct Startup {
+    files: IniFiles,
+    extended_info: bool,
+}
+
 /// `main`'s `php_getopt` loop over `argv[1..]`: the `-d` entries so far,
-/// `-c` and `-n` onto `search`, and what is asked, `-m`, `-v`, `-h` and a
-/// refused switch answered where they stand, as php answers them before
-/// it reads what follows.
-fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
+/// `-c` and `-n` onto `search`, `-e` onto `extended_info`, and what is
+/// asked, `-m`, `-v`, `-h` and a refused switch answered where they
+/// stand, as php answers them before it reads what follows.
+fn parse(argv: &[Vec<u8>], search: &mut Search, extended_info: &mut bool) -> (Vec<Define>, Ask) {
     let mut ini = Vec::new();
     let mut asked = Args {
         argv: Vec::new(),
@@ -174,7 +183,7 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
                     b'v' => return (ini, Ask::Version),
                     b'c' => search.path = Some(value),
                     b'n' => search.ignore = true,
-                    b'e' => {}
+                    b'e' => *extended_info = true,
                     _ => return (ini, Ask::Usage(EXIT_OK)),
                 }
             }
@@ -191,9 +200,10 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
 }
 
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
-/// and `cgi-fcgi` after them, over the `files` found and `-d`'s entries.
-fn engine(ini: &[Define], files: &IniFiles) -> Engine {
-    php_sapi::start(builder(files), ini, log_message)
+/// and `cgi-fcgi` after them, over the files the line found and `-d`'s
+/// entries.
+fn engine(ini: &[Define], startup: &Startup) -> Engine {
+    php_sapi::start(builder(startup), ini, log_message)
 }
 
 /// `sapi_cgi_log_message` (`Z/sapi/fpm/fpm/fpm_main.c:629-632`): the entry
@@ -207,17 +217,19 @@ fn log_message(entry: &[u8]) {
     );
 }
 
-/// php-fpm's engine before its entries: its name, the php.ini `files` the
+/// php-fpm's engine before its entries: its name, the php.ini files the
 /// master found, which a child reads as the master did, the bundle's
-/// enabled set, its tier, and its own `cgi-fcgi` after them ([`natives`]).
-fn builder(files: &IniFiles) -> php_sapi::EngineBuilder {
+/// enabled set, its tier, and its own `cgi-fcgi` after them ([`natives`]);
+/// with extended info where the line carried `-e`.
+fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     Engine::builder()
-        .ini_files(files.clone())
+        .ini_files(startup.files.clone())
         .sapi_name(worker::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
+        .extended_info(startup.extended_info)
         .additional_extension(natives::extension())
 }
 
@@ -245,9 +257,17 @@ pub fn main() -> ExitCode {
         .collect();
     let argv0 = words.first().cloned().unwrap_or_default();
     let mut search = Search::default();
-    let (ini, ask) = parse(words.get(1..).unwrap_or_default(), &mut search);
-    let files = php_sapi::ini::search(worker::NAME, &search, true);
-    let engine = |ini: &[Define]| engine(ini, &files);
+    let mut extended_info = false;
+    let (ini, ask) = parse(
+        words.get(1..).unwrap_or_default(),
+        &mut search,
+        &mut extended_info,
+    );
+    let startup = Startup {
+        files: php_sapi::ini::search(worker::NAME, &search, true),
+        extended_info,
+    };
+    let engine = |ini: &[Define]| engine(ini, &startup);
     let status = match ask {
         Ask::Usage(code) => {
             let _ = engine(&ini);
@@ -281,7 +301,7 @@ pub fn main() -> ExitCode {
         }
         Ask::Run(mut args) => {
             args.argv = words;
-            run(&ini, &files, args)
+            run(&ini, &startup, args)
         }
     };
     php_sapi::exit_code(i32::from(status))
@@ -289,8 +309,8 @@ pub fn main() -> ExitCode {
 
 /// `fpm_init` and `fpm_run`, and a child's requests once this process
 /// is one.
-fn run(ini: &[Define], files: &IniFiles, args: Args) -> u8 {
-    let engine = engine(ini, files);
+fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
+    let engine = engine(ini, startup);
     let mut fpm = match Fpm::init(&engine, args) {
         Init::Continue(fpm) => fpm,
         Init::ExitOk => return EXIT_OK,
@@ -323,7 +343,7 @@ fn run(ini: &[Define], files: &IniFiles, args: Args) -> u8 {
             // one, so the copy is let go of without ending it, which
             // would end the master's engine once more in every child.
             std::mem::forget(fpm.engine.take());
-            let worker = worker::init(&mut fpm, pool, slot, (ini, files), &started);
+            let worker = worker::init(&mut fpm, pool, slot, (ini, startup), &started);
             drop(fpm);
             worker.run()
         }

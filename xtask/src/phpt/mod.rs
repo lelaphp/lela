@@ -45,7 +45,8 @@
 //! **Held to the target.** The runner's control keeps the oracle's
 //! verdict on every test of a subset under the pin, and every engine's
 //! reading of the subset carries met-of-target, `target`, `met` and
-//! `outside`, with the target's misses named and `missed_skipped` counting
+//! `outside`, with the tests outside the target named with the oracle's
+//! reason (#2033), the target's misses named and `missed_skipped` counting
 //! those the engine skipped (#1834), and `predated` where the target was
 //! kept over another corpus than the subset holds now, with the command
 //! that keeps it again (#1644); the `target` module says what is in it
@@ -765,16 +766,18 @@ pub(crate) fn reading(
 
 /// The reading held to the target of the subset `scope` names (#1184). A
 /// run of the engine that judged a test carries met-of-target, its numbers
-/// `target`, `met`, `outside` and `missed_skipped` and the target's misses
+/// `target`, `met`, `outside` and `missed_skipped`, the tests outside the
+/// target named with the oracle's reason (#2033) and the target's misses
 /// named, and `predated` with the command that keeps the target again
 /// where the kept target holds no verdict for some of the subset's tests
 /// (#1644), or says how to take a target where none is kept under the
 /// pin; the runner's control says it kept its verdicts as the target,
-/// where it judged every test.
+/// where it judged every test. `run` is where the engine's run is kept,
+/// which the reading points to for the met tests it does not name.
 fn held_to(
     reading: &mut Reading,
     (tally, scope): (&Tally, &str),
-    (target, kept): (Option<&Target>, bool),
+    (target, kept, run): (Option<&Target>, bool, Option<&Path>),
     registry: &Registry,
     (runner, pin): (&Runner, &Pin),
 ) -> Result<()> {
@@ -789,7 +792,8 @@ fn held_to(
             let verdicts = tally.judged.iter().map(|j| (j.id.as_str(), j.judgement));
             let measure = Measure::of(target, registry, verdicts);
             measure.write(reading)?;
-            measure.words(&keeps)
+            let at = target::kept_at(pin, scope);
+            measure.words(target::Kept { target: &at, run }, &keeps)
         }
         (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
             "no target is kept under {key}; `xtask phpt --subset <scope> --engine {}` keeps one",
@@ -1021,11 +1025,11 @@ pub fn run(
         around(&mut reading, runner, removed, waited)?;
         let pin = side.oracle.pin();
         let (target, kept) = runs.target_of(pin, &subset.scope, (&tally, runner), ask.lane)?;
-        let against = (target.as_ref(), kept);
+        let run = runs.run_kept_at(held_as, (&tally, runner));
         held_to(
             &mut reading,
             (&tally, &subset.scope),
-            against,
+            (target.as_ref(), kept, run.as_deref()),
             registry,
             (runner, pin),
         )?;
@@ -1124,8 +1128,8 @@ fn to_run<'a, 'r, 'o>(
             let standing = stands(runs, pin, subset);
             if standing {
                 println!(
-                    "phpt: {}: its target under {} holds a verdict for each of its tests, so \
-                     the control does not run it again",
+                    "phpt: {}: its target under {} holds a verdict for each of its tests and \
+                     the reason for each skip, so the control does not run it again",
                     subset.scope,
                     target::key(pin)
                 );

@@ -124,7 +124,7 @@ use anyhow::{Context, Result, bail};
 use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Oracle, Oracles, Pin, Regime, Runner};
+use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -853,9 +853,10 @@ pub(crate) fn judge(
 /// have, the line a person reads, at the fence and beside the regimes the
 /// pin does have. A regime that carries `args` reaches a binary's command
 /// line (#1780): a fence marked `process` hands them to the engine's
-/// binary as the oracle's run hands them to php, and the linked engine
-/// and the request hosts take none, so a fence they serve under one is
-/// the same kind of line, naming the mark that serves it.
+/// binary as the oracle's run hands them to php; the linked engine takes
+/// `-e` as a host builds it and no other ([`Linked`], #1822); and the
+/// request hosts take none. A fence served where its regime's arguments
+/// cannot reach is the same kind of line, naming the mark that serves it.
 fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime>, String> {
     let Some(name) = witness.regime.as_deref() else {
         return Ok(None);
@@ -863,11 +864,21 @@ fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime
     let regime = pin
         .regime(name)
         .map_err(|why| format!("{}: {why:#}", witness.at()))?;
-    if witness.served != fence::Served::Binary
-        && let Err(why) = regime.linked_ini()
-    {
+    let refused = match witness.served {
+        fence::Served::Binary => None,
+        fence::Served::Linked => Linked::of([regime]).err().map(|why| format!("{why:#}")),
+        fence::Served::Cgi | fence::Served::Fpm | fence::Served::Phpdbg => {
+            (!regime.args.is_empty()).then(|| {
+                format!(
+                    "carries the arguments {:?}, which reach a binary's command line and no request host",
+                    regime.args
+                )
+            })
+        }
+    };
+    if let Some(why) = refused {
         return Err(format!(
-            "{}: `[regime.{name}]` {why:#}; only a fence marked `process` stands under it",
+            "{}: `[regime.{name}]` {why}; only a fence marked `process` stands under it",
             witness.at()
         ));
     }

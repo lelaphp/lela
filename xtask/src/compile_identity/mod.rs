@@ -15,7 +15,12 @@
 //! its `dump` regime, which is php's own recipe from §6.1, with `-l`
 //! before the program so that a file compiles and does not run: a corpus
 //! file's own bytes never reach the dump, and nothing of the corpus is
-//! executed to measure the compiler. The engine's side is the ladder of
+//! executed to measure the compiler. A run may name one more regime of
+//! the pin with `--regime`, which both sides stand under after `dump`,
+//! its arguments and its ini each after `dump`'s: `extended-info`, php's
+//! `-e`, is the second regime the per-commit corpus is held under
+//! (#1822), and its reading keeps a scope of its own,
+//! `php-src@regime=extended-info`, beside the plain one. The engine's side is the ladder of
 //! [`oracle::Runner`]: a binary where one is named or built, and below it
 //! [`Runner::Linked`], the compiler linked into this process and reached
 //! through `php_bundle` as `witness` reaches the engine (design §6.1,
@@ -48,7 +53,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
-use crate::oracle::{Oracle, Runner};
+use crate::oracle::{Linked, Oracle, Runner};
 use crate::phpt::Scope;
 use crate::reading::{Reading, listed};
 use crate::tally::{self, Judgement as _, Outcome};
@@ -164,11 +169,13 @@ impl Corpus {
     }
 
     /// The reading's scope: the corpus's, and what the run was beside it,
-    /// so a control of the runner keeps a reading of its own and never
-    /// displaces the engine's.
-    pub(crate) fn scope(&self, runner: &Runner) -> String {
+    /// so a control of the runner and a run under a regime beside `dump`
+    /// each keep a reading of their own and never displace the engine's
+    /// plain one.
+    pub(crate) fn scope(&self, runner: &Runner, regime: Option<&str>) -> String {
         let scope = Scope {
             control: matches!(runner, Runner::Control(_)),
+            regime: regime.map(str::to_owned),
             ..Scope::of(&self.scope)
         };
         scope.to_string()
@@ -231,9 +238,10 @@ pub(crate) fn reading(
     root: &Path,
     corpus: &Corpus,
     runner: &Runner,
+    regime: Option<&str>,
     oracle_absent: Option<&str>,
 ) -> Result<Reading> {
-    let scope = corpus.scope(runner);
+    let scope = corpus.scope(runner, regime);
     let absent = corpus.absent();
     let files = tally.found;
     // A directory the corpus names and this machine has not: no run can
@@ -324,6 +332,19 @@ pub struct Ask {
     /// The binary whose dump is held to the oracle's; without it, the
     /// engine's own where cargo puts it.
     pub engine: Option<PathBuf>,
+    /// A `[regime.<name>]` of the pin both sides dump under after `dump`
+    /// (#1822); none for the plain run.
+    pub regime: Option<String>,
+}
+
+impl Ask {
+    /// The regimes of the pin both sides dump under, in order: `dump`,
+    /// and the one asked for after it.
+    fn regimes(&self) -> Vec<&str> {
+        std::iter::once(REGIME)
+            .chain(self.regime.as_deref())
+            .collect()
+    }
 }
 
 /// Run what was asked for: the reading of the corpus, written by the
@@ -344,6 +365,13 @@ pub fn run(
             manifest.oracle.pin
         )
     })?;
+    if let Some(name) = &ask.regime {
+        manifest
+            .pin
+            .regime(name)
+            .with_context(|| format!("{INSTRUMENT}: `--regime {name}`"))?;
+    }
+    let regimes = ask.regimes();
     // The rung below the binary is the compiler linked into this process,
     // which the lane needs no binary for (design §6.1). It is built from
     // the tree the reading is stamped with, so a binary the tree has moved
@@ -373,6 +401,7 @@ pub fn run(
             &oracle,
             registry,
             &runner,
+            &regimes,
             oracle_absent.as_deref(),
             &corpus,
             file,
@@ -387,6 +416,7 @@ pub fn run(
         &oracle,
         registry,
         &runner,
+        &regimes,
         oracle_absent.as_deref(),
         &corpus,
     )?;
@@ -395,6 +425,7 @@ pub fn run(
         root,
         &corpus,
         &runner,
+        ask.regime.as_deref(),
         oracle_absent.as_deref(),
     )?])
 }
@@ -406,38 +437,52 @@ pub(crate) fn judge(
     oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
+    regimes: &[&str],
     oracle_absent: Option<&str>,
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(compiler), None) = (compiler(oracle, runner)?, oracle_absent) else {
+    let (Some(compiler), None) = (compiler(oracle, runner, regimes)?, oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
-    let dumps = dump::Dumps::new(oracle, registry, compiler)?;
+    let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     Tally::judge(&files, |file| dumps.judge(corpus, file))
 }
 
 /// Which compiler takes the engine's side of the dump, and none where
 /// the runner found nothing to measure. The linked one is built once for
-/// the run, under the recipe's ini and the `dump` regime's, so one recipe
-/// stands behind both sides; a `dump` regime that carries `args` refuses
-/// it, since the linked compiler has no command line to hand them and
-/// a binary's side would be handed them (#1780).
-fn compiler<'a>(oracle: &Oracle<'_>, runner: &'a Runner) -> Result<Option<dump::Compiler<'a>>> {
+/// the run, under the recipe's ini and each regime's after it, `dump`'s
+/// first, so one recipe stands behind both sides; a regime's `-e` builds
+/// it with extended info as a host's `-e` does, and any other argument
+/// refuses it, since the linked compiler has no command line to hand
+/// them and a binary's side would be handed them (#1780, #1822).
+fn compiler<'a>(
+    oracle: &Oracle<'_>,
+    runner: &'a Runner,
+    regimes: &[&str],
+) -> Result<Option<dump::Compiler<'a>>> {
     Ok(match runner {
         Runner::Engine(binary) | Runner::Control(binary) => Some(dump::Compiler::Binary(binary)),
         Runner::Linked => {
             let pin = oracle.pin();
-            let regime = match pin.regime.get(REGIME) {
-                Some(regime) => regime.linked_ini().map_err(|why| {
+            let mut linked = Linked::default();
+            for name in regimes {
+                let Some(regime) = pin.regime.get(*name) else {
+                    continue;
+                };
+                let taken = Linked::of([regime]).map_err(|why| {
                     anyhow!(
-                        "{INSTRUMENT}: `[regime.{REGIME}]` {why:#}; the linked compiler cannot dump under it, and an engine binary named with `--engine` can"
+                        "{INSTRUMENT}: `[regime.{name}]` {why:#}; the linked compiler cannot dump under it, and an engine binary named with `--engine` can"
                     )
-                })?,
-                None => &[],
-            };
-            let ini: Vec<String> = pin.recipe.ini.iter().chain(regime).cloned().collect();
-            Some(dump::Compiler::Linked(linked::engine(&ini)))
+                })?;
+                linked.ini.extend(taken.ini);
+                linked.extended_info |= taken.extended_info;
+            }
+            let ini: Vec<String> = pin.recipe.ini.iter().chain(&linked.ini).cloned().collect();
+            Some(dump::Compiler::Linked(linked::engine(
+                &ini,
+                linked.extended_info,
+            )))
         }
         // Neither reaches this lane: `or_linked` takes both rungs where
         // nothing ran down to the linked compiler before the run begins.
@@ -469,6 +514,7 @@ fn one(
     oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
+    regimes: &[&str],
     oracle_absent: Option<&str>,
     corpus: &Corpus,
     file: &Path,
@@ -476,10 +522,10 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let Some(compiler) = compiler(oracle, runner)? else {
+    let Some(compiler) = compiler(oracle, runner, regimes)? else {
         bail!("{INSTRUMENT}: there is nothing to dump the file with");
     };
-    let dumps = dump::Dumps::new(oracle, registry, compiler)?;
+    let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     let judged = dumps.judge(corpus, file)?;
     println!(
         "{} {}: {}",

@@ -62,11 +62,18 @@ fn permit(root: &Path, input: &str, args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// The call itself, as the `Bash` tool runs it, in `root`.
+/// The call itself, as the `Bash` tool runs it, in `root`. A commit the
+/// call makes takes its identity from the environment, so the command's
+/// words stay the call's and a runner with no global git identity (CI)
+/// commits as any other host does.
 fn shell(root: &Path, command: &str) {
     let out = Command::new("sh")
         .args(["-c", command])
         .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "x")
+        .env("GIT_AUTHOR_EMAIL", "x@x")
+        .env("GIT_COMMITTER_NAME", "x")
+        .env("GIT_COMMITTER_EMAIL", "x@x")
         .output()
         .unwrap();
     assert!(
