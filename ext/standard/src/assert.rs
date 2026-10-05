@@ -29,7 +29,7 @@ use php_ext::raising::{
     uncaught_at,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 
 use constants::{ASSERT_ACTIVE, ASSERT_BAIL, ASSERT_CALLBACK, ASSERT_EXCEPTION, ASSERT_WARNING};
 
@@ -386,18 +386,28 @@ fn assert(
     let message = text.as_deref().map(String::from_utf8_lossy);
     if flag(req, b"assert.exception") {
         let message = message.as_deref().unwrap_or("");
+        // `zend_throw_exception(assertion_error_ce, ..., E_ERROR)`: the
+        // code written before the throw, which `zend_throw_exception_hook`
+        // is told of.
+        let coded = |req: &mut Request, object: &PhpObject| -> Result<(), Thrown> {
+            let code = PhpString::new(req, b"code")?;
+            object.set_prop(req, code, Value::int(E_ERROR))
+        };
         let thrown = if let Some(previous) = pending {
-            throw_chained(req, previous, "AssertionError", message)
+            let thrown = throw_chained(req, previous, "AssertionError", message);
+            if let Some(object) = thrown.exception() {
+                coded(req, object)?;
+            }
+            thrown
         } else {
             let error = new_throwable(req, "AssertionError", message)?;
+            if let Some(object) = error.as_object() {
+                coded(req, object)?;
+            }
             let thrown = throw_value(req, &error);
             req.release(error);
             thrown
         };
-        if let Some(object) = thrown.exception() {
-            let code = PhpString::new(req, b"code")?;
-            object.set_prop(req, code, Value::int(E_ERROR))?;
-        }
         return Err(thrown);
     }
     if flag(req, b"assert.warning") {

@@ -28,10 +28,12 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::api::abi::{Extension, ExtensionBuilder, Refusal, Start};
+use super::api::abi::{
+    Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Refusal, Start, StringBeneath,
+};
 use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
-use super::api::values::Resource;
+use super::api::values::{PhpObject, Resource};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,20 @@ pub(crate) enum Phase {
     /// that request before every engine's first; a test that wants one
     /// declares its own and records this.
     PostStartup,
+    /// Its `zend_error_cb` link was handed a diagnostic, the message, and
+    /// served the one beneath after.
+    Error(String),
+    /// Its `gc_collect_cycles` link was served, before it served the one
+    /// beneath.
+    Collect,
+    /// The one beneath its `gc_collect_cycles` link answered, the count.
+    Collected(i64),
+    /// Its `zend_compile_string` link was handed a string, before it
+    /// served the one beneath with it.
+    CompileString(String),
+    /// Its `zend_throw_exception_hook` link was told of a throwable
+    /// thrown, its message.
+    Thrown(String),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -171,6 +187,22 @@ impl Events {
         )
     }
 
+    /// The events of the kinds of `phases` alone, what each carries
+    /// kept, as [`Events::without`] drops one kind.
+    #[must_use]
+    pub(crate) fn only(&self, phases: &[Phase]) -> Events {
+        let kinds: Vec<_> = phases.iter().map(std::mem::discriminant).collect();
+        Events(
+            self.0
+                .iter()
+                .filter(
+                    |e| matches!(e, Event::Ext(_, p) if kinds.contains(&std::mem::discriminant(p))),
+                )
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// Which extensions were handed `phase`, exactly as it is, in order.
     #[must_use]
     pub(crate) fn handed(&self, phase: &Phase) -> Vec<u8> {
@@ -182,6 +214,16 @@ impl Events {
             })
             .collect()
     }
+}
+
+/// A throwable's `message`, as its link records it.
+pub(crate) fn message_of(req: &Request, throwable: PhpObject) -> String {
+    let message = throwable.prop(req, b"message");
+    let bytes = message
+        .as_ref()
+        .and_then(|m| m.as_str_bytes())
+        .unwrap_or_default();
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// Extension `N`'s request state: recorded where it is built and where
@@ -232,6 +274,10 @@ impl<const N: u8> TestExt<N> {
             .deactivate(Self::deactivate)
             .post_deactivate(Self::post_deactivate)
             .engine_end(Self::engine_end)
+            .error(Self::error)
+            .gc_collect(Self::gc_collect)
+            .compile_string(Self::compile_string)
+            .thrown(Self::thrown)
     }
 
     /// [`TestExt::builder`] with its engine start replaced by one that
@@ -292,5 +338,28 @@ impl<const N: u8> TestExt<N> {
 
     fn resource_closed(_: &mut Request, _: Resource) {
         record(N, Phase::ResourceClosed);
+    }
+
+    fn error(req: &mut Request, beneath: ErrorBeneath<'_>) {
+        let message = String::from_utf8_lossy(beneath.message()).into_owned();
+        record(N, Phase::Error(message));
+        beneath.serve(req);
+    }
+
+    fn gc_collect(req: &mut Request, beneath: GcBeneath<'_>) -> i64 {
+        record(N, Phase::Collect);
+        let collected = beneath.collect(req);
+        record(N, Phase::Collected(collected));
+        collected
+    }
+
+    fn thrown(req: &mut Request, throwable: PhpObject) {
+        record(N, Phase::Thrown(message_of(req, throwable)));
+    }
+
+    fn compile_string(req: &mut Request, beneath: StringBeneath<'_>) -> Result<Compiled, Thrown> {
+        let source = String::from_utf8_lossy(beneath.source()).into_owned();
+        record(N, Phase::CompileString(source));
+        beneath.compile(req, beneath.source())
     }
 }

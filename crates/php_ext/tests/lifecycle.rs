@@ -15,7 +15,7 @@ mod test_ext;
 
 use test_ext::Event::{Ext, Mark};
 use test_ext::Phase::{
-    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped,
+    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped, Error,
     PostDeactivate, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 use test_ext::{Recording, TestExt};
@@ -97,10 +97,13 @@ fn an_engine_start_declared_through_the_facade_refuses_the_engine() {
         "\nWarning: test_ext_0 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_0 module in Unknown on line 0\n"
     );
     assert_eq!(served.exit_code, -2);
+    // The error links' share of the sequence is #1953's: the extension
+    // that never started is told the refusal too.
     assert_eq!(
         rec.events()
             .without(&RequestStateBuilt)
             .without(&RequestStateDropped)
+            .without(&Error(String::new()))
             .0,
         [Ext(0, EngineStartRefused), Mark("built"), Mark("served")]
     );

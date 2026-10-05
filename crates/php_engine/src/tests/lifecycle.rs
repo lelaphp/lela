@@ -11,7 +11,7 @@ use crate::test::Capture;
 
 use Event::{Ext, Mark};
 use Phase::{
-    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped,
+    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped, Error,
     PostDeactivate, PostStartup, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit,
     Rshutdown,
 };
@@ -436,7 +436,11 @@ fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
 /// the status of php's `exit(-2)`, and no extension is handed a
 /// request's start or end. The request states built are the rendering
 /// request's, which the startup request builds too. The one engine
-/// state built drops with the engine.
+/// state built drops with the engine. The `error` link of the extension
+/// that started is told both diagnostics, as php's `php_error_cb` is the
+/// error callback a link saved at `MINIT` while php starts; that the
+/// never-started extension's link is told too is #1953's, so the
+/// sequence is read without the error links.
 #[test]
 fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
     let rec = Recording::start();
@@ -465,6 +469,7 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
             .between(from, to)
             .without(&RequestStateBuilt)
             .without(&RequestStateDropped)
+            .without(&Error(String::new()))
             .0
     };
     assert_eq!(
@@ -472,6 +477,15 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
         [Ext(0, EngineStateBuilt(0)), Ext(1, EngineStartRefused)]
     );
     assert_eq!(requests("built", "served"), []);
+    let told: Vec<String> = (events.between("built", "served").0.into_iter())
+        .filter_map(|e| match e {
+            Ext(0, Error(message)) => Some(message),
+            _ => None,
+        })
+        .collect();
+    let warning = "test_ext_1 refuses to start under 'cli'";
+    let fatal = "Unable to start test_ext_1 module";
+    assert_eq!(told, [warning, fatal, warning, fatal]);
     assert_eq!(
         events.between("served", "dropped").0,
         [Ext(0, EngineStateDropped(0))]

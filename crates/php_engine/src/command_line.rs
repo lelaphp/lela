@@ -183,11 +183,15 @@ impl Request {
 fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
     let shared = Arc::clone(&req.shared);
     {
-        let unit = match shared.compile_for(req, code, name, SourceKind::Eval) {
-            Ok(unit) => unit,
-            Err(refused) => {
+        let unit = match req.compile_string(code, name) {
+            Ok(Ok(unit)) => unit,
+            Ok(Err(refused)) => {
                 crate::engine::refused_program(req, &refused, name);
                 return refused.level == Level::Parse && dont_bail(req);
+            }
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
             }
         };
         if !crate::engine::note_compiled(req, &unit, SourceKind::Eval) {

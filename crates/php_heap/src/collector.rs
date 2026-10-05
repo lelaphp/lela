@@ -740,7 +740,10 @@ impl Heap {
         let gc = &hooks.heap().gc;
         if gc.enabled && !gc.active {
             node.gc().addref();
-            let count = Heap::gc_collect_cycles(hooks);
+            let count = match hooks.gc_collect_cycles() {
+                Some(count) => count,
+                None => Heap::gc_collect_cycles(hooks),
+            };
             hooks.heap().gc.adjust_threshold(count);
             if node.gc().delref() == 0 {
                 match node {

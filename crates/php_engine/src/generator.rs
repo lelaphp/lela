@@ -1923,7 +1923,7 @@ impl Generator {
             return Err(thrown);
         }
         if !has_frame(req, this) {
-            return Err(Thrown::of(Some(throwable)));
+            return Err(crate::api::raising::throw_object(req, throwable));
         }
         let root = current(req, this);
         if is_running(req, root) {
@@ -1934,7 +1934,11 @@ impl Generator {
                 "Cannot resume an already running generator",
             ));
         }
-        req.leave_pending(&Thrown::of(Some(throwable)));
+        // Told from the caller's frame, where php switches to the
+        // generator's before it throws (`Z/Zend/zend_generators.c:524-531`),
+        // so a link reading the trace sees the caller on top, not the generator.
+        let thrown = crate::api::raising::throw_object(req, throwable);
+        req.leave_pending(&thrown);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))
     }
