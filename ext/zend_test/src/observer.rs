@@ -38,7 +38,7 @@ use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{FrameView, Raised, Request};
+use php_ext::request::{ChainFrame, FrameView, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
 
@@ -337,6 +337,16 @@ impl Serves {
         }
     }
 
+    /// A frame of php's `prev_execute_data` chain: a fiber's bottom
+    /// frame and a native's call name no file, which php writes as
+    /// `[no active file]`.
+    fn chain(req: &Request, frame: &ChainFrame<'_>) -> Serves {
+        match frame.function() {
+            Some(function) => Serves::function_of(req, function, frame.function_scope()),
+            None => Serves::File(frame.filename().unwrap_or(b"[no active file]").to_vec()),
+        }
+    }
+
     fn function_of(req: &Request, function: Function, scope: Option<ClassId>) -> Serves {
         Serves::Function {
             scope: scope.map(|class| req.class_name(class)),
@@ -378,7 +388,7 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     if switches.show_output {
         show_init(observed, &serves);
         if switches.show_init_backtrace {
-            show_init_backtrace(observed, &serves);
+            show_init_backtrace(observed);
         }
         // observer_show_opcode (#1824).
     }
@@ -447,32 +457,26 @@ fn show_init(req: &mut Request, serves: &Serves) {
 }
 
 /// `observer_show_init_backtrace`: the frame observed and every frame
-/// below it, `f()`, `C::m()` or `{main} file`, four spaces in from the
-/// tag. The frames below are the user frames [`FrameView::caller`]
-/// walks; php's `prev_execute_data` passes natives' frames too.
-fn show_init_backtrace(observed: &mut Observed<'_>, serves: &Serves) {
+/// below it on php's `prev_execute_data` chain ([`Observed::walk`]),
+/// natives' calls and a fiber's bottom frame among them, `f()`,
+/// `C::m()` or `{main} file`, four spaces in from the tag.
+fn show_init_backtrace(observed: &mut Observed<'_>) {
     let depth = observed.state::<Observing>().depth;
-    let row = |out: &mut Vec<u8>, serves: &Serves| {
+    let mut out = indent(depth);
+    out.extend_from_slice(b"<!--\n");
+    for frame in observed.walk() {
         out.extend(indent(depth + 2));
-        match serves {
+        match Serves::chain(observed, &frame) {
             Serves::Function { scope, name } => {
-                out.extend(Serves::function(scope.as_deref(), name));
+                out.extend(Serves::function(scope.as_deref(), &name));
                 out.extend_from_slice(b"()\n");
             }
             Serves::File(file) => {
                 out.extend_from_slice(b"{main} ");
-                out.extend_from_slice(file);
+                out.extend_from_slice(&file);
                 out.push(b'\n');
             }
         }
-    };
-    let mut out = indent(depth);
-    out.extend_from_slice(b"<!--\n");
-    row(&mut out, serves);
-    let mut below = observed.caller();
-    while let Some(frame) = below {
-        row(&mut out, &Serves::frame(observed, &frame));
-        below = frame.caller();
     }
     out.extend(indent(depth));
     out.extend_from_slice(b"-->\n");
