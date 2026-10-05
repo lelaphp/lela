@@ -21,7 +21,9 @@ use crate::tally;
 /// absence a reader of the earlier shape already handles correctly, is
 /// added under the same `v`, as `target.missed_skipped` was (#1834): a
 /// reader of `v = 1` that never reads it keeps its own estimate of the
-/// target's skipped misses. A field removed, renamed or retyped, or a
+/// target's skipped misses. `message` was added the same way (#1912): a
+/// reader that never reads it says why a subset ran nothing in words of
+/// its own, as it did before. A field removed, renamed or retyped, or a
 /// meaning changed, is a new `v`.
 pub(crate) const V: u32 = 1;
 
@@ -65,6 +67,13 @@ pub(crate) struct Row {
     /// Met-of-target, where the reading was held to one (#1184); null
     /// where it was not.
     target: Option<Target>,
+    /// The reading's own message, whole: what it found, or why it ran
+    /// nothing, an absent or stale binary, a refused subset or no test of
+    /// it run, in the instrument's words (#1912). Omitted where the
+    /// reading's message is empty, which is how a lean row of the
+    /// published history reads, as [`V`] allows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 /// What a run was beside the subset's own: the engine's run, the
@@ -176,6 +185,7 @@ impl PerReading for Row {
                 predated: counted(Measure::PREDATED),
                 missed_skipped: count(reading, Measure::MISSED_SKIPPED),
             }),
+            message: Some(reading.message.clone()).filter(|message| !message.is_empty()),
         }
     }
 }
@@ -326,6 +336,29 @@ mod tests {
             json!({ "n": 44, "met": 40, "outside": 6, "predated": 0 }),
             "a reading from before the count renders as it did"
         );
+    }
+
+    /// A reading's own message is on its row, so a reader draws why a
+    /// subset ran nothing in xtask's words (#1912); a reading that keeps
+    /// none, as a lean row of the published history, carries no such field
+    /// at all, so its line is the shape it always had under `v = 1`.
+    #[test]
+    fn a_row_carries_the_readings_message_where_it_keeps_one() {
+        let mut said = reading(
+            "ext/pcre",
+            &[("engine_stale", 1), ("run", 0), ("tests", 120)],
+        );
+        said.message = "ext/pcre: no subset run over 120 tests; the engine's binary was built before ext/pcre/src/lib.rs was last written".to_owned();
+        let line = serde_json::to_value(Row::of(&said)).unwrap();
+        assert_eq!(line["message"], said.message.as_str());
+        assert_eq!(line["measured"], false);
+
+        let lean = reading(
+            "ext/pcre",
+            &[("engine_stale", 1), ("run", 0), ("tests", 120)],
+        );
+        let line = serde_json::to_value(Row::of(&lean)).unwrap();
+        assert!(line.get("message").is_none(), "{line}");
     }
 
     /// A reading never held to a target says so with a null, never a

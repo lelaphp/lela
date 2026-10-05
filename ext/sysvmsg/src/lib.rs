@@ -24,19 +24,15 @@
 
 mod ffi;
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Ref, Untyped,
-};
+use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, fatal, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 /// A by-reference parameter with no declared type.
@@ -147,37 +143,10 @@ impl SysvMessageQueue {}
 /// `sysvmsg_queue_object_handlers`: `std_object_handlers` with
 /// `get_constructor` refusing, `clone_obj` php's null slot and `compare`
 /// `zend_objects_not_comparable`.
-pub(crate) struct Handlers;
-
-pub(crate) static SYSVMSG: Handlers = Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct SysvMessageQueue, use msg_get_queue() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
-}
+const SYSVMSG: Refusals = Refusals::NONE
+    .construction(Some("msg_get_queue()"))
+    .cloning()
+    .comparison();
 
 /// The queue's id, or the `InternalError` for an object no native made.
 fn id(req: &mut Request, queue: Instance<SysvMessageQueue>) -> Result<i32, Thrown> {

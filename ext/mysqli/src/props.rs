@@ -9,7 +9,7 @@
 use std::marker::PhantomData;
 
 use php_ext::abi::{
-    CloneObj, DebugInfo, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Std,
+    DebugInfo, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Refusals, Std,
 };
 use php_ext::coerce::truthy;
 use php_ext::raising::{Thrown, throw_error};
@@ -60,14 +60,17 @@ fn handled<P: Props>(name: &[u8]) -> Option<&'static str> {
     P::NAMES.iter().copied().find(|n| n.as_bytes() == name)
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl<P: Props> ObjectHandlers for Handlers<P> {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         P::free(req, object);
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `mysqli_read_property`: what the read function answers, `null`

@@ -7,7 +7,7 @@
 
 use std::ffi::CString;
 
-use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Untyped};
+use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
@@ -22,9 +22,7 @@ use crate::constants::{
 use crate::decode::{Arg, Origin, c_string, cert_from_str, check_path, defer, finish, raised};
 use crate::ffi::key::{KeyContext, Operation};
 use crate::ffi::{self, Bio, Cipher, KeyKind, PKey};
-use crate::{
-    Handlers, config, errors_restore_mark, errors_set_mark, keydata, put, put_bytes, store_errors,
-};
+use crate::{config, errors_restore_mark, errors_set_mark, keydata, put, put_bytes, store_errors};
 
 /// A `php_openssl_pkey_object`: the key, and whether it was made as a
 /// private one, which is what the natives that take a key check.
@@ -82,8 +80,7 @@ pub(crate) struct OpenSSLAsymmetricKey;
 impl OpenSSLAsymmetricKey {}
 
 /// `php_openssl_pkey_object_handlers`.
-pub(crate) static HANDLERS: Handlers =
-    Handlers("Cannot directly construct OpenSSLAsymmetricKey, use openssl_pkey_new() instead");
+pub(crate) const HANDLERS: Refusals = crate::refusals("openssl_pkey_new()");
 
 /// `php_openssl_pkey_object_init`: a new `OpenSSLAsymmetricKey` holding
 /// the key.

@@ -6,7 +6,8 @@
 #![allow(non_camel_case_types)]
 
 use php_ext::abi::{
-    ClassIterator, ClassRef, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, This, True, Union,
+    ClassIterator, ClassRef, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, Refusals, This,
+    True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -837,12 +838,16 @@ impl mysqli_result {
 /// `mysqli_object_result_handlers` with `php_mysqli_result_get_iterator`.
 pub(crate) struct ResultHandlers(props::Handlers<ResultProps>);
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for ResultHandlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         self.0.free_obj(req, object);
-    }
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
     }
     fn read_property(
         &self,
