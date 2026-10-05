@@ -636,6 +636,7 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::eval_in_frame
 request::Request::eval_stringl
 request::Request::evaluated_default
 request::Request::executing
@@ -759,6 +760,7 @@ request::Request::set_display_errors
 request::Request::set_env
 request::Request::set_error_handler
 request::Request::set_exception_handler
+request::Request::set_frame_var
 request::Request::set_global
 request::Request::set_header_callback
 request::Request::set_local_var

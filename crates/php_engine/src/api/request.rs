@@ -63,6 +63,7 @@ mod execution;
 mod extensions;
 pub use extensions::InfoRow;
 mod frame_reads;
+mod frame_writes;
 pub(crate) use frame_reads::Identity;
 pub use frame_reads::{FrameId, FrameView};
 mod frames;

@@ -244,6 +244,14 @@ impl Request {
         })
     }
 
+    /// Where the frame `id` names stands, where that is the running
+    /// stack: the frames a write or an evaluation reaches
+    /// ([`Request::set_frame_var`], [`Request::eval_in_frame`]).
+    pub(super) fn running_frame_of(&self, id: FrameId) -> Option<FrameRef> {
+        let view = self.frame_of(id)?;
+        (view.stack == 0).then_some(view.at)
+    }
+
     /// `frame` on the running stack, read: what an observer's handler is
     /// handed ([`crate::observer`]).
     pub(crate) fn frame_view(&self, frame: FrameRef) -> FrameView<'_> {
