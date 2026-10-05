@@ -10,11 +10,12 @@
 //! a stream that keeps one tells its notifier what its reads and writes
 //! came to, as php's streams do.
 
-use super::Request;
+use super::{Request, SocketOptions};
 use crate::api::call::call;
-use crate::api::coerce::callable_checked;
+use crate::api::coerce::{callable_checked, to_long, truthy};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
-use crate::api::values::{Emalloc, Key, PhpArray, PhpString, Resource, Value};
+use crate::api::request::BindTo;
+use crate::api::values::{Emalloc, Key, PhpArray, PhpString, Resource, Value, ValueRef};
 use crate::state::Layer;
 
 /// `sizeof(php_stream_context)` on the pinned 64-bit build: the
@@ -428,6 +429,59 @@ impl StreamCtx {
             max: n.progress_max,
         };
         self.call_notifier(req, &notice)
+    }
+
+    /// The `socket` options of the `context`, each read as its reader in
+    /// `xp_socket.c` and `transports.c` reads it: `bindto` a string or
+    /// refused, `backlog` by `zval_get_long`, `ipv6_v6only` where it is
+    /// not `null`, and the rest by `zend_is_true`. The `transport` reads
+    /// them as it connects or binds ([`Request::xport_create`]), so every
+    /// connection made under a `context` honours them, a `SoapClient`'s
+    /// among them: with `bindto` naming an address, the server sees the
+    /// request come from it.
+    ///
+    /// ```php
+    /// ini_set('default_socket_timeout', 1);
+    /// $t = stream_socket_server('tcp://127.0.0.1:0');
+    /// $port = explode(':', stream_socket_get_name($t, false))[1];
+    /// fclose($t);
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $ctx = stream_context_create(['socket' => ['bindto' => "127.0.0.1:$port"]]);
+    /// $c = new SoapClient(null, ['location' => 'http://' . stream_socket_get_name($s, false) . '/', 'uri' => 'urn:x', 'stream_context' => $ctx, 'exceptions' => false]);
+    /// echo $c->__soapCall('f', [])->faultstring, "\n";
+    /// stream_socket_accept($s, 1, $peer);
+    /// var_dump($peer === "127.0.0.1:$port");
+    /// ```
+    /// ```expect
+    /// Error Fetching http headers
+    /// bool(true)
+    /// ```
+    pub(crate) fn socket_options(self, req: &mut Request) -> Result<SocketOptions, Thrown> {
+        let mut options = SocketOptions::default();
+        if let Some(value) = self.option(req, b"socket", b"bindto") {
+            options.bindto = Some(match value.as_php_string() {
+                Some(text) => BindTo::Address(text.as_bytes().to_vec()),
+                None => BindTo::NotAString,
+            });
+        }
+        if let Some(value) = self.option(req, b"socket", b"backlog") {
+            options.listen_queue = Some(to_long(req, &value)?);
+        }
+        for (name, flag) in [
+            (&b"tcp_nodelay"[..], &mut options.tcp_nodelay),
+            (b"so_reuseport", &mut options.so_reuseport),
+            (b"so_broadcast", &mut options.so_broadcast),
+        ] {
+            if let Some(value) = self.option(req, b"socket", name) {
+                *flag = truthy(req, &value);
+            }
+        }
+        if let Some(value) = self.option(req, b"socket", b"ipv6_v6only")
+            && !matches!(value.as_ref(), ValueRef::Null)
+        {
+            options.ipv6_v6only = Some(truthy(req, &value));
+        }
+        Ok(options)
     }
 
     /// The options array taken out of the `context` for a call that

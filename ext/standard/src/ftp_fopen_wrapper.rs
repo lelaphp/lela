@@ -22,7 +22,7 @@ use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
-use crate::sockets::{default_timeout, socket_options, timeval};
+use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_raw_url_decode};
 
@@ -228,7 +228,7 @@ fn connect(
         timeout,
         connect: true,
         persistent: None,
-        socket: socket_options(req, ctx)?,
+        socket: SocketOptions::default(),
         context: ctx,
     };
     let control = match req.xport_create(&transport, xport)? {
@@ -731,7 +731,7 @@ fn open(
         timeout,
         connect: true,
         persistent: None,
-        socket: socket_options(req, ctx)?,
+        socket: SocketOptions::default(),
         context: ctx,
     };
     let data = match req.xport_create(&transport, xport)? {

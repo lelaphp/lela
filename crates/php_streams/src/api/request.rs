@@ -181,8 +181,10 @@ impl UrlStat {
 /// stream of the `transport`'s kind holding no socket, the name not
 /// even parsed; or a server bound to the name, listening where `listen`
 /// says; each with the `context` the native resolved, which the stream
-/// keeps as `PHP_STREAM_CONTEXT(stream)` before it connects, and the
-/// `socket` options read off it. A client with a `persistent` key, php's
+/// keeps as `PHP_STREAM_CONTEXT(stream)` and whose `socket` options the
+/// `transport` reads as it connects or binds, as `xp_socket.c` does, and
+/// the `socket` options the caller sets on the socket itself
+/// ([`SocketOptions`]). A client with a `persistent` key, php's
 /// `persistent_id`, is first looked for among the persistent streams
 /// under it, and one made is kept there.
 #[derive(Clone)]
@@ -201,11 +203,13 @@ pub enum Xport {
     },
 }
 
-/// The `socket` options of a `php_stream_context`, as `xp_socket.c` and
-/// `transports.c` read them off `PHP_STREAM_CONTEXT(stream)`: each is
+/// The `socket` options of a socket, as `xp_socket.c` and `transports.c`
+/// read them off `PHP_STREAM_CONTEXT(stream)`: each is
 /// `php_stream_context_get_option(context, "socket", name)` read the way
 /// its reader reads it, and the default is the value of none, which a
-/// stream opened with no `context` has.
+/// stream opened with no `context` has. A caller of
+/// [`Request::xport_create`] hands the ones it sets on the socket itself,
+/// which the `transport` lays over those it reads off the `context`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // php's options, one flag per name
 pub struct SocketOptions {
@@ -224,6 +228,25 @@ pub struct SocketOptions {
     /// `ipv6_v6only` where it is not `null`, `zend_is_true`: the
     /// `IPV6_V6ONLY` a server's socket is given.
     pub ipv6_v6only: Option<bool>,
+}
+
+impl SocketOptions {
+    /// What a socket is made with: the options `read` off its `context`,
+    /// as php's `transport` reads them, under these, which the caller sets
+    /// on the socket itself as `mysqlnd`'s `setsockopt` and `ftp`'s
+    /// `listen` do once php's `transport` is done with the `context`: an
+    /// option either turns on, and a value the caller gives in place of
+    /// the read one.
+    pub(crate) fn under(self, read: SocketOptions) -> SocketOptions {
+        SocketOptions {
+            bindto: self.bindto.or(read.bindto),
+            listen_queue: self.listen_queue.or(read.listen_queue),
+            tcp_nodelay: self.tcp_nodelay || read.tcp_nodelay,
+            so_reuseport: self.so_reuseport || read.so_reuseport,
+            so_broadcast: self.so_broadcast || read.so_broadcast,
+            ipv6_v6only: self.ipv6_v6only.or(read.ipv6_v6only),
+        }
+    }
 }
 
 /// The `bindto` option as `php_tcp_sockop_connect` reads it: the address

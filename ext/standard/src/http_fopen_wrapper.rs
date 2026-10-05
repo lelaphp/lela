@@ -17,14 +17,14 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, Stream, StreamCtx,
-    StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
+    Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, SocketOptions, Stream,
+    StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::State;
-use crate::sockets::{default_timeout, socket_options, timeval};
+use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_url_decode};
 
@@ -795,7 +795,7 @@ fn wrap_http_ex(
         timeout,
         connect: true,
         persistent: None,
-        socket: socket_options(req, chain.ctx)?,
+        socket: SocketOptions::default(),
         context: chain.ctx,
     };
     let stream = match req.xport_create(&transport, xport)? {
