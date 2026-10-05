@@ -9,4 +9,5 @@ mod lifecycle;
 mod observer;
 mod periodic;
 mod pool;
+mod stepped;
 pub(crate) mod test_ext;
