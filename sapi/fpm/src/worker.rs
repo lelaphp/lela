@@ -644,10 +644,22 @@ impl Worker {
             *CURRENT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&wire));
-            self.serve(begun.params, &wire, peer);
+            let start_failed = self.serve(begun.params, &wire, peer);
             *CURRENT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            if start_failed {
+                // `fcgi_finish_request(request, 1)`, then
+                // `php_module_shutdown` and `FPM_EXIT_SOFTWARE` out of
+                // `main` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`): what the
+                // failure wrote ends the request, the connection is closed
+                // whatever the web server asked to keep, and the child ends.
+                wire.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .finish(true);
+                crate::stdio::flush_child();
+                return EXIT_SOFTWARE;
+            }
             requests += 1;
             let last = self.max_requests > 0 && requests == self.max_requests;
             let mut w = wire
@@ -775,9 +787,18 @@ enum Program {
 }
 
 impl Worker {
-    /// One request, from its variables to its access log line.
+    /// One request, from its variables to its access log line; whether
+    /// its start failed, an extension's `rinit` having raised (#1775),
+    /// which ends it before `fpm_request_end` writes the scoreboard and
+    /// the access log (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`).
     #[allow(clippy::too_many_lines)] // `fpm_main`'s loop body, kept as one
-    fn serve(&mut self, params: Environment, wire: &Arc<Mutex<Wire>>, peer: Option<IpAddr>) {
+    #[must_use]
+    fn serve(
+        &mut self,
+        params: Environment,
+        wire: &Arc<Mutex<Wire>>,
+        peer: Option<IpAddr>,
+    ) -> bool {
         let mut env = params;
         let settings = Settings {
             fix_pathinfo: self.flag(b"cgi.fix_pathinfo", true),
@@ -869,6 +890,9 @@ impl Worker {
                     proc.set_stage(Stage::Executing, crate::master::clock_us());
                 }
                 let served = self.engine.serve(description, &mut response);
+                if served.start_failed {
+                    return true;
+                }
                 let status = wire
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -916,6 +940,7 @@ impl Worker {
                 },
             );
         }
+        false
     }
 
     /// An entry read as `OnUpdateBool` reads it.

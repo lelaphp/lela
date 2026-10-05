@@ -34,7 +34,7 @@ use crate::api::abi::{
     Refusal, Start, StartupIni, States, Validation,
 };
 use crate::api::call::Function;
-use crate::api::raising::Level;
+use crate::api::raising::{Level, Thrown};
 use crate::api::request::{BuildDefs, Ending, ExtensionId, Request, Sink, ini_truth};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -518,6 +518,28 @@ pub struct Observables {
     /// What the program left uncaught, where the host renders it
     /// ([`Primary::Bare`]).
     pub uncaught: Option<Uncaught>,
+    /// `php_request_startup` returned `FAILURE`: an extension's `rinit`
+    /// raised, which is php's fatal inside `RINIT` (#1775). What it
+    /// raised was rendered as the uncaught fatal with no frame standing,
+    /// no later `rinit` and no program ran, and the host ends as its php
+    /// counterpart ends after the failure: the CLI prints `Could not
+    /// startup.`, the CGI returns `FAILURE`, php-fpm finishes the
+    /// `FastCGI` request and ends the worker, and phpdbg prints `Could not
+    /// startup`.
+    pub start_failed: bool,
+}
+
+/// What `php_request_startup` came to ([`Engine::begin`]).
+enum Begun {
+    /// The request started, and what the host asked for is served in it.
+    Started(Request),
+    /// An extension's `rinit` raised, and its throwable was rendered as
+    /// the uncaught fatal: the request, which the host's own branch ends.
+    Failed(Request),
+    /// No request started: the engine's start refused, `opcache.preload`
+    /// refused, or `php_module_startup` failed, and what the host is
+    /// handed instead.
+    Refused(Observables),
 }
 
 /// The loop bound to the engine's tier, `execute::<T>` for one `T`.
@@ -3757,23 +3779,40 @@ impl Engine {
 
     /// `php_request_startup` for `description`, and what `do_cli` does
     /// after it before a program is compiled, the request handed back to
-    /// serve; the refusal `opcache.preload` answers with where it is one.
+    /// serve; the refusal `opcache.preload` answers with where it is one,
+    /// and where an extension's `rinit` raised, the startup failure every
+    /// host but the built-in server ends on ([`Engine::start_failed`]).
     pub(crate) fn begin(
         &self,
         description: RequestDescription,
         sink: &mut dyn OutputSink,
         traced: bool,
     ) -> Result<Request, Observables> {
+        match self.start_request(description, sink, traced) {
+            Begun::Started(req) => Ok(req),
+            Begun::Failed(req) => Err(Engine::start_failed(req, sink)),
+            Begun::Refused(refused) => Err(refused),
+        }
+    }
+
+    /// [`Engine::begin`] with a failed start handed back as the request
+    /// it failed in, for the built-in server, which shuts it down.
+    fn start_request(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+        traced: bool,
+    ) -> Begun {
         // php never reaches `zend_post_startup` past a failed `MINIT`.
         if let Some(status) = self.refused(sink) {
-            return Err(Observables {
+            return Begun::Refused(Observables {
                 exit_code: status,
                 headers_sent: true,
                 ..Observables::default()
             });
         }
         if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
-            return Err(Observables {
+            return Begun::Refused(Observables {
                 exit_code: status,
                 headers_sent: true,
                 ..Observables::default()
@@ -3817,7 +3856,7 @@ impl Engine {
         // failed, and the host ends with status 1 before any request.
         if (self.shared.startup_raised.iter()).any(|(level, _)| *level == Level::CoreError) {
             crate::preload::hand_over(&mut req, sink);
-            return Err(Observables {
+            return Begun::Refused(Observables {
                 exit_code: 1,
                 headers_sent: true,
                 ..Observables::default()
@@ -3826,7 +3865,15 @@ impl Engine {
         // `accel_activate`: a reset a request asked for empties the unit
         // cache at the next request's start.
         self.shared.units.restart_if_pending();
-        serve_rinits(&mut req, &self.shared.extensions);
+        if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
+            // `zend_throw_exception_internal` with no frame standing
+            // (`Z/Zend/zend_exceptions.c:206-224`): the throwable rendered
+            // as the uncaught fatal, and `zend_bailout` to the `zend_catch`
+            // of `php_request_startup`, which answers `FAILURE`; a fatal
+            // the `rinit` met was rendered where it was raised.
+            let _ = req.thrown_without_frame(&thrown);
+            return Begun::Failed(req);
+        }
         self.arm_preloaded(&mut req);
         if req.web().is_some_and(|web| web.no_headers) {
             req.output_mut().quiet();
@@ -3840,7 +3887,35 @@ impl Engine {
         }
         let _ = req.register_file_handles(false);
         req.enter_phase(crate::api::request::Phase::Running);
-        Ok(req)
+        Begun::Started(req)
+    }
+
+    /// The end of a request whose start failed, as php-cgi, php-fpm, the
+    /// CLI and phpdbg end it: what the host's `php_request_startup` left
+    /// written reaches the host, and the request's states drop with it,
+    /// with no request-end phase served, since each goes from the failure
+    /// to `php_module_shutdown` without `php_request_shutdown` (#1775).
+    /// What a buffer of the `php_output` layer still holds is never
+    /// flushed, and the head is sent only where something written sent
+    /// it. The host is handed the failure ([`Observables::start_failed`]),
+    /// and each host's tests hold its ending, since a fence carries
+    /// neither the ini nor the session file a failing `rinit` needs
+    /// (#1634).
+    fn start_failed(mut req: Request, sink: &mut dyn OutputSink) -> Observables {
+        let fatal = match req.ending() {
+            Some(Ending::Fatal(logged)) => Some(logged.clone()),
+            _ => None,
+        };
+        let observed = Observables {
+            exit_code: req.exit_status(),
+            headers_sent: req.output().headers_sent(),
+            fatal,
+            memory_peak: req.memory_peak(true),
+            uncaught: None,
+            start_failed: true,
+        };
+        crate::preload::hand_over(&mut req, sink);
+        observed
     }
 
     /// `php_execute_script` (`Z/main/main.c:2568-2648`) over the
@@ -3951,9 +4026,21 @@ impl Engine {
             code: None,
             fatal: None,
         };
-        let mut req = match self.begin(description, sink, false) {
-            Ok(req) => req,
-            Err(refused) => return (refused, dispatched),
+        let mut req = match self.start_request(description, sink, false) {
+            Begun::Started(req) => req,
+            // `php_cli_server_dispatch` shuts a request whose start
+            // failed down and closes the connection
+            // (`Z/sapi/cli/php_cli_server.c:2307-2310`): the one host
+            // that serves `php_request_shutdown` after the failure, so
+            // the request-end phases run, and no response line is logged.
+            Begun::Failed(mut req) => {
+                let observed = Observables {
+                    start_failed: true,
+                    ..self.shutdown(&mut req, sink).0
+                };
+                return (observed, dispatched);
+            }
+            Begun::Refused(refused) => return (refused, dispatched),
         };
         if let Some(router) = router {
             dispatched.routed = self.execute_router(&mut req, router);
@@ -4120,6 +4207,7 @@ impl Engine {
                 fatal,
                 memory_peak: req.memory_peak(true),
                 uncaught: req.take_kept_uncaught(),
+                start_failed: false,
             },
             trace,
         )
@@ -4499,8 +4587,10 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// with the extension being activated named to what it registers
 /// ([`Request::activating`](crate::api::request::Request::activating)),
 /// so the stream layer places the wrappers and filters each registers in
-/// php's startup order. The pinned build has `zip`, which the bundle has
-/// not:
+/// php's startup order; the first that raises ends the walk, as the
+/// `zend_bailout` of php's fatal inside `RINIT` leaves
+/// `zend_activate_modules` (#1775), and what it raised is handed back.
+/// The pinned build has `zip`, which the bundle has not:
 ///
 /// ```php
 /// echo implode(',', array_diff(stream_get_wrappers(), ['zip'])), "\n", implode(',', stream_get_filters()), "\n";
@@ -4509,15 +4599,20 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// https,ftps,compress.zlib,compress.bzip2,php,file,glob,data,http,ftp,phar
 /// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
 /// ```
-fn serve_rinits(req: &mut Request, extensions: &[Extension]) {
+fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Thrown> {
+    let mut served = Ok(());
     for (at, extension) in extensions.iter().enumerate() {
         let Some(rinit) = extension.rinit else {
             continue;
         };
         req.activating = u32::try_from(at).ok().map(crate::api::request::ExtensionId);
-        let _ = rinit(req);
+        served = rinit(req);
+        if served.is_err() {
+            break;
+        }
     }
     req.activating = None;
+    served
 }
 
 #[cfg(test)]

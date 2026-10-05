@@ -243,6 +243,73 @@ fn a_child_past_its_max_requests_finishes_a_persistent_cdb_make_file() {
     );
 }
 
+/// A request whose start fails, session's `rinit` raising under
+/// `session.auto_start` over a session file whose `DateTime` does not
+/// unserialize (#1775): the child renders the uncaught fatal and
+/// session's warning, finishes the `FastCGI` request with what they wrote
+/// and closes the connection (`fcgi_finish_request(request, 1)`), and
+/// ends with `FPM_EXIT_SOFTWARE` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`),
+/// which the master logs as php's does before it starts the next child,
+/// whose request is served. The bytes and the log's lines are the oracle's
+/// php-fpm's under the same configuration and line (#1879).
+#[test]
+fn a_child_whose_request_start_fails_finishes_the_request_and_ends() {
+    let dir = tree("start-failed");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let script = dir.join("index.php");
+    std::fs::write(&script, "<?php echo \"ran\\n\";").unwrap();
+    std::fs::write(
+        dir.join("sess_t1879"),
+        "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}",
+    )
+    .unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-d", "session.auto_start=1", "-d"])
+        .arg(format!("session.save_path={}", dir.display()))
+        .arg("-y")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let script_name = script.display().to_string();
+    let pairs = [
+        ("SCRIPT_FILENAME", script_name.as_str()),
+        ("REQUEST_METHOD", "GET"),
+    ];
+    let mut cookie = pairs.to_vec();
+    cookie.push(("HTTP_COOKIE", "PHPSESSID=t1879"));
+    let failed = connect(&socket, started)
+        .map(|s| request(s, &cookie))
+        .unwrap_or_default();
+    let next = connect(&socket, Instant::now())
+        .map(|s| request(s, &pairs))
+        .unwrap_or_default();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status();
+    let _ = master.wait();
+    let log = std::fs::read_to_string(dir.join("fpm.log")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        String::from_utf8_lossy(&failed),
+        "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<br />\n<b>Fatal error</b>:  Uncaught Error: Invalid serialization data for DateTime object in [no active file]:0\nStack trace:\n#0 [internal function]: DateTime-&gt;__unserialize(Array)\n#1 {main}\n  thrown in <b>[no active file]</b> on line <b>0</b><br />\n<br />\n<b>Warning</b>:  PHP Request Startup: Failed to decode session object. Session has been destroyed in <b>Unknown</b> on line <b>0</b><br />\n"
+    );
+    let next = String::from_utf8_lossy(&next);
+    assert!(next.ends_with("\r\n\r\nran\n"), "{next:?}");
+    let ended: Vec<&str> = log
+        .lines()
+        .filter_map(|line| line.split_once("] ").map(|(_, rest)| rest))
+        .filter(|line| line.starts_with("WARNING: [pool www] child "))
+        .collect();
+    assert_eq!(ended.len(), 1, "{log}");
+    assert!(ended[0].contains(" exited with code 70 after "), "{log}");
+}
+
 /// A log line with its time, the pids and a child's lifetime masked: the
 /// number after `pid`, `child` and `after` is `N`.
 #[cfg(target_os = "macos")]
