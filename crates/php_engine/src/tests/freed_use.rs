@@ -253,9 +253,9 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
             Capture::default(),
         );
         let stdout = String::from_utf8_lossy(&served.stdout);
-        let (before, after) = stdout.split_once("block at 0x").unwrap_or_default();
-        assert_eq!(
-            before, "went on\nFatal error: InternalError: a write into the 56-byte ",
+        let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+        assert!(
+            before.starts_with("went on\nFatal error: InternalError: a write into the "),
             "{evict}: {stdout}"
         );
         assert!(

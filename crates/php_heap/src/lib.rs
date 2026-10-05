@@ -1081,13 +1081,12 @@ mod tests {
     }
 
     /// The bin of a block just freed hands out another slot, and the
-    /// block keeps its mark until sixteen more of its bin are freed: a
+    /// block keeps its mark until its bin's quarantine is full: a
     /// value used after its block is given back and one of its size made
     /// is refused the first time it happens, where a free list that handed the
     /// block straight back would have cleared the mark and counted the
-    /// new value's owner one more. The seventeenth slot freed evicts the
-    /// first, and a block of the bin is handed out again in the order
-    /// the bin's quarantine gave them up.
+    /// new value's owner one more. A slot freed into a full quarantine
+    /// evicts the first, which its bin then hands out again.
     #[cfg(debug_assertions)]
     #[test]
     fn the_most_recently_freed_slot_of_a_bin_is_held_back_and_its_use_refused() {
@@ -1114,16 +1113,16 @@ mod tests {
                 if message.starts_with(&format!("InternalError: an addref of the block at {at:#x}, which the heap has freed"))
         ));
 
-        let more: Vec<Str> = (0..QUARANTINED)
+        let more: Vec<Str> = (0..mm::QUARANTINE_SLOTS)
             .filter_map(|_| hooks.heap.string(b"a string of its own block").ok())
             .collect();
-        assert_eq!(more.len(), QUARANTINED);
+        assert_eq!(more.len(), mm::QUARANTINE_SLOTS);
         assert!(more.iter().all(|s| s.address().as_ptr().addr() != at));
         for s in more {
             hooks.heap.release_string(s);
         }
         assert_eq!(hooks.heap.take_sensed(), None, "an eviction found a write");
-        let again: Vec<Str> = (0..QUARANTINED + 2)
+        let again: Vec<Str> = (0..mm::QUARANTINE_SLOTS + 2)
             .filter_map(|_| hooks.heap.string(b"a string of its own block").ok())
             .collect();
         assert!(
@@ -1136,10 +1135,6 @@ mod tests {
         assert_eq!(hooks.heap.take_sensed(), None);
     }
 
-    /// How many freed slots a bin holds back in a debug build.
-    #[cfg(debug_assertions)]
-    const QUARANTINED: usize = 16;
-
     /// A write into a block its bin's quarantine holds is found as the
     /// block leaves, recorded as the `InternalError` naming the block:
     /// over the poison in its first word or over the mark after it, and
@@ -1151,7 +1146,7 @@ mod tests {
         let _alone = alone();
         let leaves: [(&str, Leave); 2] = [
             ("evicted", |heap| {
-                let more: Vec<Str> = (0..QUARANTINED)
+                let more: Vec<Str> = (0..mm::QUARANTINE_SLOTS)
                     .filter_map(|_| heap.string(b"a string of its own block").ok())
                     .collect();
                 for s in more {
@@ -1191,45 +1186,60 @@ mod tests {
         }
     }
 
-    /// An allocation that finds its bin's free list empty takes the
-    /// quarantine's oldest slot, checked, before it carves a `run`, so
-    /// the `runs` a bin takes are the ones php's takes: a `run` of the
-    /// 3072-byte bin holds four slots, and four freed and four made are
-    /// the same four, oldest first, with a write into the first found
-    /// as it leaves.
+    /// A bin whose free list is empty carves a new `run` rather than hand
+    /// out a slot its quarantine holds, so a block freed from a full
+    /// `run` is still held back: a `run` of the 3072-byte bin holds four
+    /// slots, and four freed and four made are four others. Within a
+    /// chunk of the limit, where one more `run` could end the request
+    /// where php's reuses a slot, the bin hands out its quarantine's
+    /// oldest slot instead, checked, with a write into it found as it
+    /// leaves.
     #[cfg(debug_assertions)]
     #[test]
-    fn a_bin_takes_its_quarantined_slots_before_a_new_run() {
+    fn a_bin_carves_a_run_before_it_hands_out_a_held_slot_unless_the_limit_is_near() {
         let _alone = alone();
-        let mut heap = Heap::new();
         let make = |heap: &mut Heap| -> Vec<Str> {
             (0..4)
                 .filter_map(|_| heap.string(&[b'x'; 3000]).ok())
                 .collect()
         };
-        let first = make(&mut heap);
-        assert_eq!(first.len(), 4);
-        let at: Vec<usize> = first.iter().map(|s| s.address().as_ptr().addr()).collect();
-        let written = first[0].address();
-        for s in first {
-            heap.release_string(s);
-        }
-        let first: *mut u64 = written.as_ptr().cast();
-        // SAFETY: the block is a freed slot of `heap`'s 3072-byte bin, its
-        // chunk still mapped; the write is the stale one planted.
-        unsafe { first.write(7) };
-        let second = make(&mut heap);
-        let again: Vec<usize> = second.iter().map(|s| s.address().as_ptr().addr()).collect();
-        assert_eq!(again, at, "the oldest slot first, and no new run");
-        assert_eq!(
-            heap.take_sensed(),
-            Some(Fatal::Error(format!(
-                "InternalError: a write into the 3072-byte block at {:#x} after the heap freed it, found as it left the quarantine",
-                written.as_ptr().addr()
-            )))
-        );
-        for s in second {
-            heap.release_string(s);
+        for near in [false, true] {
+            let mut heap = Heap::new();
+            if near {
+                assert!(heap.set_memory_limit(heap.memory_usage(true) + mm::CHUNK_SIZE / 2));
+            }
+            let first = make(&mut heap);
+            assert_eq!(first.len(), 4);
+            let at: Vec<usize> = first.iter().map(|s| s.address().as_ptr().addr()).collect();
+            let written = first[0].address();
+            for s in first {
+                heap.release_string(s);
+            }
+            let first_word: *mut u64 = written.as_ptr().cast();
+            // SAFETY: the block is a freed slot of `heap`'s 3072-byte bin,
+            // its chunk still mapped; the write is the stale one planted.
+            unsafe { first_word.write(7) };
+            let second = make(&mut heap);
+            let again: Vec<usize> = second.iter().map(|s| s.address().as_ptr().addr()).collect();
+            if near {
+                assert_eq!(again, at, "the oldest held slot first, and no new run");
+                assert_eq!(
+                    heap.take_sensed(),
+                    Some(Fatal::Error(format!(
+                        "InternalError: a write into the 3072-byte block at {:#x} after the heap freed it, found as it left the quarantine",
+                        written.as_ptr().addr()
+                    )))
+                );
+            } else {
+                assert!(
+                    again.iter().all(|a| !at.contains(a)),
+                    "a held slot was handed out"
+                );
+                assert_eq!(heap.take_sensed(), None);
+            }
+            for s in second {
+                heap.release_string(s);
+            }
         }
     }
 
