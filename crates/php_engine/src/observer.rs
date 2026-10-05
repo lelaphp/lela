@@ -4,7 +4,7 @@
 //!
 //! An extension declares an observer on its [`Extension`] value
 //! ([`ExtensionBuilder::observer`]), as php's `MINIT` calls
-//! `zend_observer_fcall_register`; the bundle's observers are listed in
+//! `zend_observer_fcall_register` (`Z/Zend/zend_observer.c:44`); the bundle's observers are listed in
 //! the order the extensions start ([`crate::supplied`]). The engine fixes
 //! one word at its build, `Shared::observers`, how many were declared, and
 //! the two homes test it and nothing else while it is zero:
@@ -21,7 +21,7 @@
 //!   `zend_dispatch_try_catch_finally_helper` (`:8157-8161`), which is
 //!   `handlers::unwind_from`.
 //!
-//! That is ccc7f26c's plain test, which #1954 ruled stands: the test
+//! That is the plain test #1808 measured, which #1954 ruled stands: the test
 //! lives in these two functions alone, so php's observer-specialised call
 //! and return handlers, the escape design §4.3 names, would change no
 //! item of the seam. Past the word, out of line and cold, a frame's
@@ -30,7 +30,7 @@
 //! function's identity number, which is sparse: every observer asked in
 //! declaration order, each answering a begin handler, an end handler,
 //! both or neither ([`ObserverHandlers`]), php's
-//! `zend_observer_fcall_install`. There is no limit on how many. Begin
+//! `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`). There is no limit on how many. Begin
 //! handlers are called in declaration order and end handlers in reverse. A
 //! frame with an end handler is kept on the request's chain of open
 //! frames (`Request::open_observed`, php's `EG(current_observed_frame)`), and is ended
@@ -38,7 +38,8 @@
 //! return, by the unwind that leaves it, or, at a fatal, by
 //! [`end_all`], which ends every one still open from the innermost out
 //! with no value, after the fatal is rendered, as php's
-//! `zend_observer_fcall_end_all` does at `php_request_shutdown`.
+//! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
+//! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
 //! What is not here yet, each built on the same slot and chain:
 //! natives (#1810), a generator's resume and yield and a fiber's own
@@ -60,7 +61,7 @@ use crate::api::call::Function;
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Value};
 
-/// `zend_observer_fcall_init`: asked once of each function, on its first
+/// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once of each function, on its first
 /// call in the request, and of each included, evaluated or main file's
 /// frame on its activation, what handlers observe it; the default,
 /// neither, declines it, as php's answers `{NULL, NULL}`.
@@ -75,7 +76,7 @@ pub type BeginHandler = fn(&mut Observed<'_>);
 pub type EndHandler = fn(&mut Observed<'_>, Option<&Value>);
 
 /// What an [`ObserverInit`] answers of one function,
-/// `zend_observer_fcall_handlers`: either handler, both, or neither.
+/// `zend_observer_fcall_handlers` (`Z/Zend/zend_observer.h:64-67`): either handler, both, or neither.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObserverHandlers {
     pub begin: Option<BeginHandler>,
@@ -110,10 +111,7 @@ impl Observed<'_> {
     /// names by its `filename` alone.
     #[must_use]
     pub fn function(&self) -> Option<Function> {
-        self.req
-            .vm()
-            .at(self.frame)
-            .and_then(|state| state.function)
+        self.req.frame_function(self.frame)
     }
 
     /// `EX(func)->common.scope`: the class a method is declared in, the
@@ -142,13 +140,13 @@ pub(crate) enum Slot {
     #[default]
     Unresolved,
     Declined,
-    Observed(Arc<Resolved>),
+    Installed(Arc<Installed>),
 }
 
 /// The handlers a slot resolved to: begin in declaration order, end in
 /// reverse, as `zend_observer_fcall_install` lays them out.
 #[derive(Debug)]
-pub(crate) struct Resolved {
+pub(crate) struct Installed {
     begin: Box<[BeginHandler]>,
     end: Box<[EndHandler]>,
 }
@@ -174,7 +172,8 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
     }
 }
 
-/// `zend_observer_fcall_begin`: the frame's slot resolved on its first
+/// `zend_observer_fcall_begin` and `zend_observer_fcall_begin_prechecked`
+/// (`Z/Zend/zend_observer.c:257-294`): the frame's slot resolved on its first
 /// call, the frame put on the open chain where an end handler observes
 /// it, and the begin handlers called in declaration order. A generator's
 /// frame is begun when it is resumed and not at its call (#1811).
@@ -182,9 +181,7 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
 #[inline(never)]
 fn begin(req: &mut Request, frame: FrameRef) {
     let generator = req
-        .vm()
-        .at(frame)
-        .and_then(|state| state.function)
+        .frame_function(frame)
         .and_then(|function| req.function_decl(function))
         .is_some_and(|decl| decl.is_generator);
     if generator {
@@ -194,7 +191,7 @@ fn begin(req: &mut Request, frame: FrameRef) {
         Slot::Unresolved => resolve(req, frame),
         resolved => resolved,
     };
-    let Slot::Observed(handlers) = slot else {
+    let Slot::Installed(handlers) = slot else {
         return;
     };
     if !handlers.end.is_empty() {
@@ -205,7 +202,7 @@ fn begin(req: &mut Request, frame: FrameRef) {
     }
 }
 
-/// `zend_observer_fcall_install`: every observer asked of the frame in
+/// `zend_observer_fcall_install` (`Z/Zend/zend_observer.c:116-156`): every observer asked of the frame in
 /// declaration order, and what they answered written into its slot.
 fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
     let shared = Arc::clone(&req.shared);
@@ -220,7 +217,7 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
     let slot = if begin.is_empty() && end.is_empty() {
         Slot::Declined
     } else {
-        Slot::Observed(Arc::new(Resolved {
+        Slot::Installed(Arc::new(Installed {
             begin: begin.into_boxed_slice(),
             end: end.into_boxed_slice(),
         }))
@@ -229,7 +226,7 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
     slot
 }
 
-/// `zend_observer_fcall_end`: where `frame` is the innermost open one,
+/// `zend_observer_fcall_end` (`Z/Zend/zend_observer.h:124-128`): where `frame` is the innermost open one,
 /// it is taken off the chain and its end handlers called in reverse
 /// declaration order; any other frame was not begun with an end
 /// handler, or was ended already. The frame leaves the chain before its
@@ -238,13 +235,14 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
 #[inline(never)]
 fn end(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
     if req.close_observed(frame) {
-        ended(req, frame, value);
+        call_end_handlers(req, frame, value);
     }
 }
 
-/// The end handlers of `frame`'s slot, called in the order it holds them.
-fn ended(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    let Slot::Observed(handlers) = req.observer_slot(frame) else {
+/// `call_end_observers` (`Z/Zend/zend_observer.c:296-311`): the end
+/// handlers of `frame`'s slot, called in the order it holds them.
+fn call_end_handlers(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
+    let Slot::Installed(handlers) = req.observer_slot(frame) else {
         return;
     };
     for end in &handlers.end {
@@ -252,7 +250,7 @@ fn ended(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
     }
 }
 
-/// `zend_observer_fcall_end_all`: at a fatal, every frame still open
+/// `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`): at a fatal, every frame still open
 /// ended with no value, the innermost first, the chain emptied before
 /// the first handler runs. The frames still stand: the request ends
 /// them here, where the fatal is raised and after it is
@@ -263,6 +261,6 @@ pub(crate) fn end_all(req: &mut Request) {
         return;
     }
     for frame in req.take_observed() {
-        ended(req, frame, None);
+        call_end_handlers(req, frame, None);
     }
 }

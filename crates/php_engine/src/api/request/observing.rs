@@ -7,7 +7,6 @@
 
 use php_heap::FrameRef;
 
-use crate::exec;
 use crate::observer::Slot;
 
 use super::Request;
@@ -27,14 +26,6 @@ impl Request {
     /// That slot resolved to `slot` (`zend_observer_fcall_install`).
     pub(crate) fn set_observer_slot(&mut self, frame: FrameRef, slot: Slot) {
         self.vm.set_observer_slot(&mut self.map, frame, slot);
-    }
-
-    /// `EX(func)->op_array.filename` of the op array `frame` serves.
-    pub(crate) fn frame_filename(&self, frame: FrameRef) -> Option<&[u8]> {
-        self.vm
-            .at(frame)
-            .and_then(|state| exec::body_of(&state.unit, state.body))
-            .map(|code| code.filename.0.as_ref())
     }
 
     /// `frame` begun with an end handler: the innermost open frame now.

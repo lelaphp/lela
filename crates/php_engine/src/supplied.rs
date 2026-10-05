@@ -182,6 +182,7 @@ pub(crate) struct Resolved {
     /// Told of each file the unit cache holds.
     pub(crate) cached: Listed<CachedHook>,
     /// `zend_observers_fcall_list`, as `zend_observer_fcall_register`
+    /// (`Z/Zend/zend_observer.c:44`)
     /// appends to it at each `MINIT` and each Zend extension's startup,
     /// and `zend_observer_fcall_install` asks every one of a function in
     /// that order (design §4.3 seam 9, [`crate::observer`]).
@@ -245,7 +246,7 @@ impl Resolved {
             table.upload.install(own.upload);
             table.ticks.install(own.ticks);
             table.cached.install(own.cached);
-            table.observers.0.extend(own.observers);
+            table.observers.install_all(own.observers);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);
@@ -409,6 +410,11 @@ pub(crate) struct Listed<H>(Vec<H>);
 impl<H: Copy> Listed<H> {
     fn install(&mut self, hook: Option<H>) {
         self.0.extend(hook);
+    }
+
+    /// Each of a supplier's, for a kind it may supply more than once.
+    fn install_all(&mut self, hooks: Vec<H>) {
+        self.0.extend(hooks);
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = H> + '_ {
