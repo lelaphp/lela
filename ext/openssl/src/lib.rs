@@ -433,7 +433,7 @@ pub fn extension() -> Extension {
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
-        .engine_state(|_| Ok(started()))
+        .process_state(|| Ok(started()))
         .request_state::<State>()
         .rinit(rinit)
         .info(info)
@@ -472,8 +472,10 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
     Ok(false)
 }
 
-/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`, called
-/// once as the engine is built: nothing is kept but the mark of the call.
+/// `PHP_MINIT_FUNCTION(openssl)`'s `php_openssl_backend_init`, the
+/// process start (ADR-0010): called once for the process, the first time
+/// an engine carrying openssl is built; nothing is kept but the mark of
+/// the call.
 struct Started;
 
 fn started() -> Started {
