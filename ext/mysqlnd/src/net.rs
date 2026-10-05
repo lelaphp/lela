@@ -205,10 +205,11 @@ impl Net {
     }
 
     /// The stream of a persistent connection let go as the request gives
-    /// the connection back: the request's end keeps its socket under the
-    /// connection's `persistent_id`, and nothing of the request's is left.
-    /// The stream let go, for the request to hold again where the pool
-    /// answers the connection past its bound ([`Net::hold`]).
+    /// the connection back, so that nothing of the request's is left on
+    /// it: the request's end keeps its socket under the connection's
+    /// `persistent_id`. Answered to the caller, which holds it again
+    /// ([`Net::hold`]) where the pool answers the connection past its
+    /// bound.
     pub(crate) fn give_back(&mut self) -> Option<Stream> {
         self.stream.take()
     }
