@@ -652,6 +652,9 @@ pub(crate) struct Shared {
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
     hooked: php_compile::Hooked,
+    /// Whether every unit is compiled with extended info, which the
+    /// host's `-e` asked for ([`EngineBuilder::extended_info`]).
+    extended_info: bool,
     /// What the bundle supplies beyond its declarations, each kind
     /// resolved by php's rule ([`crate::supplied`]); the shell only
     /// where the host carries php's table of shell callbacks
@@ -1059,6 +1062,7 @@ pub(crate) struct Declared<'a> {
     pub(crate) functions: &'a [FunctionDecl],
     pub(crate) classes: &'a [ClassDecl],
     pub(crate) hooked: php_compile::Hooked,
+    pub(crate) extended_info: bool,
 }
 
 impl Shared {
@@ -1069,6 +1073,7 @@ impl Shared {
             functions: &self.functions,
             classes: &self.classes,
             hooked: self.hooked,
+            extended_info: self.extended_info,
         }
     }
 
@@ -1144,6 +1149,10 @@ impl Shared {
         let cwd = req.cwd();
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
+        let declared = Declared {
+            extended_info: self.extended_info && !req.host_string,
+            ..self.declared()
+        };
         let unit = req.compiling(|heap, request_classes| {
             let origin = Origin {
                 filename,
@@ -1157,7 +1166,7 @@ impl Shared {
                 source,
                 origin,
                 ini,
-                self.declared(),
+                declared,
                 stack,
                 heap,
                 &self.map_ptr_last,
@@ -2407,6 +2416,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     hooked: php_compile::Hooked,
+    extended_info: bool,
     sapi_name: &'static str,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
@@ -2576,6 +2586,21 @@ impl EngineBuilder {
         self
     }
 
+    /// Compile every unit with extended info, as php's `-e` sets
+    /// `ZEND_COMPILE_EXTENDED_INFO` in `CG(compiler_options)` before the
+    /// first file compiles (`Z/sapi/cli/php_cli.c:1366`): an `EXT_STMT`
+    /// before each statement and an `EXT_FCALL_BEGIN` and
+    /// `EXT_FCALL_END` around each call, an `include` and an `eval`
+    /// ([`php_compile::Options::extended_info`]). It is the engine's,
+    /// beside the tier's hooks: every request compiles under it, what a
+    /// host evaluates as a string of its own excepted, and the file
+    /// cache keeps such units apart from a plain engine's.
+    #[must_use]
+    pub fn extended_info(mut self) -> EngineBuilder {
+        self.extended_info = true;
+        self
+    }
+
     /// Bind the tier: `execute::<T>` becomes the loop, and the tier's
     /// state is declared under seam 3 (design §4.3 seam 8).
     #[must_use]
@@ -2725,7 +2750,13 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(MAX_ACCELERATED_FILES, self.hooked, &functions, &classes);
+        let units = UnitCache::new(
+            MAX_ACCELERATED_FILES,
+            self.hooked,
+            self.extended_info,
+            &functions,
+            &classes,
+        );
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -2752,6 +2783,7 @@ impl EngineBuilder {
                 build_defs: BuildDefs::of(self.configure),
                 shebang,
                 hooked: self.hooked,
+                extended_info: self.extended_info,
                 observers: supplied.observers.count(),
                 supplied,
                 startup_errors: configuration.stderr,
@@ -3186,6 +3218,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             hooked: Nop::HOOKED,
+            extended_info: false,
             sapi_name: "",
             additional_extension: None,
             additional_functions: Vec::new(),
@@ -4329,6 +4362,7 @@ fn compile(
         keys_before: origin.keys_before,
         multibyte: origin.multibyte,
         hooked: declared.hooked,
+        extended_info: declared.extended_info,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -6492,7 +6526,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::ExtNop,
+                    opcode: php_unit::Opcode::UserOpcode,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -6504,7 +6538,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_EXT_NOP has no handler in this engine yet"
+                "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
             )))
         );
     }

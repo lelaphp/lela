@@ -44,12 +44,19 @@ pub(crate) struct Kept {
 /// hooks the tier replaces, which pick its call opcodes, as
 /// `zend_finalize_system_id` digests `ZEND_HOOK_EXECUTE_EX` and
 /// `ZEND_HOOK_EXECUTE_INTERNAL` (`Z/Zend/zend_system_id.c:58-90`), so a
-/// file cache phpdbg wrote is never read by the CLI; in 32 hex digits.
+/// file cache phpdbg wrote is never read by the CLI; and whether units
+/// are compiled with extended info, the host's `-e`, which php's
+/// identity leaves out and #1780 ruled in, a bit of the same byte that
+/// none of php's hooks takes, so a unit compiled without its `EXT_STMT`s
+/// is never read by an engine that serves them; in 32 hex digits.
 pub(crate) fn build_identity<'a>(
     hooked: php_compile::Hooked,
+    extended_info: bool,
     names: impl Iterator<Item = &'a [u8]>,
 ) -> [u8; BUILD] {
-    let hooks = u8::from(hooked.user) << 2 | u8::from(hooked.natives) << 3;
+    let hooks = u8::from(hooked.user) << 2
+        | u8::from(hooked.natives) << 3
+        | u8::from(extended_info) << EXTENDED_INFO_BIT;
     let mut low = mix(digest(env!("PHP_ENGINE_BUILD").as_bytes()), &[hooks]);
     let mut high = digest(b"php_engine");
     for name in names {
@@ -61,6 +68,11 @@ pub(crate) fn build_identity<'a>(
     build.copy_from_slice(&hex.as_bytes()[..BUILD]);
     build
 }
+
+/// The bit of the hooks byte [`build_identity`] digests that says the
+/// units are compiled with extended info: past php's five
+/// (`ZEND_HOOK_AST_PROCESS` to `ZEND_HOOK_INTERRUPT_FUNCTION`).
+const EXTENDED_INFO_BIT: u8 = 5;
 
 /// FNV-1a over `bytes` from `hash` on, with a separator after them.
 fn mix(hash: u64, bytes: &[u8]) -> u64 {
@@ -266,6 +278,20 @@ mod tests {
             user: true,
             natives: false,
         };
+    }
+
+    /// #1822: a host's `-e` is part of the build's identity, so a unit
+    /// compiled with extended info and one compiled without it are never
+    /// read in each other's place.
+    #[test]
+    fn extended_info_keeps_its_units_apart() {
+        let build = |engine: crate::Engine| engine.shared.units.build;
+        let extended = build(crate::Engine::cli_builder().extended_info().build());
+        assert_ne!(extended, build(crate::Engine::cli_builder().build()));
+        assert_eq!(
+            extended,
+            build(crate::Engine::cli_builder().extended_info().build())
+        );
     }
 
     /// #1709: the hooks a tier declares are part of the build's

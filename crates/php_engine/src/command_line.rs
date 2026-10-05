@@ -183,7 +183,7 @@ impl Request {
 fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
     let shared = Arc::clone(&req.shared);
     {
-        let unit = match req.compile_string(code, name) {
+        let unit = match req.host_string(|req| req.compile_string(code, name)) {
             Ok(Ok(unit)) => unit,
             Ok(Err(refused)) => {
                 crate::engine::refused_program(req, &refused, name);
