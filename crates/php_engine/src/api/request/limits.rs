@@ -1,0 +1,360 @@
+//! The limits of a request: its interrupt (design §5.8), the timer
+//! that raises it for `max_execution_time` and for every periodic
+//! interrupt an extension started, `set_time_limit()`, the interrupt
+//! hooks the bundle supplied, the thread's stack limit, and `fork(2)`,
+//! which joins the timer's thread around it. The interrupt, the timer
+//! and the stack limit are [`Limits`]'s, whose fields no file but this
+//! one reads.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
+use php_compile::StackLimit;
+
+use crate::api::values::Value;
+
+use super::{Forked, Periodic, Receiving, Request};
+
+/// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
+/// the thread that raises it sees it: `Send` and `Sync`, and cloned so
+/// that the engine's execution timer and the thread serving the request
+/// share one. Raising is all a setter does; acting on it is the loop's,
+/// at a back-edge, at a frame's activation, after every `Flow::Resume`
+/// and after an internal call returns (design §5.8), and nothing else
+/// touches it.
+#[derive(Debug, Clone, Default)]
+pub struct Interrupt(Arc<State>);
+
+impl Interrupt {
+    /// What signal delivery and a periodic interrupt raise it with: the
+    /// loop serves each extension's interrupt hook at its next check,
+    /// which is php's `zend_interrupt_function`, and pcntl's dispatches
+    /// what was delivered to its PHP handlers.
+    pub fn raise(&self) {
+        self.0.raised.store(true, Ordering::Release);
+    }
+
+    /// Whether it is raised: what the loop tests at its four sites and
+    /// what compiled code tests once per loop iteration through the
+    /// tier's `ExitCtx` (`jit-design.md` §4.3).
+    #[must_use]
+    pub fn raised(&self) -> &AtomicBool {
+        &self.0.raised
+    }
+
+    /// What the engine's execution timer raises it with,
+    /// `max_execution_time` having elapsed: the seconds it was armed
+    /// with, then the two words `zend_timeout_handler` stores
+    /// (`Z/Zend/zend_execute_API.c:1516`). The seconds go down first and
+    /// the store that raises it releases them, because php's handler
+    /// runs on the interrupted thread and this timer does not.
+    pub(crate) fn elapsed(&self, seconds: i64) {
+        self.0.seconds.store(seconds, Ordering::Relaxed);
+        self.0.timed_out.store(true, Ordering::Relaxed);
+        self.0.raised.store(true, Ordering::Release);
+    }
+
+    /// Whether the timer's timeout is still unread, php's
+    /// `EG(timed_out)`: raised and not yet taken by a check.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.0.timed_out.load(Ordering::Acquire)
+    }
+
+    /// What unsetting the execution timer does beside stopping it
+    /// (`zend_unset_timeout`, `Z/Zend/zend_execute_API.c:1657-1685`): the
+    /// timer's word is cleared, so a deadline the old timer reached as
+    /// it was being unset is not the fatal the new one raises.
+    pub(crate) fn timer_unset(&self) {
+        self.0.timed_out.store(false, Ordering::Relaxed);
+    }
+
+    /// How many hold this interrupt: its request, the request's timer,
+    /// the timer's thread while one runs, and whoever else cloned it.
+    #[cfg(test)]
+    pub(crate) fn holders(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
+    /// Hand this interrupt to the process's signal record, which raises
+    /// it at every signal the process takes until the [`Receiving`] is
+    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
+    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
+    /// record holds as many interrupts as it can.
+    #[must_use]
+    pub fn receive_signals(&self) -> Option<Receiving> {
+        crate::signal::receive(Arc::clone(&self.0))
+    }
+
+    /// What a check that found it raised reads: it is cleared, and the
+    /// seconds come back when the execution timer was what raised it,
+    /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
+    /// Clearing it acquires what the setter released, so the seconds the
+    /// text names are the ones the timer was armed with; the loop's own
+    /// test stays a relaxed load, because this is where the two threads
+    /// meet.
+    pub(crate) fn taken(&self) -> Option<i64> {
+        self.0.raised.swap(false, Ordering::Acquire);
+        self.0
+            .timed_out
+            .swap(false, Ordering::Relaxed)
+            .then(|| self.0.seconds.load(Ordering::Relaxed))
+    }
+}
+
+/// What an [`Interrupt`] holds, one per request: the atomic the loop
+/// tests, which of the two setters raised it, and the seconds php's
+/// timeout text names.
+#[derive(Debug, Default)]
+struct State {
+    raised: AtomicBool,
+    /// php's `EG(timed_out)`.
+    timed_out: AtomicBool,
+    /// php's `EG(timeout_seconds)`.
+    seconds: AtomicI64,
+}
+
+impl AsRef<AtomicBool> for State {
+    /// The word a posted signal raises: the one the loop tests.
+    fn as_ref(&self) -> &AtomicBool {
+        &self.raised
+    }
+}
+
+/// The interrupt, the timer and the stack limit, whose fields no file
+/// but this one reads.
+pub(super) struct Limits {
+    /// The interrupt, shared with whatever thread sets it (design §5.8).
+    interrupt: Interrupt,
+    /// The request's timer: the execution timer's deadline while
+    /// `max_execution_time` is not zero, every periodic interrupt an
+    /// extension started, and the one thread that waits for them;
+    /// dropping the request joins the thread.
+    timer: crate::interrupt::Timer,
+    /// The thread's stack limit, php's `EG(stack_limit)`, worked out
+    /// once at request start on the thread the request runs on
+    /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
+    /// entries; what the compiler is held to (design §5.6).
+    stack_limit: StackLimit,
+}
+
+impl Limits {
+    /// The limits as a request is laid: a fresh interrupt, the timer
+    /// that raises it with no deadline yet, and no stack limit until
+    /// the request starts on its thread.
+    pub(super) fn new() -> Limits {
+        let interrupt = Interrupt::default();
+        Limits {
+            timer: crate::interrupt::Timer::new(&interrupt),
+            interrupt,
+            stack_limit: StackLimit::UNCHECKED,
+        }
+    }
+}
+
+impl Request {
+    /// `zend_call_stack_init` at request start: the stack limit worked
+    /// out on the thread the request runs on, from the engine's
+    /// `zend.*_stack_size` entries.
+    pub(super) fn start_stack_limit(&mut self) {
+        self.limits.stack_limit = self.shared.stack_limit();
+    }
+
+    /// The stack limit and `other`'s change places, as the execution
+    /// state does at a fiber switch ([`Request::switch_execution`]).
+    pub(super) fn swap_stack_limit(&mut self, other: &mut StackLimit) {
+        std::mem::swap(&mut self.limits.stack_limit, other);
+    }
+
+    /// The thread's stack limit as request start read it, for the
+    /// compiler of whatever this request compiles.
+    pub(crate) fn stack_limit(&self) -> StackLimit {
+        self.limits.stack_limit
+    }
+
+    /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
+    /// machine stack has come down to the limit request start worked
+    /// out, `zend.max_allowed_stack_size` less `zend.reserved_stack_size`.
+    /// A native that walks a nest by recursing asks it at each level and
+    /// raises its own refusal, as `php_url_encode_hash_ex` raises
+    /// `Maximum call stack size reached.`; the one php's engine raises is
+    /// [`crate::api::raising::call_stack_limit`].
+    #[must_use]
+    pub fn stack_overflowed(&self) -> bool {
+        self.limits.stack_limit.overflowed()
+    }
+
+    /// `zend_unset_timeout` then `zend_set_timeout` over
+    /// `max_execution_time` as the ini table has it now: at request
+    /// start, and again whenever the entry moves, which is php's
+    /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
+    /// so the seconds count from here.
+    pub(super) fn arm_timer(&mut self) {
+        let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
+        self.limits.timer.arm(seconds, hard);
+    }
+
+    /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
+    /// once the program's shutdown functions, destructors and buffer
+    /// handlers are done: nothing the request does after it is timed,
+    /// and every periodic interrupt's deadline goes with the execution
+    /// timer's, so the request's timer thread is joined here, before any
+    /// extension's `rshutdown`, whatever a host does with the request
+    /// after it.
+    pub(crate) fn unset_timer(&mut self) {
+        self.limits.timer.unset();
+    }
+
+    /// A periodic interrupt (#1806): this request's interrupt raised
+    /// `first` from now and every `every` after it, once where `every`
+    /// is `None` (Excimer's one-shot `ExcimerTimer`), until
+    /// [`Request::stop_periodic`] stops it or the request reaches
+    /// `php_request_shutdown`'s fourth step. A period shorter than a
+    /// tenth of a millisecond is counted in tenths of a millisecond. What
+    /// a sampling profiler's own timer thread does under php,
+    /// Excimer's `timer_create` and its handler storing
+    /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
+    /// no thread (ADR-0005, ADR-0010): one thread per request serves the
+    /// execution timer and every periodic interrupt alike, and is joined
+    /// once a change leaves no deadline, around a fork
+    /// ([`Request::fork`]) and at the request's end.
+    ///
+    /// It is served through the interrupt hook the extension supplies
+    /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
+    /// extension's hook is served, so a hook reads its own count with
+    /// [`Request::periods_elapsed`] and does nothing at zero, as Excimer's
+    /// `excimer_timer_interrupt` serves only the timers that fired. The
+    /// periods are wall-clock time, Excimer's `EXCIMER_REAL`; a child
+    /// forked from the request inherits none of them, as a child inherits
+    /// no POSIX timer. `None` where no thread could be started.
+    ///
+    /// [`ExtensionBuilder::interrupt`]: crate::api::abi::ExtensionBuilder::interrupt
+    #[must_use]
+    pub fn start_periodic(
+        &mut self,
+        first: std::time::Duration,
+        every: Option<std::time::Duration>,
+    ) -> Option<Periodic> {
+        self.limits.timer.start_periodic(first, every)
+    }
+
+    /// The periods of `periodic` elapsed since the last time this was
+    /// asked, the ones the request was too busy to be interrupted for
+    /// among them, as Excimer hands its callback the event count, POSIX's
+    /// overruns plus one; zero for one stopped.
+    pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
+        self.limits.timer.periods_elapsed(periodic)
+    }
+
+    /// `periodic` stopped, with the periods it had not been asked for,
+    /// as Excimer's `excimer_timer_stop` deletes its timer.
+    pub fn stop_periodic(&mut self, periodic: Periodic) {
+        self.limits.timer.stop_periodic(periodic);
+    }
+
+    /// `fork(2)` from this request, the engine's one home for it (#1807,
+    /// as #1779 ruled), which `pcntl_fork` asks: the process copied with
+    /// this request alone inside the engine and no thread of the engine's
+    /// alive (ADR-0010, Threads), returning in both as [`Forked::Parent`]
+    /// with the child's id and as [`Forked::Child`]. The request's timer
+    /// thread is joined before it, and after it started again in the
+    /// parent over the same deadlines, which loses none of them, as php's
+    /// interval timer counts on across the fork; in the child what php's
+    /// `php_child_init` restores is restored: every deadline is dropped,
+    /// the execution timer's and each periodic interrupt's, as a child
+    /// inherits no interval timer and no POSIX timer, so it runs untimed
+    /// until it sets a limit of its own, in its copy of this request.
+    ///
+    /// Two seconds of a three-second limit spent before the fork leave one
+    /// after it; a limit counted again from the fork would end the program
+    /// two seconds later.
+    ///
+    /// ```php
+    /// $start = microtime(true);
+    /// set_time_limit(3);
+    /// while (microtime(true) - $start < 2) {}
+    /// if (($child = pcntl_fork()) === 0) { exit(0); }
+    /// register_shutdown_function(function () use ($start) {
+    ///     echo microtime(true) - $start < 4.5 ? "counted from before the fork\n" : "counted again from the fork\n";
+    /// });
+    /// pcntl_waitpid($child, $status);
+    /// for (;;) {}
+    /// ```
+    /// ```expect exit=255 process wall=3s
+    /// Fatal error: Maximum execution time of 3 seconds exceeded in %s on line 10
+    /// counted from before the fork
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `EBUSY` where another request is in flight in the process, on a
+    /// host that serves on threads, whose other threads would leave the
+    /// child what they held; otherwise the OS error `fork(2)` failed with,
+    /// `EAGAIN` and `ENOMEM` among them, and no process was made.
+    pub fn fork(&mut self) -> std::io::Result<Forked> {
+        self.limits.timer.forked(crate::fork::fork_request)
+    }
+
+    /// This request's interrupt (design §5.8): what the loop tests at a
+    /// back-edge, at a frame's activation, after every `Flow::Resume` and
+    /// after an internal call returns, and what the engine's execution timer and signal
+    /// delivery raise. A `tier.lock` item, because compiled code tests
+    /// the same atomic once per loop iteration through the tier's
+    /// `ExitCtx` (`jit-design.md` §4.3).
+    #[must_use]
+    pub fn interrupt(&self) -> &Interrupt {
+        &self.limits.interrupt
+    }
+
+    /// Each extension's interrupt hook, from the top of the chain: php's
+    /// `zend_interrupt_function`, which the last `MINIT` to set it
+    /// holds, each link serving its own work and then the one it saved
+    /// beneath it, as pcntl's does (`Z/ext/pcntl/pcntl.c:1922-1927`);
+    /// what the interrupt check serves when the execution timer was not
+    /// what raised it.
+    pub(crate) fn serve_interrupt_hooks(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared.supplied.interrupt.top_down() {
+            if let Err(thrown) = hook(self) {
+                self.leave_pending(&thrown);
+            }
+        }
+    }
+
+    /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
+    /// `max_execution_time` at runtime (`Z/main/main.c:1631`): the
+    /// entry moved through [`Self::ini_set`], so the timer is re-armed
+    /// as it is there, and `true` when the entry took the value.
+    ///
+    /// The value is `zend_long_to_str`'s, the interned string of one
+    /// digit or a new one, which the entry keeps:
+    ///
+    /// ```php
+    /// ini_set('from', 'x');
+    /// $m = memory_get_usage(); set_time_limit(100); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); set_time_limit(5); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// -32
+    /// ```
+    pub fn set_time_limit(&mut self, seconds: i64) -> bool {
+        let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
+            return false;
+        };
+        let set = self.ini_set_string(b"max_execution_time", string);
+        self.release(Value::string(string));
+        set.is_ok_and(|previous| previous.is_some())
+    }
+
+    /// `max_execution_time`, the seconds the engine's execution timer is
+    /// armed for; zero, php's CLI default, arms none.
+    pub(crate) fn max_execution_time(&self) -> i64 {
+        i64::from(self.ini_number(b"max_execution_time", 0))
+    }
+
+    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
+    /// seconds past a timeout the timer gives the loop to take it.
+    fn hard_timeout(&self) -> i64 {
+        crate::ini_quantity::parse(self.ini_get(b"hard_timeout").unwrap_or_default()).0
+    }
+}
