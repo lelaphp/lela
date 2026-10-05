@@ -185,6 +185,26 @@ fn each_recv_a_prologue_serves_is_told() {
     );
 }
 
+/// A call that passes more arguments than a function without a type
+/// declares skips every declared parameter's `RECV`, as php's
+/// `zend_copy_extra_args` moves the opline past them, and still serves
+/// the `RECV_VARIADIC` that collects the rest.
+#[test]
+fn a_call_with_extra_arguments_skips_each_declared_recv() {
+    let ini = [("t.opcodes_0", "ZEND_RECV ZEND_RECV_VARIADIC")];
+    let source = "<?php\nfunction f($a) { return $a; }\nf(1, 2);\nfunction g($a, ...$r) { return $r; }\ng(1, 2, 3);\ng(1);\n";
+    assert_eq!(
+        served(
+            Engine::cli_builder(),
+            &[Shows::<0>::extension()],
+            &ini,
+            source
+        ),
+        "<!-- opcode: 'ZEND_RECV_VARIADIC' in user handler -->\n\
+         <!-- opcode: 'ZEND_RECV_VARIADIC' in user handler -->\n"
+    );
+}
+
 /// Two extensions that declare one opcode are each told, the later
 /// first, as php's handler that saved the one it set over calls it after
 /// its own; an opcode one of them declares is told to it alone. Each is

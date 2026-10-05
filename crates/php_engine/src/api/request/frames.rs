@@ -422,9 +422,13 @@ impl Request {
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it on the stack for
         // `RECV_VARIADIC` to collect.
-        let parameters = self.function_decl(function).map_or(0, |decl| {
-            decl.parameters.iter().filter(|p| !p.variadic).count()
+        let (parameters, typed) = self.function_decl(function).map_or((0, false), |decl| {
+            (
+                decl.parameters.iter().filter(|p| !p.variadic).count(),
+                decl.parameters.iter().any(|p| p.ty.is_some()),
+            )
         });
+        let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
         let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
@@ -461,7 +465,10 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
-        exec::skip_passed(self, frame, function, num_args);
+        let declared = u32::try_from(parameters).unwrap_or(u32::MAX);
+        if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
+            self.vm.jump(frame, at);
+        }
         crate::observer::call(self, frame);
         Ok(frame)
     }
