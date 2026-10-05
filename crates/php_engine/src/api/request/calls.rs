@@ -17,6 +17,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, ClosureInfo, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec::{self, CallStage, CallState};
+use crate::observer::OnThrow;
 
 use super::{Link, Request, UserFunction};
 
@@ -387,7 +388,9 @@ impl Request {
             };
             return self.serve_user(function, call);
         }
-        let served = self.serve_native(function);
+        // `zend_call_function` ends an observed native with `fci->retval`
+        // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
+        let served = self.serve_native(function, OnThrow::ReturnValue);
         self.pop_call();
         self.checked_after_call(served)
     }
@@ -968,7 +971,16 @@ impl Request {
     /// is the callee the `INIT_FCALL` resolved; one with no entry is the
     /// `Error` a function nothing is linked under raises, in the caller's
     /// spelling.
-    pub(crate) fn serve_native(&mut self, function: Function) -> Result<Value, Thrown> {
+    ///
+    /// An observer (design §4.3 seam 9) begins the call before the entry
+    /// and ends it after, with what it returned, or, where it threw,
+    /// with what `on_throw` says the path that called it hands
+    /// ([`crate::observer::native_call`]).
+    pub(crate) fn serve_native(
+        &mut self,
+        function: Function,
+        on_throw: OnThrow,
+    ) -> Result<Value, Thrown> {
         if function == Function::PASS {
             return Ok(Value::null());
         }
@@ -985,8 +997,11 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
+        let begun = crate::observer::native_call(self, function);
         let served = entry(self);
-        match (served, self.stream_thrown.take()) {
+        let deferred = self.stream_thrown.take();
+        crate::observer::native_returned(self, begun, &served, deferred.as_ref(), on_throw);
+        match (served, deferred) {
             (Ok(value), Some(thrown)) => {
                 self.release(value);
                 Err(thrown)
