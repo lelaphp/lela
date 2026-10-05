@@ -85,6 +85,18 @@ fn a_forked_child_s_end_finishes_a_persistent_cdb_make_file() {
     );
 }
 
+/// Both ends finish the file, as both of php's processes destroy the
+/// persistent list: the parent's write of its hash table lands where the
+/// child's left the shared offset, over the record, and the next process
+/// reads nothing, as php's does.
+#[test]
+fn a_child_and_its_parent_each_finish_the_file_as_php_s_do() {
+    assert_eq!(
+        forked("both", "return", "end"),
+        "child end\nafter the child: 2082\n2082\nbool(false)\n"
+    );
+}
+
 /// A child killed before its end leaves the file to the parent's end.
 #[test]
 fn a_killed_child_leaves_the_file_to_the_parent_s_end() {

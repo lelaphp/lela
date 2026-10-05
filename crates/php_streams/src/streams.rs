@@ -1454,6 +1454,21 @@ impl PhpStream {
         self.cast_as(req, cast, Ret::Given, warn)
     }
 
+    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
+    /// to its position with the read buffer dropped only where the buffer
+    /// holds bytes; the kind's fd as a cast with no `ret` answers it.
+    fn keep_fd(&mut self, req: &mut Request) -> Option<RawFd> {
+        self.flush(req);
+        if self.readpos != self.writepos && self.ops.seekable() && !self.flags.no_seek {
+            let Self { ops, position, .. } = self;
+            let mut dummy = 0;
+            let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
+            self.readpos = 0;
+            self.writepos = 0;
+        }
+        self.cast_as(req, Cast::Fd, Ret::Null, false)
+    }
+
     /// `php_stream_can_cast`, `_php_stream_cast` with no `ret` and no
     /// `show_err`: whether the kind would answer the cast, asked of it
     /// without flushing, seeking or converting the stream.
@@ -4603,9 +4618,10 @@ impl StreamLayer for Request {
     }
 
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
-        let (mode, process) = match kind {
-            FdStream::File { mode } => (mode, None),
-            FdStream::Process { mode, child } => (mode, Some(child)),
+        let (mode, process, kept) = match kind {
+            FdStream::File { mode } => (mode, None, None),
+            FdStream::Kept { mode, position } => (mode, None, Some(position)),
+            FdStream::Process { mode, child } => (mode, Some(child), None),
             FdStream::Socket => return self.socket_stream(fd),
             FdStream::Xport { name, blocking } => return self.xport_stream(fd, name, blocking),
         };
@@ -4619,7 +4635,9 @@ impl StreamLayer for Request {
         // A process pipe keeps the zero `php_stream_alloc` gives it
         // (`_php_stream_fopen_from_pipe`); only `_php_stream_fopen_from_fd`
         // marks a descriptor that cannot seek with no position.
-        let position = if is_seekable {
+        let position = if let Some(position) = kept.filter(|_| is_seekable) {
+            position
+        } else if is_seekable {
             file.stream_position()
                 .map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX))
         } else if process.is_some() {
@@ -4741,13 +4759,22 @@ impl Stream {
             .flatten()
     }
 
-    /// `dup(2)` of the fd a [`Cast::Fd`] answers, the copy the caller's:
-    /// the open file, its offset and a `flock(2)` taken on it outlive the
-    /// stream, as php's persistent list keeps a `dba_popen` link's streams
-    /// past the request, to be made a stream again with
-    /// [`Request::stream_from_fd`]. `None` for a kind with no fd.
+    /// `dup(2)` of the stream's fd, the copy the caller's: the open file,
+    /// its offset and a `flock(2)` taken on it outlive the stream, as
+    /// php's persistent list keeps a `dba_popen` link's streams past the
+    /// request, to be made a stream again with [`Request::stream_from_fd`]
+    /// as [`FdStream::Kept`] at the position [`tell`](Stream::tell)
+    /// answered. The write chain is flushed; the fd is sought to the
+    /// position only where the read buffer holds bytes, which are dropped
+    /// for the next stream to read again from the file; otherwise its
+    /// offset is left where it stands, so where a forked process sharing
+    /// the open file moved it, the next write lands there, as on php's
+    /// persistent stream, which nothing touches between requests. `None`
+    /// for a kind with no fd.
     pub fn dup_fd(self, req: &mut Request) -> Option<OwnedFd> {
-        let fd = self.cast(req, Cast::Fd, false)?;
+        let fd = req
+            .stream_op(self, |req, stream| stream.keep_fd(req))
+            .flatten()?;
         crate::api::net::dup_fd(fd).ok()
     }
 
