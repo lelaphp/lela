@@ -712,7 +712,7 @@ fn iconv(
 /// ÿ
 /// ```
 ///
-/// Once a byte reached the host the handler refuses at its start, is disabled,
+/// After a byte reached the host the handler refuses at its start, is disabled,
 /// and its buffer goes on as it was.
 ///
 /// ```php
