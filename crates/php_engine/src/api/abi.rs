@@ -31,7 +31,8 @@ mod marshal;
 
 pub use crate::observer::{
     BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
-    ObservedFiber, ObserverHandlers, ObserverInit, Removed,
+    ObservedFiber, ObserverHandlers, ObserverInit, OpcodeHandler, Opcodes, OpcodesDeclared,
+    Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::statement::{Statement, StatementHandler};
@@ -1386,6 +1387,31 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn class_linked_observer(mut self, observer: ClassLinked) -> ExtensionBuilder {
         self.supplies.classes_linked.push(observer);
+        self
+    }
+
+    /// Observation of a declared set of opcodes (design §7.1, as #1780
+    /// ruled), php's `zend_set_user_opcode_handler` with a handler that
+    /// answers `ZEND_USER_OPCODE_DISPATCH`: `declared` is asked once, as
+    /// the engine starts, which opcodes the extension observes, handed
+    /// what its `MINIT` is; `handler` is told of each opline of one of
+    /// them the loop dispatches, before the opcode's handler runs, handed
+    /// the frame standing at it and the opcode's name. The opcode's
+    /// handler always runs after it: no extension replaces one. Two
+    /// extensions that declare one opcode are each told, the later
+    /// first: php keeps one handler per opcode, the later set over the
+    /// earlier, and tells the earlier only where the later saved it and
+    /// calls it after its own work, as xdebug's does; here every
+    /// declaration is told, as if each saved the one beneath. A second
+    /// declaration of one extension stands over its first. With none declared, a serving reads one word as
+    /// its loop is entered and each opline pays a test of it.
+    #[must_use]
+    pub fn opcodes(
+        mut self,
+        declared: OpcodesDeclared,
+        handler: OpcodeHandler,
+    ) -> ExtensionBuilder {
+        self.supplies.opcodes = Some(crate::observer::OpcodeObserver { declared, handler });
         self
     }
 

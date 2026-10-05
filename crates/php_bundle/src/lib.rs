@@ -29,11 +29,12 @@ mod refusals;
 /// for the lifecycle phases and the four listings, which this witness
 /// holds to the oracle for the bundled set, each listing as the
 /// extensions it names in the order it first names them, past the
-/// extensions the pinned build has and the bundle has not and `pcntl`,
-/// which the harness's engine leaves out:
+/// extensions the pinned build has and the bundle has not, `pcntl`,
+/// which the harness's engine leaves out, and `zend_test`, which it
+/// carries and the pinned build does not (#1782):
 ///
 /// ```php
-/// $order = function (iterable $names): string { $absent = ['ldap', 'odbc', 'pdo_dblib', 'pdo_odbc', 'pdo_pgsql', 'pgsql', 'snmp', 'pcntl']; $seen = []; foreach ($names as $name) { $name = strtolower($name); if (!in_array($name, $absent, true)) { $seen[$name] = true; } } return implode(' ', array_keys($seen)) . "\n"; };
+/// $order = function (iterable $names): string { $absent = ['ldap', 'odbc', 'pdo_dblib', 'pdo_odbc', 'pdo_pgsql', 'pgsql', 'snmp', 'pcntl', 'zend_test']; $seen = []; foreach ($names as $name) { $name = strtolower($name); if (!in_array($name, $absent, true)) { $seen[$name] = true; } } return implode(' ', array_keys($seen)) . "\n"; };
 /// echo $order(get_loaded_extensions());
 /// echo $order(array_map(fn ($f) => (new ReflectionFunction($f))->getExtensionName(), get_defined_functions()['internal']));
 /// echo $order(array_map(fn ($c) => (new ReflectionClass($c))->getExtensionName(), get_declared_classes()));
@@ -172,6 +173,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_xmlwriter::extension,
         #[cfg(feature = "xsl")]
         php_ext_xsl::extension,
+        #[cfg(feature = "zend_test")]
+        php_ext_zend_test::extension,
         #[cfg(feature = "zip")]
         php_ext_zip::extension,
     ]
@@ -278,6 +281,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-xmlwriter",
     #[cfg(feature = "xsl")]
     "--with-xsl",
+    #[cfg(feature = "zend_test")]
+    "--enable-zend-test",
     #[cfg(feature = "zip")]
     "--with-zip",
     #[cfg(feature = "zlib")]

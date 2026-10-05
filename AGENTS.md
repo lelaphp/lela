@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=c5a460a887e0e6b97bbe8cbbd6d7ed71722159a9532b8ef15f89f9903dbf1b42 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=06c4c52722a00cf981d21658f92668540f878a8ab691eef99f9d3c89a7b6b476 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -110,12 +110,12 @@ third-engine-design.md
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1239 | 1500 | pass |
+| api | api.lock | 1255 | 1500 | pass |
 | sapi | sapi.lock | 34 |  | pass |
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=96a32df872022695eeb72c2b79dbd7f69fbfbc0bcd3361c75e50e5f1161db1fe out=a8eed74a15b5f38766f14c79a0821104fc5433eed56f037d22c1f21f84af5f26 -->
+<!-- /computed in=c6474a42297cca02c71d2b1821ae47123cf78e02812575efcf26ee906995a223 out=dd783585f04883dcccc495f1d51cfa6da373e1f19a9be993323d4c8b97e87a16 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -138,16 +138,16 @@ third-engine-design.md
 | generated.committed |  | generated | pass |
 | git.no-verify |  | deny_argv | no reading |
 | ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | fail |
+| ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | fail |
+| lanes.nightly |  | deny_pattern | no reading |
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=05a183404fad5946d56421624727c4117b67569c8138e400f1bb36d14ade736e out=b66867afeba0f4f2d56b242198efe491b959270b497220511bae93207f482b4b -->
+<!-- /computed in=20bb5515d95c9ce1417e1cc956d4e856bfb9fcc5df95c1da37e6b98db8c8acd3 out=6038e7364920afa63f4780852abfb2752f866f0c2935909accf6ebd5e1a421c8 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -265,10 +265,11 @@ Options:
 ├── xmlreader
 ├── xmlwriter
 ├── xsl
+├── zend_test
 ├── zip
 └── zlib
 ```
-<!-- /computed in=06b3a5b63870c597920bd486bbf2124bc8d5f754745a30cd069c353cbed412b6 out=4e88391791c3dfa0c0c747a2e2b706a87b5e9546275c8b9950c85e2773775223 -->
+<!-- /computed in=432887617f7e74cad48d4fdfcd8b3967bc1dc8eb7f2c4040dc47e823e1c9f8cb out=bb0f5b5f2e5f8d121baf9c01693a1ec651329cdaf6e79a2ba394482425f4531b -->
 <!-- computed tree src=sapi depth=1 name=layout-sapi | do not edit; run computed -->
 ```
 .

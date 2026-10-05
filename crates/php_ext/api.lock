@@ -106,6 +106,7 @@ abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::opcodes
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::process_state
@@ -223,6 +224,7 @@ abi::Observed::frame
 abi::Observed::function
 abi::Observed::function_scope
 abi::Observed::suspend_time_limit
+abi::Observed::walk
 abi::ObservedFiber
 abi::ObservedFiber::destroyed
 abi::ObservedFiber::fiber
@@ -231,6 +233,11 @@ abi::ObservedFiber::threw
 abi::ObserverHandlers
 abi::ObserverInit
 abi::OnModify
+abi::OpcodeHandler
+abi::Opcodes
+abi::Opcodes::insert
+abi::Opcodes::is_empty
+abi::OpcodesDeclared
 abi::OrFalse
 abi::Passed
 abi::Path
@@ -497,6 +504,11 @@ request::BuildDefs::system
 request::CacheStatus
 request::CachedFile
 request::Cast
+request::ChainFrame
+request::ChainFrame::filename
+request::ChainFrame::frame
+request::ChainFrame::function
+request::ChainFrame::function_scope
 request::Closer
 request::Closer::close
 request::ConstIdx
@@ -538,6 +550,8 @@ request::FrameView::function_scope
 request::FrameView::id
 request::FrameView::line
 request::FrameView::op_array
+request::FrameView::opcode
+request::FrameView::walk
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
@@ -590,6 +604,7 @@ request::Persisted
 request::Pid
 request::Pid::as_raw
 request::PreloadStatistics
+request::Raised
 request::Readiness
 request::RealpathEntry
 request::Receiving
@@ -744,6 +759,7 @@ request::Request::periods_elapsed
 request::Request::persistent_list
 request::Request::phpinfo_as_text
 request::Request::preloading
+request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear

@@ -348,6 +348,7 @@ fn refused_at_entry(req: &mut Request) -> bool {
 
 /// The loop from the edge its first step took.
 fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
+    let declared = crate::observer::Declared::of(req);
     let mut frame;
     let mut stepped = first;
     loop {
@@ -374,6 +375,7 @@ fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
         let serving = standing(req, frame)?;
         let code = code_of(&serving, frame)?;
         let op = *at_opline(req, frame, code)?;
+        declared.before(req, frame, op.opcode);
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
         #[cfg(debug_assertions)]
         if let Some(sensed) = req.take_sensed() {
@@ -404,7 +406,8 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 /// own `safepoint` from being asked inside its stepping; the observer's
 /// begin and end (seam 9) are raised as the loop raises them, at the
 /// push a call steps into and the return it steps out of, since their
-/// homes take no tier.
+/// homes take no tier, and the observers of a declared opcode are told
+/// of the opline before its handler runs, as the loop tells them.
 ///
 /// A frame the handler pushed is activated as the loop activates it,
 /// with `Nop` at its `Site::Entry`: the interrupt is checked there, as
@@ -416,6 +419,7 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = standing(req, frame)?;
     let code = code_of(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
+    crate::observer::tell_before(req, frame, op.opcode);
     let stepped = dispatch::dispatch::<Nop>(req, frame, code, &op)?;
     #[cfg(debug_assertions)]
     if let Some(sensed) = req.take_sensed() {

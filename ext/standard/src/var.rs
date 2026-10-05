@@ -1019,7 +1019,16 @@ fn var_export(
 /// `DEBUG` one `print_r` takes, and answer a value already inside the
 /// walk with `NULL` and the warning, which is what keeps the source it
 /// writes evaluable.
-fn export(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+///
+/// # Errors
+///
+/// What a property read or a lazy object's initializer threw.
+pub fn export(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    value: &Value,
+    level: usize,
+) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
     let value = value.deref();

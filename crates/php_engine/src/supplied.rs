@@ -45,7 +45,7 @@ use crate::api::abi::{
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
 use crate::api::values::PhpString;
-use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
+use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared, OpcodeObserver};
 use crate::statement::StatementHandler;
 
 /// A value one extension hands the extension that reads every value of
@@ -124,6 +124,7 @@ pub(crate) struct Supplies {
     pub(crate) fiber_init: Vec<FiberHandler>,
     pub(crate) fiber_switch: Vec<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Vec<FiberHandler>,
+    pub(crate) opcodes: Option<OpcodeObserver>,
     /// The Zend extension row's `statement_handler`, which
     /// [`ExtensionBuilder::build`](crate::api::abi::ExtensionBuilder::build)
     /// takes from it.
@@ -219,6 +220,12 @@ pub(crate) struct Resolved {
     pub(crate) fiber_init: Listed<FiberHandler>,
     pub(crate) fiber_switch: Listed<FiberSwitchHandler>,
     pub(crate) fiber_destroy: Listed<FiberHandler>,
+    /// `zend_user_opcode_handlers`, one handler per opcode, which an
+    /// extension that sets one over another's saves and calls after its
+    /// own, as xdebug's `xdebug_set_opcode_handler` does: from the top,
+    /// every link, each declaring at engine start the opcodes it
+    /// observes ([`crate::observer::ObservedOpcodes`]).
+    pub(crate) opcodes: Chain<OpcodeObserver>,
     /// `zend_extensions` as `ZEND_EXT_STMT` walks it, each one's
     /// `statement_handler` in the order they were registered
     /// (`zend_register_extension`, `Z/Zend/zend_extensions.c:150`), which a
@@ -290,6 +297,7 @@ impl Resolved {
             table.fiber_init.install_all(own.fiber_init);
             table.fiber_switch.install_all(own.fiber_switch);
             table.fiber_destroy.install_all(own.fiber_destroy);
+            table.opcodes.install(own.opcodes);
             table.statement_handlers.install(own.statement_handler);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);

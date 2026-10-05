@@ -3537,7 +3537,6 @@ fn enter(
     };
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
-    let passed = call.arguments.len();
     let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
     let Some(serving) = req.vm().serving(callee) else {
         return Err(Fatal::Error(String::from(
@@ -3549,7 +3548,7 @@ fn enter(
             "InternalError: the frame just pushed names a body the unit has not",
         )));
     };
-    if let Some(at) = exec::parameter_prologue(req, callee, body, function, passed)? {
+    if let Some(at) = exec::parameter_prologue(req, callee, body)? {
         return Ok(Stepped::Threw(at));
     }
     Ok(Stepped::Pushed(callee))
