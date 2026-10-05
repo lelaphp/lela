@@ -393,7 +393,10 @@ impl Heap {
     /// asked for it. The first only, and taken, so it is raised once;
     /// the refused operation itself did nothing, so the free list the
     /// block's first word links stands. The engine asks after every
-    /// handler. A release build senses nothing and answers `None`.
+    /// handler and once more at the request's end, so a refusal made
+    /// outside the loop, in a request-end function or as the request's
+    /// tables are freed, is raised too. A release build senses nothing
+    /// and answers `None`.
     pub fn take_sensed(&mut self) -> Option<Fatal> {
         sensed::take()
     }

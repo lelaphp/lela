@@ -651,7 +651,11 @@ impl Request {
     /// or what the heap's sensors found ([`php_heap::Heap::take_sensed`]),
     /// a refcount operation on a block the heap had freed among them, as
     /// the `InternalError` fatal that ends the request; the first of
-    /// them, and taken. The loop asks after every handler.
+    /// them, and taken. The loop asks after every handler, and
+    /// [`Engine::shutdown_request`] once more after the request's last
+    /// release, so what was sensed outside the loop is raised too.
+    ///
+    /// [`Engine::shutdown_request`]: crate::engine::Engine::shutdown_request
     #[cfg(debug_assertions)]
     pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
         let dirty = self.frames.dirty.take().map(|dirty| {
