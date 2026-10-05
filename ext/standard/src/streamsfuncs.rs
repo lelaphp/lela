@@ -1,8 +1,8 @@
 //! `Z/ext/standard/streamsfuncs.c`, the natives over the streams facet
-//! that need no socket and no filter chain: the stream `contexts`, as
-//! resources of php's `stream-context` type this crate registers per
-//! request (`php_stream_context_alloc`), with their options and their
-//! notification callback; `stream_get_contents`, `stream_copy_to_stream`
+//! that need no socket and no filter chain: the stream `contexts`, the
+//! stream layer's `stream-context` resources (`StreamCtx`, as #1777
+//! ruled), with their options and their notification callback;
+//! `stream_get_contents`, `stream_copy_to_stream`
 //! and `stream_get_line` over the stream's reads; the options
 //! `stream_set_*` asks of a stream, answered as the kinds this engine has
 //! answer them; and `stream_resolve_include_path`, `stream_is_local`,
@@ -11,10 +11,6 @@
 //! here in the stub's order. The socket
 //! natives, `stream_select`, the filter natives, `stream_isatty` and
 //! `stream_get_transports` wait on faces the api does not have (#684).
-//!
-//! A stream opened without a `context` of its own uses php's default
-//! one, `FG(default_context)`, which is what `stream_context_get_options`
-//! reads for a stream here: the facet keeps no `context` on a stream.
 //!
 //! The natives, as the stub declares them.
 //!
@@ -96,115 +92,20 @@ use php_ext::raising::{
     throw_error,
 };
 use php_ext::request::{
-    OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence,
+    Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx, StreamOption,
+    Streams as _, Whence,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Resource, Value, ValueRef};
 
-use crate::State;
 use crate::virtual_cwd::MAXPATHLEN;
 
-/// What the request keeps for the `contexts`: the resource type, once
-/// registered, and `FG(default_context)`.
-#[derive(Default)]
-pub(crate) struct Contexts {
-    kind: Option<ResourceType>,
-    default: Option<Resource>,
-}
-
-pub(crate) mod notifier;
-
-/// `php_stream_context`: its options array and its notifier, which php
-/// `ecalloc`s apart from it when `notification` is set.
-struct Context {
-    options: Option<PhpArray>,
-    notifier: Option<Box<notifier::Notification>>,
-}
-
-/// `sizeof(php_stream_context)` on the pinned 64-bit build: the
-/// notifier's pointer, the `options` zval and the resource's pointer
-/// (`Z/main/streams/php_stream_context.h:52-56`).
-const CONTEXT_SIZE: usize = 32;
+/// `sizeof(zend_fcall_info_cache)`, the callable's cache
+/// `parse_context_params` `emalloc`s for the notifier's `ptr`: the
+/// function, the calling and called scopes, the object and the closure.
+const FCC_SIZE: usize = 40;
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// `le_stream_context`'s destructor, `php_stream_context_free`: the
-/// options and the callback given back.
-fn context_dtor(req: &mut Request, res: Resource) {
-    let taken = res
-        .native_mut::<Context>(req)
-        .map(|context| (context.options.take(), context.notifier.take()));
-    if let Some((options, notifier)) = taken {
-        if let Some(notifier) = notifier {
-            notifier.free(req);
-        }
-        if let Some(options) = options {
-            req.release(Value::array(options));
-        }
-    }
-}
-
-/// `php_le_stream_context()`: the type, registered on first use.
-fn context_type(req: &mut Request) -> ResourceType {
-    if let Some(kind) = req.state::<State>().contexts.kind {
-        return kind;
-    }
-    let kind = req
-        .resources()
-        .register_type(b"stream-context", Some(context_dtor));
-    req.state::<State>().contexts.kind = Some(kind);
-    kind
-}
-
-/// `php_stream_context_alloc`: a `context` with an empty options array,
-/// a resource of its own with one owner, the caller's, in php's order:
-/// the struct, its `options`, then the resource, each at php's size. A
-/// request's first `fopen()` lays `FG(default_context)` down with its
-/// stream.
-///
-/// ```php
-/// $m = memory_get_usage(); $f = fopen('/dev/null', 'r'); echo memory_get_usage() - $m, "\n"; fclose($f); unset($f);
-/// $c = stream_context_create(); unset($c);
-/// $m = memory_get_usage(); $c = stream_context_create(); echo memory_get_usage() - $m, "\n";
-/// $m = memory_get_usage(); stream_context_set_params($c, ['notification' => 'strlen']); echo memory_get_usage() - $m, "\n";
-/// $m = memory_get_usage(); unset($c); echo memory_get_usage() - $m, "\n";
-/// ```
-/// ```expect
-/// 616
-/// 120
-/// 88
-/// -208
-/// ```
-fn context_alloc(req: &mut Request) -> Result<Resource, Thrown> {
-    let kind = context_type(req);
-    let options = PhpArray::new(req)?;
-    Resource::sized(
-        req,
-        kind,
-        Context {
-            options: Some(options),
-            notifier: None,
-        },
-        CONTEXT_SIZE,
-    )
-}
-
-/// `php_stream_context_alloc` (`Z/main/streams/streams.c:2422`): a
-/// fresh `context` with no options, its one owner the caller's, as
-/// `php_sdl.c` makes one to fetch a WSDL with.
-pub fn stream_ctx_alloc(req: &mut Request) -> Result<Resource, Thrown> {
-    context_alloc(req)
-}
-
-/// `FG(default_context)`, made on first use and kept for the request.
-fn default_context(req: &mut Request) -> Result<Resource, Thrown> {
-    if let Some(res) = req.state::<State>().contexts.default {
-        return Ok(res);
-    }
-    let res = context_alloc(req)?;
-    req.state::<State>().contexts.default = Some(res);
-    Ok(res)
-}
 
 /// What `php_stream_context_from_zval`'s `nocontext` says a `null`
 /// `$context` is: `FG(default_context)`, or, under
@@ -219,226 +120,101 @@ pub(crate) enum NullContext {
 /// `php_stream_context_from_zval(zcontext, nocontext)`
 /// (`Z/main/streams/php_stream_context.h:36`) over the `$context` a
 /// native's declaration held as `Z_PARAM_RESOURCE_OR_NULL`: the one given,
-/// which must be a `stream-context` (`zend_fetch_resource_ex`'s
-/// `supplied resource is not a valid Stream-Context resource`), or for
-/// `null` `FG(default_context)`, made on the first use and a resource of
-/// the request's from then, unless `nocontext` says none. The first open
-/// of a request that is handed no `$context` makes it, so under the CLI
-/// it is resource 4, after the three standard streams, and the stream is
-/// 5. What it answers is the `php_stream_context` the native's stream
-/// operations are handed ([`Request::with_stream_ctx`]).
-///
-/// ```php
-/// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
-/// try { file_get_contents(__FILE__, false, STDIN); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// resource(5) of type (stream)
-/// resource(4) of type (stream-context)
-/// resource(6) of type (stream)
-/// file_get_contents(): supplied resource is not a valid Stream-Context resource
-/// ```
+/// which must be a `stream-context` ([`StreamCtx::fetch`]), or for
+/// `null` `FG(default_context)` ([`StreamCtx::default_ctx`]),
+/// unless `nocontext` says none. The first open of a request that is
+/// handed no `$context` makes it, so under the CLI it is resource 4,
+/// after the three standard streams, and the stream is 5. What it answers
+/// is the `context` the native's stream operations are handed
+/// ([`Request::with_stream_ctx`]).
 pub(crate) fn context_of(
     req: &mut Request,
     given: Option<Resource>,
     nocontext: NullContext,
-) -> Result<Option<Resource>, Thrown> {
-    if let Some(res) = given {
-        let kind = context_type(req);
-        if res.is_closed() || res.kind() != Some(kind) {
-            let text = format!(
-                "{}(): supplied resource is not a valid Stream-Context resource",
-                req.active_function_name()
-            );
-            return Err(throw_error(req, "TypeError", &text));
-        }
-        return Ok(Some(res));
+) -> Result<Option<StreamCtx>, Thrown> {
+    match (given, nocontext) {
+        (Some(res), _) => StreamCtx::fetch(req, res).map(Some),
+        (None, NullContext::Default) => StreamCtx::default_ctx(req).map(Some),
+        (None, NullContext::None) => Ok(None),
     }
-    if nocontext == NullContext::Default {
-        return Ok(Some(default_context(req)?));
-    }
-    Ok(None)
 }
 
-/// `php_stream_context_from_zval(NULL, 0)`: `FG(default_context)`,
-/// made on the first use, what `gzopen` and its kin open under.
-pub fn default_stream_ctx(req: &mut Request) -> Result<Resource, Thrown> {
-    default_context(req)
-}
-
-/// `php_stream_context_get_option` (`Z/main/streams/streams.c:2440`): the
-/// value under `option` of the `wrapper`'s options of a `context`, a view
-/// with no owner, dereferenced; `None` where either level is missing.
-pub fn stream_ctx_option(
+/// One `php_stream_notify_*` told the notifier of the `context` an
+/// operation was handed, where it was handed one.
+pub(crate) fn notify(
     req: &mut Request,
-    context: Resource,
-    wrapper: &[u8],
-    option: &[u8],
-) -> Result<Option<Value>, Thrown> {
-    let Some(options) = context
-        .native::<Context>(req)
-        .and_then(|context| context.options)
-    else {
-        return Ok(None);
+    context: Option<StreamCtx>,
+    notification: Notification<'_>,
+) -> Result<(), Thrown> {
+    context.map_or(Ok(()), |context| context.notify(req, notification))
+}
+
+/// `php_stream_notify_info(context, code, message, message_code)`.
+pub(crate) fn notify_info(
+    req: &mut Request,
+    context: Option<StreamCtx>,
+    code: NotifyCode,
+    message: Option<&[u8]>,
+    message_code: i64,
+) -> Result<(), Thrown> {
+    let info = Notification::Info {
+        code,
+        message,
+        message_code,
     };
-    let found = options.find(wrapper).map(|v| v.deref());
-    let Some(level) = found.as_ref().and_then(Value::as_array).copied() else {
-        return Ok(None);
+    notify(req, context, info)
+}
+
+/// `php_stream_notify_error(context, code, message, message_code)`.
+pub(crate) fn notify_error(
+    req: &mut Request,
+    context: Option<StreamCtx>,
+    code: NotifyCode,
+    message: Option<&[u8]>,
+    message_code: i64,
+) -> Result<(), Thrown> {
+    let error = Notification::Error {
+        code,
+        message,
+        message_code,
     };
-    Ok(level.find(option).map(|v| v.deref()))
+    notify(req, context, error)
 }
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
 /// `PHP_STREAM_CONTEXT(stream)`, a new one made and kept by a stream that
 /// keeps none; anything else is php's `must be a valid stream/context`.
-fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<Resource, Thrown> {
-    let kind = context_type(req);
-    if !res.is_closed() && res.kind() == Some(kind) {
-        return Ok(res);
+fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<StreamCtx, Thrown> {
+    if let Some(context) = StreamCtx::from_resource(req, res) {
+        return Ok(context);
     }
     if let Some(stream) = Stream::from_value(req, &res.as_value()) {
         if let Some(context) = stream.ctx(req) {
             return Ok(context);
         }
-        let context = context_alloc(req)?;
+        let context = StreamCtx::alloc(req)?;
         stream.set_ctx(req, Some(context));
         // The stream holds the owner `php_stream_context_alloc` made;
         // `stream->ctx = context->res` takes it without one more.
-        req.release(context.as_value());
+        req.release(context.resource().as_value());
         return Ok(context);
     }
     Err(arg_type_error(req, position, "be a valid stream/context"))
-}
-
-/// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`):
-/// both levels separated, the wrapper's array made where it is missing,
-/// and the value, dereferenced, written under the option's name; each
-/// name as the C string it is, up to its first NUL.
-fn set_option(
-    req: &mut Request,
-    res: Resource,
-    wrapper: &[u8],
-    option: &[u8],
-    value: &Value,
-) -> Result<(), Thrown> {
-    let Some(mut options) = res
-        .native_mut::<Context>(req)
-        .and_then(|context| context.options.take())
-    else {
-        return Ok(());
-    };
-    let wrote = put_option(req, &mut options, wrapper, option, value);
-    if let Some(context) = res.native_mut::<Context>(req) {
-        context.options = Some(options);
-    }
-    wrote
-}
-
-/// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`)
-/// over a `context`, as `xp_ssl.c` keeps a captured peer certificate in
-/// the stream's: the value under `option` of the `wrapper`'s options,
-/// one owner more.
-pub fn stream_ctx_set_option(
-    req: &mut Request,
-    context: Resource,
-    wrapper: &[u8],
-    option: &[u8],
-    value: &Value,
-) -> Result<(), Thrown> {
-    set_option(req, context, wrapper, option, value)
-}
-
-/// `php_stream_context_unset_option` (`Z/main/streams/streams.c:2477`):
-/// the value under `option` of the `wrapper`'s options taken out, both
-/// levels separated first; nothing where the `wrapper` has none.
-pub(crate) fn stream_ctx_unset_option(
-    req: &mut Request,
-    context: Resource,
-    wrapper: &[u8],
-    option: &[u8],
-) -> Result<(), Thrown> {
-    let Some(mut options) = context
-        .native_mut::<Context>(req)
-        .and_then(|context| context.options.take())
-    else {
-        return Ok(());
-    };
-    let unset = unset_in(req, &mut options, wrapper, option);
-    if let Some(context) = context.native_mut::<Context>(req) {
-        context.options = Some(options);
-    }
-    unset
-}
-
-/// The body of [`stream_ctx_unset_option`] over the options array taken
-/// out of the `context` for the call.
-fn unset_in(
-    req: &mut Request,
-    options: &mut PhpArray,
-    wrapper: &[u8],
-    option: &[u8],
-) -> Result<(), Thrown> {
-    let found = options
-        .find(wrapper)
-        .map(|v| v.deref())
-        .and_then(|v| v.as_array().copied());
-    let Some(mut category) = found else {
-        return Ok(());
-    };
-    let name = PhpString::new(req, wrapper)?;
-    options.separate(req)?;
-    req.addref(&Value::array(category));
-    category.separate(req)?;
-    let option = PhpString::new(req, option)?;
-    let unset = category.unset(req, &Key::Str(option));
-    req.release(Value::string(option));
-    unset?;
-    options.set(req, Key::Str(name), Value::array(category))
-}
-
-/// The body of [`set_option`] over the options array taken out of the
-/// `context` for the call.
-fn put_option(
-    req: &mut Request,
-    options: &mut PhpArray,
-    wrapper: &[u8],
-    option: &[u8],
-    value: &Value,
-) -> Result<(), Thrown> {
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    options.separate(req)?;
-    let wrapper = c_string(wrapper);
-    let existing = options.find(&wrapper).map(|v| v.deref());
-    let mut category = match existing.as_ref().and_then(Value::as_array) {
-        Some(array) => {
-            let array = *array;
-            req.addref(&Value::array(array));
-            array
-        }
-        None => PhpArray::new(req)?,
-    };
-    category.separate(req)?;
-    let value = value.deref();
-    req.addref(&value);
-    let option_key = Key::Str(PhpString::new(req, &c_string(option))?);
-    category.set(req, option_key, value)?;
-    let wrapper_key = Key::Str(PhpString::new(req, &wrapper)?);
-    options.set(req, wrapper_key, Value::array(category))
 }
 
 /// `parse_context_options` (`Z/ext/standard/streamsfuncs.c:872`): each
 /// string key holding an array sets its string-keyed options, in order;
 /// the first entry that is neither is php's `ValueError`, what came
 /// before it already set.
-fn parse_options(req: &mut Request, res: Resource, options: PhpArray) -> Result<(), Thrown> {
+fn parse_options(req: &mut Request, res: StreamCtx, options: PhpArray) -> Result<(), Thrown> {
     for (wkey, wval) in options.snapshot() {
         let wval = wval.deref();
         match (&wkey, wval.as_array()) {
             (Key::Str(wrapper), Some(inner)) => {
                 for (okey, oval) in inner.snapshot() {
                     if let Key::Str(option) = okey {
-                        set_option(req, res, wrapper.as_bytes(), option.as_bytes(), &oval)?;
+                        res.set_option(req, wrapper.as_bytes(), option.as_bytes(), &oval)?;
                     }
                 }
             }
@@ -458,17 +234,12 @@ fn parse_options(req: &mut Request, res: Resource, options: PhpArray) -> Result<
 /// `notification` a callable, php's `TypeError` otherwise, which
 /// replaces the one there; `options` an array of options, php's
 /// `Invalid stream/context parameter` otherwise.
-fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<(), Thrown> {
+fn parse_params(req: &mut Request, res: StreamCtx, params: PhpArray) -> Result<(), Thrown> {
     if let Some(callback) = params.find(b"notification") {
         // The notifier there is freed first, so a callable refused below
         // leaves the context with none.
-        let old = res
-            .native_mut::<Context>(req)
-            .and_then(|context| context.notifier.take());
-        if let Some(old) = old {
-            old.free(req);
-        }
-        let fcc = notifier::Notification::fcc(req)?;
+        res.set_notifier(req, None)?;
+        let fcc = Emalloc::new(req, FCC_SIZE)?;
         if let Err(why) = callable_checked(req, &callback) {
             fcc.free(req);
             return Err(arg_type_error(
@@ -478,12 +249,7 @@ fn parse_params(req: &mut Request, res: Resource, params: PhpArray) -> Result<()
             ));
         }
         req.addref(&callback);
-        let made = Box::new(notifier::Notification::new(req, callback, fcc)?);
-        if let Some(context) = res.native_mut::<Context>(req) {
-            context.notifier = Some(made);
-        } else {
-            made.free(req);
-        }
+        res.set_notifier(req, Some((callback, fcc)))?;
     }
     if let Some(options) = params.find(b"options") {
         let options = options.deref();
@@ -556,7 +322,7 @@ fn stream_context_create(
     #[php(default = null)] options: Option<PhpArray>,
     #[php(default = null)] params: Option<PhpArray>,
 ) -> Result<Untyped<Resource>, Thrown> {
-    let res = context_alloc(req)?;
+    let res = StreamCtx::alloc(req)?;
     let mut applied = Ok(());
     if let Some(options) = options {
         applied = parse_options(req, res, options);
@@ -565,9 +331,9 @@ fn stream_context_create(
         applied = parse_params(req, res, params);
     }
     match applied {
-        Ok(()) => Ok(Untyped(res)),
+        Ok(()) => Ok(Untyped(res.resource())),
         Err(thrown) => {
-            req.release(res.as_value());
+            req.release(res.resource().as_value());
             Err(thrown)
         }
     }
@@ -635,12 +401,7 @@ fn stream_context_set_params(
 #[php_function]
 fn stream_context_get_params(req: &mut Request, context: Resource) -> Result<PhpArray, Thrown> {
     let res = context_resource(req, context, 1)?;
-    let (options, notification) = res.native::<Context>(req).map_or((None, None), |context| {
-        (
-            context.options,
-            context.notifier.as_ref().map(|n| n.callback),
-        )
-    });
+    let (options, notification) = (res.options(req), res.notifier(req));
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {
         req.addref(&notification);
@@ -759,7 +520,7 @@ fn stream_context_set_option(
                     "must be provided when argument #2 ($wrapper_or_options) is a string",
                 );
             };
-            set_option(req, res, wrapper.as_bytes(), option.as_bytes(), &value)?;
+            res.set_option(req, wrapper.as_bytes(), option.as_bytes(), &value)?;
         }
     }
     Ok(True)
@@ -829,9 +590,7 @@ fn stream_context_get_options(
     stream_or_context: Resource,
 ) -> Result<PhpArray, Thrown> {
     let res = context_resource(req, stream_or_context, 1)?;
-    let options = res
-        .native::<Context>(req)
-        .and_then(|context| context.options);
+    let options = res.options(req);
     match options {
         Some(options) => {
             req.addref(&Value::array(options));
@@ -868,12 +627,12 @@ fn stream_context_get_default(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
 ) -> Result<Untyped<Resource>, Thrown> {
-    let res = default_context(req)?;
+    let res = StreamCtx::default_ctx(req)?;
     if let Some(options) = options {
         parse_options(req, res, options)?;
     }
-    req.addref(&res.as_value());
-    Ok(Untyped(res))
+    req.addref(&res.resource().as_value());
+    Ok(Untyped(res.resource()))
 }
 
 /// `stream_context_set_default(array $options)`,
@@ -894,10 +653,10 @@ fn stream_context_set_default(
     req: &mut Request,
     options: PhpArray,
 ) -> Result<Untyped<Resource>, Thrown> {
-    let res = default_context(req)?;
+    let res = StreamCtx::default_ctx(req)?;
     parse_options(req, res, options)?;
-    req.addref(&res.as_value());
-    Ok(Untyped(res))
+    req.addref(&res.resource().as_value());
+    Ok(Untyped(res.resource()))
 }
 
 /// `stream_get_contents($stream, ?int $length = null, int $offset = -1): string|false`,

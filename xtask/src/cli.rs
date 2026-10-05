@@ -483,6 +483,11 @@ pub(crate) struct Phpt {
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
+    /// With `--engine` the pinned php, the runner's control: run only the
+    /// subsets whose kept target does not stand, none kept under the pin or
+    /// one that predates a test the subset has now, and say so of the rest.
+    #[arg(long, requires = "engine")]
+    pub unkept: bool,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the
@@ -733,9 +738,10 @@ pub enum Section {
     Oracle,
     /// The corpus CI checks out at the pin: the tag, the commit, the
     /// `.phpt` files the pin counts, the sparse patterns the subsets need
-    /// and the cache key they make, and where the targets under the pin
-    /// are kept. CI reads them here and writes no directory of the corpus
-    /// (#1713, #1733).
+    /// and the cache key they make, where the targets under the pin are
+    /// kept, and the hosts the lane runs a test through. CI reads them
+    /// here and writes no directory of the corpus and no host (#1713,
+    /// #1733, #1908).
     Corpus,
     /// Met-of-target per suite and in total, from the phpt reading that
     /// stands for each suite parity counts, and the suites outside parity

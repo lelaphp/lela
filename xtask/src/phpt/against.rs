@@ -161,7 +161,13 @@ impl Runs {
                 return Ok((Some(target), true));
             }
         }
-        Ok((Target::kept(&self.roots, pin, scope)?, false))
+        Ok((self.kept_target(pin, scope)?, false))
+    }
+
+    /// The target kept for `scope` under the pin, from the first of
+    /// [`roots`] that keeps one: what an engine's run of it is held to.
+    pub(crate) fn kept_target(&self, pin: &Pin, scope: &str) -> Result<Option<Target>> {
+        Target::kept(&self.roots, pin, scope)
     }
 
     /// After a subset ran: its run kept, where the engine judged every

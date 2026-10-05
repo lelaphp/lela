@@ -8,7 +8,7 @@
 use php_ext::abi::Callable;
 use php_ext::call::{call, closure_from_callable};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
-use php_ext::request::{Request, Stream, Streams as _, UrlStat};
+use php_ext::request::{Request, Stream, StreamCtx, Streams as _, UrlStat};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::State;
@@ -374,8 +374,8 @@ fn open(
         .as_ref()
         .and_then(|v| v.as_resource().copied());
     let context = match kept {
-        Some(context) => context,
-        None => php_ext_standard::default_stream_ctx(req)?,
+        Some(context) => StreamCtx::fetch(req, context)?,
+        None => StreamCtx::default_ctx(req)?,
     };
     let opened = req.with_stream_ctx(Some(context), |req| req.open_stream(&path, mode, false))?;
     // "Prevent from closing this by fclose()": the stream is libxml's.

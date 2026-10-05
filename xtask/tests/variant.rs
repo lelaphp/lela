@@ -578,6 +578,57 @@ fn phpt_runs_a_subset_whose_row_names_a_variant_under_it() {
     );
 }
 
+/// `--unkept` under a variant (#1830, #1782): the subset's target is kept
+/// and found under the variant's pin, so run again under the variant's own
+/// binary it stands and is not run; and the main php, which is no control
+/// of the variant's subset, leaves it rather than running it.
+#[test]
+fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin() {
+    let Some((root, manifest, binary)) = phpt_scratch("phpt-unkept", None, true) else {
+        return;
+    };
+    let locks = Tree::new("variant-unkept-locks").unwrap();
+    let run = |engine: &Path| {
+        let ask = phpt::Ask {
+            subset: Some("ext/fixture".to_owned()),
+            engine: Some(engine.to_path_buf()),
+            locks: Some(locks.path().to_path_buf()),
+            unkept: true,
+            ..phpt::Ask::default()
+        };
+        phpt::run(&root, &manifest, &Registry::default(), &ask)
+    };
+    let readings = run(&binary).unwrap();
+    assert_eq!(
+        readings.len(),
+        1,
+        "no target kept, so it runs: {readings:#?}"
+    );
+    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let kept = root.join(format!(
+        "target/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        manifest.pin.source.tag
+    ));
+    assert!(
+        kept.is_file(),
+        "kept under the variant's pin: {}",
+        kept.display()
+    );
+
+    let readings = run(&binary).unwrap();
+    assert!(
+        readings.is_empty(),
+        "the variant's target stands: {readings:#?}"
+    );
+
+    // A binary that is no subset's control is refused, the main php here
+    // among them, being nowhere.
+    let main = root.join("main-php");
+    fs::write(&main, "#!/bin/sh\n").unwrap();
+    let refused = run(&main).expect_err("no subset's control");
+    assert!(format!("{refused:#}").contains("--unkept"), "{refused:#}");
+}
+
 /// `phpt`'s half of the binary's negative control: the subset of a crate
 /// read under a variant whose binary is not its md5 is refused, a failing
 /// reading naming the drift, as the main oracle's is.

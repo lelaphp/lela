@@ -238,16 +238,13 @@ fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Re
         req.state::<State>().num_free_persistent -= 1;
         free
     } else {
-        let id = req
+        let kept = req
             .engine::<crate::Pooled>()
             .and_then(|crate::Pooled(pool)| pool.take(&key.to_vec()));
-        let Some(id) = id else {
+        let Some(kept) = kept else {
             return Ok(false);
         };
-        let Some(pooled) = Mysqlnd::take_up(req, &id)? else {
-            return Ok(false);
-        };
-        pooled
+        Mysqlnd::take_up(req, kept)?
     };
     if let Some(made) = mysql.mysql.take() {
         made.close(req, CloseType::Implicit)?;
@@ -302,18 +299,18 @@ pub(crate) fn deactivate(req: &mut Request) {
     }
 }
 
-/// `handle` kept in the engine's pool under `key`, or closed past its bound.
+/// `handle` kept, with its socket, in the engine's pool of mysqli's free
+/// links under `key`, or closed with this request past its bound.
 fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
-    let Some(id) = handle.give_back(req) else {
+    let Some(kept) = handle.give_back(req) else {
         return;
     };
-    let back = req
-        .engine::<crate::Pooled>()
-        .and_then(|crate::Pooled(pool)| pool.give_back(key.to_vec(), id));
-    if let Some(back) = back
-        && let Ok(Some(handle)) = Mysqlnd::take_up(req, &back)
-    {
-        let _ = handle.close(req, CloseType::Implicit);
+    let past = match req.engine::<crate::Pooled>() {
+        Some(crate::Pooled(pool)) => pool.give_back(key.to_vec(), kept),
+        None => Some(kept),
+    };
+    if let Some(past) = past {
+        let _ = past.close(req);
     }
 }
 

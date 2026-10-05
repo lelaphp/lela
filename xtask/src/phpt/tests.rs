@@ -1427,6 +1427,41 @@ fn redirect_subset(tree: &Tree, under: &str) -> Subset {
     }
 }
 
+/// `--unkept`'s reading of a redirect (#1830): a target stands for the
+/// redirecting test only where it kept a verdict through it for every test
+/// of the set as the tree holds it now. A test added to the set is one the
+/// target predates, as one added to the subset is.
+#[test]
+fn a_redirect_stands_only_where_every_test_of_its_set_was_kept_through_it() {
+    let tree = Tree::new("redirect-kept").unwrap();
+    let subset = redirect_subset(&tree, "ext/driver/tests");
+    let by = subset.id(&tree.path().join("ext/driver/tests/common.phpt"));
+    let through = |name: &str| {
+        format!("phpt:php-src/ext/shared/tests/{name} via php-src/ext/driver/tests/common.phpt")
+    };
+    let both = [through("dsn.phpt"), through("second.phpt")];
+    assert!(redirect::set_kept(&subset, &by, both.iter()));
+    assert!(
+        !redirect::set_kept(&subset, &by, both[..1].iter()),
+        "second.phpt was not kept"
+    );
+    assert!(!redirect::set_kept(&subset, &by, std::iter::empty()));
+    let other = subset.id(&tree.path().join("ext/driver/tests/own.phpt"));
+    assert!(
+        !redirect::set_kept(&subset, &other, both.iter()),
+        "kept through another test"
+    );
+    fs::write(
+        tree.path().join("ext/shared/tests/third.phpt"),
+        "--TEST--\nthird\n",
+    )
+    .unwrap();
+    assert!(
+        !redirect::set_kept(&subset, &by, both.iter()),
+        "the target predates third.phpt"
+    );
+}
+
 /// A `--REDIRECTTEST--` runs the set its section names in its place: each
 /// test under the environment the section returns and `REDIR_TEST_DIR`,
 /// its program written in the redirecting test's directory, needing the

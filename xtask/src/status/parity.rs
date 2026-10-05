@@ -302,7 +302,10 @@ fn outside<'a>(
 /// its subset, as a narrower run, a scope a suite was once read under, a
 /// host's `tests` directory, or the suite of a row that owns no subset yet
 /// (`sapi/embed`) is. A row stands for what the pinned php builds, so a
-/// place a row owns is never one it does not build.
+/// place a row owns is never one it does not build. The dashboard's
+/// `whyOut` (dashboard/collect/parity.ts) is the same rule, a place inside
+/// or around a row's name or subset, and re-judges this section's list by
+/// it (#1865).
 fn owned(manifest: &Manifest, inside: &BTreeSet<PathBuf>, place: &Path) -> bool {
     let overlaps = |owner: &Path| place.starts_with(owner) || owner.starts_with(place);
     inside.iter().any(|suite| overlaps(suite))

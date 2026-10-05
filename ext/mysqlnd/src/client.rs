@@ -145,6 +145,25 @@ pub enum Command<'a> {
     },
 }
 
+/// An idle persistent connection, what `mysqlnd.h`'s persistent
+/// `MYSQLND *` is between requests (#1674): it owns the connection's
+/// `ConnData` with its socket, and a pool entry of `pdo_mysql` or mysqli
+/// holds it, so dropping the entry closes the connection, its socket
+/// closed with no `COM_QUIT` sent. [`Mysqlnd::give_back`] answers one;
+/// a request takes it up ([`Mysqlnd::take_up`]) or closes it with a
+/// `COM_QUIT` ([`Idle::close`]).
+pub struct Idle(Box<ConnData>);
+
+impl Idle {
+    /// `mysqlnd_close` with this request: the connection taken up and
+    /// closed, its `COM_QUIT` sent and its socket closed, as an owner
+    /// closes one past its pool's bound (ADR-0010's amendment of
+    /// ADR-0005).
+    pub fn close(self, req: &mut Request) -> Result<bool, Thrown> {
+        Mysqlnd::take_up(req, self)?.close(req, CloseType::Implicit)
+    }
+}
+
 impl Mysqlnd {
     /// The connection's number in the table, for the statements of this
     /// crate.
@@ -158,23 +177,22 @@ impl Mysqlnd {
     }
 
     /// A persistent connection given back as the request that holds it
-    /// ends: taken out of the request's table, this owner gone, and kept
-    /// by the engine with its socket under the key answered, which the
-    /// owner's pool entry holds in place of the connection php's holds;
-    /// `None` where it is no persistent connection that connected, or
-    /// where the engine's pool is at its bound, which closes it with this
-    /// request.
-    pub fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
-        self.0.give_back(req)
+    /// ends: taken out of the request's table, this owner gone, with its
+    /// socket, for its owner to keep in its own pool, the one list the
+    /// connection waits in as php's `EG(persistent_list)` entry holds the
+    /// `MYSQLND` itself; `None` where it is no persistent connection that
+    /// connected.
+    #[must_use]
+    pub fn give_back(self, req: &mut Request) -> Option<Idle> {
+        self.0.give_back(req).map(Idle)
     }
 
-    /// The persistent connection kept under `key` taken up by the request,
-    /// one owner counted: `None` where the engine keeps none under it.
-    /// Its socket is the one kept under the key where that one is alive;
-    /// otherwise every command over it fails as one over a dead link
-    /// does, as the `mysqlnd_ping` its owner sends first finds.
-    pub fn take_up(req: &mut Request, key: &[u8]) -> Result<Option<Mysqlnd>, Thrown> {
-        Ok(Handle::take_up(req, key)?.map(Mysqlnd))
+    /// The connection a request gave back taken up by this one, one owner
+    /// counted, over the socket it kept; one whose socket the server has
+    /// closed fails every command as one over a dead link does, as the
+    /// `mysqlnd_ping` or `COM_CHANGE_USER` its owner sends first finds.
+    pub fn take_up(req: &mut Request, idle: Idle) -> Result<Mysqlnd, Thrown> {
+        Ok(Mysqlnd(Handle::take_up(req, idle.0)?))
     }
 
     /// `get_reference`: one more owner, for a statement or a set of rows

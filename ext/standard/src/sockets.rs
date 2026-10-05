@@ -134,11 +134,10 @@ use std::time::Duration;
 
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{
-    BindTo, FdStream, Handshake, Request, SocketOptions, Stream, Streams as _, Xport, XportFailure,
+    FdStream, Handshake, Request, SocketOptions, Stream, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
@@ -146,7 +145,7 @@ use crate::file::constants::{
     STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_CLIENT_PERSISTENT,
     STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
 };
-use crate::streamsfuncs::{NullContext, context_of, stream_ctx_option};
+use crate::streamsfuncs::{NullContext, context_of};
 
 /// An untyped by-reference out-parameter, `&$error_code = null`.
 type Out = Ref<Untyped<Value>>;
@@ -550,7 +549,7 @@ fn stream_socket_client(
     #[php(default = STREAM_CLIENT_CONNECT)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let (socket, context) = socket_options(req, context)?;
+    let context = context_of(req, context, NullContext::Default)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
         Some(timeout) if !timeout.is_finite() => {
@@ -571,7 +570,7 @@ fn stream_socket_client(
                 key.extend_from_slice(&persistent_key(&host));
                 key
             }),
-            socket,
+            socket: SocketOptions::default(),
             context,
         },
     )? {
@@ -592,53 +591,6 @@ fn stream_socket_client(
             Ok(Untyped(OrFalse::False))
         }
     }
-}
-
-/// `php_stream_context_from_zval(zcontext, 0)` and the `socket` options
-/// of what it answers, each read as its reader in `xp_socket.c` and
-/// `transports.c` reads it: `bindto` a string or refused, `backlog` by
-/// `zval_get_long`, `ipv6_v6only` where it is not `null`, and the rest by
-/// `zend_is_true`; with the `context` itself, which the socket keeps.
-pub(crate) fn socket_options(
-    req: &mut Request,
-    given: Option<Resource>,
-) -> Result<(SocketOptions, Option<Resource>), Thrown> {
-    let context = context_of(req, given, NullContext::Default)?;
-    let options = match context {
-        Some(context) => context_socket_options(req, context)?,
-        None => SocketOptions::default(),
-    };
-    Ok((options, context))
-}
-
-/// The `socket` options of one `context`, as [`socket_options`] reads
-/// them.
-fn context_socket_options(req: &mut Request, context: Resource) -> Result<SocketOptions, Thrown> {
-    let mut options = SocketOptions::default();
-    if let Some(value) = stream_ctx_option(req, context, b"socket", b"bindto")? {
-        options.bindto = Some(match value.as_php_string() {
-            Some(text) => BindTo::Address(text.as_bytes().to_vec()),
-            None => BindTo::NotAString,
-        });
-    }
-    if let Some(value) = stream_ctx_option(req, context, b"socket", b"backlog")? {
-        options.listen_queue = Some(to_long(req, &value)?);
-    }
-    for (name, flag) in [
-        (&b"tcp_nodelay"[..], &mut options.tcp_nodelay),
-        (b"so_reuseport", &mut options.so_reuseport),
-        (b"so_broadcast", &mut options.so_broadcast),
-    ] {
-        if let Some(value) = stream_ctx_option(req, context, b"socket", name)? {
-            *flag = truthy(req, &value);
-        }
-    }
-    if let Some(value) = stream_ctx_option(req, context, b"socket", b"ipv6_v6only")?
-        && !matches!(value.as_ref(), ValueRef::Null)
-    {
-        options.ipv6_v6only = Some(truthy(req, &value));
-    }
-    Ok(options)
 }
 
 /// `stream_socket_server(string $address, &$error_code = null,
@@ -715,13 +667,13 @@ fn stream_socket_server(
     #[php(default = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
-    let (socket, context) = socket_options(req, context)?;
+    let context = context_of(req, context, NullContext::Default)?;
     let host = address.as_bytes().to_vec();
     let error = (&error_code, &error_message);
     assign_error(req, error, 0, Some(b""))?;
     let xport = Xport::Server {
         listen: flags & STREAM_SERVER_LISTEN != 0,
-        socket,
+        socket: SocketOptions::default(),
         context,
     };
     match req.xport_create(&host, xport)? {
@@ -954,10 +906,9 @@ fn stream_socket_enable_crypto(
         } else {
             // `GET_CTX_OPT(stream, "ssl", "crypto_method", val)`, then
             // `Z_LVAL_P(val)`: the integer it holds, read unconverted.
-            let found = match stream.ctx(req) {
-                Some(context) => stream_ctx_option(req, context, b"ssl", b"crypto_method")?,
-                None => None,
-            };
+            let found = stream
+                .ctx(req)
+                .and_then(|context| context.option(req, b"ssl", b"crypto_method"));
             let Some(value) = found else {
                 return Err(arg_value_error(
                     req,

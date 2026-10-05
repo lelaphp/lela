@@ -203,6 +203,89 @@ fn a_missed_expectation_fails_with_the_counts_and_the_reading_names_the_file() {
     assert_eq!(count(&reading, "run"), 1);
 }
 
+/// `--unkept` (#1830): the runner's control runs only a subset whose kept
+/// target does not stand. With none kept under the pin it runs and keeps
+/// one; run again, the target holds a verdict for each of the subset's
+/// tests and the subset is not run; a test added to the subset is one the
+/// target predates, so it runs again and keeps the target over both. Asked
+/// of a binary that is not the pinned php, it is refused, since only the
+/// control keeps a target.
+#[test]
+fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand() {
+    let Some(php) = oracle() else {
+        return;
+    };
+    let test = |name: &str| {
+        format!("--TEST--\n{name}\n--FILE--\n<?php echo '{name}';\n--EXPECT--\n{name}\n")
+    };
+    let scratch = Scratch::new("unkept", &[("a.phpt", &test("a"))]);
+    let ask = |engine: &Path| Ask {
+        subset: Some("ext/fixture".to_owned()),
+        engine: Some(engine.to_path_buf()),
+        locks: Some(scratch.locks.path().to_path_buf()),
+        unkept: true,
+        ..Ask::default()
+    };
+    let run = || phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask(&php));
+    let pin = &scratch.manifest.pin;
+    let kept = scratch.root.join(format!(
+        "target/phpt-runs/pin-{}-{}/ext/fixture.json",
+        pin.source.tag, pin.oracle.md5
+    ));
+    let verdicts = || -> Vec<String> {
+        let run: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();
+        run["verdicts"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let id = |name: &str| format!("phpt:php-src/ext/fixture/tests/{name}");
+
+    let readings = run().unwrap();
+    assert_eq!(
+        readings.len(),
+        1,
+        "no target kept, so the subset runs: {readings:#?}"
+    );
+    assert_eq!(readings[0].scope, "ext/fixture@control");
+    assert_eq!(verdicts(), [id("a.phpt")], "and keeps its target");
+
+    let readings = run().unwrap();
+    assert!(
+        readings.is_empty(),
+        "the target stands, so nothing runs: {readings:#?}"
+    );
+
+    fs::write(
+        scratch.root.join("corpus/ext/fixture/tests/b.phpt"),
+        test("b"),
+    )
+    .unwrap();
+    let readings = run().unwrap();
+    assert_eq!(
+        readings.len(),
+        1,
+        "the target predates b.phpt: {readings:#?}"
+    );
+    assert_eq!(
+        verdicts(),
+        [id("a.phpt"), id("b.phpt")],
+        "kept again over both"
+    );
+
+    let refused = phpt::run(
+        &scratch.root,
+        &scratch.manifest,
+        &registry(""),
+        &ask(&scratch.engine),
+    )
+    .expect_err("a binary that is not the pin keeps no target");
+    assert!(format!("{refused:#}").contains("--unkept"), "{refused:#}");
+}
+
 /// An extension's derived subset is every `.phpt` under `ext/<name>`, as
 /// run-tests.php walks the directory, so a test in a directory beside
 /// `tests/`, as `ext/intl/uchar/tests` stands beside `ext/intl/tests`, is

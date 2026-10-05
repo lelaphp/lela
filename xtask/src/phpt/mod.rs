@@ -936,6 +936,11 @@ pub struct Ask {
     /// unless named. A test of the harness names one of its own, so a real
     /// run beside it holding `all` makes it wait for nothing (#1675).
     pub locks: Option<PathBuf>,
+    /// Under the runner's control alone: run only the subsets whose kept
+    /// target does not stand, none kept under the pin or one that predates
+    /// a test the subset has now, and say of each other one that it stands
+    /// (#1830). What CI runs after every push, before the engine's lane.
+    pub unkept: bool,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -962,10 +967,12 @@ pub fn run(
     if let Runner::Absent(why) | Runner::Stale(why) = runner {
         println!("phpt: {why}");
     }
+    let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     let sides: Vec<Result<Side>> = subsets
         .iter()
         .map(|subset| runners.side(manifest, &oracles, subset))
         .collect();
+    let todo = to_run(ask, (manifest, &runs), &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
         && !sides.iter().flatten().any(Side::runs)
@@ -976,7 +983,11 @@ pub fn run(
     let jobs = ask.jobs.unwrap_or_else(tally::cores);
     // The run's own copy of the pinned tree, which every subset runs in and
     // which goes when the run does; none where no test will run.
-    let copy = if sides.iter().flatten().any(Side::runs) {
+    let copy = if todo
+        .iter()
+        .filter_map(|(_, side)| side.as_ref().ok())
+        .any(Side::runs)
+    {
         Some(copy_of(&source, jobs)?)
     } else {
         None
@@ -986,7 +997,6 @@ pub fn run(
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
     let mut lane = census::Census::default();
-    let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     // One subset's readings: its own and the one holding it against a
     // commit. A subset refused, for a server that did not answer or for
     // any other cause, is that subset's failing reading, and the lane goes
@@ -1045,7 +1055,7 @@ pub fn run(
     };
     // A subset whose row names an oracle variant the pin does not carry is
     // refused as any other subset the lane could not run, naming it.
-    for (subset, side) in subsets.iter().zip(&sides) {
+    for (subset, side) in todo {
         let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
         let side = side
             .as_ref()
@@ -1061,6 +1071,88 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// The subsets a run under `ask` runs, each beside its side: all of them,
+/// or under `--unkept` all but each whose kept target stands under its own
+/// oracle's pin, as
+/// its [`Side`] resolves it (#1830, #1782), and each the named binary is no
+/// control of, a variant's subset under the main php; each said, and set
+/// aside before anything is copied, so a lane whose every target stands
+/// copies no tree and runs nothing. Only the control keeps a target, and
+/// only outside a tier's lane (`Runs::target_of`), so `--unkept` is
+/// refused where the binary is no subset's control or a lane is named.
+fn to_run<'a, 'r, 'o>(
+    ask: &Ask,
+    (manifest, runs): (&Manifest, &against::Runs),
+    subsets: &'a [Subset],
+    sides: &'a [Result<Side<'r, 'o>>],
+) -> Result<Vec<(&'a Subset, &'a Result<Side<'r, 'o>>)>> {
+    let pairs = subsets.iter().zip(sides);
+    if !ask.unkept {
+        return Ok(pairs.collect());
+    }
+    let control = |side: &Side| matches!(side.runner, Runner::Control(_));
+    if ask.lane.is_some() || !sides.iter().flatten().any(control) {
+        bail!(
+            "--unkept keeps the targets of the runner's control: name the pinned php, {}, or a \
+             variant's, with --engine, and no --jit",
+            manifest.pin.oracle.path.display()
+        );
+    }
+    Ok(pairs
+        .filter(|(subset, side)| {
+            let Ok(side) = side else {
+                // A variant the pin does not carry: the run refuses it
+                // with its reading, as any run does.
+                return true;
+            };
+            let pin = side.oracle.pin();
+            if !control(side) {
+                println!(
+                    "phpt: {}: the named binary is not its control, the php{} at {}, so \
+                     --unkept leaves it",
+                    subset.scope,
+                    pin.oracle
+                        .variant()
+                        .map(|v| format!(" of the oracle variant {v}"))
+                        .unwrap_or_default(),
+                    pin.oracle.path.display()
+                );
+                return false;
+            }
+            let standing = stands(runs, pin, subset);
+            if standing {
+                println!(
+                    "phpt: {}: its target under {} holds a verdict for each of its tests, so \
+                     the control does not run it again",
+                    subset.scope,
+                    target::key(pin)
+                );
+            }
+            !standing
+        })
+        .collect())
+}
+
+/// Whether the target kept for `subset` under `pin` stands for it as it
+/// is now ([`Target::stands_for`]); a target or a subset that cannot be
+/// read is one that does not, said, so the control runs the subset again.
+fn stands(runs: &against::Runs, pin: &Pin, subset: &Subset) -> bool {
+    let read = runs
+        .kept_target(pin, &subset.scope)
+        .and_then(|target| Ok((target, subset.tests()?)));
+    match read {
+        Ok((Some(target), tests)) => target.stands_for(subset, &tests),
+        Ok((None, _)) => false,
+        Err(why) => {
+            println!(
+                "phpt: {}: its target is run again, as it could not be read: {why:#}",
+                subset.scope
+            );
+            false
+        }
+    }
 }
 
 /// What one subset runs under: the oracle its crate's row names, the main

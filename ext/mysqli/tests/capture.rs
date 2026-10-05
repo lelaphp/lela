@@ -45,6 +45,47 @@ fn a_persistent_link_serves_the_next_request() {
     );
 }
 
+/// A `p:` link's connection waits between requests in one list, mysqli's
+/// free links, with its socket, as php's `mysqli_plist_entry` holds the
+/// `MYSQLND` and mysqlnd deletes its stream from `EG(persistent_list)`
+/// (#1805): the first request fills the engine's pool of persistent
+/// streams to its bound of 1024 with `pfsockopen` sockets before it
+/// connects, and the next request still takes up the same server thread,
+/// where a connection whose socket waited in that pool lost it past the
+/// bound and connected again. Against the server of
+/// `ci/mysql/compose.yaml`; with none listening the test says so and
+/// passes.
+#[test]
+fn a_persistent_link_keeps_its_socket_however_full_the_stream_pool_is() {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
+        .build();
+    let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
+    let first = format!(
+        "<?php $s = stream_socket_server('tcp://127.0.0.1:0');
+        $port = explode(':', stream_socket_get_name($s, false))[1];
+        for ($i = 0; $i < 1024; $i++) {{
+            $kept[] = pfsockopen(\"127.0.0.1:$port/$i\", -1);
+            $accepted[] = stream_socket_accept($s, 1);
+        }}
+        $l = {connect}; echo mysqli_thread_id($l);"
+    );
+    let served = engine.serve_capture(&first, Capture::default());
+    let thread = String::from_utf8_lossy(&served.stdout).into_owned();
+    assert!(thread.parse::<u64>().is_ok(), "{thread}");
+    let second = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
+    let served = engine.serve_capture(&second, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), thread);
+}
+
 /// A link `mysqli_init()` made and the first request connected without
 /// `p:`, held by two variables so that no destructor pass frees it, is
 /// closed as that request ends, as php's free of the link closes its
