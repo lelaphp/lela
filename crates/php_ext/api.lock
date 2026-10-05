@@ -275,6 +275,10 @@ abi::Start::host
 abi::Start::ini
 abi::Start::process
 abi::StartupIni
+abi::Statement
+abi::Statement::frame
+abi::Statement::suspend_time_limit
+abi::StatementHandler
 abi::Static
 abi::Std
 abi::StreamHooks

@@ -146,6 +146,7 @@ pub fn extension() -> Extension {
             author: String::from("Zend Technologies"),
             url: String::from("http://www.zend.com/"),
             copyright: String::from("Copyright (c)"),
+            statement_handler: None,
         })
         .build(PRODUCT)
 }

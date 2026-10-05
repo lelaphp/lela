@@ -205,7 +205,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
                 return false;
             }
         };
-        let served = (shared.entry)(req, frame);
+        let served = req.serve_host_string(|req| (shared.entry)(req, frame));
         // What a fatal left standing above the main frame, as
         // `serve_unit` pops it.
         while req.vm().frames().len() > standing + 1 {
