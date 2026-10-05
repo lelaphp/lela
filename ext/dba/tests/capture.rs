@@ -145,9 +145,19 @@ fn a_persistent_cdb_make_file_closed_is_finished_at_engine_end() {
     assert_eq!(read, "2082\nstring(6) \"value0\"\n");
 }
 
-/// A fatal ends the request, and the engine's end finishes the file.
+/// A fatal ends the request, and the engine's end finishes the file: an
+/// uncaught `Error`, and the memory limit's `E_ERROR`.
 #[test]
 fn a_persistent_cdb_make_file_is_finished_at_engine_end_after_a_fatal() {
+    let (written, read) = written_then_read(
+        "memory",
+        "ini_set('memory_limit', '2M'); $a = str_repeat('x', 4 * 1024 * 1024);",
+    );
+    assert!(
+        written.contains("Fatal error: Allowed memory size of 2097152 bytes exhausted"),
+        "{written}"
+    );
+    assert_eq!(read, "2082\nstring(6) \"value0\"\n");
     let (written, read) = written_then_read("fatal", "undefined_function();");
     assert!(
         written.contains(

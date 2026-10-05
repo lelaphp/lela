@@ -219,11 +219,15 @@ fn deactivate(req: &mut Request) {
 
 /// What php's `zend_shutdown` does to dba's persistent links when it
 /// destroys `EG(persistent_list)` (`Z/Zend/zend.c:1166`): each idle link
-/// the pool keeps closed through `close_pconnection`, so a cdb being made
-/// with `dba_popen` is finished, its hash tables and bucket heads
-/// written, and the next process reads what the requests wrote; in a
-/// forked child that ends its engine too, as php's child runs
-/// `php_module_shutdown` over the list the fork copied.
+/// the pool keeps closed through `close_pconnection`
+/// (`Z/ext/dba/dba.c:285`), so a cdb being made with `dba_popen` is
+/// finished, its hash tables and bucket heads written, and the next
+/// process reads what the requests wrote; in a forked child that ends its
+/// engine too, as php's child calls `php_module_shutdown`
+/// (`Z/main/main.c:2490`) over the list the fork copied. A link whose
+/// streams cannot be made again, the memory limit met on the shutdown
+/// request, has its fds closed unfinished: php's list holds the streams
+/// themselves and has no such step.
 fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<Pooled>()
