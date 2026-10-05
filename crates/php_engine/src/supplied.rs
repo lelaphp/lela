@@ -124,14 +124,14 @@ pub(crate) struct Resolved {
     /// phar's falls through to `phar_orig_compile_file` for a file it
     /// does not serve (`Z/ext/phar/phar.c:3248-3256`).
     pub(crate) compile_file: Chain<CompileFileHook>,
-    /// `zend_compile_string`, from the top, each link handed the ones
-    /// beneath ([`StringBeneath`]): the tracers' and the profilers'
+    /// `zend_compile_string` (`Z/Zend/zend_compile.c:88`), from the top,
+    /// each link handed the ones beneath ([`StringBeneath`]): the tracers' and the profilers'
     /// links do their work on both sides of the one they saved, as
     /// dd-trace's `zai_interceptor_compile_string` notes the tables'
     /// ends, compiles and resolves what the string declared.
     pub(crate) compile_string: Chain<CompileStringHook>,
-    /// `zend_error_cb`, from the top, each link handed the ones beneath
-    /// ([`ErrorBeneath`]), php's own `php_error_cb` beneath every link:
+    /// `zend_error_cb` (`Z/Zend/zend.c:90`), from the top, each link
+    /// handed the ones beneath ([`ErrorBeneath`]), php's own `php_error_cb` beneath every link:
     /// most links serve before the one they saved, as New Relic's
     /// `nr_php_error_cb` records and then calls it, but soap's
     /// `soap_error_handler` serves a client's fatal itself, throwing its
@@ -139,8 +139,8 @@ pub(crate) struct Resolved {
     /// (`Z/ext/soap/soap.c:1885-1966`), so no walk from one end serves
     /// every link.
     pub(crate) error: Chain<ErrorHook>,
-    /// The `gc_collect_cycles` pointer, from the top, each link handed
-    /// the ones beneath ([`GcBeneath`]): a link measures the collection it
+    /// The `gc_collect_cycles` pointer (`Z/Zend/zend_gc.c:254`), from the
+    /// top, each link handed the ones beneath ([`GcBeneath`]): a link measures the collection it
     /// serves, as xdebug's `xdebug_gc_collect_cycles` reads the status,
     /// the time and the memory before the one it saved and records the
     /// collection after it.
@@ -373,7 +373,7 @@ impl<'a> ErrorBeneath<'a> {
     pub fn serve(self, req: &mut Request) {
         match self.links.split_last() {
             Some((link, links)) => link(req, ErrorBeneath { links, ..self }),
-            None => req.error_cb(self.level, self.string, self.message, self.file, self.line),
+            None => req.php_error_cb(self.level, self.string, self.message, self.file, self.line),
         }
     }
 }
@@ -817,21 +817,31 @@ mod tests {
         ];
         let out = printed(
             &extensions,
-            "<?php echo $u; trigger_error('kept'); echo 'end';",
+            "<?php echo $u; trigger_error('kept'); echo 'end'; throw new Exception('x');",
         );
-        assert_eq!(
-            out,
-            "\nWarning: Undefined variable $u in Standard input code on line 1\nend"
-        );
+        let shown = "\nWarning: Undefined variable $u in Standard input code on line 1\nend";
+        assert!(out.starts_with(&format!("{shown}\nFatal error: Uncaught Exception: x")));
         let warning = || Phase::Error(String::from("Undefined variable $u"));
+        let mut handed = recording.events().only(&[warning()]).0;
+        let uncaught = handed.split_off(3);
         assert_eq!(
-            recording.events().only(&[warning()]).0,
+            handed,
             [
                 Ext(2, warning()),
                 Ext(1, warning()),
                 Ext(2, Phase::Error("kept".into()))
             ]
         );
+        // `zend_exception_error`'s uncaught throwable, past the user
+        // handler, through the same links.
+        let uncaught: Vec<_> = uncaught
+            .iter()
+            .map(|e| match e {
+                Ext(n, Phase::Error(m)) => (*n, m.starts_with("Uncaught Exception: x")),
+                _ => (0, false),
+            })
+            .collect();
+        assert_eq!(uncaught, [(2, true), (1, true)]);
     }
 
     /// The `gc_collect_cycles` pointer, each link handed the ones

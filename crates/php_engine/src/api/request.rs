@@ -1888,7 +1888,7 @@ pub struct Request {
     /// The stage an entry's `on_modify` is served at ([`IniStage`]).
     ini_stage: IniStage,
     /// `EG(error_reporting)`, the mask a diagnostic is held to
-    /// ([`Request::error_cb`]): what `OnUpdateErrorReporting`
+    /// ([`Request::php_error_cb`]): what `OnUpdateErrorReporting`
     /// (`Z/Zend/zend.c:111`) reads out of the `error_reporting` entry at
     /// request start and whenever the entry moves, what
     /// `error_reporting()` and `BEGIN_SILENCE` write past the entry, and
@@ -7290,7 +7290,7 @@ impl Request {
 
     /// `zend_error_cb`: the links the bundle supplied
     /// ([`ExtensionBuilder::error`]) from the top, each serving the one
-    /// beneath where it will, and php's own [`Request::error_cb`]
+    /// beneath where it will, and php's own [`Request::php_error_cb`]
     /// beneath them all.
     ///
     /// [`ExtensionBuilder::error`]: crate::api::abi::ExtensionBuilder::error
@@ -7343,7 +7343,7 @@ impl Request {
     /// 160
     /// 376
     /// ```
-    pub(crate) fn error_cb(
+    pub(crate) fn php_error_cb(
         &mut self,
         level: Level,
         string: PhpString,

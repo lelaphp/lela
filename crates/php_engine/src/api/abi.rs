@@ -29,6 +29,7 @@ use crate::supplied::{Keyed, Registered, Supplies};
 mod class;
 mod marshal;
 
+pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
     Typed,
@@ -358,7 +359,6 @@ pub(crate) type ErrorHook = fn(&mut Request, ErrorBeneath<'_>);
 /// The cycle collection hook, php's `gc_collect_cycles` pointer as an
 /// extension overrides it: [`ExtensionBuilder::gc_collect`].
 pub(crate) type GcCollectHook = fn(&mut Request, GcBeneath<'_>) -> i64;
-pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
