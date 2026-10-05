@@ -37,8 +37,9 @@
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
+use std::ops::Range;
 
-use php_heap::FrameRef;
+use php_heap::{FrameRef, VmStack};
 
 use crate::api::call::Function;
 use crate::api::values::ClassId;
@@ -147,10 +148,7 @@ impl<'a> FrameView<'a> {
     /// from, `… : eval()'d code` for an evaluated string's.
     #[must_use]
     pub fn filename(&self) -> &'a [u8] {
-        self.state()
-            .and_then(|state| exec::body_of(&state.unit, state.body))
-            .map(|code| code.filename.0.as_ref())
-            .unwrap_or_default()
+        self.state().and_then(file_of).unwrap_or_default()
     }
 
     /// `EX(func)->op_array`: the op array the frame serves, a
@@ -225,21 +223,21 @@ impl<'a> FrameView<'a> {
         if let Some(generator) = state.and_then(|state| state.generator) {
             walk.extend(
                 req.placeholder_links(generator)
-                    .into_iter()
-                    .map(|link| ChainFrame::of(req, self.stack, self.vm, &link)),
+                    .iter()
+                    .map(|link| ChainFrame::of(req, self.stack, self.vm, link)),
             );
         }
         let calls = state.map_or(0, |state| {
             usize::try_from(state.calls_below).unwrap_or(usize::MAX)
         });
         if let Some((stack, _)) = req.executions().nth(self.stack) {
-            walk.extend(
-                links_of(stack, self.vm, 0..self.at.0 as usize, 0..calls, &|root| {
-                    req.placeholder_links(root)
-                })
-                .into_iter()
-                .map(|link| ChainFrame::of(req, self.stack, self.vm, &link)),
-            );
+            walk.extend(req.stack_walk(
+                self.stack,
+                stack,
+                self.vm,
+                0..self.at.0 as usize,
+                0..calls,
+            ));
         }
         req.walk_below(self.stack, &mut walk);
         walk.into_iter()
@@ -450,8 +448,10 @@ impl Request {
 
     /// The walk from a native's call to `function` ([`FrameView::walk`]):
     /// the call, then the frames and calls below it. The native being
-    /// served is the call on top of the running stack; were it not, the
-    /// call is read alone above the whole chain.
+    /// served is the call on top of the running stack, which every path
+    /// to a native's entry serves it from, told by its function since a
+    /// call holds no number of the observer's; were it not, the call is
+    /// read alone above the whole chain.
     pub(crate) fn native_walk(&self, function: Function) -> std::vec::IntoIter<ChainFrame<'_>> {
         let mut walk = vec![ChainFrame {
             req: self,
@@ -475,15 +475,25 @@ impl Request {
             }
             _ => (vm.frames().len(), served),
         };
-        walk.extend(
-            links_of(&self.stack, vm, 0..frames, 0..calls, &|root| {
-                self.placeholder_links(root)
-            })
-            .into_iter()
-            .map(|link| ChainFrame::of(self, 0, vm, &link)),
-        );
+        walk.extend(self.stack_walk(0, &self.stack, vm, 0..frames, 0..calls));
         self.walk_below(0, &mut walk);
         walk.into_iter()
+    }
+
+    /// The frames `frames` numbers and the calls `calls` numbers on one
+    /// stack, `stack` down the chain, read innermost first: the links a
+    /// backtrace reads there ([`links_of`]).
+    fn stack_walk<'a>(
+        &'a self,
+        stack: usize,
+        on: &'a VmStack,
+        vm: &'a Vm,
+        frames: Range<usize>,
+        calls: Range<usize>,
+    ) -> impl Iterator<Item = ChainFrame<'a>> {
+        links_of(on, vm, frames, calls, &|root| self.placeholder_links(root))
+            .into_iter()
+            .map(move |link| ChainFrame::of(self, stack, vm, &link))
     }
 
     /// The stacks below the one `from` counts down the chain, each
@@ -495,13 +505,7 @@ impl Request {
                 req: self,
                 read: Read::FiberBottom,
             });
-            walk.extend(
-                links_of(on, vm, 0..vm.frames().len(), 0..vm.calls().len(), &|root| {
-                    self.placeholder_links(root)
-                })
-                .into_iter()
-                .map(|link| ChainFrame::of(self, stack, vm, &link)),
-            );
+            walk.extend(self.stack_walk(stack, on, vm, 0..vm.frames().len(), 0..vm.calls().len()));
         }
     }
 }

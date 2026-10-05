@@ -223,8 +223,17 @@ fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
 
 /// One frame of a walk as `observer_show_init_backtrace` writes it:
 /// `C::m`, `f`, or `{main}` and the file's base name, `[no active file]`
-/// where it has none.
+/// where it has none; then, for a user frame standing on a stack, the
+/// line its [`FrameView`] reads.
 fn walked(req: &Request, frame: &ChainFrame<'_>) -> String {
+    let named = named(req, frame);
+    match frame.frame() {
+        Some(view) => format!("{named}:{}", view.line()),
+        None => named,
+    }
+}
+
+fn named(req: &Request, frame: &ChainFrame<'_>) -> String {
     let Some(function) = frame.function() else {
         let file = frame.filename().map_or_else(
             || String::from("[no active file]"),
@@ -291,7 +300,7 @@ fn a_walk_meets_the_natives_between_user_frames() {
     );
     assert_eq!(
         out,
-        "[walk < C::{closure:C::m():3} < Closure::call < C::m < gen < Generator::current < f < {main} Standard input code]"
+        "[walk:2 < C::{closure:C::m():3}:3 < Closure::call < C::m:3 < gen:4 < Generator::current < f:5 < {main} Standard input code:6]"
     );
 }
 
@@ -304,12 +313,13 @@ fn a_walk_from_a_native_call_begins_at_the_call() {
     );
     assert_eq!(
         out,
-        "[strcmp < C::{closure:f():3} < Closure::call < f < {main} Standard input code]"
+        "[strcmp < C::{closure:f():3}:3 < Closure::call < f:3 < {main} Standard input code:4]"
     );
 }
 
 /// A destructor a delegated generator's frame runs as it is freed
-/// stands on the delegating generator's frame, as php links it:
+/// stands on the delegating generator's frame, as php links it, a frame
+/// the generator keeps and no stack holds, so it has no [`FrameView`]:
 /// `gh16514.phpt`'s chain.
 #[test]
 fn a_walk_from_a_delegated_generator_meets_the_delegating_one() {
@@ -322,7 +332,7 @@ fn a_walk_from_a_delegated_generator_meets_the_delegating_one() {
     );
     assert_eq!(
         out,
-        "[walk < Foo::__destruct < bar < {main} Standard input code]"
+        "[walk:2 < Foo::__destruct:3 < bar < {main} Standard input code:6]"
     );
 }
 
@@ -338,6 +348,6 @@ fn a_walk_meets_a_fibers_bottom_frame_and_its_resumer() {
     );
     assert_eq!(
         out,
-        "[walk < {closure:Standard input code:3} < {main} [no active file] < Fiber::start < {main} Standard input code]"
+        "[walk:2 < {closure:Standard input code:3}:3 < {main} [no active file] < Fiber::start < {main} Standard input code:4]"
     );
 }
