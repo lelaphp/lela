@@ -2322,11 +2322,13 @@ fn function_table(
                 .map(|(_, native)| (None, native)),
         );
     }
-    let started = registered.iter().filter_map(|&at| {
-        let number = u32::try_from(at + 1).ok()?;
-        Some((extensions.get(at)?, number))
+    // Each extension in registration order, beside its number in
+    // `module_registry` once sorted: its place in start order plus one.
+    let by_registration = registered.iter().filter_map(|&place| {
+        let number = u32::try_from(place + 1).ok()?;
+        Some((extensions.get(place)?, number))
     });
-    for (e, at) in started {
+    for (e, at) in by_registration {
         let id = Some(ExtensionId(at));
         let own = e.functions.iter().cloned();
         match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
@@ -3031,7 +3033,7 @@ fn host_ini(
 /// `MINIT`: walking from the first, an extension that names a required
 /// or optional dependency standing after it trades places with that one,
 /// and the walk stays where it is until the extension there names none
-/// that stands later. The order the engine starts, registers and lists
+/// that stands later. The order the engine starts, activates and lists
 /// its extensions in is the bundle's as this leaves it, so `standard`,
 /// which names `session` optional (`standard_deps`), starts after it
 /// whatever the crates depend on:
@@ -3074,8 +3076,10 @@ fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
             _ => at += 1,
         }
     }
+    // `handed[place]` is where the extension now at `place` was handed;
+    // ordering the places by it lists them in registration order.
     let mut registered: Vec<usize> = (0..modules.len()).collect();
-    registered.sort_by_key(|&started| handed[started]);
+    registered.sort_by_key(|&place| handed[place]);
     registered
 }
 
