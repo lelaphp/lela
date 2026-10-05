@@ -208,6 +208,13 @@ pub enum Xport {
     },
 }
 
+/// A persistent stream's connection out of every request, what
+/// [`Stream::keep`] answers: the socket with its `transport`'s and crypto
+/// layer's state, kept by the extension that opened it and by nothing
+/// else, until a request lends it again with [`Streams::stream_lend`].
+/// Dropped, it closes the socket.
+pub struct Persisted(crate::streams::persistent::Entry);
+
 /// The `socket` options of a socket, as `xp_socket.c` and `transports.c`
 /// read them off `PHP_STREAM_CONTEXT(stream)`: each is
 /// `php_stream_context_get_option(context, "socket", name)` read the way
@@ -750,6 +757,21 @@ impl Stream {
     pub fn free(self, req: &mut Request) {
         self.close(req);
         req.release(self.as_value());
+    }
+
+    /// The persistent stream's connection taken out of the request for
+    /// the extension that opened it to keep across requests, in the one
+    /// list it keeps its connection in, as php's mysqlnd deletes the
+    /// stream it opened from `EG(persistent_list)` and `EG(regular_list)`
+    /// (`mysqlnd_vio::open_tcp_or_unix`): the socket, its owed write
+    /// flushed, out of the engine's persistent list and out of the
+    /// resource, which is closed, and this owner given up. The request
+    /// that takes the connection up lends it again with
+    /// [`Streams::stream_lend`]. `None`, and the stream left as it is,
+    /// for a stream that is not a socket's.
+    #[must_use]
+    pub fn keep(self, req: &mut Request) -> Option<Persisted> {
+        crate::streams::persistent::keep(req, self).map(Persisted)
     }
 
     /// `stream->wrapperthis`, with the wrapper's `stream_closer` the
@@ -1514,6 +1536,13 @@ pub trait Streams {
         name: &[u8],
         xport: Xport,
     ) -> Result<Result<Stream, XportFailure>, Thrown>;
+
+    /// The connection [`Stream::keep`] took out lent to this request
+    /// under `key`: a fresh resource of the `persistent stream` type over
+    /// its socket, held under `key` in the request's persistent list as
+    /// `php_stream_from_persistent_id` registers one, `r+` and seeking
+    /// nowhere, until its owner keeps it again or closes it.
+    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Stream, Thrown>;
 }
 
 impl Streams for Request {
@@ -1704,5 +1733,9 @@ impl Streams for Request {
         xport: Xport,
     ) -> Result<Result<Stream, XportFailure>, Thrown> {
         Transports::xport_create(self, name, xport)
+    }
+
+    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Stream, Thrown> {
+        crate::streams::persistent::Persistent::lend(self, key, kept.0)
     }
 }

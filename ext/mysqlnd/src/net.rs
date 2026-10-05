@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use php_ext::raising::Thrown;
 use php_ext::request::{
-    Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _, Xport,
+    Persisted, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _, Xport,
 };
 use php_ext::values::{PhpString, Value};
 
@@ -69,6 +69,10 @@ impl VioOptions {
 #[allow(clippy::struct_excessive_bools)] // php's flags, `vio->data->ssl` and the frame codec's two
 pub(crate) struct Net {
     stream: Option<Stream>,
+    /// A persistent connection's socket while no request holds the
+    /// connection: out of every request and of the engine's persistent
+    /// list, the connection's alone, as php's mysqlnd owns its stream.
+    kept: Option<Persisted>,
     /// Whether the stream is a unix socket, which `caching_sha2_password` counts as
     /// a secure stream (`is_secure_transport`).
     pub(crate) unix: bool,
@@ -181,43 +185,28 @@ impl Net {
     }
 
     /// The stream of a persistent connection taken up by a request: the
-    /// socket the engine kept under the connection's `persistent_id`, a
-    /// live one, with the options `post_connect_set_opt` gave it; a stream
-    /// holding no socket where none was kept, over which every command
-    /// fails as one over a dead link does.
-    pub(crate) fn take_up(&mut self, req: &mut Request, scheme: &[u8]) -> Result<(), Thrown> {
+    /// socket the connection kept, lent to the request under its
+    /// `persistent_id`, with the options `post_connect_set_opt` gave it; a
+    /// connection that kept none takes up holding no stream, over which
+    /// every command fails as one over a dead link does.
+    pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
         self.stream = None;
-        let made = req.xport_create(
-            scheme,
-            Xport::Client {
-                timeout: None,
-                connect: false,
-                persistent: self.persistent_id.clone(),
-                socket: SocketOptions::default(),
-                context: None,
-            },
-        )?;
-        if let Ok(stream) = made {
-            self.stream = Some(stream);
-            self.post_connect(req, stream);
-        }
+        let (Some(kept), Some(key)) = (self.kept.take(), self.persistent_id.clone()) else {
+            return Ok(());
+        };
+        let stream = req.stream_lend(key, kept)?;
+        self.stream = Some(stream);
+        self.post_connect(req, stream);
         Ok(())
     }
 
     /// The stream of a persistent connection let go as the request gives
-    /// the connection back, so that nothing of the request's is left on
-    /// it: the request's end keeps its socket under the connection's
-    /// `persistent_id`. Answered to the caller, which holds it again
-    /// ([`Net::hold`]) where the pool answers the connection past its
-    /// bound.
-    pub(crate) fn give_back(&mut self) -> Option<Stream> {
-        self.stream.take()
-    }
-
-    /// The stream [`Net::give_back`] let go held again, by the request that
-    /// let it go, to close the connection over it.
-    pub(crate) fn hold(&mut self, stream: Option<Stream>) {
-        self.stream = stream;
+    /// the connection back, nothing of the request's left on it: its
+    /// socket kept by the connection ([`Stream::keep`]), out of the
+    /// request and out of the engine's persistent list, so the one list
+    /// the connection waits in is its owner's.
+    pub(crate) fn give_back(&mut self, req: &mut Request) {
+        self.kept = self.stream.take().and_then(|stream| stream.keep(req));
     }
 
     /// `post_connect_set_opt` and the error suppression php sets beside it.
