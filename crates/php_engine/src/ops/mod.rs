@@ -5000,12 +5000,30 @@ fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
 /// `add_function_array`: a copy of the left array (`zend_array_dup`)
 /// with every key of the right one it does not already carry, which is
 /// `zend_hash_merge` with php's `overwrite` off and `zval_add_ref` on
-/// each element taken. The copy has one owner, the caller's.
+/// each element taken. The copy has one owner, the caller's. The keys
+/// the right yields are views, and [`PhpArray::set`] takes a string
+/// key's owner, so the union takes one more of each it adds: a right
+/// operand freed after the union leaves its keys standing, and a string
+/// of a key's size allocated after is not handed the key's block.
+///
+/// ```php
+/// $k = 'kkkkk'; $z = 'ZZZZZ';
+/// function row($k) { return [$k . $k => 1]; }
+/// $u = ['a' => 0] + row($k);
+/// $x = $z . $z;
+/// foreach ($u as $key => $_) { echo $key, ','; }
+/// ```
+/// ```expect
+/// a,kkkkkkkkkk,
+/// ```
 fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<PhpArray, Thrown> {
     let mut union = left.copy(req)?;
     for (key, value) in right.snapshot_refs() {
         if !union.contains(&key) {
             req.addref(&value);
+            if let Key::Str(name) = key {
+                req.addref(&Value::string(name));
+            }
             union.set(req, key, value)?;
         }
     }
@@ -5607,6 +5625,20 @@ mod tests {
         );
         assert!(dumped.starts_with("array(1) {\n  [0]=>\n  array(1) {\n"));
         assert!(dumped.contains("nesting level too deep"));
+        assert_eq!(served.fatal, None);
+    }
+
+    /// A union keeps the string keys it takes from the right operand
+    /// when that operand is a temporary freed after it: the key is one
+    /// more owner, so the string a later allocation of its size is
+    /// handed is not the key's block.
+    #[test]
+    fn a_union_owns_the_string_keys_it_takes_from_a_freed_right_operand() {
+        let source = "<?php\n$k = 'kkkkk'; $z = 'ZZZZZ';\nfunction row($k) { return [$k . $k => 1]; }\n$u = ['a' => 0] + row($k);\n$x = $z . $z;\nforeach ($u as $key => $_) { echo $key, ','; }";
+        let served = Engine::cli_builder()
+            .build()
+            .serve_capture(source, Capture::default());
+        assert_eq!(String::from_utf8_lossy(&served.stdout), "a,kkkkkkkkkk,");
         assert_eq!(served.fatal, None);
     }
 
