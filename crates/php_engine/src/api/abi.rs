@@ -1608,7 +1608,23 @@ pub trait ClassIterator: Send {
 /// `do_operation` answer the value or `None` in one call, since
 /// their kernels fall back either way; `get_properties_for` answers a
 /// [`PropertiesFor`], whose slot may answer php's `NULL` table besides.
+///
+/// What a table refuses of construction, cloning and comparison it
+/// states once, as [`ObjectHandlers::refusals`], and the default
+/// `get_constructor`, `clone_obj` and `compare` serve it.
 pub trait ObjectHandlers: Send + Sync {
+    /// The class's [`Refusals`], php's `get_constructor` that throws,
+    /// null `clone_obj` and `zend_objects_not_comparable`, which the
+    /// default bodies of those three slots read; none at `Std`. A table
+    /// that overrides one of the three slots answers it in its own words
+    /// and the refusal it states for that slot is not read. Each default
+    /// body is compiled per table, so the read is a call on the table's
+    /// own type, never through the class's handlers pointer, and `Std`'s
+    /// is the constant [`Refusals::NONE`].
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE
+    }
+
     /// `ce->create_object` past `zend_object_alloc`: what the class lays
     /// down with a new object on the request's heap that its payload's
     /// `Default` cannot, `array_init(&intern->array)` among them, after
@@ -1640,8 +1656,12 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `clone_obj`, `zend_objects_clone_obj` at `Std`: the members
     /// copied with one more owner each and `__clone` served on the copy.
-    /// `None` is php's null slot, an uncloneable class.
+    /// `None` is php's null slot, an uncloneable class, as a table that
+    /// refuses cloning in its [`Refusals`] answers.
     fn clone_obj(&self) -> Option<CloneObj> {
+        if self.refusals().cloning {
+            return None;
+        }
         Some(Request::clone_members)
     }
 
@@ -1947,12 +1967,16 @@ pub trait ObjectHandlers: Send + Sync {
     /// `get_constructor`, `zend_std_get_constructor` at `Std`: the
     /// class's `__construct` where the calling scope may reach it, php's
     /// `Error` where it may not, and none for a class with no
-    /// constructor.
+    /// constructor. A table that refuses construction in its
+    /// [`Refusals`] throws php's `Error` in its template instead.
     fn get_constructor(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
+        if let Construction::Refused(instead) = self.refusals().construction {
+            return Err(Refusals::refuse_construction(req, object, instead));
+        }
         req.constructor_of(object)
     }
 
@@ -2036,13 +2060,18 @@ pub trait ObjectHandlers: Send + Sync {
     /// `compare`, `zend_std_compare_objects` at `Std`: equal for one
     /// object, uncomparable (`None`, php's `ZEND_UNCOMPARABLE`) across
     /// classes, and the declared slots then the dynamic tables in order
-    /// within one class.
+    /// within one class. A table that refuses comparison in its
+    /// [`Refusals`] answers uncomparable for every pair,
+    /// `zend_objects_not_comparable`.
     fn compare(
         &self,
         req: &mut Request,
         left: &Value,
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
+        if self.refusals().comparison {
+            return Ok(None);
+        }
         req.compare_objects(left, right)
     }
 
@@ -2274,3 +2303,176 @@ pub type ClassUnserialize = fn(&mut Request, PhpObject, &[u8]) -> Result<(), Thr
 pub struct Std;
 
 impl ObjectHandlers for Std {}
+
+/// The three refusals php keeps in a class's handler table, each a fact
+/// of its own: a `get_constructor` that throws "Cannot directly
+/// construct", a null `clone_obj`, and `compare` as
+/// `zend_objects_not_comparable`. `CurlHandle` refuses construction and
+/// comparison and clones; `FTP\Connection` and `GdFont` refuse
+/// construction and cloning and compare. A class states its refusals
+/// once, as one named constant, and [`ObjectHandlers`]' default bodies
+/// serve them. The value is itself a table, `std_object_handlers` with
+/// these refusals, so a class with nothing else to override names the
+/// constant as its `handlers`; a table with slots of its own answers it
+/// from [`ObjectHandlers::refusals`]. The constant is a named `const`
+/// and not a builder chain in the class attribute, since the attribute
+/// borrows its table for the engine's whole life and only a named
+/// constant is promoted to that.
+///
+/// ```php
+/// try { new CurlShareHandle; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { clone curl_share_init(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(curl_share_init() == curl_share_init());
+/// try { new CurlHandle; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $c = curl_init();
+/// var_dump(clone $c instanceof CurlHandle, $c == clone $c);
+/// ```
+/// ```expect
+/// Cannot directly construct CurlShareHandle, use curl_share_init() instead
+/// Trying to clone an uncloneable object of class CurlShareHandle
+/// bool(false)
+/// Cannot directly construct CurlHandle, use curl_init() instead
+/// bool(true)
+/// bool(false)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refusals {
+    construction: Construction,
+    cloning: bool,
+    comparison: bool,
+}
+
+/// Whether `get_constructor` refuses, and with which words after the
+/// class's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Construction {
+    Allowed,
+    Refused(Option<&'static str>),
+}
+
+impl Refusals {
+    /// Nothing refused, `std_object_handlers`.
+    pub const NONE: Refusals = Refusals {
+        construction: Construction::Allowed,
+        cloning: false,
+        comparison: false,
+    };
+
+    /// Construction refused, in php's template: "Cannot directly
+    /// construct {class}, use {instead} instead", or "Cannot directly
+    /// construct {class}" alone where `instead` is `None`, as
+    /// `Soap\Url`'s and `Soap\Sdl`'s say. The class is the object's,
+    /// which for the final classes that spell their own name in php is
+    /// that name, and for a table several classes share is each one's.
+    /// A refusal php throws from a `__construct` method and not from
+    /// `get_constructor`, `mysqli_warning`'s and `Dom\Node`'s, is that
+    /// method's and is not stated here.
+    #[must_use]
+    pub const fn construction(self, instead: Option<&'static str>) -> Refusals {
+        Refusals {
+            construction: Construction::Refused(instead),
+            ..self
+        }
+    }
+
+    /// Cloning refused: `clone_obj` is php's null slot, so `clone`
+    /// throws "Trying to clone an uncloneable object of class {class}".
+    #[must_use]
+    pub const fn cloning(self) -> Refusals {
+        Refusals {
+            cloning: true,
+            ..self
+        }
+    }
+
+    /// Comparison refused: `compare` is `zend_objects_not_comparable`,
+    /// uncomparable with any value.
+    #[must_use]
+    pub const fn comparison(self) -> Refusals {
+        Refusals {
+            comparison: true,
+            ..self
+        }
+    }
+
+    /// The `Error` a refused `get_constructor` throws, `zend_throw_error`
+    /// in the template.
+    fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
+        let class = req.class_name(object.class());
+        let message = match instead {
+            Some(instead) => {
+                format!("Cannot directly construct {class}, use {instead} instead")
+            }
+            None => format!("Cannot directly construct {class}"),
+        };
+        crate::api::raising::throw_error(req, "Error", &message)
+    }
+}
+
+impl ObjectHandlers for Refusals {
+    fn refusals(&self) -> Refusals {
+        *self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use php_unit::decl::ClassKind;
+
+    use super::{ExtensionBuilder, Refusals};
+    use crate::api::__private::class;
+    use crate::engine::Engine;
+    use crate::test::Capture;
+
+    const UNMADE: Refusals = Refusals::NONE.construction(Some("make()"));
+    const UNNAMED: Refusals = Refusals::NONE.construction(None);
+    const UNCLONED: Refusals = Refusals::NONE.cloning();
+    const UNCOMPARED: Refusals = Refusals::NONE.comparison();
+
+    /// Each refusal holds alone, served by the default bodies of a table
+    /// that is nothing but its `Refusals`: the constructor's two
+    /// templates, a constructible class that refuses only cloning and
+    /// still compares, and one that refuses only comparison and still
+    /// clones.
+    #[test]
+    fn each_refusal_is_a_fact_of_its_own() {
+        let extension = ExtensionBuilder::default()
+            .class_with(class(b"Unmade", ClassKind::Class), Vec::new(), &UNMADE)
+            .class_with(class(b"Unnamed", ClassKind::Class), Vec::new(), &UNNAMED)
+            .class_with(class(b"Uncloned", ClassKind::Class), Vec::new(), &UNCLONED)
+            .class_with(
+                class(b"Uncompared", ClassKind::Class),
+                Vec::new(),
+                &UNCOMPARED,
+            )
+            .build("refusals");
+        let served = Engine::cli_builder()
+            .extensions(&[extension])
+            .build()
+            .serve_capture(
+                r#"<?php
+foreach (['Unmade', 'Unnamed', 'Uncloned', 'Uncompared'] as $c) {
+    try { new $c; echo "made $c\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+$a = new Uncloned;
+try { clone $a; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+var_dump($a == new Uncloned);
+$b = new Uncompared;
+var_dump(clone $b instanceof Uncompared, $b == new Uncompared);
+"#,
+                Capture::default(),
+            );
+        assert_eq!(served.fatal, None);
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "Cannot directly construct Unmade, use make() instead\n\
+             Cannot directly construct Unnamed\n\
+             made Uncloned\n\
+             made Uncompared\n\
+             Trying to clone an uncloneable object of class Uncloned\n\
+             bool(true)\n\
+             bool(true)\n\
+             bool(false)\n"
+        );
+    }
+}

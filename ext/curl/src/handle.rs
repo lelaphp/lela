@@ -4,11 +4,9 @@
 //! left and the values the `CurlHandle` holds; with `curl_object_handlers`
 //! and the natives of `interface.c` that act on one `CurlHandle`.
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Union};
+use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpObject, PhpString, TypeTag, Value};
@@ -219,10 +217,16 @@ pub(crate) struct CurlHandle;
 #[php_class]
 impl CurlHandle {}
 
-/// `curl_object_handlers`.
+/// `curl_object_handlers`: construction and comparison refused, and
+/// cloning served by `curl_clone_obj`.
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
+
+/// What `curl_object_handlers` refuses: construction and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("curl_init()"))
+    .comparison();
 
 impl ObjectHandlers for Handlers {
     /// `curl_free_obj`: the `CURL *` cleaned up with the request
@@ -242,16 +246,8 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct CurlHandle, use curl_init() instead",
-        ))
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -295,16 +291,6 @@ impl ObjectHandlers for Handlers {
         to: TypeTag,
     ) -> Result<Option<Value>, Thrown> {
         cast_object(req, object, to)
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

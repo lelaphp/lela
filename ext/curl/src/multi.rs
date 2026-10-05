@@ -1,11 +1,8 @@
 //! `multi.c`: the `CurlMultiHandle` class over a `CURLM`, the easy
 //! `CurlHandle`s added to it, its push callable, and its natives.
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, Ref, Untyped};
+use php_ext::abi::{Instance, ObjectHandlers, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::Function;
 use php_ext::coerce::{callable_checked, to_long};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
@@ -66,6 +63,13 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What `curl_multi_handlers` refuses: construction, cloning and
+/// comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("curl_multi_init()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
     /// `curl_multi_free_obj`: `curl_multi_cleanup`, then the `CurlHandle`s and
     /// the push callable let go.
@@ -85,20 +89,8 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct CurlMultiHandle, use curl_multi_init() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -120,16 +112,6 @@ impl ObjectHandlers for Handlers {
         to: TypeTag,
     ) -> Result<Option<Value>, Thrown> {
         cast_object(req, object, to)
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 
