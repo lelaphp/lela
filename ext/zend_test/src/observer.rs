@@ -28,11 +28,14 @@
 //! `show_opcode_in_user_handler` (#1824), whose tags stand where the
 //! comments below say.
 
+use std::fmt::Write as _;
+
 use php_ext::abi::{
     ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Refusal,
     Start,
 };
 use php_ext::call::{Function, lookup_function};
+use php_ext::coerce::type_name;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{FrameView, Raised, Request};
@@ -229,6 +232,15 @@ impl Observing {
     }
 }
 
+/// The names `observe_function_names` holds, split at each comma as the
+/// handler splits them, none where it is empty.
+fn names_in(value: Option<&[u8]>) -> impl Iterator<Item = &[u8]> {
+    value
+        .filter(|names| !names.is_empty())
+        .into_iter()
+        .flat_map(|names| names.split(|&b| b == b','))
+}
+
 /// `ZEND_INI_MH(zend_test_observer_OnUpdateCommaList)`: refused while
 /// the observer is not enabled, as `ZT_G(observer_enabled)` reads
 /// whenever the handler runs. The table php keeps is the entry's value
@@ -243,17 +255,19 @@ impl Observing {
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_function_names(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    // Read from the entry and not from [`Switches`]: at the engine's
+    // start the handler runs before the engine state is built.
     if !req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
         return Ok(false);
     }
     if req.ini_stage() != IniStage::Runtime {
         return Ok(true);
     }
+    // `zend_hash_find_ptr(EG(function_table), funcname)`: the table's
+    // keys are lowered, so a name written with a capital finds nothing.
     let named = |req: &Request, names: Option<&[u8]>| -> Vec<Function> {
-        names
-            .filter(|names| !names.is_empty())
-            .into_iter()
-            .flat_map(|names| names.split(|&b| b == b','))
+        names_in(names)
+            .filter(|name| !name.iter().any(u8::is_ascii_uppercase))
             .filter_map(|name| lookup_function(req, name))
             .collect()
     };
@@ -311,7 +325,7 @@ impl Serves {
             (None, Some(function)) => {
                 Serves::function_of(observed, function, observed.function_scope())
             }
-            (None, None) => Serves::File(Vec::new()),
+            (None, None) => Serves::File(b"[no active file]".to_vec()),
         }
     }
 
@@ -372,12 +386,8 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
         begin: Some(begin),
         end: Some(end),
     };
-    let observed_by_name = |name: &[u8]| {
-        observed
-            .ini_get(OBSERVE_FUNCTION_NAMES)
-            .filter(|names| !names.is_empty())
-            .is_some_and(|names| names.split(|&b| b == b',').any(|named| named == name))
-    };
+    let observed_by_name =
+        |name: &[u8]| names_in(observed.ini_get(OBSERVE_FUNCTION_NAMES)).any(|named| named == name);
     match &serves {
         _ if switches.observe_all => both,
         Serves::Function { name, .. } if switches.observe_functions || observed_by_name(name) => {
@@ -573,7 +583,7 @@ fn retval_info(
                 let _ = php_var_export_ex(req, &mut info, value, level);
             }
         }
-        Some(value) => info.extend_from_slice(value.type_name().as_bytes()),
+        Some(value) => info.extend_from_slice(type_name(req, value).as_bytes()),
     }
     info
 }
@@ -643,7 +653,7 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
     );
     for (tag, fiber) in [(entered, to), (left, from)] {
         if let Some(tag) = tag {
-            out.extend([format!("<{tag} '{}'>\n", address(fiber))]);
+            let _ = writeln!(out, "<{tag} '{}'>", address(fiber));
         }
     }
     req.write(out.as_bytes());
