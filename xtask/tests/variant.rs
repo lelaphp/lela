@@ -182,13 +182,9 @@ fn a_variant_is_the_pin_with_its_build_for_this_platform_in_place_of_the_oracles
 
 #[test]
 fn a_variant_pinning_no_build_for_this_platform_is_absent_and_says_which() {
-    let Some(platform) = Platform::this() else {
+    let Some((platform, other)) = other_platform() else {
         return;
     };
-    let other = ["darwin-arm64", "linux-x86_64", "linux-aarch64"]
-        .into_iter()
-        .find(|key| *key != platform.key())
-        .unwrap();
     let text = tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0");
     let variant = Pin::parse(&text).unwrap().variant("zend-test").unwrap();
     let why = variant.oracle.absent().unwrap();
@@ -396,16 +392,12 @@ fn witness_reads_a_crate_whose_row_names_a_variant_under_it() {
 
 #[test]
 fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
-    let Some(platform) = Platform::this() else {
+    let Some((platform, other)) = other_platform() else {
         return;
     };
     let lib =
         "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn native() {}\n";
     let root = scratch("witness-unpinned", lib);
-    let other = ["darwin-arm64", "linux-x86_64", "linux-aarch64"]
-        .into_iter()
-        .find(|key| *key != platform.key())
-        .unwrap();
     let mut manifest = Manifest::of([Crate::named("ext/fixture").with_oracle("zend-test")]);
     manifest.pin = Pin::parse(
         &(tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0")),
@@ -478,7 +470,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
         assert!(
             reading
                 .message
-                .contains("under the oracle variant `stand-in`"),
+                .contains("read under the oracle variant stand-in"),
             "{}",
             reading.message
         );
@@ -620,6 +612,85 @@ fn phpt_refuses_a_subset_whose_row_names_a_variant_the_pin_lacks() {
         reading.message.contains(
             "no oracle variant \"no-such-variant\" in the pin; the variants are stand-in"
         ),
+        "{}",
+        reading.message
+    );
+}
+
+/// The key of a pinned platform other than this machine's, none on a
+/// machine of no pinned platform.
+fn other_platform() -> Option<(Platform, &'static str)> {
+    let platform = Platform::this()?;
+    let other = ["darwin-arm64", "linux-x86_64", "linux-aarch64"]
+        .into_iter()
+        .find(|key| *key != platform.key())?;
+    Some((platform, other))
+}
+
+#[test]
+fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
+    let Some((platform, other)) = other_platform() else {
+        return;
+    };
+    let root = Tree::new("variant-crosscheck-unpinned").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    manifest.pin = Pin::parse(
+        &(tracked_text() + &variant_table("zend-test", other, Path::new("/opt/php"), "0")),
+    )
+    .unwrap();
+    manifest
+        .crates
+        .iter_mut()
+        .find(|krate| krate.name == "ext/ctype")
+        .unwrap()
+        .oracle = Some("zend-test".to_owned());
+    let store = Store::at(root.join("target/harness"));
+    let readings = crosscheck::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &store,
+        &crosscheck::Ask {
+            ext: vec!["ctype".to_owned()],
+            ..crosscheck::Ask::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(readings.len(), 2, "{readings:#?}");
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+        assert!(
+            reading.message.contains(&format!(
+                "the oracle variant zend-test pins no build for {}",
+                platform.key()
+            )),
+            "{}",
+            reading.message
+        );
+    }
+}
+
+#[test]
+fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
+    let Some((platform, other)) = other_platform() else {
+        return;
+    };
+    let (root, mut manifest, binary) = phpt_scratch("phpt-unpinned", None, true).unwrap();
+    let tree = manifest.pin.source.tree().unwrap();
+    manifest.pin = Pin::parse(
+        &(tracked_text() + &variant_table("stand-in", other, Path::new("/opt/php"), "0")),
+    )
+    .unwrap()
+    .on_this_machine(Some(tree));
+    let reading = phpt_run(&root, &manifest, &binary);
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 0, "{reading:#?}");
+    assert!(
+        reading.message.contains(&format!(
+            "the oracle variant stand-in pins no build for {}",
+            platform.key()
+        )),
         "{}",
         reading.message
     );

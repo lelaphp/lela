@@ -189,31 +189,15 @@ impl<'a> Oracles<'a> {
         let Some(name) = variant else {
             return Ok(&self.main);
         };
-        if let Some(oracle) = self.variants.get(name) {
-            return Ok(oracle);
-        }
-        match self.main.pin().variant(name) {
-            Err(unknown) => Err(unknown),
-            Ok(_) => bail!(
-                "the oracle variant {name} is in the pin and not in this run; the run holds {}",
-                listed(self.variants.keys().copied())
-            ),
+        match self.variants.get(name) {
+            Some(oracle) => Ok(oracle),
+            None => Err(self.main.pin().unknown(name)),
         }
     }
 
     /// The main oracle's.
     pub fn main(&self) -> &Oracle<'a> {
         &self.main
-    }
-}
-
-/// Names joined for a message, `none` where there are none.
-pub(super) fn listed<'n>(names: impl Iterator<Item = &'n str>) -> String {
-    let names: Vec<&str> = names.collect();
-    if names.is_empty() {
-        "none".to_owned()
-    } else {
-        names.join(", ")
     }
 }
 

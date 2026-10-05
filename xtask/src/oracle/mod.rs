@@ -299,6 +299,14 @@ impl Binary {
         self.variant.as_deref()
     }
 
+    /// What a reading taken under this binary adds to its message: the
+    /// variant it was read under, nothing for the main oracle (#1890).
+    pub(crate) fn read_under(&self) -> Option<String> {
+        self.variant
+            .as_ref()
+            .map(|name| format!("read under the oracle variant {name}"))
+    }
+
     /// The words that name the variant after `php`, none for the main
     /// oracle's.
     fn of(&self) -> String {
@@ -594,13 +602,11 @@ impl Pin {
     /// refused beside the names it does.
     pub fn variant(&self, name: &str) -> Result<Pin> {
         let Some(variant) = self.variant.get(name) else {
-            bail!(
-                "no oracle variant {name:?} in the pin; the variants are {}",
-                variant::listed(self.variant.keys().map(String::as_str))
-            );
+            return Err(self.unknown(name));
         };
-        let build = Platform::this().and_then(|platform| variant.build(platform));
-        let unpinned = match (Platform::this(), build) {
+        let platform = Platform::this();
+        let build = platform.and_then(|platform| variant.build(platform));
+        let unpinned = match (platform, build) {
             (_, Some(_)) => None,
             (Some(platform), None) => Some(format!(
                 "the oracle variant {name} pins no build for {}",
@@ -629,6 +635,20 @@ impl Pin {
             }
         }
         Ok(pin)
+    }
+
+    /// The refusal of a variant name the pin does not carry, naming it
+    /// beside the names it does.
+    fn unknown(&self, name: &str) -> anyhow::Error {
+        let names: Vec<&str> = self.variant.keys().map(String::as_str).collect();
+        anyhow::anyhow!(
+            "no oracle variant {name:?} in the pin; the variants are {}",
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                crate::reading::listed(&names)
+            }
+        )
     }
 
     /// The pin as one run holds it: the digest is asserted before the

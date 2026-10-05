@@ -390,14 +390,17 @@ pub fn run(
                 }
             };
             let pin = oracle.pin();
-            let recipe = match pin.oracle.variant() {
-                Some(variant) => format!("{recipe}` under the oracle variant `{variant}"),
-                None => recipe,
+            // A reading taken under a variant says so, whatever it came to.
+            let told = |mut reading: Reading| {
+                if let Some(under) = pin.oracle.read_under() {
+                    reading.message = format!("{}; {under}", reading.message);
+                }
+                Ok(reading)
             };
             if let Some(why) = pin.oracle.absent() {
                 reading.status = Status::Skip;
                 reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);
-                return Ok(reading);
+                return told(reading);
             }
             oracle.asserted()?;
             let observed = if host == Host::Cli {
@@ -412,7 +415,7 @@ pub fn run(
                     reading.scope,
                     said(&observed)
                 );
-                return Ok(reading);
+                return told(reading);
             }
             let path = kept_at(
                 store,
@@ -452,7 +455,7 @@ pub fn run(
                     observed.stdout.len()
                 ),
             };
-            Ok(reading)
+            told(reading)
         })
         .collect()
 }

@@ -968,6 +968,7 @@ pub fn run(
         .collect();
     if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
+        && !sides.iter().flatten().any(Side::runs)
     {
         println!("phpt: nothing runs; {why}");
     }
@@ -1018,12 +1019,8 @@ pub fn run(
             registry,
             (runner, pin),
         )?;
-        if let Some(variant) = pin.oracle.variant() {
-            told(
-                &mut reading,
-                runner,
-                &format!("read under the oracle variant {variant}"),
-            );
+        if let Some(under) = pin.oracle.read_under() {
+            told(&mut reading, runner, &under);
         }
         let held = runs.after(
             manifest,

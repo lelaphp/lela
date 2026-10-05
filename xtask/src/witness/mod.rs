@@ -647,11 +647,8 @@ fn run_in(
             );
         }
         let mut judged = reading(&tally, root, krate, rule)?.under(&manifest.pin);
-        if let Some(variant) = oracle.pin().oracle.variant() {
-            judged.message = format!(
-                "{}; read under the oracle variant {variant}",
-                judged.message
-            );
+        if let Some(under) = oracle.pin().oracle.read_under() {
+            judged.message = format!("{}; {under}", judged.message);
         }
         if let Some(journal) = journal {
             journal.judged(&judged)?;
