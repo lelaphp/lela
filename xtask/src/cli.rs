@@ -483,6 +483,11 @@ pub(crate) struct Phpt {
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
+    /// With `--engine` the pinned php, the runner's control: run only the
+    /// subsets whose kept target does not stand, none kept under the pin or
+    /// one that predates a test the subset has now, and say so of the rest.
+    #[arg(long, requires = "engine")]
+    pub unkept: bool,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the

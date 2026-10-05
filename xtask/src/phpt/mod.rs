@@ -943,6 +943,11 @@ pub struct Ask {
     /// unless named. A test of the harness names one of its own, so a real
     /// run beside it holding `all` makes it wait for nothing (#1675).
     pub locks: Option<PathBuf>,
+    /// Under the runner's control alone: run only the subsets whose kept
+    /// target does not stand, none kept under the pin or one that predates
+    /// a test the subset has now, and say of each other one that it stands
+    /// (#1830). What CI runs after every push, before the engine's lane.
+    pub unkept: bool,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -963,6 +968,11 @@ pub fn run(
     // lane says so before the subsets rather than at the reading alone.
     if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("phpt: {why}");
+    }
+    let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
+    let subsets = unkept(ask, &runner, (manifest, &runs), subsets)?;
+    if subsets.is_empty() {
+        return Ok(Vec::new());
     }
     // One oracle for the run: the digest is asserted before the first
     // program and never per test, subset or section (harness §4.3). A
@@ -1001,7 +1011,6 @@ pub fn run(
     // widest cause of the whole corpus is one line at the end and not a
     // sum a reader does by hand.
     let mut lane = census::Census::default();
-    let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     // One subset's readings: its own and the one holding it against a
     // commit. A subset refused, for a server that did not answer or for
     // any other cause, is that subset's failing reading, and the lane goes
@@ -1063,6 +1072,56 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// The subsets a run under `ask` runs: all of them, or under `--unkept`
+/// those whose kept target does not stand, each of the others said and set
+/// aside before anything is copied, so a lane whose every target stands
+/// copies no tree and runs nothing (#1830). Only the control keeps a
+/// target, and only outside a tier's lane (`Runs::target_of`), so
+/// `--unkept` is refused of any other run.
+fn unkept(
+    ask: &Ask,
+    runner: &Runner,
+    (manifest, runs): (&Manifest, &against::Runs),
+    subsets: Vec<Subset>,
+) -> Result<Vec<Subset>> {
+    if !ask.unkept {
+        return Ok(subsets);
+    }
+    if !matches!(runner, Runner::Control(_)) || ask.lane.is_some() {
+        bail!(
+            "--unkept keeps the targets of the runner's control: name the pinned php, {}, with \
+             --engine, and no --jit",
+            manifest.pin.oracle.path.display()
+        );
+    }
+    let pin = &manifest.pin;
+    Ok(subsets
+        .into_iter()
+        .filter(|subset| {
+            let standing = stands(runs, pin, subset);
+            if standing {
+                println!(
+                    "phpt: {}: its target under {} holds a verdict for each of its tests, so \
+                     the control does not run it again",
+                    subset.scope,
+                    target::key(pin)
+                );
+            }
+            !standing
+        })
+        .collect())
+}
+
+/// Whether the target kept for `subset` under the pin stands for it as it
+/// is now ([`Target::stands_for`]); a target or a subset that cannot be
+/// read is one that does not, so the control runs the subset again.
+fn stands(runs: &against::Runs, pin: &Pin, subset: &Subset) -> bool {
+    match (runs.kept_target(pin, &subset.scope), subset.tests()) {
+        (Ok(Some(target)), Ok(tests)) => target.stands_for(subset, &tests),
+        _ => false,
+    }
 }
 
 /// The subsets `ask` names: one crate's or directory's, the whole corpus,

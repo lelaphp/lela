@@ -37,6 +37,14 @@ use crate::tally;
 /// id and its name.
 const VIA: &str = " via ";
 
+/// Whether the verdict keyed `key` is of a test reached through the
+/// redirecting test whose own key is `by`: `key` ends with [`VIA`] and
+/// where `by` stands in the corpus ([`Redirect::id`]'s shape).
+pub(crate) fn through(key: &str, by: &str) -> bool {
+    by.strip_prefix("phpt:")
+        .is_some_and(|by| key.strip_suffix(by).is_some_and(|head| head.ends_with(VIA)))
+}
+
 /// Where the section is evaluated: beside run-tests.php at the root of the
 /// tree, where upstream evaluates it, so `__DIR__` is that root.
 const PROGRAM: &str = "run-tests.redirect.php";
@@ -220,5 +228,32 @@ impl Redirect {
             extensions,
         };
         Ok(Ok((redirect, listed)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::through;
+
+    /// A verdict kept through a redirecting test is found by that test's
+    /// own key, so `--unkept` finds the target holds it (#1830); another
+    /// redirecting test's, or the redirected test's own key, is not.
+    #[test]
+    fn a_verdict_through_a_redirect_is_found_by_the_redirecting_tests_key() {
+        let key =
+            "phpt:php-src/ext/pdo/tests/pdo_001.phpt via php-src/ext/pdo_sqlite/tests/common.phpt";
+        assert!(through(
+            key,
+            "phpt:php-src/ext/pdo_sqlite/tests/common.phpt"
+        ));
+        assert!(!through(
+            key,
+            "phpt:php-src/ext/pdo_mysql/tests/common.phpt"
+        ));
+        assert!(!through(key, "phpt:php-src/ext/pdo/tests/pdo_001.phpt"));
+        assert!(!through(
+            "phpt:php-src/ext/pdo_sqlite/tests/common.phpt",
+            "phpt:php-src/ext/pdo_sqlite/tests/common.phpt"
+        ));
     }
 }

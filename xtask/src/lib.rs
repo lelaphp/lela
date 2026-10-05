@@ -332,6 +332,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         against: ask.against,
         jobs: ask.jobs,
         locks: None,
+        unkept: ask.unkept,
     };
     let readings = phpt::run(root, manifest, &registry, &ask)?;
     let outcome = recorded(store, &readings)?;

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::against::{RUNS, Run};
-use super::{CORPUS, Judgement};
+use super::{CORPUS, Judgement, Subset, redirect};
 use crate::divergence::Registry;
 use crate::oracle::Pin;
 use crate::reading::{Reading, listed, plural};
@@ -103,6 +103,19 @@ impl Target {
             self.0.verdicts.get(id),
             Some(Judgement::Pass | Judgement::XFail)
         )
+    }
+
+    /// Whether the target stands for `subset` as it is now: it holds a
+    /// verdict for each of `tests`, the subset's files, so it predates none
+    /// of them (#1644), a test that redirects to a set by a verdict kept
+    /// through it. What `phpt --unkept` asks before the control runs a
+    /// subset again (#1830).
+    pub(crate) fn stands_for(&self, subset: &Subset, tests: &[PathBuf]) -> bool {
+        let verdicts = &self.0.verdicts;
+        tests.iter().all(|test| {
+            let id = subset.id(test);
+            verdicts.contains_key(&id) || verdicts.keys().any(|key| redirect::through(key, &id))
+        })
     }
 
     /// Where the test stands, the engine having come to `engine` on it.
