@@ -350,6 +350,7 @@ fn write(
             return Ok(());
         }
     }
+    let through_ref = value.as_php_ref().is_some();
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
@@ -365,7 +366,23 @@ fn write(
         ValueRef::Array(array) => {
             out.extend_from_slice(b"a:");
             let shared = !is_root && (in_rcn_array || array.to_value().refcount() > 1);
-            nested(req, out, &value, *array, hash, shared, false)?;
+            // A table reached through a reference the walk shares with
+            // the program can lose its only owner to an element's
+            // `__serialize` that assigns over the reference, and
+            // `php_var_serialize_nested_data` then reads freed rows. That
+            // table is held across its walk; any other is held by the
+            // table, argument or copy it was reached from. The test
+            // `serialize_holds_a_nested_array_a_serialize_method_gives_up`
+            // says why there is no divergence row.
+            let held = through_ref.then(|| {
+                req.addref(&value);
+                value
+            });
+            let written = nested(req, out, &value, *array, hash, shared, false);
+            if let Some(held) = held {
+                req.release(held);
+            }
+            written?;
         }
         ValueRef::Object(object) => object_value(req, out, *object, hash)?,
         _ => out.extend_from_slice(b"i:0;"),

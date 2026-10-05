@@ -138,6 +138,39 @@ fn extract_holds_the_array_it_walks_when_an_element_overwrites_its_variable() {
     assert_eq!(stdout, "2,1,vvvvvvvvvv");
 }
 
+/// `serialize` holds an owner of a nested array while it walks it when
+/// it reached the array through a shared reference. An element's
+/// `__serialize` that assigns over that reference gives up the array's
+/// only owner. The rows after the element are still the array's, so a
+/// string of their size allocated in `__serialize` is not handed their
+/// blocks.
+///
+/// Here dax departs from php on purpose. php's
+/// `php_var_serialize_nested_data` walks the table with no owner of it,
+/// so on this input it reads freed memory. The pinned php prints
+/// `s:10:"ZZZZZZZZZZ"` for the last row, and what it prints changes
+/// with the allocator; on #1989's own input it dies on a 4 GB
+/// allocation. dax writes the row the array held. On the same kind of
+/// input, the owner also shows where php is deterministic. A row that
+/// `__serialize` rewrites in place separates the array instead, so dax
+/// writes the old row and php the new one. An array freed at that
+/// assignment is freed when the walk ends, after php would free it.
+/// Whether those stand is #2043's ruling. No divergence row records
+/// any of these: `docs/divergence.toml` is keyed by a compared site, and
+/// no witness or phpt compares these inputs. A row is added if one ever
+/// does (#1989).
+#[test]
+fn serialize_holds_a_nested_array_a_serialize_method_gives_up() {
+    let (stdout, fatal) = served(
+        "<?php class C { function __serialize(): array { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\necho serialize($outer);",
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "a:1:{i:0;a:2:{i:0;O:1:\"C\":0:{}i:1;s:10:\"vvvvvvvvvv\";}}"
+    );
+}
+
 /// What `conn` sent until it went quiet for a moment.
 fn sent(conn: &mut std::net::TcpStream) -> Vec<u8> {
     use std::io::Read;
