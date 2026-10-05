@@ -193,7 +193,18 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
 /// and `cgi-fcgi` after them, over the `files` found and `-d`'s entries.
 fn engine(ini: &[Define], files: &IniFiles) -> Engine {
-    php_sapi::start(builder(files), ini)
+    php_sapi::start(builder(files), ini, log_message)
+}
+
+/// `sapi_cgi_log_message` (`Z/sapi/fpm/fpm/fpm_main.c:629-632`): the entry
+/// as a notice of the process's log, after `PHP message: `.
+fn log_message(entry: &[u8]) {
+    crate::zlog::msg(
+        crate::zlog::Level::Notice,
+        crate::zlog::Site::at("sapi_cgi_log_message", 631),
+        b"PHP message: ",
+        entry,
+    );
 }
 
 /// php-fpm's engine before its entries: its name, the php.ini `files` the

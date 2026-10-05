@@ -24,6 +24,13 @@ use log::{Log, Type};
 /// answers under it.
 pub(crate) const NAME: &str = "cli-server";
 
+/// `sapi_cli_server_log_message` while php starts, before `-q` lowers the
+/// level (`Z/sapi/cli/php_cli_server.c:768`): the entry as a message, at
+/// the default level, which shows it.
+pub(crate) fn log_message(entry: &[u8]) {
+    Log::new(3, false).write(Type::Message, &String::from_utf8_lossy(entry));
+}
+
 /// What every connection of one server reads: the engine, the document
 /// root and the router, the host and port the server listens on, and
 /// the log.

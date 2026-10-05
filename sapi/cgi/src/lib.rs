@@ -808,7 +808,7 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, origin: Origin) -> Engine
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
     let builder = natives::declare(builder, origin).skip_shebang_while("cgi.check_shebang_line");
-    php_sapi::start(builder, ini)
+    php_sapi::start(builder, ini, |entry| Process.log(entry))
 }
 
 #[cfg(test)]

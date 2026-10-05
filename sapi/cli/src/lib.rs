@@ -61,7 +61,7 @@ use std::process::ExitCode;
 
 use std::sync::OnceLock;
 
-use php_sapi::{Engine, EngineBuilder, IniFiles};
+use php_sapi::{Engine, EngineBuilder, IniFiles, OutputSink};
 
 use crate::natives::ProcessTitle;
 
@@ -255,7 +255,9 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
     let builder = php_sapi::ini::CLI_HARDCODED
         .iter()
         .fold(builder, |builder, (name, value)| builder.ini(name, value));
-    php_sapi::start(natives::cli(builder), ini)
+    php_sapi::start(natives::cli(builder), ini, |entry| {
+        request::Process.log(entry);
+    })
 }
 
 /// `sapi_cli_ini_defaults`, which the CLI and its built-in server both set.
@@ -280,5 +282,5 @@ fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles) -> Engine {
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang();
-    php_sapi::start(natives::server(builder), ini)
+    php_sapi::start(natives::server(builder), ini, server::log_message)
 }
