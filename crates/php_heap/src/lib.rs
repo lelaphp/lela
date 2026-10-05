@@ -44,6 +44,7 @@ mod map;
 mod mm;
 mod numeric;
 mod object;
+mod observe;
 mod payload;
 pub mod process;
 mod property_table;
@@ -71,6 +72,7 @@ pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
+pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
@@ -232,6 +234,28 @@ impl Heap {
     /// giving back cached chunks brings them under it.
     pub fn set_memory_limit(&mut self, limit: usize) -> bool {
         self.mm.set_limit(limit)
+    }
+
+    /// `observer` told of every allocation, reallocation and free this
+    /// heap serves from here on, and of what `gc_mem_caches()` gives
+    /// back, after the observers put in before it ([`ObserveAllocations`],
+    /// design §7.1): what stands in the place of php's
+    /// `zend_mm_set_custom_handlers`. The heap still serves each one, so
+    /// what `memory_get_usage()` reads is what it reads with none.
+    pub fn observe_allocations(
+        &mut self,
+        observer: Box<dyn ObserveAllocations>,
+    ) -> AllocationObserverId {
+        self.mm.observe(observer)
+    }
+
+    /// The observer put in at `at` taken out, told of nothing more and
+    /// handed back, `None` where it was taken out already.
+    pub fn unobserve_allocations(
+        &mut self,
+        at: AllocationObserverId,
+    ) -> Option<Box<dyn ObserveAllocations>> {
+        self.mm.unobserve(at)
     }
 
     /// `zend_alloc_in_memory_limit_error_reporting`: whether the limit's

@@ -3,11 +3,13 @@
 //! the observer's order and pairing (seam 9), the frames its handlers
 //! read and keep, its notices and the handlers added while a request is
 //! served, a periodic interrupt as an extension sees it (#1806), the
-//! pool's drain, and a handler that blocks with the time limit suspended
-//! (#1814).
+//! pool's drain, a handler that blocks with the time limit suspended
+//! (#1814), and allocations as an extension observes them (design
+//! §7.1).
 
 use crate::api;
 
+mod allocations;
 mod frames;
 mod lifecycle;
 mod observer;
