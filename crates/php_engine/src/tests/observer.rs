@@ -318,7 +318,9 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
 /// does at `php_request_shutdown` (`observer_error_01.phpt`), and before
 /// a shutdown function runs: a fatal the loop raises, the memory limit
 /// a concatenation reaches, and one a native raises, `trigger_error`'s
-/// `E_USER_ERROR`, inside the error handler `zend_error` called.
+/// `E_USER_ERROR`, inside the error handler `zend_error` called; and
+/// the time limit reached by a function a generator's body called,
+/// which the loop raises.
 #[test]
 fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     let rec = Recording::start();
@@ -342,6 +344,14 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         &dir,
         "<?php\nfunction b($no, $str) { trigger_error('boom', E_USER_ERROR); }\n\
          function a() { set_error_handler('b'); echo $u; }\na();\n",
+    );
+    rec.mark("generator");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nset_time_limit(1);\n\
+         function b() { while (true); }\n\
+         function g() { b(); yield 1; }\nfunction a() { foreach (g() as $v) {} }\na();\n",
     );
     rec.mark("end");
     let events = rec.events();
@@ -369,7 +379,7 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         "every open frame ended once after the fatal, before the shutdown function: {memory:?}"
     );
 
-    let user = observed(&events.between("user", "end"));
+    let user = observed(&events.between("user", "generator"));
     let fatal = user
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m == "boom"));
@@ -390,4 +400,23 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             .count();
         assert_eq!((begun, ended), (1, 1), "{name}: {user:?}");
     }
+
+    // A frame a generator's body called stands above the generator's
+    // frame, which the resumption pops on its way out of the fatal: it
+    // is ended before that, after the fatal is rendered. The generator's
+    // own frame is not begun at its call (#1811).
+    let resumed = observed(&events.between("generator", "end"));
+    let fatal = resumed
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Maximum execution time")));
+    assert!(fatal.is_some(), "the fatal is rendered: {resumed:?}");
+    assert_eq!(
+        resumed
+            .iter()
+            .skip(fatal.unwrap_or_default() + 1)
+            .cloned()
+            .collect::<Vec<_>>(),
+        [end(0, "b", None), end(0, "a", None), end(0, file, None)],
+        "every open frame ended once after the fatal: {resumed:?}"
+    );
 }

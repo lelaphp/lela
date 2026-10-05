@@ -55,7 +55,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use php_heap::FrameRef;
+use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
 use crate::api::request::Request;
@@ -248,6 +248,28 @@ fn call_end_handlers(req: &mut Request, frame: FrameRef, value: Option<&Value>) 
     for end in &handlers.end {
         end(&mut Observed { req, frame }, value);
     }
+}
+
+/// A serving's loop left, by its entry frame or by a fatal the loop
+/// raised and nothing has rendered yet: a resumed generator's caller and
+/// `php -r`'s pop the frames above the serving's entry before they
+/// render it, which would leave [`end_all`] frames that no longer stand.
+/// With an observer declared, the fatal is rendered here, where they
+/// still do, and the request leaves by `zend_bailout`, so the caller's
+/// own rendering finds it rendered; with none, nothing changes.
+#[inline]
+pub(crate) fn loop_left(req: &mut Request, outcome: &Result<(), Fatal>) {
+    if let Err(fatal) = outcome
+        && req.shared.observers != 0
+    {
+        render_where_frames_stand(req, fatal);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn render_where_frames_stand(req: &mut Request, fatal: &Fatal) {
+    req.end_in(fatal);
 }
 
 /// `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`): at a fatal, every frame still open
