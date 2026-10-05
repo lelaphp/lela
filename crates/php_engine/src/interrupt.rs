@@ -797,9 +797,10 @@ mod tests {
             .ini("max_execution_time", "1")
             .tier::<Nop>()
             .build();
+        // Before the request, whose start arms the timer.
+        let armed = Instant::now();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
         let frame = req.pushed(looping());
-        let armed = Instant::now();
 
         assert_eq!(
             execute::<Nop>(&mut req, frame),
