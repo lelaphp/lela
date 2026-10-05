@@ -12,7 +12,7 @@
 
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
-use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Mysqlnd, Stmt as Ps};
+use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Kept, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
     SqlError, SqlState, bool_attribute, long_attribute, option_long, option_string,
@@ -352,11 +352,11 @@ enum Place {
     /// In the request's table, at this number.
     Held(usize),
     /// A persistent connection the request gave back to the engine's
-    /// pool: out of the request's table, with the key mysqlnd keeps the
-    /// connection under until a request takes it up.
-    Idle(H, Vec<u8>),
-    /// In no request's table: given back and not kept, or kept and gone
-    /// by the time a request asked for it.
+    /// pool: out of the request's table, with the connection and its
+    /// socket, which wait in PDO's pool with it and in no other list
+    /// until a request takes them up.
+    Idle(H, Kept),
+    /// In no request's table: closed, or given back and not kept.
     Gone,
 }
 
@@ -687,11 +687,11 @@ impl Connection for Db {
         }
     }
 
-    /// The connection out of the request's tables and kept by mysqlnd,
-    /// its `pdo_mysql_db_handle` kept here, for the next request to take
-    /// up. One mysqlnd did not keep, past its pool's bound and closed
-    /// there, is gone, so the next request's `check_liveness` finds it
-    /// dead.
+    /// The connection out of the request's tables, its
+    /// `pdo_mysql_db_handle` and the connection with its socket kept here,
+    /// in PDO's pool with it, for the next request to take up. One mysqlnd
+    /// did not keep, as no persistent connection that connected, is gone,
+    /// so the next request's `check_liveness` finds it dead.
     fn give_back(&mut self, req: &mut Request) {
         let Some(id) = self.id() else {
             return;
@@ -704,7 +704,7 @@ impl Connection for Db {
             *slot = None;
         }
         self.place = match kept {
-            Some(key) => Place::Idle(h, key),
+            Some(kept) => Place::Idle(h, kept),
             None => Place::Gone,
         };
     }
@@ -730,17 +730,16 @@ impl Connection for Db {
 
 impl Db {
     /// A connection given back to the engine's pool held in the request's
-    /// table again, with the connection mysqlnd keeps under its key, or
-    /// gone where mysqlnd keeps none there; one not given back stays where
-    /// it stands.
+    /// table again, over the socket it kept, or gone where the request
+    /// could not hold it; one not given back stays where it stands.
     fn take_up(&mut self, req: &mut Request) {
         if !matches!(self.place, Place::Idle(..)) {
             return;
         }
-        let Place::Idle(mut h, key) = std::mem::replace(&mut self.place, Place::Gone) else {
+        let Place::Idle(mut h, kept) = std::mem::replace(&mut self.place, Place::Gone) else {
             return;
         };
-        let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
+        let Ok(server) = Mysqlnd::take_up(req, kept) else {
             return;
         };
         h.server = server;
