@@ -63,12 +63,30 @@
 //! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
 //! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
+//! A generator's frame is not begun at its call, as php's
+//! `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`: it is begun
+//! at each resumption, [`generator_resumed`]
+//! (`zend_observer_generator_resume`, `Z/Zend/zend_generators.c:847`),
+//! and ended at each suspension with the value it yielded,
+//! [`generator_yielded`] (`:851`), and at its `return` with what it
+//! returned (`ZEND_GENERATOR_RETURN`, `Z/Zend/zend_vm_def.h:4766`), so
+//! each resumption is a begin and an end of its own.
+//!
+//! A fiber runs on a stack of its own, so the chain of open frames is
+//! one per stack: it rides with the execution state a switch swaps
+//! ([`crate::fiber`]), as php saves `EG(current_observed_frame)` into
+//! the `zend_fiber_context` it leaves and restores the one it enters
+//! (`zend_observer_fiber_switch_notify`, `Z/Zend/zend_observer.c:409-425`),
+//! and a frame of one stack is never ended in place of another's. The
+//! three fiber notices, creation, switch and destruction
+//! ([`fiber_initialized`], [`fiber_switched`], [`fiber_destroyed`]), are
+//! called in declaration order whether or not any call observer is
+//! declared, as php's lists are walked; a switch away from a fiber that
+//! is dead ends what its chain still holds first.
+//!
 //! What is not here yet, each built on the same slot and chain:
-//! a generator's resume and yield and a fiber's own
-//! chain (#1811; a generator's frame is never begun at its call, as
-//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
-//! notices and adding and removing handlers while a request is served
-//! (#1812). A handler reads the frame it is handed through
+//! the other notices and adding and removing handlers while a request
+//! is served (#1812). A handler reads the frame it is handed through
 //! [`Observed::frame`], and the user frame below it through
 //! [`Observed::caller`], and keeps one as a
 //! [`FrameId`](crate::api::request::FrameId) (#1827).
@@ -84,7 +102,7 @@ use php_heap::{Fatal, FrameRef};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{FrameView, Request};
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, PhpObject, Value};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
 /// frame the loop serves, a function's or an included, evaluated or main
@@ -316,11 +334,10 @@ pub(crate) fn native_returned(
     }
 }
 
-/// `zend_observer_fcall_begin` and `zend_observer_fcall_begin_prechecked`
-/// (`Z/Zend/zend_observer.c:257-294`): the frame's slot resolved on its first
-/// call, the frame put on the open chain where an end handler observes
-/// it, and the begin handlers called in declaration order. A generator's
-/// frame is begun when it is resumed and not at its call (#1811).
+/// `zend_observer_fcall_begin` (`Z/Zend/zend_observer.c:288-294`): the
+/// frame begun ([`begin_prechecked`]) unless it is a generator's, which
+/// is begun when it is resumed ([`generator_resumed`]) and not at its
+/// call.
 #[cold]
 #[inline(never)]
 fn begin(req: &mut Request, at: Observable) {
@@ -336,10 +353,53 @@ fn begin(req: &mut Request, at: Observable) {
     let _ = begin_prechecked(req, at);
 }
 
-/// `zend_observer_fcall_begin_prechecked` past the generator's test:
-/// the slot resolved where it is not yet, the call put on the open chain
-/// where an end handler observes it, which is the answer, and the begin
-/// handlers called in declaration order.
+/// The resumption home: a generator's `frame` pushed again by
+/// `zend_generator_resume` and about to be served, which is begun as a
+/// call is, `zend_observer_generator_resume` (`Z/Zend/zend_observer.c:283-286`,
+/// called at `Z/Zend/zend_generators.c:847`). As [`call`] while no
+/// observer is declared.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn generator_resumed(req: &mut Request, frame: FrameRef) {
+    if req.shared.observers != 0 {
+        begin_resumed(req, frame);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn begin_resumed(req: &mut Request, frame: FrameRef) {
+    let _ = begin_prechecked(req, Observable::Code(frame));
+}
+
+/// The suspension home: a generator's `frame` about to leave the stack
+/// at a `YIELD`, or at a `YIELD_FROM` that delegates, ended with the
+/// value the generator holds then, php's
+/// `zend_observer_fcall_end(generator->execute_data, &generator->value)`
+/// once `zend_execute_ex` has returned (`Z/Zend/zend_generators.c:849-852`):
+/// what it yielded, or, at a `yield from`, what it yielded last. As
+/// [`call`] while no observer is declared.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
+    if req.shared.observers != 0 {
+        end_yielded(req, frame, generator);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn end_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
+    let value = crate::generator::value(req, generator);
+    req.addref(&value);
+    end(req, Observable::Code(frame), Some(&value));
+    req.release(value);
+}
+
+/// `zend_observer_fcall_begin_prechecked` (`Z/Zend/zend_observer.c:257-281`)
+/// past the generator's test: the slot resolved where it is not yet, the
+/// call put on the open chain where an end handler observes it, which is
+/// the answer, and the begin handlers called in declaration order.
 fn begin_prechecked(req: &mut Request, at: Observable) -> bool {
     let slot = match req.observer_slot(at) {
         Slot::Unresolved => resolve(req, at),
@@ -495,5 +555,141 @@ pub(crate) fn end_all(req: &mut Request) {
     }
     for at in req.take_observed() {
         call_end_handlers(req, at, None);
+    }
+}
+
+/// `zend_fiber_status` (`Z/Zend/zend_fibers.h:33-38`) as a fiber
+/// observer reads it on an [`ObservedFiber`]: php's own, where the
+/// fiber a switch leaves is `Running`, or `Dead` once it has returned,
+/// thrown or ended in a fatal, and the fiber it enters is `Init` on its
+/// first switch and `Suspended` after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiberStatus {
+    Init,
+    Running,
+    Suspended,
+    Dead,
+}
+
+/// A fiber as a fiber observer is handed it, php's `zend_fiber_context`
+/// (`Z/Zend/zend_fibers.h:76-100`): a `Fiber` object, the collector's
+/// destructor fiber among them, or the request's own stack,
+/// `EG(main_fiber_context)`; and its status at the notice. What an
+/// extension keeps per fiber, which php keeps in the `reserved` slots,
+/// it keys by the object [`ObservedFiber::fiber`] names, its
+/// `PhpObject::index`, from the creation notice to the destruction
+/// notice, and by none for the request's own.
+#[derive(Debug, Clone, Copy)]
+pub struct ObservedFiber {
+    fiber: Option<PhpObject>,
+    status: FiberStatus,
+    threw: bool,
+    destroyed: bool,
+}
+
+impl ObservedFiber {
+    pub(crate) fn of(fiber: Option<PhpObject>, status: FiberStatus) -> ObservedFiber {
+        ObservedFiber {
+            fiber,
+            status,
+            threw: false,
+            destroyed: false,
+        }
+    }
+
+    /// With whether the `Fiber` threw and whether it is being destroyed.
+    pub(crate) fn flagged(self, threw: bool, destroyed: bool) -> ObservedFiber {
+        ObservedFiber {
+            threw,
+            destroyed,
+            ..self
+        }
+    }
+
+    /// The `Fiber` object, `zend_fiber_from_context`; `None` for the
+    /// request's own stack, whose `kind` is not `zend_ce_fiber`.
+    #[must_use]
+    pub fn fiber(&self) -> Option<PhpObject> {
+        self.fiber
+    }
+
+    /// `context->status` at the notice.
+    #[must_use]
+    pub fn status(&self) -> FiberStatus {
+        self.status
+    }
+
+    /// `ZEND_FIBER_FLAG_THREW`: the fiber's callable left a throwable,
+    /// or the unwind exit, which is how a `Dead` fiber that threw is told
+    /// from one that returned. Never set on the request's own stack.
+    #[must_use]
+    pub fn threw(&self) -> bool {
+        self.threw
+    }
+
+    /// `ZEND_FIBER_FLAG_DESTROYED`: the fiber is being torn down, resumed
+    /// with the graceful exit because nothing holds it any more, which
+    /// is how a switch into a fiber to destroy it is told from one that
+    /// resumes it. Never set on the request's own stack.
+    #[must_use]
+    pub fn destroyed(&self) -> bool {
+        self.destroyed
+    }
+}
+
+/// `zend_observer_fiber_init_handler` and
+/// `zend_observer_fiber_destroy_handler`: a fiber created, or given
+/// back.
+pub type FiberHandler = fn(&mut Request, ObservedFiber);
+
+/// `zend_observer_fiber_switch_handler`: the fiber a switch leaves and
+/// the one it enters, called while the one it leaves is still the one
+/// served.
+pub type FiberSwitchHandler = fn(&mut Request, ObservedFiber, ObservedFiber);
+
+/// `zend_observer_fiber_init_notify` (`Z/Zend/zend_observer.c:396-407`):
+/// `fiber`'s stack laid down by its start, before the first switch
+/// into it (`zend_fiber_init_context`, `Z/Zend/zend_fibers.c:460`).
+pub(crate) fn fiber_initialized(req: &mut Request, fiber: ObservedFiber) {
+    if req.shared.supplied.fiber_init.is_empty() {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for handler in shared.supplied.fiber_init.iter() {
+        handler(req, fiber);
+    }
+}
+
+/// `zend_observer_fiber_switch_notify` (`Z/Zend/zend_observer.c:409-425`)
+/// up to the chain's swap, which the execution state's swap makes
+/// ([`Request::switch_execution`]): where `from` is dead, what its
+/// chain still holds ended first, which is nothing for a fiber that
+/// returned or threw and every frame left open for one that ended in a
+/// fatal; then each switch handler, while `from`'s frames are the ones
+/// standing.
+pub(crate) fn fiber_switched(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
+    if from.status == FiberStatus::Dead {
+        end_all(req);
+    }
+    if req.shared.supplied.fiber_switch.is_empty() {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for handler in shared.supplied.fiber_switch.iter() {
+        handler(req, from, to);
+    }
+}
+
+/// `zend_observer_fiber_destroy_notify` (`Z/Zend/zend_observer.c:427-436`):
+/// a dead `fiber` given back, once the switch out of it has
+/// restored its resumer's state (`zend_fiber_destroy_context`,
+/// `Z/Zend/zend_fibers.c:465-475`, called at `:549-551`).
+pub(crate) fn fiber_destroyed(req: &mut Request, fiber: ObservedFiber) {
+    if req.shared.supplied.fiber_destroy.is_empty() {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for handler in shared.supplied.fiber_destroy.iter() {
+        handler(req, fiber);
     }
 }
