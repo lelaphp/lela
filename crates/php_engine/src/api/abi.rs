@@ -272,7 +272,15 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 /// The `Mutex` and the bound are here and nowhere an extension can see.
 pub struct Pool<K, V> {
     capacity: usize,
-    idle: Mutex<HashMap<K, Vec<V>>>,
+    idle: Mutex<Idle<K, V>>,
+}
+
+/// What a [`Pool`]'s `Mutex` guards: the idle entries by key, each with
+/// the number of its give-back, and whether the pool was drained.
+struct Idle<K, V> {
+    entries: HashMap<K, Vec<(u64, V)>>,
+    given: u64,
+    drained: bool,
 }
 
 impl<K: Hash + Eq, V> Pool<K, V> {
@@ -287,11 +295,15 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     pub fn new(capacity: usize) -> Pool<K, V> {
         Pool {
             capacity: capacity.max(1),
-            idle: Mutex::new(HashMap::new()),
+            idle: Mutex::new(Idle {
+                entries: HashMap::new(),
+                given: 0,
+                drained: false,
+            }),
         }
     }
 
-    fn idle(&self) -> std::sync::MutexGuard<'_, HashMap<K, Vec<V>>> {
+    fn idle(&self) -> std::sync::MutexGuard<'_, Idle<K, V>> {
         match self.idle.lock() {
             Ok(idle) => idle,
             Err(poisoned) => poisoned.into_inner(),
@@ -302,51 +314,69 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     /// back last, as php's one entry per key is the one a worker last used.
     pub fn take(&self, key: &K) -> Option<V> {
         let mut idle = self.idle();
-        let entries = idle.get_mut(key)?;
+        let entries = idle.entries.get_mut(key)?;
         let entry = entries.pop();
         if entries.is_empty() {
-            idle.remove(key);
+            idle.entries.remove(key);
         }
-        entry
+        entry.map(|(_, entry)| entry)
     }
 
     /// The entries idle under every key, which php counts as a process's
     /// inactive persistent links, `MyG(num_inactive_persistent)`.
     #[must_use]
     pub fn idle_len(&self) -> usize {
-        self.idle().values().map(Vec::len).sum()
+        self.idle().entries.values().map(Vec::len).sum()
     }
 
     /// `entry` given back under `key` at the end of the request that
-    /// held it; past the bound it is answered to the caller, the
-    /// extension that owns it, which closes it with the ending request,
-    /// outside the `Mutex` (ADR-0010's amendment of ADR-0005): an entry
-    /// leaves the pool only through its extension, never by a drop no
-    /// request sees.
+    /// held it; past the bound, or once the pool is drained, it is
+    /// answered to the caller, the extension that owns it, which closes it
+    /// with the ending request, outside the `Mutex` (ADR-0010's amendment
+    /// of ADR-0005): an entry leaves the pool only through its extension,
+    /// never by a drop no request sees, and one a request on another
+    /// thread held as the engine ended is closed with that request.
     #[must_use = "an entry past the bound is the caller's to close with the ending request"]
     pub fn give_back(&self, key: K, entry: V) -> Option<V> {
         let mut idle = self.idle();
-        if idle.values().map(Vec::len).sum::<usize>() >= self.capacity {
+        if idle.drained || idle.entries.values().map(Vec::len).sum::<usize>() >= self.capacity {
             return Some(entry);
         }
-        idle.entry(key).or_default().push(entry);
+        idle.given += 1;
+        let given = idle.given;
+        idle.entries.entry(key).or_default().push((given, entry));
         None
     }
 
     /// Every idle entry, with its key, taken out for the caller to close
-    /// outside the `Mutex`: what an extension's engine-end function does
-    /// with its pools (ADR-0010), and the engine with its own before any
-    /// engine-end function, as `zend_shutdown` destroys
-    /// `EG(persistent_list)` before `zend_destroy_modules`
+    /// outside the `Mutex`, the one given back last first, as
+    /// `zend_hash_graceful_reverse_destroy` destroys `EG(persistent_list)`
+    /// last entry first; from here every entry given back is answered to
+    /// its caller ([`give_back`](Pool::give_back)). What an extension's
+    /// engine-end function does with its pools (ADR-0010), and the engine
+    /// with its own before any engine-end function, as `zend_shutdown`
+    /// destroys `EG(persistent_list)` before `zend_destroy_modules`
     /// (`Z/Zend/zend.c:1166-1170`).
     #[must_use]
     pub fn drain(&self) -> Vec<(K, V)>
     where
         K: Clone,
     {
-        self.idle()
+        let mut idle = self.idle();
+        idle.drained = true;
+        let mut drained: Vec<(u64, K, V)> = idle
+            .entries
             .drain()
-            .flat_map(|(key, entries)| entries.into_iter().map(move |entry| (key.clone(), entry)))
+            .flat_map(|(key, entries)| {
+                entries
+                    .into_iter()
+                    .map(move |(given, entry)| (given, key.clone(), entry))
+            })
+            .collect();
+        drained.sort_unstable_by_key(|&(given, _, _)| std::cmp::Reverse(given));
+        drained
+            .into_iter()
+            .map(|(_, key, entry)| (key, entry))
             .collect()
     }
 }
