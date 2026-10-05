@@ -542,6 +542,7 @@ request::Request::extension_version
 request::Request::finish_response
 request::Request::flush
 request::Request::forbid_dynamic_call
+request::Request::forked
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless

@@ -1597,6 +1597,13 @@ impl Interrupt {
         self.0.timed_out.store(false, Ordering::Relaxed);
     }
 
+    /// How many hold this interrupt: its request, the request's timer,
+    /// the timer's thread while one runs, and whoever else cloned it.
+    #[cfg(test)]
+    pub(crate) fn holders(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Hand this interrupt to the process's signal record, which raises
     /// it at every signal the process takes until the [`Receiving`] is
     /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
@@ -2744,6 +2751,7 @@ impl Request {
         // did would refuse the first push again, with php's fatal.
         let mut heap = Heap::new();
         let mut stack = VmStack::new();
+        let interrupt = Interrupt::default();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
@@ -2855,8 +2863,8 @@ impl Request {
             phase: Phase::Startup,
             shutdown_walk_ended: false,
             returned: Value::null(),
-            interrupt: Interrupt::default(),
-            timer: crate::interrupt::Timer::default(),
+            interrupt: interrupt.clone(),
+            timer: crate::interrupt::Timer::new(&interrupt),
             stack_limit: StackLimit::UNCHECKED,
             declared: tables.classes,
             bound_at_load: Vec::new(),
@@ -2936,25 +2944,33 @@ impl Request {
     /// so the seconds count from here.
     fn arm_timer(&mut self) {
         let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
-        self.timer.arm(&self.interrupt, seconds, hard);
+        self.timer.arm(seconds, hard);
     }
 
     /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
     /// once the program's shutdown functions, destructors and buffer
-    /// handlers are done: nothing the request does after it is timed.
+    /// handlers are done: nothing the request does after it is timed,
+    /// and every periodic interrupt's deadline goes with the execution
+    /// timer's, so the request's timer thread is joined here, before any
+    /// extension's `rshutdown`, whatever a host does with the request
+    /// after it.
     pub(crate) fn unset_timer(&mut self) {
-        self.timer.arm(&self.interrupt, 0, 0);
+        self.timer.unset();
     }
 
     /// A periodic interrupt (#1806): this request's interrupt raised
     /// `first` from now and every `every` after it, once where `every`
-    /// is zero, until [`Request::stop_periodic`] stops it or the request
-    /// ends. What a sampling profiler's own timer thread does under php,
+    /// is `None` (Excimer's one-shot `ExcimerTimer`), until
+    /// [`Request::stop_periodic`] stops it or the request reaches
+    /// `php_request_shutdown`'s fourth step. A period shorter than a
+    /// tenth of a millisecond is counted in tenths of a millisecond. What
+    /// a sampling profiler's own timer thread does under php,
     /// Excimer's `timer_create` and its handler storing
     /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
     /// no thread (ADR-0005, ADR-0010): one thread per request serves the
     /// execution timer and every periodic interrupt alike, and is joined
-    /// once none is left and when the request ends.
+    /// once a change leaves no deadline, around a fork
+    /// ([`Request::forked`]) and at the request's end.
     ///
     /// It is served through the interrupt hook the extension supplies
     /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
@@ -2970,15 +2986,15 @@ impl Request {
     pub fn start_periodic(
         &mut self,
         first: std::time::Duration,
-        every: std::time::Duration,
+        every: Option<std::time::Duration>,
     ) -> Option<Periodic> {
-        self.timer.start_periodic(&self.interrupt, first, every)
+        self.timer.start_periodic(first, every)
     }
 
     /// The periods of `periodic` elapsed since the last time this was
     /// asked, the ones the request was too busy to be interrupted for
     /// among them, as Excimer hands its callback the event count, POSIX's
-    /// overruns plus one; zero for one stopped or of another request.
+    /// overruns plus one; zero for one stopped.
     pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
         self.timer.periods_elapsed(periodic)
     }
@@ -2986,7 +3002,20 @@ impl Request {
     /// `periodic` stopped, with the periods it had not been asked for,
     /// as Excimer's `excimer_timer_stop` deletes its timer.
     pub fn stop_periodic(&mut self, periodic: Periodic) {
-        self.timer.stop_periodic(&self.interrupt, periodic);
+        self.timer.stop_periodic(periodic);
+    }
+
+    /// `fork` called with no thread of the engine's alive in this
+    /// request (ADR-0010, Threads): the request's timer thread is joined
+    /// before it, and after it started again over the same deadlines in
+    /// the process that called it, which loses none of them; in the
+    /// child every deadline is dropped, the execution timer's and each
+    /// periodic interrupt's, as a child inherits no interval timer and no
+    /// POSIX timer, so it runs untimed until it sets a limit of its own.
+    /// What `pcntl_fork` forks through, until the engine's one home for
+    /// fork asks it (#1807).
+    pub fn forked<R>(&mut self, fork: impl FnOnce() -> R) -> R {
+        self.timer.forked(fork)
     }
 
     // -------------------------------------------------- crate-internal

@@ -86,10 +86,14 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// `php_request_shutdown` and `OnUpdateTimeout` unset php's. A thread is
 /// the only timed wake the standard library has, and one serves every
 /// deadline: moving one is a write under the timer's mutex and a wake,
-/// with no thread spawned (#1924); the thread is started when the first
-/// deadline is set and joined when none is left; and a request that ends
-/// before a deadline wakes it at once rather than leaving it to the
-/// deadline. What is timed later is one more deadline in the
+/// with no thread spawned (#1924); the thread is started by the change
+/// that sets the first deadline and joined by the one that leaves none,
+/// around a fork ([`Timer::forked`]) and at `php_request_shutdown`'s
+/// fourth step ([`Timer::unset`]); and a request that ends before a
+/// deadline wakes it at once rather than leaving it to the deadline. A
+/// deadline the thread itself retires, a timeout with no hard stage or a
+/// periodic interrupt that raises once, leaves it parked until the next
+/// change. What is timed later is one more deadline in the
 /// [`Schedule`] the thread reads, never a second thread.
 ///
 /// Past a timeout the timer is armed again for `hard_timeout` seconds,
@@ -117,7 +121,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// returns once it waits, and ending it returns once it has ended
 /// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, the
 /// timer's thread is parked in its wait or raising the interrupt, and a
-/// timer with no deadline left has no thread at all. A fork needs both
+/// change that leaves no deadline leaves no thread. A fork needs both
 /// halves (#1783). The standard library takes one process-wide mutex as
 /// a thread starts and again as it ends, its stack overflow handler's
 /// thread table (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`),
@@ -125,14 +129,17 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// taken, with no thread to release it, and hung at exit, where its own
 /// main thread takes it. Ending wakes the thread rather than waiting out
 /// its deadline, so a join costs a wake and an exit, never the seconds
-/// left. That is what the engine's fork home stands on (#1807): a
-/// request whose timer has no deadline has no timer thread alive, and
-/// one that keeps its deadlines across a fork joins the thread and
-/// starts it again over the same schedule, whose deadlines are instants.
+/// left. That is what a fork stands on (ADR-0010, Threads): `pcntl_fork`
+/// forks through [`Timer::forked`], which joins the thread first and
+/// starts it again after in the parent over the same schedule, whose
+/// deadlines are instants, so a periodic interrupt keeps its grid and
+/// the execution timer its stage; the engine's one home for fork asks
+/// the same (#1807).
 ///
-/// A timer in a process forked from the one that started its thread has
-/// no thread there, since a child copies its calling thread alone, as a
-/// child does not inherit php's interval timer either. Its thread and
+/// A timer in a process forked from the one that started its thread
+/// other than through [`Timer::forked`] has no thread there, since a
+/// child copies its calling thread alone, as a child does not inherit
+/// php's interval timer either. Its thread and
 /// its schedule are forgotten, neither woken nor joined: the mutex may
 /// have been copied held, and there is nothing to join. So the child
 /// runs untimed, as php's does, until it sets a limit of its own.
@@ -206,10 +213,13 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// 0 of 15000 children hung, 0 did not fork or end with status 0
 /// 0 of 8 workers did not end with status 0
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Timer {
+    /// The request's interrupt, which the thread raises.
+    interrupt: Interrupt,
     shared: Arc<Shared>,
-    /// The thread, while a deadline is set.
+    /// The thread, from the change that set a deadline to the one that
+    /// leaves none, a fork or the drop.
     thread: Option<JoinHandle<()>>,
     /// The process that started the thread, the only one it is in.
     started_in: Process,
@@ -217,75 +227,118 @@ pub(crate) struct Timer {
     periodics: u32,
 }
 
+/// The shortest period a periodic interrupt is counted in, which one
+/// asked for shorter is: a period below what the thread takes to raise
+/// one would keep it raising and never let the request at the schedule.
+const SHORTEST: Duration = Duration::from_micros(100);
+
 impl Timer {
+    /// The timer of the request whose interrupt is `interrupt`, with no
+    /// deadline and no thread.
+    pub(crate) fn new(interrupt: &Interrupt) -> Timer {
+        Timer {
+            interrupt: interrupt.clone(),
+            shared: Arc::default(),
+            thread: None,
+            started_in: Process::default(),
+            periodics: 0,
+        }
+    }
+
     /// `zend_unset_timeout` then `zend_set_timeout`: the execution
     /// deadline `seconds` from now, and again `hard` seconds past each
     /// timeout where `hard` is above zero; none at all for a `seconds`
     /// that is zero or below, which is php's `max_execution_time = 0`
-    /// and the CLI's own default. It returns with the thread waiting
-    /// where a deadline is left, and with no thread where none is.
-    pub(crate) fn arm(&mut self, interrupt: &Interrupt, seconds: i64, hard: i64) {
+    /// and the CLI's own default, or so far off no clock reaches it.
+    pub(crate) fn arm(&mut self, seconds: i64, hard: i64) {
         let execution = u64::try_from(seconds)
             .ok()
             .filter(|s| *s > 0)
-            .map(|s| Execution {
-                deadline: Instant::now() + Duration::from_secs(s),
+            .and_then(|s| Instant::now().checked_add(Duration::from_secs(s)))
+            .map(|deadline| Execution {
+                deadline,
                 seconds,
                 hard: u64::try_from(hard).ok().filter(|h| *h > 0),
             });
-        self.change(interrupt, |schedule| schedule.execution = execution);
+        self.change(|schedule| schedule.execution = execution);
         // The old deadline is gone from the schedule, so whatever it
         // raised is raised already, and is cleared here.
-        interrupt.timer_unset();
+        self.interrupt.timer_unset();
     }
 
-    /// [`Request::start_periodic`]: a deadline `first` from now and every
-    /// `every` after it, once where `every` is zero. `None` where no
-    /// thread could be started to serve it.
+    /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step, and
+    /// every periodic interrupt's deadline with it, so the thread is
+    /// joined before any extension's `rshutdown`; the periods counted
+    /// stay for an `rshutdown` to read.
+    pub(crate) fn unset(&mut self) {
+        self.change(|schedule| {
+            schedule.execution = None;
+            for period in &mut schedule.periodic {
+                period.next = None;
+            }
+        });
+        self.interrupt.timer_unset();
+    }
+
+    /// [`Request::start_periodic`]. `None` where no thread could be
+    /// started to serve it.
     pub(crate) fn start_periodic(
         &mut self,
-        interrupt: &Interrupt,
         first: Duration,
-        every: Duration,
+        every: Option<Duration>,
     ) -> Option<Periodic> {
-        let of = Periodic(self.periodics);
+        let id = Periodic(self.periodics);
         self.periodics = self.periodics.checked_add(1)?;
-        let next = Some(Instant::now().checked_add(first)?);
         let period = Period {
-            of,
-            next,
-            every,
+            id,
+            next: Some(Instant::now().checked_add(first)?),
+            every: every.map(|every| every.max(SHORTEST)),
             elapsed: 0,
         };
-        self.change(interrupt, |schedule| schedule.periodic.push(period));
+        self.change(|schedule| schedule.periodic.push(period));
         if self.thread.is_none() {
-            self.stop_periodic(interrupt, of);
+            self.stop_periodic(id);
             return None;
         }
-        Some(of)
+        Some(id)
     }
 
     /// [`Request::periods_elapsed`]: the periods elapsed since the last
     /// time this was asked, and none counted from here.
-    pub(crate) fn periods_elapsed(&mut self, of: Periodic) -> u64 {
-        self.here();
+    pub(crate) fn periods_elapsed(&mut self, id: Periodic) -> u64 {
+        self.forget_if_forked();
         let mut schedule = self.shared.held();
-        let period = schedule.periodic.iter_mut().find(|period| period.of == of);
+        let period = schedule.periodic.iter_mut().find(|period| period.id == id);
         period.map_or(0, |period| std::mem::take(&mut period.elapsed))
     }
 
     /// [`Request::stop_periodic`]: its deadline gone and its count with it.
-    pub(crate) fn stop_periodic(&mut self, interrupt: &Interrupt, of: Periodic) {
-        self.change(interrupt, |schedule| {
-            schedule.periodic.retain(|period| period.of != of);
-        });
+    pub(crate) fn stop_periodic(&mut self, id: Periodic) {
+        self.change(|schedule| schedule.periodic.retain(|period| period.id != id));
+    }
+
+    /// [`Request::forked`]: the thread joined, `fork` called, and the
+    /// thread started again over the same deadlines in the process that
+    /// called it, or every deadline dropped in a child, which inherits
+    /// none, as a child inherits no interval timer.
+    pub(crate) fn forked<R>(&mut self, fork: impl FnOnce() -> R) -> R {
+        self.forget_if_forked();
+        self.end();
+        let parent = Process::current();
+        let forked = fork();
+        if !parent.is_current() {
+            self.shared = Arc::default();
+        } else if self.shared.held().next().is_some() {
+            self.start();
+        }
+        forked
     }
 
     /// `f` over the schedule, under the mutex, and the thread woken to
     /// read it again: started where it had no thread and now has a
-    /// deadline, ended where it now has none.
-    fn change(&mut self, interrupt: &Interrupt, f: impl FnOnce(&mut Schedule)) {
-        self.here();
+    /// deadline, joined where it now has none.
+    fn change(&mut self, f: impl FnOnce(&mut Schedule)) {
+        self.forget_if_forked();
         let idle = {
             let mut schedule = self.shared.held();
             f(&mut schedule);
@@ -295,16 +348,16 @@ impl Timer {
         if idle {
             self.end();
         } else if self.thread.is_none() {
-            self.start(interrupt);
+            self.start();
         }
     }
 
     /// Spawn the thread and return once it waits; a thread the system
     /// refuses leaves the request untimed, as before any deadline.
-    fn start(&mut self, interrupt: &Interrupt) {
+    fn start(&mut self) {
         self.shared.held().phase = Phase::Starting;
         let shared = Arc::clone(&self.shared);
-        let raised = interrupt.clone();
+        let raised = self.interrupt.clone();
         let Ok(thread) = thread::Builder::new()
             .name(String::from("php-request-timer"))
             .spawn(move || shared.serve(&raised))
@@ -326,10 +379,10 @@ impl Timer {
         }
     }
 
-    /// In a process forked from the one that started the thread, the
-    /// thread and its schedule forgotten (see [`Timer`]), so what follows
-    /// starts afresh.
-    fn here(&mut self) {
+    /// In a process forked from the one that started the thread other
+    /// than through [`Timer::forked`], the thread and its schedule
+    /// forgotten (see [`Timer`]), so what follows starts afresh.
+    fn forget_if_forked(&mut self) {
         if self.thread.is_some() && !self.started_in.is_current() {
             std::mem::forget(self.thread.take());
             std::mem::forget(std::mem::take(&mut self.shared));
@@ -341,7 +394,7 @@ impl Drop for Timer {
     /// The request's end: every deadline unset and the thread joined, or
     /// forgotten in a forked child.
     fn drop(&mut self) {
-        self.here();
+        self.forget_if_forked();
         self.end();
     }
 }
@@ -390,18 +443,20 @@ struct Schedule {
 /// One periodic interrupt a request was asked for (#1806), by the number
 /// its request's timer gave it: what [`Request::start_periodic`] answers
 /// and the extension that asked keeps, in its request state, to read
-/// its periods with and to stop it by. It names nothing outside the
-/// request that started it.
+/// its periods with and to stop it by. The number is its request's
+/// alone: another request numbers its own from the same start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Periodic(u32);
 
 /// A periodic interrupt, started.
 #[derive(Debug)]
 struct Period {
-    of: Periodic,
-    /// Its next deadline, `None` once a period of zero has raised its one.
+    id: Periodic,
+    /// Its next deadline: `None` once one that raises once has raised, or
+    /// once the request's end has unset it.
     next: Option<Instant>,
-    every: Duration,
+    /// The period, at least [`SHORTEST`]; `None` raises once.
+    every: Option<Duration>,
     /// The periods elapsed since the extension last read them.
     elapsed: u64,
 }
@@ -440,7 +495,7 @@ impl Schedule {
     /// ones a late wake missed among them, as Excimer counts a POSIX
     /// timer's overruns into its event count (`excimer_timer_handle`),
     /// its next deadline kept on the grid `first` laid down, and the
-    /// interrupt raised, as Excimer's handler stores `EG(vm_interrupt)`.
+    /// interrupt raised, as Excimer's handler stores php's interrupt word.
     /// The count waits for the extension's hook to read it.
     fn elapse(&mut self, interrupt: &Interrupt, now: Instant) {
         if let Some(execution) = &mut self.execution
@@ -452,8 +507,11 @@ impl Schedule {
                 terminate(execution.seconds, hard);
             }
             interrupt.elapsed(execution.seconds);
-            match execution.hard {
-                Some(hard) => execution.deadline = now + Duration::from_secs(hard),
+            match execution
+                .hard
+                .and_then(|hard| now.checked_add(Duration::from_secs(hard)))
+            {
+                Some(deadline) => execution.deadline = deadline,
                 None => self.execution = None,
             }
         }
@@ -461,15 +519,17 @@ impl Schedule {
             let Some(next) = period.next.filter(|next| *next <= now) else {
                 continue;
             };
-            let late = (now - next).as_nanos().checked_div(period.every.as_nanos());
+            let late = period
+                .every
+                .map(|every| (now - next).as_nanos() / every.as_nanos());
             let periods = late.map_or(1, |late| {
                 u64::try_from(late).unwrap_or(u64::MAX).saturating_add(1)
             });
             period.elapsed = period.elapsed.saturating_add(periods);
-            let ahead = period
+            let times = u32::try_from(periods).unwrap_or(u32::MAX);
+            period.next = period
                 .every
-                .saturating_mul(u32::try_from(periods).unwrap_or(u32::MAX));
-            period.next = late.and_then(|_| next.checked_add(ahead));
+                .and_then(|every| next.checked_add(every.saturating_mul(times)));
             interrupt.raise();
         }
     }
@@ -659,8 +719,8 @@ mod tests {
     #[test]
     fn unsetting_a_timer_that_elapsed_clears_what_it_raised() {
         let interrupt = Interrupt::default();
-        let mut timer = Timer::default();
-        timer.arm(&interrupt, 1, 0);
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(1, 0);
         let armed = Instant::now();
         while !interrupt.raised().load(Ordering::Relaxed) {
             assert!(
@@ -669,7 +729,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-        timer.arm(&interrupt, 0, 0);
+        timer.arm(0, 0);
         assert_eq!(
             interrupt.taken(),
             None,
@@ -695,21 +755,21 @@ mod tests {
         let interrupt = Interrupt::default();
         let began = Instant::now();
         for _ in 0..100 {
-            let mut timer = Timer::default();
-            timer.arm(&interrupt, 30, 2);
+            let mut timer = Timer::new(&interrupt);
+            timer.arm(30, 2);
             assert_eq!(
                 timer.shared.held().phase,
                 Phase::Waiting,
                 "armed and waiting"
             );
-            timer.arm(&interrupt, 0, 2);
+            timer.arm(0, 2);
             assert_eq!(serving(&timer), None, "unset, and no thread");
             assert_eq!(
                 Arc::strong_count(&timer.shared),
                 1,
                 "the thread let go of the timer before the unset returned"
             );
-            timer.arm(&interrupt, 30, 2);
+            timer.arm(30, 2);
             let shared = Arc::downgrade(&timer.shared);
             drop(timer);
             assert!(
@@ -729,24 +789,26 @@ mod tests {
     #[test]
     fn rearming_a_timer_keeps_its_thread() {
         let interrupt = Interrupt::default();
-        let mut timer = Timer::default();
-        timer.arm(&interrupt, 30, 2);
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(30, 2);
         let first = serving(&timer);
         assert!(first.is_some(), "armed, and served");
         for seconds in 1..=1000 {
-            timer.arm(&interrupt, 30 + seconds, 2);
+            timer.arm(30 + seconds, 2);
             assert_eq!(serving(&timer), first, "the same thread");
         }
     }
 
     /// php's `max_execution_time = 0`, the CLI's default: no deadline, no
-    /// thread, and an interrupt nothing raises.
+    /// thread, and an interrupt nothing raises; and the same for a limit
+    /// past what the clock can count to, `set_time_limit(PHP_INT_MAX)`.
     #[test]
     fn a_request_with_no_time_limit_arms_no_timer() {
         let interrupt = Interrupt::default();
-        let mut timer = Timer::default();
-        timer.arm(&interrupt, 0, 2);
-        timer.arm(&interrupt, -1, 2);
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(0, 2);
+        timer.arm(-1, 2);
+        timer.arm(i64::MAX, i64::MAX);
         assert_eq!(serving(&timer), None);
         assert!(!interrupt.raised().load(Ordering::Relaxed));
     }
@@ -758,10 +820,10 @@ mod tests {
     #[test]
     fn a_periodic_interrupt_counts_the_periods_nobody_read() {
         let interrupt = Interrupt::default();
-        let mut timer = Timer::default();
+        let mut timer = Timer::new(&interrupt);
         let every = Duration::from_millis(5);
         let began = Instant::now();
-        let periodic = timer.start_periodic(&interrupt, every, every);
+        let periodic = timer.start_periodic(every, Some(every));
         thread::sleep(every * 20);
         let read = periodic.map_or(0, |periodic| timer.periods_elapsed(periodic));
         let at_most = u64::try_from(began.elapsed().as_millis() / every.as_millis()).unwrap_or(0);
@@ -774,29 +836,50 @@ mod tests {
         assert!(again <= 1, "each count is handed over once, not {again}");
     }
 
-    /// A period of zero raises the interrupt once, `first` from now, as
+    /// A periodic interrupt with no period raises the interrupt once, `first` from now, as
     /// Excimer's one-shot timer does; stopping the last periodic
     /// interrupt ends the thread, and dropping a timer that still has
     /// one joins it.
     #[test]
     fn a_periodic_interrupt_of_no_period_raises_once_and_its_thread_ends() {
         let interrupt = Interrupt::default();
-        let mut timer = Timer::default();
-        let once = timer.start_periodic(&interrupt, Duration::from_millis(5), Duration::ZERO);
+        let mut timer = Timer::new(&interrupt);
+        let once = timer.start_periodic(Duration::from_millis(5), None);
         assert!(serving(&timer).is_some(), "started, and served");
         thread::sleep(Duration::from_millis(50));
         assert_eq!(once.map(|once| timer.periods_elapsed(once)), Some(1));
         if let Some(once) = once {
-            timer.stop_periodic(&interrupt, once);
+            timer.stop_periodic(once);
         }
         assert_eq!(serving(&timer), None, "stopped, and no thread");
         assert_eq!(Arc::strong_count(&timer.shared), 1);
 
-        let every = timer.start_periodic(&interrupt, Duration::ZERO, Duration::from_secs(30));
+        let every = timer.start_periodic(Duration::ZERO, Some(Duration::from_secs(30)));
         assert!(every.is_some() && serving(&timer).is_some());
         let shared = Arc::downgrade(&timer.shared);
         drop(timer);
         assert!(shared.upgrade().is_none(), "the drop joined the thread");
+    }
+
+    /// ADR-0010, Threads: a fork is called with the timer's thread joined,
+    /// and after it the parent's thread serves the same deadlines, the
+    /// execution timer's and a periodic interrupt's, counted from where
+    /// they stood rather than from the fork.
+    #[test]
+    fn a_fork_finds_no_thread_and_the_parent_keeps_its_deadlines() {
+        let interrupt = Interrupt::default();
+        let mut timer = Timer::new(&interrupt);
+        timer.arm(30, 2);
+        let periodic = timer.start_periodic(Duration::from_secs(20), Some(Duration::from_secs(20)));
+        let before = timer.shared.held().next();
+        let holders = timer.forked(|| interrupt.holders());
+        assert_eq!(holders, 2, "the test and the timer, and no thread");
+        assert!(serving(&timer).is_some(), "started again after the fork");
+        assert_eq!(timer.shared.held().next(), before, "the same deadlines");
+        if let Some(periodic) = periodic {
+            timer.stop_periodic(periodic);
+        }
+        assert!(serving(&timer).is_some(), "the execution timer is left");
     }
 
     /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
