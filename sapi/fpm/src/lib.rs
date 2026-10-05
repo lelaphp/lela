@@ -271,8 +271,13 @@ pub fn main() -> ExitCode {
                 ..RequestDescription::default()
             };
             let mut sink = Stdout;
-            engine(&ini).serve(description, &mut sink);
-            EXIT_OK
+            // A request whose start fails is `FPM_EXIT_SOFTWARE`
+            // (`Z/sapi/fpm/fpm/fpm_main.c:1727-1734`).
+            if engine(&ini).serve(description, &mut sink).start_failed {
+                crate::master::EXIT_SOFTWARE
+            } else {
+                EXIT_OK
+            }
         }
         Ask::Run(mut args) => {
             args.argv = words;

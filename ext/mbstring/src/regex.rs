@@ -258,14 +258,18 @@ pub(crate) fn rshutdown(req: &mut Request) {
     }
 }
 
-/// `PHP_MINIT_FUNCTION(mb_regex)`'s `onig_init`, as the engine is built.
-pub(crate) fn startup() -> Startup {
+/// `PHP_MINIT_FUNCTION(mb_regex)`'s `onig_init`
+/// (`Z/ext/mbstring/php_mbregex.c:115`), the process start (ADR-0010):
+/// called once for the process, the first time an engine carrying
+/// mbstring is built. php's `onig_end` at `MSHUTDOWN` has no
+/// counterpart, since no host ends the process scope.
+pub(crate) fn initialize() -> Initialized {
     onig::init();
-    Startup
+    Initialized
 }
 
-/// What startup leaves: nothing but the library initialised.
-pub(crate) struct Startup;
+/// The process scope's proof that oniguruma is started.
+pub(crate) struct Initialized;
 
 /// `PHP_MINFO_FUNCTION(mb_regex)`.
 pub(crate) fn info(req: &mut Request) {
