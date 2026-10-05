@@ -1,0 +1,391 @@
+//! How a request ends: where it stands in `php_request_startup`,
+//! `php_execute_script` and `php_request_shutdown`, `zend_bailout` and
+//! the `zend_try` that catches it, the fatal, core and uncaught endings,
+//! the compile-time refusal, `exit` and its unwind, and the status the
+//! process ends with. Where the request stands is [`Progress`]'s, whose
+//! field no file but this one reads.
+
+use std::sync::Arc;
+
+use php_heap::Fatal;
+
+use crate::api::abi::AfterLog;
+use crate::api::raising::Level;
+use crate::api::values::{PhpString, Value};
+
+use diagnostics::Display;
+
+use super::{Raised, Request, diagnostics};
+
+/// Where a request stands, as `php_verror` reads it to name the origin
+/// of a diagnostic raised while no function is active
+/// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
+/// `php_request_startup` and cleared by the CLI before it compiles the
+/// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
+/// served inside it; the main op array; `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`); and
+/// `EG_FLAGS_IN_RESOURCE_SHUTDOWN`, which `shutdown_executor` sets beside
+/// it as it closes the resources (`Z/Zend/zend_execute_API.c:276`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Startup,
+    Running,
+    Shutdown,
+    ResourceShutdown,
+    /// The shutdown request the engine end is served on, which
+    /// `php_during_module_shutdown()` names.
+    EngineEnd,
+}
+
+/// The fatal the request is ending in, when it is one: `E_ERROR` and
+/// its kin, or a source that did not compile. An `exit` is not one:
+/// php unwinds it as a throwable ([`Request::throw_unwind_exit`]) and
+/// records its status alone, in `EG(exit_status)`, which a fatal writes
+/// too and the last write wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ending {
+    /// `E_ERROR`: the fatal as `php_error_cb` gave it to `php_log_err`,
+    /// one entry, which is the text `serve` reports and not a second
+    /// rendering; the streams already have theirs.
+    Fatal(String),
+    /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
+    /// on, and what is left is php's status, 255.
+    Parse,
+}
+
+/// Where the request stands, whose field no file but this one reads.
+pub(super) struct Progress {
+    /// Where the request stands in `php_request_startup`,
+    /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
+    /// names a diagnostic's origin by when no function is active.
+    phase: Phase,
+}
+
+impl Default for Progress {
+    fn default() -> Progress {
+        Progress {
+            phase: Phase::Startup,
+        }
+    }
+}
+
+impl Request {
+    pub(crate) fn ending(&self) -> Option<&Ending> {
+        self.ending.as_ref()
+    }
+
+    /// Whether a `zend_bailout` is under way, which leaves every step
+    /// it passes through at once.
+    pub fn bailing_out(&self) -> bool {
+        self.bailout
+    }
+
+    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
+    /// fatal where the request stands, on the streams the two ini entries
+    /// say, and the request ends in it. It is rendered once, here, and
+    /// `serve` writes nothing of its own. The store is marked destructed
+    /// before the request bails out (`zend_objects_store_mark_destructed`), so no
+    /// object standing then is destructed, and a delegation of
+    /// generators a frame lets go of on the way out is not given up
+    /// link by link through their destructors:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// function a() { yield from a(); }
+    /// ini_set("memory_limit", "8M");
+    /// foreach (a() as $v);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted %s
+    /// sd
+    /// d
+    /// ```
+    pub(crate) fn end_in_fatal(&mut self, message: &str) {
+        // One raised while a bailout is under way is not rendered: php
+        // left what raised it at the first. One raised after the bailout
+        // was caught, in a later step of `php_request_shutdown`, is.
+        if self.bailout {
+            return;
+        }
+        // `php_error_cb` marks the store before it bails out: no object
+        // that stands now is destructed, one a shutdown function makes is.
+        self.heap.mark_destructed();
+        let (file, line) = self.executed_site();
+        self.note_error_in(Level::Error, message, &file, line);
+        self.end_at_level(Level::Error, message, &file, line);
+    }
+
+    /// `zend_error_noreturn(E_CORE_ERROR, ...)`: the one core fatal
+    /// this engine raises, `zend_objects_destroy_object`'s. php gives
+    /// `E_CORE_ERROR` no site at all (`get_filename_lineno`,
+    /// `Z/Zend/zend.c:1642`), so it is rendered at `Unknown` on line
+    /// zero wherever it was raised, and the request ends in it.
+    pub(super) fn end_in_core_error(&mut self, message: &str) {
+        if self.bailout {
+            return;
+        }
+        self.heap.mark_destructed();
+        self.note_error_in(Level::CoreError, message, b"Unknown", 0);
+        self.end_at_level(Level::CoreError, message, b"Unknown", 0);
+    }
+
+    /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936-990`): an
+    /// uncaught throwable rendered at the site it recorded, through
+    /// `zend_error_cb` alone and never `zend_error_impl`, with
+    /// `EG(last_fatal_error_backtrace)` cleared first, so the diagnostic
+    /// carries the throwable's own trace in its message and never a
+    /// fatal's after the site, whatever `fatal_error_backtraces` says. A
+    /// `ParseError` or a `CompileError` is rendered at its own level and
+    /// the rest as `E_ERROR`, and the request ends as the level ends it.
+    pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        if self.bailout {
+            return;
+        }
+        self.clear_fatal_error_backtrace();
+        // `zend_strpprintf`'s message, handed to `zend_error_cb` and
+        // released after.
+        if let Ok(string) = PhpString::new(self, message.as_bytes()) {
+            self.zend_error_cb(level, string, message, file, line);
+            self.release(Value::string(string));
+        }
+        self.end_at_level(level, message, file, line);
+    }
+
+    /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
+    /// it cannot recover from that the built-in handler served, raised
+    /// where the request stands: every object standing marked
+    /// destructed, `zend_objects_store_mark_destructed`, so none of them
+    /// is destructed after it, while one a shutdown function makes is;
+    /// and the request ended at the level. What `trigger_error()` reaches
+    /// with `E_USER_ERROR`.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { $e = new D; echo "sd\n"; });
+    /// trigger_error("boom", E_USER_ERROR);
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 5
+    ///
+    /// Fatal error: boom in %s on line 5
+    /// sd
+    /// d
+    /// ```
+    pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
+        let (file, line) = self.executed_site();
+        self.heap.mark_destructed();
+        self.end_at_level(level, message, &file, line);
+    }
+
+    /// The ending alone, the diagnostic already rendered at its own
+    /// level: php's status alone for `E_PARSE`, and for every other
+    /// fatal level the log form the host is handed, the trace under
+    /// `Stack trace:` where `php_error_cb` gave `php_log_err` one. The
+    /// cycle collector takes no root from here on, as `_zend_bailout`
+    /// protects it (`Z/Zend/zend.c:1263`), and a collection serving
+    /// destructors when the fatal came returns without freeing.
+    fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        self.heap.gc_protect(true);
+        // A host that bailed out from inside its log left before
+        // `php_error_cb` wrote the status or the header.
+        let left_in_log = self.take_left_in_log();
+        if !left_in_log {
+            self.exit_status = 255;
+        }
+        // `php_error_cb`'s arm for what it cannot recover from
+        // (`Z/main/main.c:1517`): with nothing displayed, a response not
+        // yet committed at 200 answers `HTTP/1.0 500 Internal Server Error`.
+        if !left_in_log
+            && self.display_errors() == Display::Off
+            && !self.output().headers_sent()
+            && self.output().response_code() == 200
+        {
+            let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
+        }
+        self.bailout = true;
+        if self.ending.is_some() {
+            return;
+        }
+        self.ending = Some(match level {
+            Level::Parse => Ending::Parse,
+            _ => Ending::Fatal(format!(
+                "PHP Fatal error:  {message} in {} on line {line}{}",
+                String::from_utf8_lossy(file),
+                self.stack_trace_after_the_site()
+            )),
+        });
+    }
+
+    /// `E_PARSE` or `E_COMPILE_ERROR` at a site of its own, which is what
+    /// the compiler's refusal carries: rendered once through
+    /// `php_error_cb` at its level, and the request ended as that level
+    /// ends it, php's status alone for the parse error and the log form
+    /// beside it for the compile error, which `php_error_cb` bails out
+    /// of as it does from `E_ERROR`. php's parser refuses by throwing a
+    /// `ParseError` (`zenderror`, `Z/Zend/zend_language_parser.y`), which
+    /// `zend_exception_error` renders with no trace fetched, while the
+    /// compiler's `zend_error_noreturn(E_COMPILE_ERROR, …)` goes through
+    /// `zend_error_impl` and fetches one, `#0 {main}` with no frame
+    /// standing.
+    pub(crate) fn end_in_compile_time(
+        &mut self,
+        level: Level,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) {
+        if level == Level::Parse {
+            self.end_in_uncaught(level, message, file, line);
+            return;
+        }
+        self.note_error_in(level, message, file, line);
+        self.end_at_level(level, message, file, line);
+    }
+
+    /// `EG(exit_status) = status`, `ZEND_FUNCTION(exit)`'s int arm: the
+    /// last write wins, so an `exit` in a destructor or a shutdown
+    /// function moves the status a fatal or an earlier `exit` set.
+    pub(crate) fn end_in_exit(&mut self, code: i32) {
+        self.exit_status = code;
+    }
+
+    /// php's `EG(exit_status)`, what `serve` reports the request ended
+    /// with: what `exit` last wrote, or 255 after a fatal.
+    #[must_use]
+    pub fn exit_status(&self) -> i32 {
+        self.exit_status
+    }
+
+    /// `zend_throw_unwind_exit` (`Z/Zend/zend_exceptions.c:1061`): the
+    /// unwind exit is standing where a throwable would be, for the
+    /// unwinder to read; php asserts nothing else is pending, and a
+    /// raiser that found something pending returns it instead.
+    pub(crate) fn throw_unwind_exit(&mut self) {
+        if self.raised.is_none() {
+            self.raised = Some(Raised::UnwindExit);
+        }
+    }
+
+    /// `zend_throw_graceful_exit` (`Z/Zend/zend_exceptions.c:1069`): the
+    /// graceful exit standing where a throwable would, which is what
+    /// `zend_fiber_object_destroy` resumes a suspended fiber with.
+    pub(crate) fn throw_graceful_exit(&mut self) {
+        if self.raised.is_none() {
+            self.raised = Some(Raised::GracefulExit);
+        }
+    }
+
+    /// Whether the unwind exit is what is being unwound: php's
+    /// `zend_is_unwind_exit(EG(exception))`, read by the unwinder where
+    /// it would enter a `finally` block or chain a throwable, and by
+    /// [`Request::serve_user`] where a native reads what its callback
+    /// left.
+    pub(crate) fn unwind_exit(&self) -> bool {
+        self.raised == Some(Raised::UnwindExit)
+    }
+
+    /// What the unwinder leaves by that no `catch` takes and no `finally`
+    /// is served for: the unwind exit, or a fatal leaving for its
+    /// `zend_try`.
+    pub(crate) fn unwinding(&self) -> bool {
+        self.unwind_exit() || self.bailout
+    }
+
+    /// `zend_end_try()` over a fatal's `zend_bailout`: the `zend_try` it left
+    /// for has caught it, and what follows is served again.
+    ///
+    /// A fatal a native raises inside a callback leaves the callback,
+    /// the native that called it and the program, as `zend_bailout`
+    /// leaves them all for the `zend_try` in `php_execute_script`:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// array_map(function ($x) { echo "cb $x\n"; str_repeat('x', 4 << 20); echo "after $x\n"; }, [1, 2]);
+    /// echo "main after\n";
+    /// ```
+    /// ```expect exit=255
+    /// cb 1
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 3
+    /// ```
+    ///
+    /// No `finally` is served on the way out, and each step of
+    /// `php_request_shutdown` is a `zend_try` of its own: the shutdown
+    /// functions are served after the program's fatal, one of them
+    /// raising a second, which is rendered and ends the walk.
+    ///
+    /// ```php
+    /// register_shutdown_function(function () { echo "sd1\n"; str_repeat('x', 4 << 20); echo "sd1 after\n"; });
+    /// register_shutdown_function(function () { echo "sd2\n"; });
+    /// ini_set('memory_limit', '2M');
+    /// try { str_repeat('y', 4 << 20); } finally { echo "finally\n"; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+    /// sd1
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 2
+    /// ```
+    pub(crate) fn catch_bailout(&mut self) {
+        self.bailout = false;
+    }
+
+    /// The request's [`Phase`].
+    pub(crate) fn phase(&self) -> Phase {
+        self.progress.phase
+    }
+
+    /// The request moved to `phase`, as `serve` crosses php's startup
+    /// and shutdown.
+    pub(crate) fn enter_phase(&mut self, phase: Phase) {
+        self.progress.phase = phase;
+    }
+
+    pub(crate) fn end_in(&mut self, fatal: &Fatal) {
+        // `php_output_discard_all()` where the heap refused with its
+        // limit lifted, before the fatal is displayed
+        // (`zend_alloc_in_memory_limit_error_reporting`).
+        if self.heap.in_memory_limit_error() {
+            crate::output::discard_all(self);
+        }
+        match fatal {
+            Fatal::Error(message) => self.end_in_fatal(message),
+            Fatal::OutOfMemory(bytes) => self.end_in_fatal(&format!(
+                "Allowed memory size of {} bytes exhausted (tried to allocate {bytes} bytes)",
+                self.ini_parse_bytes_of("memory_limit")
+            )),
+        }
+        // A fatal the heap raised lifted its limit for the rendering, as
+        // `zend_mm_safe_error` does; it holds again from here.
+        self.heap.overflow_rendered();
+    }
+
+    /// Each extension's hook once the primary program has ended and before
+    /// the request shuts down, in bundle order
+    /// ([`ExtensionBuilder::program_ended`]).
+    ///
+    /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
+    pub(crate) fn program_ended(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        for hook in shared.supplied.program_ended.iter() {
+            hook(self);
+        }
+    }
+
+    /// The host's log for a fatal it took, `sapi_module.log_message`,
+    /// the last extension's that supplied one
+    /// ([`ExtensionBuilder::fatal_logged`]).
+    ///
+    /// [`ExtensionBuilder::fatal_logged`]: crate::api::abi::ExtensionBuilder::fatal_logged
+    pub(super) fn fatal_logged(&mut self) -> AfterLog {
+        let shared = Arc::clone(&self.shared);
+        shared
+            .supplied
+            .fatal_logged
+            .get()
+            .map_or(AfterLog::Returned, |hook| hook(self))
+    }
+}

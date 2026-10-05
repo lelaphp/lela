@@ -962,7 +962,7 @@ impl Request {
         // `php_error_cb`'s display branch (`Z/main/main.c:1469`): while
         // modules start and while the request starts, what is raised is
         // displayed only under `display_startup_errors`, php's default on.
-        let starting = self.diagnostics.display_direct || self.phase == Phase::Startup;
+        let starting = self.diagnostics.display_direct || self.phase() == Phase::Startup;
         if starting
             && self
                 .ini_get(b"display_startup_errors")
