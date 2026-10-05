@@ -124,6 +124,12 @@ impl Request {
             self.release(value);
             return;
         };
+        self.set_table_var(frame, name, value);
+    }
+
+    /// [`Request::set_caller_var`]'s write into `frame`'s table, rebuilt
+    /// first where the frame has none.
+    fn set_table_var(&mut self, frame: FrameRef, name: &[u8], value: Value) {
         let table = self.rebuild_symbol_table(frame);
         let indirect = self.table_mut(table).and_then(|entries| {
             entries
@@ -156,12 +162,30 @@ impl Request {
             self.release(value);
             return false;
         };
+        self.set_local_var_in(frame, name, value, false)
+    }
+
+    /// `zend_set_local_var(name, value, force)`
+    /// (`Z/Zend/zend_execute_API.c:1917-1956`) with
+    /// `EG(current_execute_data)` at `frame`: the bucket of its symbol
+    /// table where it has one, else the CV of that name, else, with
+    /// `force`, the table `zend_rebuild_symbol_table` builds for it; what
+    /// stood there released, which php's CV arm leaves to its callers,
+    /// whose variable is undefined. `false`, and the value released,
+    /// where none of them takes it.
+    pub(super) fn set_local_var_in(
+        &mut self,
+        frame: FrameRef,
+        name: &[u8],
+        value: Value,
+        force: bool,
+    ) -> bool {
         if self
             .vm
             .at(frame)
             .is_some_and(|state| state.symbol_table.is_some())
         {
-            self.set_caller_var(name, value);
+            self.set_table_var(frame, name, value);
             return true;
         }
         let at = self
@@ -171,6 +195,10 @@ impl Request {
             .and_then(|at| u32::try_from(at).ok());
         let place = at.and_then(|at| self.stack.frame_mut(frame)?.slot_ptr(Slot(at)));
         let Some(place) = place else {
+            if force {
+                self.set_table_var(frame, name, value);
+                return true;
+            }
             self.release(value);
             return false;
         };

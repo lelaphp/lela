@@ -37,7 +37,7 @@ use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::exec::{self, FrameState, Vm};
 
-use super::Request;
+use super::{OpArrayView, Request};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
 /// as an extension stores it: read again through [`Request::frame_of`],
@@ -146,6 +146,15 @@ impl<'a> FrameView<'a> {
             .unwrap_or_default()
     }
 
+    /// `EX(func)->op_array`: the op array the frame serves, a
+    /// function's or an included, evaluated or main file's, read
+    /// ([`OpArrayView`]).
+    #[must_use]
+    pub fn op_array(&self) -> Option<OpArrayView<'a>> {
+        let state = self.state()?;
+        exec::body_of(&state.unit, state.body).map(OpArrayView::of)
+    }
+
     /// `EX(opline)->lineno`: the line the frame stands on, the call's
     /// for a frame below the innermost; zero past its op array.
     #[must_use]
@@ -233,6 +242,14 @@ impl Request {
             vm,
             at,
         })
+    }
+
+    /// Where the frame `id` names stands, where that is the running
+    /// stack: the frames a write or an evaluation reaches
+    /// ([`Request::set_frame_var`], [`Request::eval_in_frame`]).
+    pub(super) fn running_frame_of(&self, id: FrameId) -> Option<FrameRef> {
+        let view = self.frame_of(id)?;
+        (view.stack == 0).then_some(view.at)
     }
 
     /// `frame` on the running stack, read: what an observer's handler is
