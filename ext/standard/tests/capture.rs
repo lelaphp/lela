@@ -219,3 +219,70 @@ fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
         "fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709"
     );
 }
+
+/// #1986: `array_walk` holds no key of an element it has yet to visit.
+/// The callback unsets the elements ahead, which frees their runtime
+/// keys, and then builds keys of the same size in the reverse order, so
+/// each takes the slot a freed key had. php's iterator walks the
+/// buckets, the new ones in the order they were appended; a walk that
+/// kept the freed keys read them as the new ones, in the old order.
+#[test]
+fn array_walk_holds_no_key_of_an_element_the_callback_unset() {
+    let (stdout, fatal) = served(
+        r#"<?php
+$a = [];
+for ($i = 0; $i < 4; $i++) { $a["kkk" . $i] = $i; }
+array_walk($a, function ($v, $k) use (&$a) {
+    echo $k, " ";
+    if ($v === 0) {
+        unset($a["kkk1"], $a["kkk2"], $a["kkk3"]);
+        for ($n = 3; $n >= 1; $n--) { $a["ZZZ" . $n] = $n; }
+    }
+});
+echo implode(",", array_keys($a));"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "kkk0 ZZZ3 ZZZ2 ZZZ1 kkk0,ZZZ3,ZZZ2,ZZZ1");
+}
+
+/// #1987: `array_walk` over an object holds no name of a property it has
+/// yet to visit. The callback unsets the dynamic properties ahead, which
+/// frees their runtime-built names, and then writes properties under
+/// names of the same size in the reverse order, so each takes the slot a
+/// freed name had; php hands the callback the new properties in the
+/// order they were written, each with its own name and value.
+#[test]
+fn array_walk_holds_no_name_of_a_property_the_callback_unset() {
+    let (stdout, fatal) = served(
+        r#"<?php
+$o = new stdClass;
+for ($i = 0; $i < 4; $i++) { $name = "ppp" . $i; $o->$name = $i; }
+array_walk($o, function ($v, $k) use ($o) {
+    echo "$k=$v ";
+    if ($v === 0) {
+        unset($o->ppp1, $o->ppp2, $o->ppp3);
+        for ($n = 3; $n >= 1; $n--) { $name = "QQQ" . $n; $o->$name = $n * 10; }
+    }
+});"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "ppp0=0 QQQ3=30 QQQ2=20 QQQ1=10 ");
+}
+
+/// #1987: a callback that lets go of the object the walk is over
+/// destroys it there, and the walk reads the variable again and raises
+/// php's `TypeError`, never reading the object's freed table.
+#[test]
+fn array_walk_over_an_object_the_callback_let_go_of_is_php_s_type_error() {
+    let (stdout, fatal) = served(
+        r#"<?php
+class D { public $a = 1; public $b = 2; function __destruct() { echo "dtor "; } }
+$o = new D;
+try { array_walk($o, function ($v, $k) { global $o; echo "$k "; $o = null; echo "after "; }); } catch (TypeError $e) { echo $e->getMessage(); }"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "a dtor after Iterated value is no longer an array or object"
+    );
+}

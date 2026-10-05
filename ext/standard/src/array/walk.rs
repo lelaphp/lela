@@ -12,9 +12,9 @@ use php_ext::abi::{Callable, FromArgument, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, call_stack_end, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, Value, ValueRef};
+use php_ext::values::{HashIterator, Key, PhpArray, PhpObject, PhpRef, Value, ValueRef};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::pointer::ArrayOrObject;
@@ -26,9 +26,12 @@ use super::{copied, key_copy};
 /// each element of the array the reference holds made a reference in
 /// place (`ZVAL_MAKE_REF`) and handed to the callback with its key, and
 /// `$arg` third where it was given, so a callback that takes the value
-/// by reference writes the caller's array. The array is read again
-/// after every call, since the callback may change it: an element it
-/// removed is not visited, and one it appended is.
+/// by reference writes the caller's array. The walk stands at a bucket
+/// of the table, a hash iterator the table's writes move, and the
+/// variable is read again after every call, since the callback may
+/// change it: an element it removed is not visited, one it appended
+/// is, and a key it removed and wrote again is visited again at the
+/// end, where it now stands.
 ///
 /// ```php
 /// $a = ["x" => 1, "y" => 2, 3];
@@ -55,6 +58,28 @@ use super::{copied, key_copy};
 /// 139
 /// stop
 /// array_walk(): Argument #1 ($array) must be of type array, int given
+/// ```
+///
+/// The visit order under a callback that removes and appends: an
+/// element removed ahead, two keys removed and written again, appends
+/// that grow the table, and appends that turn a list into a hash and
+/// rehash it, which move the walk with the bucket it stood at.
+///
+/// ```php
+/// $a = ['a' => 1, 'b' => 2, 'c' => 3, 'd' => 4];
+/// array_walk($a, function ($v, $k) use (&$a) { echo $k; if ($k === 'a') { unset($a['c']); } }); echo "\n";
+/// $a = ['a' => 1, 'b' => 2, 'c' => 3];
+/// array_walk($a, function ($v, $k) use (&$a) { echo $k; if ($v === 1) { unset($a['a'], $a['b']); $a['a'] = 9; $a['b'] = 8; } }); echo "\n";
+/// $a = [1, 2];
+/// array_walk($a, function ($v, $k) use (&$a) { echo " $k=$v"; if ($v < 5) { $a[] = $v + 3; } }); echo "\n";
+/// $a = [1, 2, 3];
+/// array_walk($a, function ($v, $k) use (&$a) { echo " $k"; if ($k === 1) { unset($a[0]); for ($i = 0; $i < 9; $i++) { $a["k$i"] = $i; } } }); echo "\n";
+/// ```
+/// ```expect
+/// abd
+/// acab
+///  0=1 1=2 2=4 3=5 4=7
+///  0 1 2 k0 k1 k2 k3 k4 k5 k6 k7 k8
 /// ```
 ///
 /// The declarations of the natives that call back.
@@ -123,6 +148,7 @@ use super::{copied, key_copy};
 ///
 /// ```php
 /// $a = [1, 2, 3]; array_walk($a, function (&$v) { global $a; echo $v, " "; if ($v == 2) { $a = [7, 8]; } $v *= 10; }); var_dump($a);
+/// $c = [1, 2, 3]; array_walk($c, function ($v, $k) { global $c; echo " $k=$v"; if ($k === 0) { $d = [5, 6, 7, 8]; next($d); next($d); $c = $d; } }); echo "\n";
 /// $b = [1, 2]; try { array_walk($b, function () { global $b; $b = 1; }); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
@@ -132,6 +158,7 @@ use super::{copied, key_copy};
 ///   [1]=>
 ///   int(80)
 /// }
+///  0=1 2=7 3=8
 /// Iterated value is no longer an array or object
 /// ```
 #[php_function]
@@ -209,9 +236,13 @@ fn walk(
     }
     // `Z_PARAM_FUNC` after `Z_PARAM_ARRAY_OR_OBJECT_EX`, in php's order.
     let callback = callback.hold(req)?;
-    let userdata = match arg {
-        Passed::Given(userdata) => Some(userdata),
-        Passed::Omitted => None,
+    let walking = Walk {
+        callback: &callback,
+        userdata: match arg {
+            Passed::Given(userdata) => Some(userdata),
+            Passed::Omitted => None,
+        },
+        recursive,
     };
     // A value where a reference was asked for, past the notice: the
     // walk is over a cell of its own, which nobody reads after.
@@ -221,7 +252,7 @@ fn walk(
         req.addref(&target);
         PhpRef::new(req, target)?
     };
-    let walked = walk_holder(req, holder, &callback, userdata, recursive);
+    let walked = walk_holder(req, holder, &walking);
     if given.reference().is_none() {
         req.release(holder.as_value());
     }
@@ -229,99 +260,170 @@ fn walk(
     Ok(True)
 }
 
-/// One level of `php_array_walk` over what the cell `holder` holds.
-fn walk_holder(
-    req: &mut Request,
-    holder: PhpRef,
-    callback: &Callable,
+/// What every level of a walk hands on, php's `php_array_walk_context`
+/// with the two arguments `php_array_walk` passes beside it: the
+/// callback, the `$arg` it is given third, and whether an element that
+/// is an array is descended into.
+struct Walk<'a> {
+    callback: &'a Callable,
     userdata: Option<Value>,
     recursive: bool,
-) -> Result<(), Thrown> {
-    let start = holder.get();
-    if let Some(object) = start.as_object().copied() {
-        return walk_object(req, object, callback, userdata, recursive);
-    }
-    let Some(mut table) = holder.separate_array(req)? else {
-        return Ok(());
-    };
-    if table.is_empty() {
-        return Ok(());
-    }
-    // `zend_hash_internal_pointer_reset_ex`: the walk starts at the first
-    // element, whatever the array's own pointer says.
-    let mut pending: Vec<Key> = table.snapshot_refs().into_iter().map(|(k, _)| k).collect();
-    let mut visited: HashSet<Key> = HashSet::new();
-    'table: loop {
-        for key in std::mem::take(&mut pending) {
-            if !visited.insert(key.clone()) {
-                continue;
-            }
-            let Some(value) = table.get(&key) else {
-                continue;
-            };
-            // `ZVAL_MAKE_REF(zv)`: the element a reference in place.
-            let reference = if let Some(reference) = value.as_php_ref() {
-                *reference
-            } else {
-                let Some(separated) = holder.separate_array(req)? else {
-                    continue;
-                };
-                table = separated;
-                req.addref(&value);
-                let reference = PhpRef::new(req, value)?;
-                let written = key_copy(req, &key);
-                table.set(req, written, reference.as_value())?;
-                reference
-            };
-            visit(req, reference, &key, callback, userdata, recursive)?;
-            // "Reload array and position -- both may have changed": the
-            // variable may hold another array now, which the iterator
-            // moves to, separated, at that array's own pointer
-            // (`zend_hash_iterator_pos_ex`); an object's properties are
-            // walked from their start; anything else is php's TypeError.
-            let now = holder.get();
-            if let Some(now) = now.as_array().copied() {
-                if !now.is_same(table) {
-                    let Some(separated) = holder.separate_array(req)? else {
-                        return Ok(());
-                    };
-                    table = separated;
-                    visited.clear();
-                    pending = from_pointer(table);
-                    continue 'table;
-                }
-            } else if let Some(object) = now.as_object().copied() {
-                return walk_object(req, object, callback, userdata, recursive);
-            } else {
-                return Err(throw_error(
-                    req,
-                    "TypeError",
-                    "Iterated value is no longer an array or object",
-                ));
-            }
-        }
-        // What the callbacks appended is visited after, as php's position
-        // walks on into it.
-        pending = table
-            .snapshot_refs()
-            .into_iter()
-            .map(|(k, _)| k)
-            .filter(|k| !visited.contains(k))
-            .collect();
-        if pending.is_empty() {
-            return Ok(());
+}
+
+/// Where the walk over an array the cell holds begins: its first
+/// element, `zend_hash_internal_pointer_reset_ex`, for the array the walk
+/// was given; the array's own pointer, `_zend_hash_get_current_pos`, for
+/// one a callback put in the cell in the place of an object.
+#[derive(Clone, Copy)]
+enum Start {
+    First,
+    Pointer,
+}
+
+/// How the walk over one table ended: past its last row, or with the
+/// cell holding something else, which `walk_holder` reads.
+enum Ended {
+    Done,
+    Replaced,
+}
+
+/// One level of `php_array_walk` over what the cell `holder` holds, read
+/// again whenever a callback put something else there: an array walked
+/// by a hash iterator, an object by its property table, and anything
+/// else php's `TypeError`.
+fn walk_holder(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thrown> {
+    let mut start = Start::First;
+    loop {
+        let now = holder.get();
+        let ended = if let Some(object) = now.as_object().copied() {
+            walk_object(req, holder, object, walk)?
+        } else if now.as_array().is_some() {
+            walk_array(req, holder, start, walk)?
+        } else if matches!(start, Start::First) {
+            return Err(fatal(
+                req,
+                "InternalError: array_walk's variable holds no array or object",
+            ));
+        } else {
+            return Err(throw_error(
+                req,
+                "TypeError",
+                "Iterated value is no longer an array or object",
+            ));
+        };
+        match ended {
+            Ended::Done => return Ok(()),
+            Ended::Replaced => start = Start::Pointer,
         }
     }
 }
 
-/// The keys of `table` from its internal pointer on,
-/// `_zend_hash_get_current_pos`: where an iterator moved onto a table it
-/// did not start on stands.
-fn from_pointer(table: PhpArray) -> Vec<Key> {
-    let keys = table.snapshot_refs().into_iter().map(|(k, _)| k);
-    match table.cursor_key() {
-        Some(at) => keys.skip_while(|k| *k != at).collect(),
-        None => Vec::new(),
+/// `php_array_walk` over the array the cell `holder` holds, separated:
+/// a hash iterator registered at the bucket `start` names
+/// (`zend_hash_iterator_add`) and given up on every way out
+/// (`zend_hash_iterator_del`).
+fn walk_array(
+    req: &mut Request,
+    holder: PhpRef,
+    start: Start,
+    walk: &Walk,
+) -> Result<Ended, Thrown> {
+    let table = held_array(req, holder)?;
+    let first = match start {
+        Start::First => table.live_from(0).map(|(first, _, _)| first),
+        Start::Pointer => pointer_bucket(table),
+    };
+    let Some(first) = first else {
+        return Ok(Ended::Done);
+    };
+    let at = HashIterator::new(req, &table, first);
+    let walked = walk_buckets(req, holder, table, at, walk);
+    at.release(req);
+    walked
+}
+
+/// The bucket of `table`'s internal pointer, `_zend_hash_get_current_pos`;
+/// `None` where it stands past the last element.
+fn pointer_bucket(table: PhpArray) -> Option<u32> {
+    let at = table.cursor_key()?;
+    let mut pos = 0;
+    while let Some((found, key, _)) = table.live_from(pos) {
+        if key == at {
+            return Some(found);
+        }
+        pos = found.saturating_add(1);
+    }
+    None
+}
+
+/// `php_array_walk`'s loop over an array: the element at the bucket the
+/// iterator `at` stands at, made a reference in place, the iterator
+/// moved past it before the callback runs, and the cell `holder` read
+/// again after: the same table goes on from where the table's writes
+/// moved the iterator (`zend_hash_iterator_pos_ex`), so an element the
+/// callback removed ahead is not visited, one it appended is, and a key
+/// it removed and wrote again is visited again where it now stands.
+/// Another array is walked on from where the iterator stands in it, at
+/// its own pointer unless it is a copy of this one, separated; what is
+/// no array ends this table's walk. Nothing of the table is kept across
+/// a callback but the iterator.
+fn walk_buckets(
+    req: &mut Request,
+    holder: PhpRef,
+    mut table: PhpArray,
+    at: HashIterator,
+    walk: &Walk,
+) -> Result<Ended, Thrown> {
+    let mut pos = at.position(req, &table);
+    loop {
+        let Some((found, key, value)) = table.live_from(pos) else {
+            return Ok(Ended::Done);
+        };
+        // `ZVAL_MAKE_REF(zv)`: the element a reference in place. php
+        // writes the cell into the table as it stands; the face writes
+        // a table only after `SEPARATE_ARRAY`, so a table the callback
+        // shared is separated first and walked on in the copy, which
+        // carries the iterator (`zend_array_dup_ht_iterators`).
+        let reference = if let Some(reference) = value.as_php_ref() {
+            *reference
+        } else {
+            let separated = held_array(req, holder)?;
+            if !separated.is_same(table) {
+                table = separated;
+                pos = at.position(req, &table);
+                continue;
+            }
+            req.addref(&value);
+            let reference = PhpRef::new(req, value)?;
+            table.replace(req, &key, reference.as_value())?;
+            reference
+        };
+        // `zend_hash_move_forward_ex`, before the call, "this mirrors the
+        // approach used by foreach": the next live bucket, or the end.
+        let next = found.saturating_add(1);
+        pos = table.live_from(next).map_or(next, |(next, _, _)| next);
+        at.set_position(req, pos);
+        visit(req, reference, &key, walk)?;
+        // "Reload array and position -- both may have changed".
+        let Some(now) = holder.get().as_array().copied() else {
+            return Ok(Ended::Replaced);
+        };
+        if !now.is_same(table) {
+            table = held_array(req, holder)?;
+        }
+        pos = at.position(req, &table);
+    }
+}
+
+/// The array the cell `holder` holds, separated: what the walk writes
+/// once it has read that the cell holds an array.
+fn held_array(req: &mut Request, holder: PhpRef) -> Result<PhpArray, Thrown> {
+    match holder.separate_array(req)? {
+        Some(table) => Ok(table),
+        None => Err(fatal(
+            req,
+            "InternalError: array_walk's variable holds no array",
+        )),
     }
 }
 
@@ -330,15 +432,8 @@ fn from_pointer(table: PhpArray) -> Vec<Key> {
 /// guarded against an array that holds itself, and otherwise the cell
 /// handed to the callback with its key, and `$arg` third where it was
 /// given.
-fn visit(
-    req: &mut Request,
-    reference: PhpRef,
-    key: &Key,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
-) -> Result<(), Thrown> {
-    if recursive && reference.get().as_array().is_some() {
+fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result<(), Thrown> {
+    if walk.recursive && reference.get().as_array().is_some() {
         call_stack_end(req)?;
         let Some(nested) = reference.separate_array(req)? else {
             return Ok(());
@@ -348,19 +443,27 @@ fn visit(
         }
         req.addref(&reference.as_value());
         nested.protect();
-        let walked = walk_holder(req, reference, callback, userdata, true);
+        let walked = walk_holder(req, reference, walk);
         if reference.get().as_array() == Some(&nested) {
             nested.unprotect();
         }
         req.release(reference.as_value());
         return walked;
     }
-    let mut arguments = vec![reference.as_value(), key_value(key)];
-    if let Some(userdata) = userdata {
+    // `ZVAL_COPY(&args[0], zv)` and `zend_hash_get_current_key_zval_ex`:
+    // the call's cell and key are owners of their own, so a callback that
+    // removes the element leaves both to the call.
+    let (cell, key) = (reference.as_value(), key_value(key));
+    req.addref(&cell);
+    req.addref(&key);
+    let mut arguments = vec![cell, key];
+    if let Some(userdata) = walk.userdata {
         arguments.push(userdata);
     }
-    let answer = call(req, callback, &arguments)?;
-    req.release(answer);
+    let answer = call(req, walk.callback, &arguments);
+    req.release(key);
+    req.release(cell);
+    req.release(answer?);
     Ok(())
 }
 
@@ -407,34 +510,113 @@ fn visit(
 ///   int(50)
 /// }
 /// ```
+///
+/// The walk holds an owner of each name it has read until it ends, so a
+/// dynamic property the callback removes leaves its name to the walk,
+/// and it holds the object only while the cell does: the cell is read
+/// again after every call, an object the callback let go of is
+/// destroyed there, and what the cell holds then is walked, another
+/// object from its first property, an array from its own pointer, and
+/// anything else php's `TypeError`.
+///
+/// ```php
+/// $o = new stdClass; for ($i = 0; $i < 4; $i++) { $name = "p" . $i; $o->$name = $i; }
+/// array_walk($o, function (&$v, $k) use ($o) { echo " $k=$v"; if ($v === 0) { unset($o->p1, $o->p2); $name = "q" . $v; $o->$name = 9; } $v = -$v; }); echo "\n";
+/// var_dump($o);
+/// class D { public $a = 1; public $b = 2; function __destruct() { echo " dtor"; } }
+/// $o = new D;
+/// try { array_walk($o, function ($v, $k) { global $o; echo " $k"; $o = null; }); } catch (TypeError $e) { echo " ", $e->getMessage(), "\n"; }
+/// $o = new D;
+/// array_walk($o, function ($v, $k) { global $o; echo " $k=$v"; if ($v === 1) { $o = new D; $o->a = 7; } }); echo "\n";
+/// $o = new stdClass; $o->a = 1; $o->b = 2;
+/// array_walk($o, function ($v, $k) { global $o; echo " $k=$v"; if ($k === 'a') { $p = [5, 6, 7]; next($p); $o = $p; } }); echo "\n";
+/// ```
+/// ```expect
+///  p0=0 p3=3 q0=9
+/// object(stdClass)#1 (3) {
+///   ["p0"]=>
+///   int(0)
+///   ["p3"]=>
+///   int(-3)
+///   ["q0"]=>
+///   int(-9)
+/// }
+///  a dtor Iterated value is no longer an array or object
+///  a=1 dtor a=7 b=2
+///  dtor a=1 1=6 2=7
+/// ```
 fn walk_object(
     req: &mut Request,
+    holder: PhpRef,
     object: PhpObject,
-    callback: &Callable,
-    userdata: Option<Value>,
-    recursive: bool,
-) -> Result<(), Thrown> {
-    let mut visited: HashSet<Key> = HashSet::new();
+    walk: &Walk,
+) -> Result<Ended, Thrown> {
+    let mut names = Names::default();
+    let walked = walk_rows(req, holder, object, walk, &mut names);
+    names.release(req);
+    walked
+}
+
+/// [`walk_object`]'s rounds: the rows of the property table whose names
+/// the walk has not read yet, each visited unless a callback removed it
+/// since, until a round finds none or the cell `holder` holds another
+/// value than `object`.
+fn walk_rows(
+    req: &mut Request,
+    holder: PhpRef,
+    object: PhpObject,
+    walk: &Walk,
+    names: &mut Names,
+) -> Result<Ended, Thrown> {
     loop {
-        let pending: Vec<Key> = object
-            .entries(req)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|key| !visited.contains(key))
-            .collect();
+        let mut pending = Vec::new();
+        for (key, _) in object.entries(req)? {
+            if names.take(req, &key) {
+                pending.push(key);
+            }
+        }
         if pending.is_empty() {
-            return Ok(());
+            return Ok(Ended::Done);
         }
         for key in pending {
-            visited.insert(key.clone());
             // A row an earlier callback removed is not visited.
             if object.row(req, &key)?.is_none() {
                 continue;
             }
             let cell = object.typed_row_ref(req, &key)?;
-            let visited_row = visit(req, cell, &key, callback, userdata, recursive);
+            let visited = visit(req, cell, &key, walk);
             req.release(cell.as_value());
-            visited_row?;
+            visited?;
+            // "Reload array and position": the walk of this object goes
+            // on only while the cell holds it.
+            if holder.get().as_object() != Some(&object) {
+                return Ok(Ended::Replaced);
+            }
+        }
+    }
+}
+
+/// The names of an object's rows a walk has read, one owner of each held
+/// from the round that read it to the walk's end.
+#[derive(Default)]
+struct Names(HashSet<Key>);
+
+impl Names {
+    /// `key` taken up with an owner of its own, `false` where the walk
+    /// has read it already.
+    fn take(&mut self, req: &mut Request, key: &Key) -> bool {
+        if self.0.contains(key) {
+            return false;
+        }
+        let owned = key_copy(req, key);
+        self.0.insert(owned);
+        true
+    }
+
+    /// The owners given up, on every way out of the walk.
+    fn release(self, req: &mut Request) {
+        for key in self.0 {
+            req.release(key_value(&key));
         }
     }
 }
