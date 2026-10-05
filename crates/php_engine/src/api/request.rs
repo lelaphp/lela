@@ -501,9 +501,10 @@ impl Resources {
 pub struct Interrupt(Arc<State>);
 
 impl Interrupt {
-    /// What signal delivery raises it with: the loop dispatches what was
-    /// delivered to its PHP handlers at its next check, which is php's
-    /// `zend_interrupt_function`.
+    /// What signal delivery and a periodic interrupt raise it with: the
+    /// loop serves each extension's interrupt hook at its next check,
+    /// which is php's `zend_interrupt_function`, and pcntl's dispatches
+    /// what was delivered to its PHP handlers.
     pub fn raise(&self) {
         self.0.raised.store(true, Ordering::Release);
     }
@@ -540,6 +541,13 @@ impl Interrupt {
     /// it was being unset is not the fatal the new one raises.
     pub(crate) fn timer_unset(&self) {
         self.0.timed_out.store(false, Ordering::Relaxed);
+    }
+
+    /// How many hold this interrupt: its request, the request's timer,
+    /// the timer's thread while one runs, and whoever else cloned it.
+    #[cfg(test)]
+    pub(crate) fn holders(&self) -> usize {
+        Arc::strong_count(&self.0)
     }
 
     /// Hand this interrupt to the process's signal record, which raises
@@ -586,6 +594,8 @@ impl AsRef<AtomicBool> for State {
         &self.raised
     }
 }
+
+pub use crate::interrupt::Periodic;
 
 /// The process's signal record (design §5.8, revision 38), for the
 /// extension that installs signal handlers: [`SIGNAL_POST`] is what its
@@ -1128,9 +1138,11 @@ pub struct Request {
     returned: Value,
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
-    /// The execution timer, armed while `max_execution_time` is not
-    /// zero; dropping the request unsets it.
-    timer: Option<crate::interrupt::Timer>,
+    /// The request's timer: the execution timer's deadline while
+    /// `max_execution_time` is not zero, every periodic interrupt an
+    /// extension started, and the one thread that waits for them;
+    /// dropping the request joins the thread.
+    timer: crate::interrupt::Timer,
     /// The thread's stack limit, php's `EG(stack_limit)`, worked out
     /// once at request start on the thread the request runs on
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
@@ -1626,6 +1638,7 @@ impl Request {
         // did would refuse the first push again, with php's fatal.
         let mut heap = Heap::new();
         let mut stack = VmStack::new();
+        let interrupt = Interrupt::default();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
@@ -1713,8 +1726,8 @@ impl Request {
             phase: Phase::Startup,
             shutdown_walk_ended: false,
             returned: Value::null(),
-            interrupt: Interrupt::default(),
-            timer: None,
+            interrupt: interrupt.clone(),
+            timer: crate::interrupt::Timer::new(&interrupt),
             stack_limit: StackLimit::UNCHECKED,
             declared: tables.classes,
             bound_at_load: Vec::new(),
@@ -1793,19 +1806,79 @@ impl Request {
     /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
     /// so the seconds count from here.
     fn arm_timer(&mut self) {
-        self.timer = None;
-        self.timer = crate::interrupt::Timer::arm(
-            &self.interrupt,
-            self.max_execution_time(),
-            self.hard_timeout(),
-        );
+        let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
+        self.timer.arm(seconds, hard);
     }
 
     /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
     /// once the program's shutdown functions, destructors and buffer
-    /// handlers are done: nothing the request does after it is timed.
+    /// handlers are done: nothing the request does after it is timed,
+    /// and every periodic interrupt's deadline goes with the execution
+    /// timer's, so the request's timer thread is joined here, before any
+    /// extension's `rshutdown`, whatever a host does with the request
+    /// after it.
     pub(crate) fn unset_timer(&mut self) {
-        self.timer = None;
+        self.timer.unset();
+    }
+
+    /// A periodic interrupt (#1806): this request's interrupt raised
+    /// `first` from now and every `every` after it, once where `every`
+    /// is `None` (Excimer's one-shot `ExcimerTimer`), until
+    /// [`Request::stop_periodic`] stops it or the request reaches
+    /// `php_request_shutdown`'s fourth step. A period shorter than a
+    /// tenth of a millisecond is counted in tenths of a millisecond. What
+    /// a sampling profiler's own timer thread does under php,
+    /// Excimer's `timer_create` and its handler storing
+    /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
+    /// no thread (ADR-0005, ADR-0010): one thread per request serves the
+    /// execution timer and every periodic interrupt alike, and is joined
+    /// once a change leaves no deadline, around a fork
+    /// ([`Request::forked`]) and at the request's end.
+    ///
+    /// It is served through the interrupt hook the extension supplies
+    /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
+    /// extension's hook is served, so a hook reads its own count with
+    /// [`Request::periods_elapsed`] and does nothing at zero, as Excimer's
+    /// `excimer_timer_interrupt` serves only the timers that fired. The
+    /// periods are wall-clock time, Excimer's `EXCIMER_REAL`; a child
+    /// forked from the request inherits none of them, as a child inherits
+    /// no POSIX timer. `None` where no thread could be started.
+    ///
+    /// [`ExtensionBuilder::interrupt`]: crate::api::abi::ExtensionBuilder::interrupt
+    #[must_use]
+    pub fn start_periodic(
+        &mut self,
+        first: std::time::Duration,
+        every: Option<std::time::Duration>,
+    ) -> Option<Periodic> {
+        self.timer.start_periodic(first, every)
+    }
+
+    /// The periods of `periodic` elapsed since the last time this was
+    /// asked, the ones the request was too busy to be interrupted for
+    /// among them, as Excimer hands its callback the event count, POSIX's
+    /// overruns plus one; zero for one stopped.
+    pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
+        self.timer.periods_elapsed(periodic)
+    }
+
+    /// `periodic` stopped, with the periods it had not been asked for,
+    /// as Excimer's `excimer_timer_stop` deletes its timer.
+    pub fn stop_periodic(&mut self, periodic: Periodic) {
+        self.timer.stop_periodic(periodic);
+    }
+
+    /// `fork` called with no thread of the engine's alive in this
+    /// request (ADR-0010, Threads): the request's timer thread is joined
+    /// before it, and after it started again over the same deadlines in
+    /// the process that called it, which loses none of them; in the
+    /// child every deadline is dropped, the execution timer's and each
+    /// periodic interrupt's, as a child inherits no interval timer and no
+    /// POSIX timer, so it runs untimed until it sets a limit of its own.
+    /// What `pcntl_fork` forks through, until the engine's one home for
+    /// fork asks it (#1807).
+    pub fn forked<R>(&mut self, fork: impl FnOnce() -> R) -> R {
+        self.timer.forked(fork)
     }
 
     // -------------------------------------------------- crate-internal
@@ -5866,27 +5939,27 @@ impl Request {
     /// are the rest of that branch and are not read yet. `true` says the
     /// built-in handler served it.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
-        // `zend_error_va_list`'s site (`Z/Zend/zend.c:1633-1651`): the
-        // executing frame's file and line, and, where nothing is
-        // executing and nothing compiling, no file at all, which
-        // `php_error_cb` is handed as `Unknown` at line zero
-        // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
-        // walk refuses to serve raises there, and so does what a
-        // `zend_catch` raises while a fatal is in flight, since
-        // `_zend_bailout` empties `EG(current_execute_data)` first.
-        if !self.executing() || self.bailout {
-            return self.note_error_in(level, message, b"Unknown", 0);
-        }
-        let line = self.current_line();
-        self.note_error_at(level, message, line)
+        let (file, line) = self.executed_site();
+        self.note_error_in(level, message, &file, line)
     }
 
-    /// The same diagnostic at a line no frame stands on: what a
-    /// compile-time error carries, since php's `zend_error_cb` is given
-    /// the compiler's line while `zend_get_executed_lineno` has none.
-    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) -> bool {
+    /// `get_filename_lineno`'s site (`Z/Zend/zend.c:1640-1679`) for a
+    /// diagnostic raised where the request stands: the executing frame's
+    /// file and line, and, where nothing is executing, no file at all,
+    /// which `php_error_cb` is handed as `Unknown` at line zero
+    /// (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown walk
+    /// refuses to serve raises there, and so does an extension's
+    /// request-end function, which `zend_deactivate_modules` serves with
+    /// `EG(current_execute_data)` emptied, and what a `zend_catch` raises
+    /// while a fatal is in flight, since `_zend_bailout` empties it
+    /// first. php's arm for a file being compiled is not taken: the
+    /// engine compiles with no site of its own.
+    fn executed_site(&self) -> (Vec<u8>, u32) {
+        if !self.executing() || self.bailout {
+            return (b"Unknown".to_vec(), 0);
+        }
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        self.note_error_in(level, message, &file, line)
+        (file, self.current_line())
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -6071,11 +6144,7 @@ impl Request {
     /// handed it and the last error keeps it, one more owner each, as
     /// `trigger_error()`'s string is in php.
     pub(crate) fn note_error_string(&mut self, level: Level, message: PhpString) -> bool {
-        if !self.executing() || self.bailout {
-            return self.note_message_in(level, Message::String(message), b"Unknown", 0);
-        }
-        let line = self.current_line();
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let (file, line) = self.executed_site();
         self.note_message_in(level, Message::String(message), &file, line)
     }
 
@@ -6586,8 +6655,7 @@ impl Request {
         // `php_error_cb` marks the store before it bails out: no object
         // that stands now is destructed, one a shutdown function makes is.
         self.heap.mark_destructed();
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = self.current_line();
+        let (file, line) = self.executed_site();
         self.note_error_in(Level::Error, message, &file, line);
         self.end_at_level(Level::Error, message, &file, line);
     }
@@ -6650,12 +6718,7 @@ impl Request {
     /// d
     /// ```
     pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
-        let (file, line) = if self.executing() {
-            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-            (file, self.current_line())
-        } else {
-            (b"Unknown".to_vec(), 0)
-        };
+        let (file, line) = self.executed_site();
         self.heap.mark_destructed();
         self.end_at_level(level, message, &file, line);
     }

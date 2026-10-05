@@ -44,7 +44,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
@@ -410,7 +410,7 @@ pub(crate) fn judge(
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(compiler), None) = (compiler(oracle, runner), oracle_absent) else {
+    let (Some(compiler), None) = (compiler(oracle, runner)?, oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler)?;
@@ -420,25 +420,29 @@ pub(crate) fn judge(
 /// Which compiler takes the engine's side of the dump, and none where
 /// the runner found nothing to measure. The linked one is built once for
 /// the run, under the recipe's ini and the `dump` regime's, so one recipe
-/// stands behind both sides.
-fn compiler<'a>(oracle: &Oracle<'_>, runner: &'a Runner) -> Option<dump::Compiler<'a>> {
-    match runner {
+/// stands behind both sides; a `dump` regime that carries `args` refuses
+/// it, since the linked compiler has no command line to hand them and
+/// a binary's side would be handed them (#1780).
+fn compiler<'a>(oracle: &Oracle<'_>, runner: &'a Runner) -> Result<Option<dump::Compiler<'a>>> {
+    Ok(match runner {
         Runner::Engine(binary) | Runner::Control(binary) => Some(dump::Compiler::Binary(binary)),
         Runner::Linked => {
             let pin = oracle.pin();
-            let ini: Vec<String> = pin
-                .recipe
-                .ini
-                .iter()
-                .chain(pin.regime.get(REGIME).into_iter().flat_map(|r| &r.ini))
-                .cloned()
-                .collect();
+            let regime = match pin.regime.get(REGIME) {
+                Some(regime) => regime.linked_ini().map_err(|why| {
+                    anyhow!(
+                        "{INSTRUMENT}: `[regime.{REGIME}]` {why:#}; the linked compiler cannot dump under it, and an engine binary named with `--engine` can"
+                    )
+                })?,
+                None => &[],
+            };
+            let ini: Vec<String> = pin.recipe.ini.iter().chain(regime).cloned().collect();
             Some(dump::Compiler::Linked(linked::engine(&ini)))
         }
         // Neither reaches this lane: `or_linked` takes both rungs where
         // nothing ran down to the linked compiler before the run begins.
         Runner::Stale(_) | Runner::Absent(_) => None,
-    }
+    })
 }
 
 /// The corpus one file on request is named inside: the pinned tree's,
@@ -472,7 +476,7 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let Some(compiler) = compiler(oracle, runner) else {
+    let Some(compiler) = compiler(oracle, runner)? else {
         bail!("{INSTRUMENT}: there is nothing to dump the file with");
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler)?;

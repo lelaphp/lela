@@ -758,6 +758,7 @@ dependencies = [
  "php_compile",
  "php_heap",
  "php_macros",
+ "php_process",
  "php_unit",
  "toml",
 ]
@@ -1317,6 +1318,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "php_process"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

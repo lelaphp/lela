@@ -6,12 +6,14 @@
 //! views, so a row says what one reading counted and leaves a count it does
 //! not keep null, never 0.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use super::{INSTRUMENT, numbers};
 use crate::reading::Reading;
 use crate::status::PerReading;
-use crate::status::every::{Head, count};
+use crate::status::every::{Head, count, whole};
 
 /// The version of [`Row`]'s shape, which changes only when the shape does
 /// and never for a new reading; a reader refuses a `v` it does not know
@@ -37,6 +39,12 @@ pub(crate) struct Row {
     edges: Option<u64>,
     /// The extensions the bundle registers, on the bundle's reading.
     extensions: Option<u64>,
+    /// An item lock's lines by the module that defines each (#1795), the
+    /// growth of one module read across a series; left out where the
+    /// reading keeps none, a crate's or one taken before api-check counted
+    /// them, which a reader of the earlier shape already handles.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    modules: BTreeMap<String, u64>,
 }
 
 impl PerReading for Row {
@@ -51,6 +59,11 @@ impl PerReading for Row {
             private: count(reading, numbers::PRIVATE),
             edges: count(reading, numbers::EDGES),
             extensions: count(reading, numbers::EXTENSIONS),
+            modules: reading
+                .groups
+                .iter()
+                .map(|(module, n)| (module.clone(), whole(*n)))
+                .collect(),
         }
     }
 }
@@ -80,5 +93,23 @@ mod tests {
             (bundle.items, bundle.edges, bundle.extensions),
             (None, Some(59), Some(58))
         );
+        assert!(bundle.modules.is_empty());
+    }
+
+    /// A seam's per-module counts are its row's `modules`, and a row
+    /// without them leaves the field out of its line (#1795).
+    #[test]
+    fn a_seam_carries_its_lines_per_module() {
+        let mut reading = reading("api", &[("items", 3)]);
+        reading.group("php_engine::api::request", 2).unwrap();
+        reading.group("php_engine::api::values", 1).unwrap();
+        let row = Row::of(&reading);
+        let line = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            line["modules"],
+            serde_json::json!({"php_engine::api::request": 2, "php_engine::api::values": 1})
+        );
+        let bare = serde_json::to_value(Row::of(&self::reading("api", &[]))).unwrap();
+        assert!(bare.get("modules").is_none(), "{bare}");
     }
 }

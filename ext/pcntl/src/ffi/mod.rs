@@ -88,7 +88,7 @@ pub(crate) fn install(
 /// every request that asked for asynchronous delivery.
 ///
 /// What runs in the signal handler is this function, [`decode`] and the
-/// post and wake of `php_heap::post` that [`SIGNAL_POST`] is, and nothing
+/// post and wake of `php_process::post` that [`SIGNAL_POST`] is, and nothing
 /// of `php_engine`: the post claims a free slot by a compare-and-swap,
 /// the decoder copies integers out of the kernel's structure, and the
 /// wake stores to atomics, so nothing here allocates, locks or calls a

@@ -2,13 +2,14 @@
 //! by the tracked manifest: locks, edges and bundle order (ticket #4). One
 //! fixture per rule the instrument evaluates must fail; `clean` must pass.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
 use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam, Section};
-use xtask::reading::{Reading, Status};
+use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
 
 mod common;
@@ -77,6 +78,47 @@ fn the_clean_fixture_passes_every_rule() {
         assert_eq!(reading.instrument, "api-check");
         assert_eq!(reading.tree().len(), 40, "{}", reading.scope);
     }
+}
+
+/// An item lock's reading counts its lines by the module that defines
+/// each, beside the total (#1795): a re-export by the module it is written
+/// in, `Severity` by `raising`'s, and a method by its impl block's. The
+/// counts sum to the total, and an import lock and a crate keep none.
+#[test]
+fn an_item_lock_counts_its_lines_by_the_module_that_defines_each() {
+    let readings = readings("clean");
+    let groups = |scope: &str| &of(&readings, scope).groups;
+    let counted = |pairs: &[(&str, i64)]| -> BTreeMap<String, Number> {
+        pairs
+            .iter()
+            .map(|(module, n)| ((*module).to_owned(), (*n).into()))
+            .collect()
+    };
+    assert_eq!(
+        *groups("api"),
+        counted(&[("php_engine::api::abi", 5), ("php_engine::api::raising", 3)])
+    );
+    assert_eq!(
+        *groups("heap"),
+        counted(&[
+            ("php_heap", 2),
+            ("php_heap::hidden", 2),
+            ("php_heap::stack", 1),
+            ("php_heap::stack::entry", 4),
+        ])
+    );
+    for scope in ["api", "heap"] {
+        let sum: i64 = groups(scope)
+            .values()
+            .map(|n| match n {
+                Number::Int(n) => *n,
+                Number::Float(n) => panic!("{scope}: a count of {n}"),
+            })
+            .sum();
+        assert_eq!(of(&readings, scope).numbers["items"], sum.into(), "{scope}");
+    }
+    assert!(groups("sapi").is_empty(), "an import lock counts imports");
+    assert!(groups("php_bundle").is_empty(), "a crate keeps none");
 }
 
 #[test]

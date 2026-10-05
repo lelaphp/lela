@@ -20,7 +20,9 @@
 //! laid over the engine's defaults, so `precision`, `error_reporting` and
 //! the rest are the pin's, and a named `[regime.<name>]` of the pin lays
 //! its own after them, in the order the fresh-process adapter passes the
-//! two as `-d` (harness-design.md §8, ledger 55). An entry the engine has
+//! two as `-d` (harness-design.md §8, ledger 55); a regime that carries
+//! `args` is refused, since this adapter has no command line to hand them
+//! (#1780, [`Regime::linked_ini`]). An entry the engine has
 //! no name for is carried and read by nobody, which is what php does with
 //! `opcache.*` when opcache is not loaded.
 //!
@@ -62,7 +64,8 @@ pub(crate) fn cli_layer<'a>() -> impl Iterator<Item = (&'a str, &'a str)> {
 }
 
 /// One snippet through the linked engine under `recipe`, and under
-/// `regime`'s ini after it where a run names one, answered as the
+/// `regime`'s ini after it where a run names one, refused where the
+/// regime carries arguments ([`Regime::linked_ini`]), answered as the
 /// fresh-process adapter answers it: the program written where that
 /// adapter writes it and served in that directory, both streams
 /// normalised by the recipe's rules with the directory as the token, and
@@ -94,6 +97,14 @@ fn run(
 ) -> Result<(Observation, Vec<Entered>)> {
     let source = format!("{}{snippet}", recipe.preamble);
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
+    // The engine here has no command line, so a regime's arguments are
+    // refused rather than dropped from this side of the comparison alone.
+    // The witness lane reads this before anything runs, naming the regime
+    // (`witness::under`); this is the adapter's own backstop.
+    let regime = regime
+        .map(Regime::linked_ini)
+        .transpose()?
+        .unwrap_or_default();
     // The CLI's layer first, the recipe's entries after it and the
     // regime's last, so an entry both name is the regime's, as the later
     // `-d` is under the fresh-process adapter.
@@ -102,7 +113,7 @@ fn run(
             recipe
                 .ini
                 .iter()
-                .chain(regime.into_iter().flat_map(|r| &r.ini))
+                .chain(regime)
                 .filter_map(|entry| entry.split_once('=')),
         )
         .collect();

@@ -40,9 +40,24 @@ use crate::{State, failed, ffi};
 /// bool(true)
 /// int(3)
 /// ```
+///
+/// The engine's timer thread is joined before the fork and started
+/// again after it in the parent, over the deadlines it had
+/// (`Request::forked`): the parent's limit, counted from before the
+/// fork, still stops it, and the child inherits none.
+///
+/// ```php
+/// set_time_limit(1);
+/// if (($child = pcntl_fork()) === 0) { exit(0); }
+/// pcntl_waitpid($child, $status);
+/// for (;;) {}
+/// ```
+/// ```expect exit=255 process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 5
+/// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
-    match ffi::fork() {
+    match req.forked(ffi::fork) {
         Ok(ForkResult::Parent { child }) => child.as_raw().into(),
         Ok(ForkResult::Child) => 0,
         Err(errno) => {

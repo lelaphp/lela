@@ -30,8 +30,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
-    States, Validation,
+    DependencyKind, EndFunction, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify,
+    StartupIni, States, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
@@ -40,7 +40,7 @@ use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
-use crate::supplied::{Keyed, Last, Resolved};
+use crate::supplied::{Keyed, Last, Phase, Resolved};
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -2339,11 +2339,12 @@ fn at_stub_places(
 }
 
 /// `phar_intercept_functions_init` and opcache's
-/// `zend_accel_override_file_functions` for every extension, in bundle
-/// order: each native an extension intercepts has its entry replaced,
-/// and the entry it replaced goes in front of its row of what this
-/// answers, so a later interception stands over an earlier one, as
-/// opcache's handler is saved over phar's.
+/// `zend_accel_override_file_functions` for every extension, in the
+/// order php installs them ([`Phase`]): each native an extension
+/// intercepts has its entry replaced, and the entry it replaced goes in
+/// front of its row of what this answers, so a later interception
+/// stands over an earlier one, as opcache's handler is saved over
+/// phar's.
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
@@ -2583,13 +2584,15 @@ impl EngineBuilder {
         extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // Each extension's supplies taken out of it, by its number in
-        // `module_registry`, which numbers Core 0 and the bundle from 1.
-        let mut supplied = Resolved::resolve(
-            extensions
-                .iter_mut()
-                .zip(1u32..)
-                .map(|(e, at)| (ExtensionId(at), std::mem::take(&mut e.supplies))),
-        );
+        // `module_registry`, which numbers Core 0 and the bundle from 1,
+        // and installed by the phase it starts in.
+        let mut supplied = Resolved::resolve(extensions.iter_mut().zip(1u32..).map(|(e, at)| {
+            (
+                ExtensionId(at),
+                Phase::of(e),
+                std::mem::take(&mut e.supplies),
+            )
+        }));
         if !self.cli_shell {
             supplied.shell = Last::default();
         }
@@ -3134,7 +3137,7 @@ impl Engine {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
-        php_heap::reset_lc_ctype_locale();
+        php_process::reset_lc_ctype_locale();
         // `zend_register_ini_entries_ex` walks each module's entries in
         // its `PHP_INI_BEGIN()` order, the modules in startup order, and
         // finds the host's value for each: the handlers meet the values
@@ -3906,12 +3909,7 @@ impl Engine {
         req: &mut Request,
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(rshutdown) = extension.rshutdown {
-                rshutdown(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.rshutdown);
         crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
@@ -3919,12 +3917,7 @@ impl Engine {
         req.destroy_uploaded_files();
         // `zend_deactivate` reaches `shutdown_executor`: each extension's
         // `deactivate`, in reverse, before the resources are closed.
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(deactivate) = extension.deactivate {
-                deactivate(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.deactivate);
         req.close_resources();
         req.free_user_handlers();
         req.destroy_symbol_table();
@@ -3988,6 +3981,23 @@ impl Engine {
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
         self.transaction(description, sink, Work::Serve, true)
+    }
+}
+
+/// One end phase of the extensions' (ADR-0010): `hook` of each that
+/// declared one, in reverse bundle order, each in a `zend_try` of its
+/// own, as `zend_deactivate_modules` serves each extension's `RSHUTDOWN`
+/// (`Z/Zend/zend_API.c:3441-3448`). A fatal one raises is rendered and
+/// ends that function only; the next is still served, and a fatal it
+/// raises is rendered too.
+fn end_phase(
+    extensions: &[Extension],
+    req: &mut Request,
+    hook: fn(&Extension) -> Option<EndFunction>,
+) {
+    for serve in extensions.iter().rev().filter_map(hook) {
+        serve(req);
+        req.catch_bailout();
     }
 }
 
@@ -4648,7 +4658,7 @@ mod tests {
     }
 
     /// Two extensions that intercept one native stack in bundle order,
-    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// each at its `MINIT`: the later serves
     /// first and passes through to the earlier, the earlier to the
     /// native, and each hands on the call's own arguments.
     #[test]

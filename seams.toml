@@ -50,6 +50,10 @@ name = "php_heap"
 budget = 20000
 lock = "heap.lock"
 [[crate]]
+name = "php_process"
+budget = 500                               # fork, the signal pool and LC_CTYPE: the process-wide mechanisms (#1779; revision 38's condition)
+lock = "process.lock"
+[[crate]]
 name = "php_unit"
 budget = 6000
 lock = "unit.lock"
@@ -481,6 +485,11 @@ consumers = ["php_unit", "php_compile", "php_engine", "php_jit"]
 lock = "heap.lock"
 adr = "0003"
 [[seam]]
+name = "process"
+producer = "php_process"
+consumers = ["php_engine"]
+lock = "process.lock"
+[[seam]]
 name = "unit"
 producer = "php_unit"
 consumers = ["php_compile", "php_engine", "php_jit"]
@@ -604,6 +613,13 @@ id = "unsafe.one-op"
 scope = ["crates/php_heap/**", "crates/php_process/**", "ext/*/src/ffi/**", "sapi/*/src/ffi/**", "crates/timelib_sys/src/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
 deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
 text = "Every unsafe block is one operation with a SAFETY comment."
+
+[[rule]]
+id = "fork.home"
+scope = ["crates/**/*.rs", "ext/**/*.rs", "sapi/**/*.rs"]
+exempt = ["crates/php_process/**"]
+deny_pattern = '\b(unistd|libc)::v?fork\b'
+text = "fork has one home, php_process, and php_engine's fork policy is its only caller (#1779)."
 
 [[rule]]
 id = "lints.no-panic"

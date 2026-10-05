@@ -481,6 +481,7 @@ request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
+request::Periodic
 request::PreloadStatistics
 request::Readiness
 request::RealpathEntry
@@ -566,6 +567,7 @@ request::Request::extension_version
 request::Request::finish_response
 request::Request::flush
 request::Request::forbid_dynamic_call
+request::Request::forked
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless
@@ -626,6 +628,7 @@ request::Request::output_started_at
 request::Request::parse_body
 request::Request::parse_encoding_list
 request::Request::parse_query
+request::Request::periods_elapsed
 request::Request::persistent_list
 request::Request::phpinfo_as_text
 request::Request::preloading
@@ -675,9 +678,11 @@ request::Request::set_shutdown_function
 request::Request::set_time_limit
 request::Request::set_umask
 request::Request::stack_overflowed
+request::Request::start_periodic
 request::Request::state
 request::Request::state_ref
 request::Request::status_line
+request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
 request::Request::take_pending

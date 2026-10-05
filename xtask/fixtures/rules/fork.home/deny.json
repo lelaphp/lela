@@ -1,0 +1,1 @@
+{"tool_name": "Write", "tool_input": {"file_path": "sapi/cgi/src/ffi/fork.rs", "content": "use nix::unistd::ForkResult;\n\n/// `fork(2)`, bound a second time beside the one home.\npub(crate) fn fork() -> nix::Result<ForkResult> {\n    // SAFETY: the binary is single-threaded when it forks.\n    unsafe { nix::unistd::fork() }\n}\n"}}
