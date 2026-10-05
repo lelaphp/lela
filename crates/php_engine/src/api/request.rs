@@ -15191,6 +15191,11 @@ impl Request {
         self.ini_stage = IniStage::Startup;
     }
 
+    /// How many diagnostics the startup has raised so far.
+    pub(crate) fn startup_raised_len(&self) -> usize {
+        self.startup.as_ref().map_or(0, Vec::len)
+    }
+
     /// Leave the startup: what was raised during it, in order.
     pub(crate) fn end_startup(&mut self) -> Vec<(Level, Vec<u8>)> {
         self.ini_stage = IniStage::Runtime;

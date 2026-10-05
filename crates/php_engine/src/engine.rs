@@ -3153,7 +3153,14 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         let failed = register_extensions(&mut req, loads);
+        // Where each extension's handlers start raising, by its place in
+        // the bundle: a refused start shows what php raised before it,
+        // which is nothing of a later extension's (`Engine::refused`).
+        let mut marks = Vec::new();
         for (name, value, activate) in held {
+            let owner = (self.shared.extensions.iter())
+                .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
+            marks.push((owner.unwrap_or(usize::MAX), req.startup_raised_len()));
             req.set_ini_stage(if activate {
                 IniStage::Activate
             } else {
@@ -3167,10 +3174,13 @@ impl Engine {
             }
         }
         req.set_ini_stage(IniStage::Startup);
+        let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
         if taken_encoding == crate::multibyte::Startup::Refused {
             taken.push((b"zend.script_encoding".to_vec(), None));
         }
+        // What php raises after `zend_startup_modules` follows.
+        let modules_end = req.startup_raised_len();
         disable_warnings(&mut req);
         startup_directives(&mut req, &self.shared);
         let raised = req.end_startup();
@@ -3189,7 +3199,6 @@ impl Engine {
             shared.ini.retain(|(n, _)| *n != name);
             shared.ini.push((name, value));
         }
-        shared.startup_raised = raised;
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
@@ -3201,19 +3210,29 @@ impl Engine {
         };
         // `zend_startup_modules`: each engine start in bundle order, and
         // the first that fails ends the startup (`zend_startup_module_ex`).
-        for extension in &shared.extensions {
+        for (at, extension) in shared.extensions.iter().enumerate() {
             let Some(build) = &extension.engine_state else {
                 continue;
             };
             match build(&start) {
                 Ok(state) => shared.engine_states.push(state),
                 Err(refusal) => {
+                    let cut = marks
+                        .iter()
+                        .find(|(owner, _)| *owner > at)
+                        .map_or(encoding_at, |(_, len)| *len);
+                    let before = raised.get(..cut).into_iter().flatten();
+                    let encoding = raised.get(encoding_at..modules_end).into_iter().flatten();
+                    let mut shown = Refusal::new();
+                    shown.raised = before.chain(encoding).cloned().collect();
+                    shown.raised.extend(refusal.raised);
                     let failed = format!("Unable to start {} module", extension.name);
-                    shared.refused = Some((sapi_name, refusal.raise(Level::CoreError, failed)));
+                    shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
                     break;
                 }
             }
         }
+        shared.startup_raised = raised;
     }
 
     /// Where an extension's engine start refused ([`Refusal`]): what php
@@ -3222,9 +3241,11 @@ impl Engine {
     /// startup ini's `display_errors`, `html_errors` and `log_errors`;
     /// then the status php ends the process with, the `-2` of its
     /// `exit(-2)` (`Z/main/main.c:1505-1507`), the same in every host.
-    /// What the extensions raised over the host's values comes first, as
-    /// php raised it earlier. `None` for an engine that started. Every
-    /// request a refused engine is asked for is refused so.
+    /// What php raised before the failed start comes first: the host's
+    /// values the handlers of the extensions up to it met, never a later
+    /// extension's nor what php raises after `zend_startup_modules`.
+    /// `None` for an engine that started. Every request a refused engine
+    /// is asked for is refused so.
     pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
         let (host, refused) = self.shared.refused.as_ref()?;
         let description = RequestDescription {
@@ -3235,7 +3256,7 @@ impl Engine {
         if let Some(held) = sink.held() {
             req.hold(held);
         }
-        for (level, message) in self.shared.startup_raised.iter().chain(&refused.raised) {
+        for (level, message) in &refused.raised {
             req.note_startup_error(*level, message);
         }
         crate::preload::hand_over(&mut req, sink);
