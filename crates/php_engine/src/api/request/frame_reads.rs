@@ -245,4 +245,19 @@ impl Request {
             at: frame,
         }
     }
+
+    /// The innermost user frame on the chain, not being popped: where a
+    /// native's call stands, read ([`crate::observer::Observed::caller`]),
+    /// on a fiber whose callable is a native the resumer's.
+    pub(crate) fn innermost_frame_view(&self) -> Option<FrameView<'_>> {
+        self.executions().enumerate().find_map(|(stack, (_, vm))| {
+            let at = vm.frames().iter().rposition(|state| !state.leaving)?;
+            Some(FrameView {
+                req: self,
+                stack,
+                vm,
+                at: FrameRef(u32::try_from(at).ok()?),
+            })
+        })
+    }
 }

@@ -36,7 +36,10 @@ fn name(req: &Request, view: &FrameView<'_>) -> String {
 }
 
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
-    let begin: fn(&mut Observed<'_>) = match name(observed, &observed.frame()).as_str() {
+    let Some(frame) = observed.frame() else {
+        return ObserverHandlers::default();
+    };
+    let begin: fn(&mut Observed<'_>) = match name(observed, &frame).as_str() {
         "keep" => keep,
         "read" => read,
         _ => return ObserverHandlers::default(),
@@ -50,7 +53,6 @@ fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
 /// `keep()` begun: its caller's frame kept past the handler.
 fn keep(observed: &mut Observed<'_>) {
     let caller = observed
-        .frame()
         .caller()
         .map(|view| (view.id(), name(observed, &view)));
     let Some((id, named)) = caller else {
@@ -144,7 +146,7 @@ fn a_kept_frame_below_a_fiber_is_read_on_its_own_stack() {
 fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
     fn walk(observed: &mut Observed<'_>) {
         let mut names = Vec::new();
-        let mut at = observed.frame().caller();
+        let mut at = observed.caller();
         while let Some(view) = at {
             names.push(format!("{}:{}", name(observed, &view), view.line()));
             at = view.caller();
@@ -153,7 +155,9 @@ fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
         observed.write(line.as_bytes());
     }
     fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
-        let walks = name(observed, &observed.frame()) == "walk";
+        let walks = observed
+            .frame()
+            .is_some_and(|frame| name(observed, &frame) == "walk");
         ObserverHandlers {
             begin: walks.then_some(walk as fn(&mut Observed<'_>)),
             end: None,
@@ -171,5 +175,48 @@ fn a_frame_view_walks_its_callers_into_the_resumer_of_a_fiber() {
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "[{closure:f():4}:5 < f:7 < Standard input code:9]"
+    );
+}
+
+/// A native's call stands in no frame of the loop's, so
+/// [`Observed::frame`] answers none for it, and [`Observed::caller`]
+/// answers the user frame it was called from, which a kept identity
+/// reads as any other.
+#[test]
+fn a_native_call_has_no_frame_and_its_caller_is_the_user_frame_it_stands_on() {
+    fn native(observed: &mut Observed<'_>) {
+        let framed = observed.frame().is_some();
+        let caller = observed
+            .caller()
+            .map(|view| format!("{}:{}", name(observed, &view), view.line()));
+        let line = format!(
+            "[strcmp framed={framed} from {}]",
+            caller.unwrap_or_default()
+        );
+        observed.write(line.as_bytes());
+    }
+    fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
+        let named = observed.frame().is_none()
+            && observed
+                .function()
+                .and_then(|function| observed.function_decl(function))
+                .is_some_and(|decl| decl.name.0.as_ref() == b"strcmp");
+        ObserverHandlers {
+            begin: named.then_some(native as fn(&mut Observed<'_>)),
+            end: None,
+        }
+    }
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .observer(init)
+            .build("frame_native")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php\nfunction f($s) {\n    return strcmp($s, 'abc');\n}\necho f('abc');\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "[strcmp framed=false from f:3]0"
     );
 }
