@@ -14,7 +14,7 @@ use crate::api::values::{Key, PhpArray, PhpString, Value};
 use crate::engine::{Aborted, OutputSink, ResponseHead};
 use crate::output::Output;
 
-use super::{Request, host_value};
+use super::Request;
 
 /// One `ob_*` operation on the request's buffer stack.
 #[derive(Debug, Clone, PartialEq)]
@@ -265,10 +265,10 @@ impl Response {
 }
 
 impl Request {
-    /// The one sink every call of the request goes to, for the log
-    /// `php_log_err` writes past the `php_output` layer.
-    pub(super) fn sink(&mut self) -> &mut dyn OutputSink {
-        self.response.sink.get()
+    /// An entry handed to the host's log, past the `php_output` layer,
+    /// as `php_log_err` hands it to `sapi_module.log_message`.
+    pub(super) fn log_to_host(&mut self, entry: &[u8]) {
+        self.response.sink.get().log(entry);
     }
 
     /// The host's sink, held from here to the request's end, so each
@@ -706,4 +706,32 @@ impl Request {
         }
         Ok(array)
     }
+}
+
+/// A host's value made an array of `req`'s: a map's keys strings, a
+/// list's the next index ([`Request::host_status`]).
+fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpArray, Thrown> {
+    use crate::engine::HostValue;
+    let mut array = PhpArray::new(req)?;
+    let rows: Vec<(Option<Vec<u8>>, HostValue)> = match value {
+        HostValue::Map(rows) => rows.into_iter().map(|(k, v)| (Some(k), v)).collect(),
+        HostValue::List(rows) => rows.into_iter().map(|v| (None, v)).collect(),
+        other => vec![(None, other)],
+    };
+    for (key, row) in rows {
+        let value = match row {
+            HostValue::Int(n) => Value::int(n),
+            HostValue::Float(f) => Value::float(f),
+            HostValue::Str(s) => Value::string(PhpString::new(req, &s)?),
+            nested => Value::array(host_value(req, nested)?),
+        };
+        match key {
+            Some(key) => {
+                let key = Key::from_string(PhpString::new(req, &key)?);
+                array.set(req, key, value)?;
+            }
+            None => array.append(req, value)?,
+        }
+    }
+    Ok(array)
 }

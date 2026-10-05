@@ -23,7 +23,7 @@ use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, TableId, Vm};
@@ -54,6 +54,7 @@ mod constants;
 pub(crate) use constants::halt_offset_key;
 mod diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
+pub use diagnostics::{FormatDate, Syslog};
 pub(crate) use diagnostics::{append_escaped, escape_html, escaped_html_sizes};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
@@ -141,32 +142,6 @@ impl ExtensionId {
     /// `Core`, the engine's own natives, classes, constants and ini.
     pub(crate) const CORE: ExtensionId = ExtensionId(0);
 }
-
-/// `php_format_date(format, len, ts, localtime)` (`Z/ext/date/php_date.c:882`),
-/// the one function of ext/date php's `main` and its other extensions
-/// call: `format` over the timestamp in the request's default zone
-/// where `localtime` says, in UTC where it does not. ext/date hands it
-/// to [`ExtensionBuilder::register`]; `php_log_err` stamps a file log
-/// with it, and `mail.log` its lines. An engine without ext/date stamps
-/// in UTC.
-///
-/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
-pub struct FormatDate(pub FormatDateFn);
-
-/// [`FormatDate`]'s function: the request, the format, the timestamp
-/// and whether it is taken in the request's zone.
-type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
-
-/// `php_syslog(priority, "%s", message)` (`Z/main/php_syslog.c`), which
-/// shares libc's one connection with userland `openlog()`: ext/standard
-/// hands it to [`ExtensionBuilder::register`], and `php_log_err` sends
-/// an entry through it at its priority where `error_log` is `syslog`.
-/// An engine without it sends that entry to the host's log.
-///
-/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
-#[derive(Debug, Clone, Copy)]
-pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
 
 pub use crate::interrupt::Periodic;
 
@@ -901,34 +876,6 @@ impl Request {
         assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
         pushed.unwrap_or(FrameRef(0))
     }
-}
-
-/// A host's value made an array of `req`'s: a map's keys strings, a
-/// list's the next index ([`Request::host_status`]).
-fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpArray, Thrown> {
-    use crate::engine::HostValue;
-    let mut array = PhpArray::new(req)?;
-    let rows: Vec<(Option<Vec<u8>>, HostValue)> = match value {
-        HostValue::Map(rows) => rows.into_iter().map(|(k, v)| (Some(k), v)).collect(),
-        HostValue::List(rows) => rows.into_iter().map(|v| (None, v)).collect(),
-        other => vec![(None, other)],
-    };
-    for (key, row) in rows {
-        let value = match row {
-            HostValue::Int(n) => Value::int(n),
-            HostValue::Float(f) => Value::float(f),
-            HostValue::Str(s) => Value::string(PhpString::new(req, &s)?),
-            nested => Value::array(host_value(req, nested)?),
-        };
-        match key {
-            Some(key) => {
-                let key = Key::from_string(PhpString::new(req, &key)?);
-                array.set(req, key, value)?;
-            }
-            None => array.append(req, value)?,
-        }
-    }
-    Ok(array)
 }
 
 #[cfg(test)]

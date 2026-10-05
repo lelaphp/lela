@@ -14,7 +14,7 @@ use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use super::{FormatDate, Phase, Raised, Request, Syslog, ini_atol, ini_truth, zone};
+use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
 
 /// A diagnostic's message as `php_error_cb` is handed it.
 #[derive(Clone, Copy)]
@@ -27,6 +27,32 @@ pub(crate) enum Message<'a> {
     /// `zend_error_zstr_at`'s, which is `trigger_error()`'s message.
     String(PhpString),
 }
+
+/// `php_format_date(format, len, ts, localtime)` (`Z/ext/date/php_date.c:882`),
+/// the one function of ext/date php's `main` and its other extensions
+/// call: `format` over the timestamp in the request's default zone
+/// where `localtime` says, in UTC where it does not. ext/date hands it
+/// to [`ExtensionBuilder::register`]; `php_log_err` stamps a file log
+/// with it, and `mail.log` its lines. An engine without ext/date stamps
+/// in UTC.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct FormatDate(pub FormatDateFn);
+
+/// [`FormatDate`]'s function: the request, the format, the timestamp
+/// and whether it is taken in the request's zone.
+type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown>;
+
+/// `php_syslog(priority, "%s", message)` (`Z/main/php_syslog.c`), which
+/// shares libc's one connection with userland `openlog()`: ext/standard
+/// hands it to [`ExtensionBuilder::register`], and `php_log_err` sends
+/// an entry through it at its priority where `error_log` is `syslog`.
+/// An engine without it sends that entry to the host's log.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
 
 impl Message<'_> {
     /// What the display and the log write.
@@ -234,7 +260,7 @@ impl Request {
             return false;
         }
         if named.is_empty() || named == b"syslog" {
-            self.sink().log(entry);
+            self.log_to_host(entry);
             return true;
         }
         let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
@@ -250,7 +276,7 @@ impl Request {
             .mode(mode)
             .open(path);
         let Ok(mut file) = opened else {
-            self.sink().log(entry);
+            self.log_to_host(entry);
             return true;
         };
         let stamp = self.log_stamp(std::time::SystemTime::now());
