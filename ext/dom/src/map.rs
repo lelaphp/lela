@@ -4,8 +4,8 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
-    PropertyTest, Raw, This, Union, Untyped,
+    ClassIterator, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
+    PropertyTest, Raw, Refusals, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
@@ -556,6 +556,10 @@ pub(crate) struct MapHandlers;
 pub(crate) static HANDLERS: MapHandlers = MapHandlers;
 
 impl ObjectHandlers for MapHandlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     /// `php_dom_iterator`: the iterator, `curobj`, `index` and the cache tag.
     fn iterator_size(&self) -> usize {
         120
@@ -615,10 +619,6 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn read_dimension(

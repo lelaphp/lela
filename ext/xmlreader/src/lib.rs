@@ -27,9 +27,9 @@
 mod trampoline;
 
 use php_ext::abi::{
-    CloneObj, DebugInfo, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance,
-    ObjectHandlers, OrFalse, Path, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
-    Static, Std, This, Untyped,
+    DebugInfo, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, ObjectHandlers,
+    OrFalse, Path, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Refusals, Static,
+    Std, This, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, instantiate, lookup_class};
@@ -96,13 +96,13 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         free_resources(req, object);
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn read_property(

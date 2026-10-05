@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use php_ext::abi::{
-    Callable, CloneObj, DebugInfo, ObjectHandlers, OrFalse, Path, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Ref, Std, This, Union, Untyped,
+    Callable, DebugInfo, ObjectHandlers, OrFalse, Path, PropertiesFor, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Ref, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::call;
@@ -178,6 +178,10 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     /// `php_zip_object_free_storage`: an open archive closed, its changes
     /// written, and php's warning where that fails.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -205,10 +209,6 @@ impl ObjectHandlers for Handlers {
             }
         }
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn read_property(

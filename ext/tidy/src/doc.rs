@@ -4,7 +4,7 @@
 //! function share one body here, handed the object and the argument
 //! position the object takes up, which a method reports one lower.
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path, This, Union};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Path, Refusals, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_long, to_string};
@@ -47,6 +47,10 @@ pub(crate) static DOC: Handlers = Handlers { node: false };
 pub(crate) static NODE: Handlers = Handlers { node: true };
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     /// `tidy_object_new` for a `tidy`: a document, its error buffer, the
     /// two options php sets and the default configuration.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -72,10 +76,6 @@ impl ObjectHandlers for Handlers {
         if let Some(id) = object.native_mut::<Obj>(req).and_then(|obj| obj.doc.take()) {
             forget(req, id);
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `tidy_doc_cast_handler` and `tidy_node_cast_handler`: zero for a

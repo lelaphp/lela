@@ -6,7 +6,7 @@
 //! [`from_enumeration`]; `IntlPartsIterator` walks a break iterator's parts
 //! through the same object.
 
-use php_ext::abi::{ClassIterator, ObjectHandlers, This};
+use php_ext::abi::{ClassIterator, ObjectHandlers, Refusals, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
@@ -310,8 +310,8 @@ impl Walk for Strings {
 }
 
 impl ObjectHandlers for Handlers {
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     /// `IntlIterator_objects_dtor`, `destroy_it` on the cursor.

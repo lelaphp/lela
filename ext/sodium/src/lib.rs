@@ -44,7 +44,7 @@ mod hash;
 mod keys;
 
 use php_ext::abi::{
-    CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Raw, Ref, Refusals,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
@@ -258,8 +258,8 @@ pub(crate) struct SodiumException;
 pub(crate) struct SodiumHandlers;
 
 impl ObjectHandlers for SodiumHandlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

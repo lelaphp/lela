@@ -3,7 +3,7 @@
 //! expression may call through `php:function`, `php:functionString` and
 //! the names `registerPhpFunctionNS` registered.
 
-use php_ext::abi::{Callable, Instance, Passed, Path, Raw, This, Union};
+use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
@@ -1037,6 +1037,10 @@ pub(crate) struct XPathHandlers;
 pub(crate) static HANDLERS: XPathHandlers = XPathHandlers;
 
 impl php_ext::abi::ObjectHandlers for XPathHandlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     fn read_property(
         &self,
         req: &mut Request,
@@ -1091,10 +1095,6 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
-    }
-
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
     }
 
     /// `dom_xpath_objects_free_storage`: `xmlXPathFreeContext`, then the

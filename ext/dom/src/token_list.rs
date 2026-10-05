@@ -5,8 +5,8 @@
 //! again whenever the attribute has changed under it.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace,
-    PropertyRead, PropertyTest, Raw, This, Variadic,
+    ClassIterator, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace, PropertyRead,
+    PropertyTest, Raw, Refusals, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
@@ -627,6 +627,10 @@ pub(crate) struct TokenListHandlers;
 pub(crate) static HANDLERS: TokenListHandlers = TokenListHandlers;
 
 impl ObjectHandlers for TokenListHandlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     /// `dom_token_list_free_obj`: the set's table and strings and the
     /// cached value given back.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -698,10 +702,6 @@ impl ObjectHandlers for TokenListHandlers {
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
         crate::debug_info(req, object)
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn read_dimension(

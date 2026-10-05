@@ -66,8 +66,8 @@ mod signature;
 use std::fmt::Write as _;
 
 use php_ext::abi::{
-    CloneObj, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers,
-    OrFalse, PropertyPlace, Raw, Std, This, Union, ZendExtension,
+    DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers, OrFalse,
+    PropertyPlace, Raw, Refusals, Std, This, Union, ZendExtension,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -4512,6 +4512,10 @@ pub(crate) struct ReflectorHandlers;
 pub(crate) static HANDLERS: ReflectorHandlers = ReflectorHandlers;
 
 impl ObjectHandlers for ReflectorHandlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let Some(reflected) = object.native_mut::<Reflected>(req) else {
             return;
@@ -4530,10 +4534,6 @@ impl ObjectHandlers for ReflectorHandlers {
         if let Some(reference) = reference {
             req.release(reference.as_value());
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `_reflection_write_property`: `$name` and `$class` where the
