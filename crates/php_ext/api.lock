@@ -433,6 +433,7 @@ request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::Forked
 request::FormatDate
 request::HandlerCall
 request::HandlerOp
@@ -462,6 +463,8 @@ request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
 request::Periodic
+request::Pid
+request::Pid::as_raw
 request::PreloadStatistics
 request::Readiness
 request::RealpathEntry
@@ -542,7 +545,7 @@ request::Request::extension_version
 request::Request::finish_response
 request::Request::flush
 request::Request::forbid_dynamic_call
-request::Request::forked
+request::Request::fork
 request::Request::frame_args
 request::Request::frame_vars
 request::Request::frameless
