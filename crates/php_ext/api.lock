@@ -563,7 +563,6 @@ request::Reentry::take_lent
 request::Refused
 request::Request
 request::Request::absolutize
-request::Request::activating
 request::Request::active_function_name
 request::Request::addref
 request::Request::argument

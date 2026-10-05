@@ -4609,10 +4609,10 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 }
 
 /// Each extension's `rinit` in startup order, `zend_activate_modules`,
-/// with the extension being activated named to what it registers
-/// ([`Request::activating`](crate::api::request::Request::activating)),
-/// so the stream layer places the wrappers and filters each registers in
-/// php's startup order; the first that raises ends the walk, as the
+/// so the wrappers and filters each registers stand in the stream
+/// layer's tables in the order php's `MINIT`s registered them, the
+/// bundle started in php's order ([`sort_modules`]); the first that
+/// raises ends the walk, as the
 /// `zend_bailout` of php's fatal inside `RINIT` leaves
 /// `zend_activate_modules` (#1775), and what it raised is handed back.
 /// The pinned build has `zip`, which the bundle has not:
@@ -4626,17 +4626,15 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Thrown> {
     let mut served = Ok(());
-    for (at, extension) in extensions.iter().enumerate() {
+    for extension in extensions {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        req.activating = u32::try_from(at).ok().map(crate::api::request::ExtensionId);
         served = rinit(req);
         if served.is_err() {
             break;
         }
     }
-    req.activating = None;
     served
 }
 
