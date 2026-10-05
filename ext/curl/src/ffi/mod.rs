@@ -47,6 +47,15 @@ pub(crate) use multi::{Multi, Share};
 
 use sys::CURL_ERROR_SIZE as ERROR_SIZE;
 
+/// `curl_global_init(CURL_GLOBAL_DEFAULT)`: libcurl's global state set
+/// up, whether it took. The process start alone calls it.
+pub(crate) fn global_init() -> bool {
+    // SAFETY: no pointer; called once for the process, from the process
+    // start the engine holds a once for (ADR-0010), before any handle.
+    let rc = unsafe { sys::curl_global_init(sys::CURL_GLOBAL_DEFAULT) };
+    rc == sys::CURLE_OK
+}
+
 /// A `CURLcode` as the `int` php keeps it in, `ch->err.no`.
 const fn code(rc: sys::CURLcode) -> i32 {
     rc.cast_signed()

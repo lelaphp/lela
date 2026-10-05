@@ -22,6 +22,12 @@ php_ext_standard = { path = "../standard" }
 # (design §7.2, revision 34; #950).
 libz-sys = { workspace = true }
 
+# `build.rs` reads `ZLIB_VERSION` and `ZLIB_VERNUM` off the `zlib.h` a C
+# build finds, through the C preprocessor, as php's build compiles them
+# (#1974).
+[build-dependencies]
+cc = { workspace = true }
+
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }

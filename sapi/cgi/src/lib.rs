@@ -712,7 +712,14 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
         Behavior::Strip if !failed => engine.strip(description, &mut sink),
         _ => engine.serve(description, &mut sink),
     };
-    if failed { 255 } else { served.exit_code }
+    // `main` returns `FAILURE` where `php_request_startup` failed, an
+    // extension's `rinit` having raised (#1775), and php-cgi ends there
+    // (`Z/sapi/cgi/cgi_main.c:2460-2467`).
+    if failed || served.start_failed {
+        255
+    } else {
+        served.exit_code
+    }
 }
 
 /// `-l`: each file compiled as its own request and its verdict written,
@@ -737,6 +744,11 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         }
         let name = description.script_name.clone().unwrap_or_default();
         let served = engine.lint(description, &mut Process);
+        // Each file's request is started at `do_repeat`, and one whose
+        // start fails ends the process with `FAILURE`, no verdict written.
+        if served.start_failed {
+            return 255;
+        }
         let mut line = if served.exit_code == 0 {
             b"No syntax errors detected in ".to_vec()
         } else {

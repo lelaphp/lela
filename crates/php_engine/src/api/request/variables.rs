@@ -59,6 +59,17 @@ pub struct BodyLimits {
     pub upload_max_filesize: Option<i64>,
 }
 
+/// Each auto-global not made yet, whose field no file but this one
+/// reads.
+#[derive(Default)]
+pub(super) struct Variables {
+    /// Each auto-global made just in time and not made yet, php's
+    /// `armed` on each of `CG(auto_globals)`: the first
+    /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
+    /// ([`Request::arm`]).
+    armed: Vec<php_unit::AutoGlobal>,
+}
+
 impl Request {
     /// `php_hash_environment` (`Z/main/php_variables.c:785`), what
     /// `php_request_startup` runs before the extensions' `RINIT`: `$argv`
@@ -111,7 +122,7 @@ impl Request {
         // `argc`; every other one is made now, in the order registered.
         let jit = self.ini_flag(b"auto_globals_jit");
         let server_jit = jit && !self.ini_flag(b"register_argc_argv");
-        self.armed = [
+        self.variables.armed = [
             (AutoGlobal::Server, server_jit),
             (AutoGlobal::Env, jit),
             (AutoGlobal::Request, jit),
@@ -128,7 +139,7 @@ impl Request {
             AutoGlobal::Request,
             AutoGlobal::Files,
         ] {
-            if !self.armed.contains(&global) {
+            if !self.variables.armed.contains(&global) {
                 self.make(global)?;
             }
         }
@@ -235,10 +246,15 @@ impl Request {
     /// auto-global: made and laid into `EG(symbol_table)` where it is
     /// still armed, and nothing where it was made already.
     pub(crate) fn arm(&mut self, global: AutoGlobal) -> Result<(), Thrown> {
-        let Some(at) = self.armed.iter().position(|armed| *armed == global) else {
+        let Some(at) = self
+            .variables
+            .armed
+            .iter()
+            .position(|armed| *armed == global)
+        else {
             return Ok(());
         };
-        self.armed.remove(at);
+        self.variables.armed.remove(at);
         self.make(global)
     }
 
@@ -1110,6 +1126,24 @@ impl Request {
             return Ok(());
         }
         container.set(self, key, value)
+    }
+
+    /// The request headers the host received, `getallheaders()`, as
+    /// strings of the request's.
+    pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
+        let mut array = PhpArray::new(self)?;
+        let headers = self
+            .description
+            .web
+            .as_ref()
+            .map(|web| web.headers.clone())
+            .unwrap_or_default();
+        for (name, value) in &headers {
+            let key = Key::Str(PhpString::new(self, name)?);
+            let value = Value::string(PhpString::new(self, value)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
     }
 }
 

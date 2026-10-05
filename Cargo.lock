@@ -1007,6 +1007,7 @@ dependencies = [
 name = "php_ext_openssl"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "openssl-sys",
  "php_ext",
  "php_ext_standard",
@@ -1025,6 +1026,7 @@ dependencies = [
 name = "php_ext_pcre"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "pcre2-sys",
  "php_ext",
  "pkg-config",
@@ -1299,6 +1301,7 @@ dependencies = [
 name = "php_ext_zlib"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "libz-sys",
  "php_ext",
  "php_ext_standard",

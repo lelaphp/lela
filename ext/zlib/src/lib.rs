@@ -38,6 +38,14 @@ mod filter;
 mod gz;
 mod output;
 
+/// The values php compiles in from `<zlib.h>`, read by `build.rs` off the
+/// header a C build finds, as php's `@cvalue` reads the macro at its build
+/// (#1974): after the library is upgraded without a rebuild, these keep
+/// the header's version as php's do.
+mod header {
+    include!(concat!(env!("OUT_DIR"), "/header.rs"));
+}
+
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
@@ -45,8 +53,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
 
 /// `register_zlib_symbols`: the constants in `zlib.stub.php`'s order,
-/// `ZLIB_VERSION` and `ZLIB_VERNUM` read off the library the process
-/// linked, which is the header's on a platform whose zlib is its own.
+/// `ZLIB_VERSION` and `ZLIB_VERNUM` the header's (see [`header`]).
 ///
 /// ```php
 /// var_dump(FORCE_GZIP, ZLIB_ENCODING_RAW, ZLIB_BLOCK, ZLIB_FINISH, ZLIB_FIXED, ZLIB_VERSION, ZLIB_VERNUM, ZLIB_VERSION_ERROR);
@@ -80,14 +87,13 @@ pub(crate) mod constants {
     pub(crate) const ZLIB_RLE: i64 = 3;
     pub(crate) const ZLIB_FIXED: i64 = 4;
     pub(crate) const ZLIB_DEFAULT_STRATEGY: i64 = 0;
-    /// Read off the library the process loaded, when the builder runs.
-    pub(crate) fn ZLIB_VERSION() -> String {
-        super::ffi::version()
-    }
-    /// `ZLIB_VERNUM`, `0xMmrs`, of the same version.
-    pub(crate) fn ZLIB_VERNUM() -> i64 {
-        super::vernum(&super::ffi::version())
-    }
+    /// `ZLIB_VERSION`, `@cvalue` of the header macro: the version of the
+    /// `zlib.h` this build compiled against, not the zlib it loads
+    /// (`zlibVersion`, `--ri`'s "Linked Version").
+    pub(crate) const ZLIB_VERSION: &str = super::header::ZLIB_VERSION;
+    /// `ZLIB_VERNUM`, `@cvalue` of the header macro, `0xMmrs`, of the
+    /// same header.
+    pub(crate) const ZLIB_VERNUM: i64 = super::header::ZLIB_VERNUM;
     pub(crate) const ZLIB_OK: i64 = 0;
     pub(crate) const ZLIB_STREAM_END: i64 = 1;
     pub(crate) const ZLIB_NEED_DICT: i64 = 2;
@@ -97,20 +103,6 @@ pub(crate) mod constants {
     pub(crate) const ZLIB_MEM_ERROR: i64 = -4;
     pub(crate) const ZLIB_BUF_ERROR: i64 = -5;
     pub(crate) const ZLIB_VERSION_ERROR: i64 = -6;
-}
-
-/// `ZLIB_VERNUM` as `zlib.h` writes it from its dotted version: a nibble
-/// each of the major, minor and revision numbers and the subrevision,
-/// `1.2.12` being `0x12c0`.
-fn vernum(version: &str) -> i64 {
-    let mut parts = version
-        .split('.')
-        .map(|part| part.trim().parse::<i64>().unwrap_or(0) & 0xf);
-    let mut out = 0;
-    for _ in 0..4 {
-        out = (out << 4) | parts.next().unwrap_or(0);
-    }
-    out
 }
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -210,6 +202,8 @@ fn rshutdown(req: &mut Request) {
 
 /// `PHP_MINFO_FUNCTION(zlib)`: the table, then `DISPLAY_INI_ENTRIES`,
 /// `zlib.output_compression` shown as the boolean its displayer prints.
+/// "Compiled Version" is `ZLIB_VERSION`, the header's ([`header`]);
+/// "Linked Version" is the loaded zlib's, `zlibVersion`.
 ///
 /// ```php
 /// $e = new ReflectionExtension('zlib'); ob_start(); $e->info(); echo ob_get_clean();
@@ -235,23 +229,13 @@ fn rshutdown(req: &mut Request) {
 /// zlib.output_handler => no value => no value
 /// ```
 fn info(req: &mut Request) {
-    let version = ffi::version();
+    let linked = ffi::version();
     req.info_table(&[
         &["ZLib Support", "enabled"],
         &["Stream Wrapper", "compress.zlib://"],
         &["Stream Filter", "zlib.inflate, zlib.deflate"],
-        &["Compiled Version", &version],
-        &["Linked Version", &version],
+        &["Compiled Version", header::ZLIB_VERSION],
+        &["Linked Version", &linked],
     ]);
     output::info_ini(req);
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vernum_is_zlib_h_s() {
-        assert_eq!(super::vernum("1.2.12"), 0x12c0);
-        assert_eq!(super::vernum("1.2.11.1"), 0x12b1);
-        assert_eq!(super::vernum("1.3.1"), 0x1310);
-    }
 }

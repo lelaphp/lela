@@ -33,7 +33,7 @@
 //! `zend_observer_fcall_install`. There is no limit on how many. Begin
 //! handlers are called in declaration order and end handlers in reverse. A
 //! frame with an end handler is kept on the request's chain of open
-//! frames ([`Open`], php's `EG(current_observed_frame)`), and is ended
+//! frames (`Request::open_observed`, php's `EG(current_observed_frame)`), and is ended
 //! only while it is that chain's innermost, so each is ended once: by its
 //! return, by the unwind that leaves it, or, at a fatal, by
 //! [`end_all`], which ends every one still open from the innermost out
@@ -153,13 +153,6 @@ pub(crate) struct Resolved {
     end: Box<[EndHandler]>,
 }
 
-/// The request's chain of open observed frames, php's
-/// `EG(current_observed_frame)` and each frame's `prev_observed_frame`:
-/// the frames begun with an end handler and not yet ended, the
-/// innermost last.
-#[derive(Debug, Default)]
-pub(crate) struct Open(Vec<FrameRef>);
-
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
@@ -205,7 +198,7 @@ fn begin(req: &mut Request, frame: FrameRef) {
         return;
     };
     if !handlers.end.is_empty() {
-        req.observing.0.push(frame);
+        req.open_observed(frame);
     }
     for begin in &handlers.begin {
         begin(&mut Observed { req, frame });
@@ -244,11 +237,9 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
 #[cold]
 #[inline(never)]
 fn end(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    if req.observing.0.last() != Some(&frame) {
-        return;
+    if req.close_observed(frame) {
+        ended(req, frame, value);
     }
-    req.observing.0.pop();
-    ended(req, frame, value);
 }
 
 /// The end handlers of `frame`'s slot, called in the order it holds them.
@@ -271,8 +262,7 @@ pub(crate) fn end_all(req: &mut Request) {
     if req.shared.observers == 0 {
         return;
     }
-    let open = std::mem::take(&mut req.observing);
-    for frame in open.0.into_iter().rev() {
+    for frame in req.take_observed() {
         ended(req, frame, None);
     }
 }

@@ -12,6 +12,8 @@
 //! and marks nothing, so the next `new` or the next read tries again
 //! and fails again where it failed.
 
+use std::collections::HashMap;
+
 use php_unit::decl::{ClassConstDecl, ClassKind};
 
 use super::Request;
@@ -53,6 +55,18 @@ struct Layout {
     declared_by: Option<ClassId>,
 }
 
+/// Each class's mutable data and the blocks made beside each object, whose fields no file but this one
+/// reads.
+#[derive(Default)]
+pub(super) struct ClassDataTables {
+    /// `zend_class_mutable_data` of each class the request updated or
+    /// read a constant of ([`class_data`]).
+    rows: HashMap<ClassId, ClassData>,
+    /// The `emalloc`s php's `create_object` made beside each object
+    /// that has them, by the object's id ([`Request::lay_beside`]).
+    beside: HashMap<u32, Vec<php_heap::Block>>,
+}
+
 impl Request {
     /// What `zend_object_alloc(sizeof(custom), ce)` counts of an object
     /// of `class` past the header and the declared slots (design §5.13):
@@ -78,7 +92,12 @@ impl Request {
     /// once per class.
     fn object_layout(&mut self, class: ClassId) -> Layout {
         const ZEND_OBJECT: usize = 56;
-        if let Some(layout) = self.class_data.get(&class).and_then(|data| data.layout) {
+        if let Some(layout) = self
+            .class_data
+            .rows
+            .get(&class)
+            .and_then(|data| data.layout)
+        {
             return layout;
         }
         let mut at = Some(class);
@@ -100,7 +119,7 @@ impl Request {
             custom: size.saturating_sub(ZEND_OBJECT) + guards,
             declared_by,
         };
-        self.class_data.entry(class).or_default().layout = Some(layout);
+        self.class_data.rows.entry(class).or_default().layout = Some(layout);
         layout
     }
 
@@ -136,7 +155,7 @@ impl Request {
             }
         }
         if !blocks.is_empty() {
-            self.beside.insert(object.heap().id().0, blocks);
+            self.class_data.beside.insert(object.heap().id().0, blocks);
         }
         Ok(())
     }
@@ -153,7 +172,8 @@ impl Request {
     ) -> Result<(), Thrown> {
         let block = self.heap.block(size);
         let block = self.fatal_of(block)?;
-        self.beside
+        self.class_data
+            .beside
             .entry(object.heap().id().0)
             .or_default()
             .push(block);
@@ -185,10 +205,11 @@ impl Request {
     /// What [`Request::lay_beside`] allocated for `object`, given back as
     /// its `free_obj` gives it back.
     pub(crate) fn free_beside(&mut self, object: PhpObject) {
-        if self.beside.is_empty() {
+        if self.class_data.beside.is_empty() {
             return;
         }
         for block in self
+            .class_data
             .beside
             .remove(&object.heap().id().0)
             .unwrap_or_default()
@@ -268,7 +289,12 @@ impl Request {
     /// Undefined constant "UNRESOLVED"
     /// ```
     pub(crate) fn update_class_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
-        if self.class_data.get(&class).is_some_and(|data| data.updated) {
+        if self
+            .class_data
+            .rows
+            .get(&class)
+            .is_some_and(|data| data.updated)
+        {
             return Ok(());
         }
         let Some(decl) = self.class_decl(class) else {
@@ -302,7 +328,7 @@ impl Request {
             self.lay_down_static(class, &name)?;
         }
         self.evaluate_defaults(class)?;
-        self.class_data.entry(class).or_default().updated = true;
+        self.class_data.rows.entry(class).or_default().updated = true;
         Ok(())
     }
 
@@ -395,6 +421,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         if let Some((_, value)) = self
             .class_data
+            .rows
             .get(&declaring)
             .and_then(|data| data.constants.iter().find(|(held, _)| **held == *name))
         {
@@ -411,6 +438,7 @@ impl Request {
         };
         self.addref(&value);
         self.class_data
+            .rows
             .entry(declaring)
             .or_default()
             .constants
@@ -475,7 +503,7 @@ impl Request {
         constant: &ClassConstDecl,
         class_name: &str,
     ) -> Result<Value, Thrown> {
-        let data = self.class_data.entry(declaring).or_default();
+        let data = self.class_data.rows.entry(declaring).or_default();
         if data.constants.iter().any(|(held, _)| **held == *name) {
             return self.evaluated_class_constant(declaring, name, constant);
         }
@@ -491,7 +519,7 @@ impl Request {
         }
         data.visiting.push(name.into());
         let evaluated = self.evaluated_class_constant(declaring, name, constant);
-        if let Some(data) = self.class_data.get_mut(&declaring) {
+        if let Some(data) = self.class_data.rows.get_mut(&declaring) {
             data.visiting.retain(|held| **held != *name);
         }
         evaluated
@@ -591,6 +619,7 @@ impl Request {
         self.update_class_constants(class)?;
         let defaults: Vec<Option<Value>> = self
             .class_data
+            .rows
             .get(&class)
             .map_or_else(Vec::new, |data| data.defaults.clone());
         for value in defaults.iter().flatten() {
@@ -626,7 +655,11 @@ impl Request {
     /// ```
     #[must_use]
     pub fn evaluated_default(&self, class: ClassId, name: &[u8]) -> Option<Value> {
-        let data = self.class_data.get(&class).filter(|data| data.updated)?;
+        let data = self
+            .class_data
+            .rows
+            .get(&class)
+            .filter(|data| data.updated)?;
         let placed = self.placed_properties(class);
         let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
         data.defaults.get(at).copied().flatten()
@@ -635,6 +668,7 @@ impl Request {
     fn evaluate_defaults(&mut self, class: ClassId) -> Result<(), Thrown> {
         let done = self
             .class_data
+            .rows
             .get(&class)
             .map_or(0, |data| data.defaults.len());
         // The rows not yet evaluated, which is none once the class's
@@ -655,6 +689,7 @@ impl Request {
                 None => Some(Value::null()),
             };
             self.class_data
+                .rows
                 .entry(class)
                 .or_default()
                 .defaults

@@ -1144,7 +1144,12 @@ impl ExtensionBuilder {
         self
     }
 
-    /// The request-start function, `RINIT`.
+    /// The request-start function, `RINIT`, served in bundle order as the
+    /// request starts. What it raises is php's fatal inside `RINIT`
+    /// (#1775): the throwable rendered as the uncaught fatal with no frame
+    /// standing, no later extension's `rinit` and no program served, no
+    /// request-end phase but under the built-in server, and the host
+    /// ending as php's does after `php_request_startup` fails.
     #[must_use]
     pub fn rinit(mut self, hook: fn(&mut Request) -> Result<(), Thrown>) -> ExtensionBuilder {
         self.rinit = Some(hook);
