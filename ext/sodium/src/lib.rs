@@ -285,7 +285,7 @@ struct Initialized;
 /// `Unable to start sodium module`, where php's `zend_error_noreturn` aborts the process
 /// after the fatal. The library fails only where it cannot read
 /// randomness, so the difference is not met in practice.
-fn start() -> Result<Initialized, Refusal> {
+fn initialize() -> Result<Initialized, Refusal> {
     if ffi::init() {
         Ok(Initialized)
     } else {
@@ -296,7 +296,7 @@ fn start() -> Result<Initialized, Refusal> {
 /// The extension value (design §7.1): `sodium_module_entry`, after
 /// `standard` (`ZEND_MOD_REQUIRED("standard")`), its constants, its
 /// functions in the stub's order and `SodiumException`, and
-/// `sodium_init` as its process start ([`start`]).
+/// `sodium_init` as its process start (`initialize`).
 ///
 /// ```php
 /// var_dump(extension_loaded('sodium'), count(get_extension_funcs('sodium')), class_exists('SodiumException'));
@@ -311,7 +311,7 @@ fn start() -> Result<Initialized, Refusal> {
 #[allow(clippy::too_many_lines)] // one line per function of the stub
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .process_state(start)
+        .process_state(initialize)
         .dependencies(vec![Dependency {
             name: String::from("standard"),
             kind: DependencyKind::Required,

@@ -828,7 +828,7 @@ pub fn extension() -> Extension {
             per_dir: false,
             system: true,
         }])
-        .process_state(global_init)
+        .process_state(initialize)
         .request_state::<State>()
         .info(version::curl_info)
         .build("curl")
@@ -846,7 +846,7 @@ struct Initialized;
 /// `Unable to start curl module`. php's `curl_global_cleanup` at `MSHUTDOWN` has
 /// no counterpart: no host ends the process scope, and the call is
 /// documented unsafe while another thread may use the library.
-fn global_init() -> Result<Initialized, Refusal> {
+fn initialize() -> Result<Initialized, Refusal> {
     if ffi::global_init() {
         Ok(Initialized)
     } else {

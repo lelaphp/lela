@@ -62,8 +62,8 @@ pub(crate) mod constants {
     pub(crate) const LIBEXSLT_DOTTED_VERSION: &str = "0.8.20";
 }
 
-/// The extension value (design §7.1): `PHP_MINIT_FUNCTION(xsl)` sets
-/// libxslt's process-wide functions and error handler as the engine is built.
+/// The extension value (design §7.1); `PHP_MINIT_FUNCTION(xsl)`'s
+/// libxslt registrations are its process start (`initialize`).
 ///
 /// ```php
 /// var_dump(extension_loaded('xsl'), XSL_SECPREF_DEFAULT, LIBXSLT_DOTTED_VERSION);
@@ -102,7 +102,8 @@ pub fn extension() -> Extension {
 /// (ADR-0010).
 struct Initialized;
 
-/// `PHP_MINIT_FUNCTION(xsl)`'s library half, the process start: called
+/// `PHP_MINIT_FUNCTION(xsl)`'s library half (`Z/ext/xsl/php_xsl.c:282-292`),
+/// the process start: called
 /// once for the process, the first time an engine carrying xsl is built,
 /// after libxml's, as the bundle orders them. It cannot fail.
 fn initialize() -> Initialized {
