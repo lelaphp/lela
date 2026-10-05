@@ -79,7 +79,7 @@ extern "C" fn on_sigint(_: libc::c_int) {
 }
 
 /// `signal(SIGINT, php_cli_server_sigint_handler)`
-/// (`Z/sapi/cli/php_cli_server.c:2900-2902`): from here a `SIGINT` sets
+/// (`Z/sapi/cli/php_cli_server.c:2900`): from here a `SIGINT` sets
 /// the flag answered, which the built-in server's loop reads between
 /// waits, where it would have ended the process.
 pub(crate) fn stop_on_sigint() -> &'static std::sync::atomic::AtomicBool {

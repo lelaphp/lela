@@ -120,10 +120,10 @@ fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) {
     let _ = listener.set_nonblocking(true);
     let mut clients: Vec<(Option<TcpStream>, JoinHandle<()>)> = Vec::new();
     while !stop.load(Ordering::Relaxed) {
+        clients.retain(|(_, thread)| !thread.is_finished());
         if !crate::ffi::wait_readable(listener.as_raw_fd(), 1000) {
             continue;
         }
-        clients.retain(|(_, thread)| !thread.is_finished());
         match listener.accept() {
             Ok((stream, peer)) => {
                 let _ = stream.set_nonblocking(false);
