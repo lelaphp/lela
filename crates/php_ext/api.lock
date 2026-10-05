@@ -468,7 +468,7 @@ raising::uncaught_at
 raising::warning
 raising::while_pending
 request::Allocation
-request::AllocationObserver
+request::AllocationObserverId
 request::BindTo
 request::BodyLimits
 request::Brigade

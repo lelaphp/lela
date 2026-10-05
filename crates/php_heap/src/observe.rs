@@ -66,12 +66,12 @@ pub trait ObserveAllocations: Any + Send {
 
 /// One observer's place in a heap's list, which removes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AllocationObserver(u32);
+pub struct AllocationObserverId(u32);
 
 /// A heap's observers, in the order they were put in.
 #[derive(Default)]
 pub(crate) struct Observers {
-    list: Vec<(AllocationObserver, Box<dyn ObserveAllocations>)>,
+    list: Vec<(AllocationObserverId, Box<dyn ObserveAllocations>)>,
     next: u32,
 }
 
@@ -84,15 +84,18 @@ impl Observers {
     }
 
     /// `observer` put in last, and its place.
-    pub(crate) fn add(&mut self, observer: Box<dyn ObserveAllocations>) -> AllocationObserver {
-        let at = AllocationObserver(self.next);
+    pub(crate) fn add(&mut self, observer: Box<dyn ObserveAllocations>) -> AllocationObserverId {
+        let at = AllocationObserverId(self.next);
         self.next = self.next.wrapping_add(1);
         self.list.push((at, observer));
         at
     }
 
     /// The observer at `at` taken out, where it is still in.
-    pub(crate) fn remove(&mut self, at: AllocationObserver) -> Option<Box<dyn ObserveAllocations>> {
+    pub(crate) fn remove(
+        &mut self,
+        at: AllocationObserverId,
+    ) -> Option<Box<dyn ObserveAllocations>> {
         let index = self.list.iter().position(|(held, _)| *held == at)?;
         Some(self.list.remove(index).1)
     }
@@ -136,7 +139,7 @@ mod tests {
     }
 
     /// What `observer` was told, taken out of `heap`.
-    fn taken(heap: &mut Heap, observer: AllocationObserver) -> Vec<Allocation> {
+    fn taken(heap: &mut Heap, observer: AllocationObserverId) -> Vec<Allocation> {
         let back: Option<Box<dyn Any>> = heap.unobserve_allocations(observer).map(|o| o as _);
         back.and_then(|any| any.downcast::<Recorder>().ok())
             .map(|recorder| recorder.0)

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-pub use php_heap::{Allocation, AllocationObserver, ObserveAllocations};
+pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
 
 use crate::api::raising::Thrown;
@@ -407,10 +407,27 @@ impl Request {
     /// `use_custom_heap` test. An observer is told mid-allocation and is
     /// handed nothing of the request; what it keeps is its own, and it is
     /// dropped with the request's heap where it is not taken out before.
+    ///
+    /// With none put in, what the heap reads across small and large
+    /// allocations, grown and freed, is php's:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); memory_reset_peak_usage();
+    /// $a = []; for ($i = 0; $i < 1000; $i++) { $a[] = "x$i"; }
+    /// $c = 'y'; for ($i = 0; $i < 12; $i++) { $c .= $c; }
+    /// $s = ''; for ($i = 0; $i < 100; $i++) { $s .= $c; }
+    /// unset($a);
+    /// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m, memory_get_usage(true));
+    /// ```
+    /// ```expect
+    /// int(421888)
+    /// int(474424)
+    /// int(2097152)
+    /// ```
     pub fn observe_allocations(
         &mut self,
         observer: Box<dyn ObserveAllocations>,
-    ) -> AllocationObserver {
+    ) -> AllocationObserverId {
         self.heap.observe_allocations(observer)
     }
 
@@ -419,7 +436,7 @@ impl Request {
     /// taken out already.
     pub fn unobserve_allocations(
         &mut self,
-        at: AllocationObserver,
+        at: AllocationObserverId,
     ) -> Option<Box<dyn ObserveAllocations>> {
         self.heap.unobserve_allocations(at)
     }

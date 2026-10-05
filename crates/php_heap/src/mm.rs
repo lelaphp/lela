@@ -43,7 +43,7 @@ use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use crate::hooks::Fatal;
-use crate::observe::{Allocation, Observers};
+use crate::observe::{Allocation, AllocationObserverId, ObserveAllocations, Observers};
 
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
@@ -415,9 +415,21 @@ impl Mm {
         freed
     }
 
-    /// The observers of this heap's allocations, put in and taken out.
-    pub(crate) fn observers(&mut self) -> &mut Observers {
-        &mut self.observers
+    /// `observer` put in last in this heap's list, and its place.
+    pub(crate) fn observe(
+        &mut self,
+        observer: Box<dyn ObserveAllocations>,
+    ) -> AllocationObserverId {
+        self.observers.add(observer)
+    }
+
+    /// The observer at `at` taken out of this heap's list, where it is
+    /// still in.
+    pub(crate) fn unobserve(
+        &mut self,
+        at: AllocationObserverId,
+    ) -> Option<Box<dyn ObserveAllocations>> {
+        self.observers.remove(at)
     }
 
     /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
@@ -656,8 +668,8 @@ impl Mm {
     }
 
     /// `zend_mm_free_heap`: give `at` back to the bin, `run` or huge
-    /// block it came from. php reads what it is from the chunk's page map, and so does
-    /// this, so a pointer carries no header of its own.
+    /// block it came from. php reads what it is from the chunk's page
+    /// map, and so does this, so a pointer carries no header of its own.
     ///
     /// # Safety
     ///

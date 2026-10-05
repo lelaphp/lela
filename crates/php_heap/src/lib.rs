@@ -72,7 +72,7 @@ pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
-pub use observe::{Allocation, AllocationObserver, ObserveAllocations};
+pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
@@ -245,17 +245,17 @@ impl Heap {
     pub fn observe_allocations(
         &mut self,
         observer: Box<dyn ObserveAllocations>,
-    ) -> AllocationObserver {
-        self.mm.observers().add(observer)
+    ) -> AllocationObserverId {
+        self.mm.observe(observer)
     }
 
     /// The observer put in at `at` taken out, told of nothing more and
     /// handed back, `None` where it was taken out already.
     pub fn unobserve_allocations(
         &mut self,
-        at: AllocationObserver,
+        at: AllocationObserverId,
     ) -> Option<Box<dyn ObserveAllocations>> {
-        self.mm.observers().remove(at)
+        self.mm.unobserve(at)
     }
 
     /// `zend_alloc_in_memory_limit_error_reporting`: whether the limit's

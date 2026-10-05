@@ -36,7 +36,7 @@ use super::api::abi::{
 };
 use super::api::decl::{IniDecl, Name};
 use super::api::raising::{Level, Thrown};
-use super::api::request::{Allocation, AllocationObserver, ObserveAllocations, Request};
+use super::api::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
 use super::api::values::{PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
@@ -343,7 +343,7 @@ impl<const N: u8> Drop for RequestSlot<N> {
 /// stands in the heap's list, while its entry is on, as `zend_test`
 /// keeps its observed heap in `ZT_G(observed_heap)`.
 #[derive(Default)]
-pub(crate) struct AllocationSlot<const N: u8>(Option<AllocationObserver>);
+pub(crate) struct AllocationSlot<const N: u8>(Option<AllocationObserverId>);
 
 /// What [`TestExt::observing_allocations`] puts in the heap's list: each
 /// allocation recorded as handed to extension `N`, as `zend_test`'s
@@ -444,11 +444,15 @@ impl<const N: u8> TestExt<N> {
             .build(&format!("test_ext_{N}"))
     }
 
-    /// `OnUpdateZendTestMMCustomHandlersEnabled`: on puts the observer
-    /// in where none stands, off takes the one standing out.
+    /// `OnUpdateZendTestMMCustomHandlersEnabled`: no value is refused,
+    /// on puts the observer in where none stands, and off takes the one
+    /// standing out.
     #[allow(clippy::unnecessary_wraps)]
     fn observe_allocations(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-        let on = matches!(value, Some(b"1" | b"on" | b"yes" | b"true"));
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        let on = Request::ini_parse_bool(value);
         let standing = req.state::<AllocationSlot<N>>().0.take();
         let standing = match (on, standing) {
             (true, None) => Some(req.observe_allocations(Box::new(AllocationRecorder::<N>))),
