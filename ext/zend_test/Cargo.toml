@@ -1,0 +1,23 @@
+# ext/zend_test: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_zend_test"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The zend_test extension, php-src/ext/zend_test"
+
+[lints]
+workspace = true
+
+# The facade; the engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+# ext/standard, whose `php_var_export_ex` the observer writes a return
+# value with (`ext/standard/php_var.h`, design §4.10).
+php_ext_standard = { path = "../standard" }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
