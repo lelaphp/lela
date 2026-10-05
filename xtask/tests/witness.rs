@@ -826,7 +826,7 @@ fn with_no_binary_built_the_linked_engine_serves_the_witness() {
         return;
     }
     let root = scratch("linked", &block("/// ```expect\n/// 1\n/// ```\n"));
-    for profile in ["release", "debug"] {
+    for profile in ["release-da", "release", "debug"] {
         let binary = root.join("target").join(profile).join("php");
         assert!(!binary.is_file(), "{} stands", binary.display());
     }
