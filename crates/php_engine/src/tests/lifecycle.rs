@@ -11,8 +11,8 @@ use crate::test::Capture;
 
 use Event::{Ext, Mark};
 use Phase::{
-    Deactivate, EngineStateBuilt, EngineStateDropped, PostStartup, RequestStateBuilt,
-    RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
+    Deactivate, EngineEnd, EngineStateBuilt, EngineStateDropped, PostDeactivate, PostStartup,
+    RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 
 /// Three recording extensions, in bundle order.
@@ -43,8 +43,10 @@ fn serve(engine: &Engine) {
 /// bundle order; at the end each `rshutdown` in reverse, each
 /// `deactivate` in reverse, then the resources the request left open
 /// closed from the top down (`zend_close_rsrc_list`), which is reverse
-/// again for resources opened in bundle order; each request state
-/// dropped once, after all of it, in reverse.
+/// again for resources opened in bundle order; then each
+/// `post_deactivate` in reverse, after `shutdown_executor`
+/// (`zend_post_deactivate_modules`); each request state dropped once,
+/// after all of it, in reverse.
 #[test]
 fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_closed_last() {
     let rec = Recording::start();
@@ -70,6 +72,9 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
             Ext(2, ResourceClosed),
             Ext(1, ResourceClosed),
             Ext(0, ResourceClosed),
+            Ext(2, PostDeactivate),
+            Ext(1, PostDeactivate),
+            Ext(0, PostDeactivate),
             Ext(2, RequestStateDropped),
             Ext(1, RequestStateDropped),
             Ext(0, RequestStateDropped),
@@ -185,13 +190,18 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
         ]
     );
     assert!(events.between("served", "first dropped").0.is_empty());
-    assert_eq!(
-        events.between("first dropped", "clone dropped").0,
-        [Ext(0, EngineStateDropped(0))]
-    );
+    let ended = |engine| {
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(0, EngineEnd(Some(engine))),
+            Ext(0, RequestStateDropped),
+            Ext(0, EngineStateDropped(engine)),
+        ]
+    };
+    assert_eq!(events.between("first dropped", "clone dropped").0, ended(0));
     assert_eq!(
         events.between("clone dropped", "second dropped").0,
-        [Ext(0, EngineStateDropped(1))]
+        ended(1)
     );
 }
 
@@ -233,11 +243,15 @@ fn a_refused_request_drops_its_request_state_in_reverse() {
     );
 }
 
-/// Dropping the last clone of an engine drops each engine state once,
-/// in reverse bundle order, as php's `zend_destroy_modules` walks its
-/// modules back to front; nothing else is handed to an extension.
+/// Dropping the last clone of an engine ends it: the shutdown request,
+/// the mirror of the startup one, builds every request state in bundle
+/// order, serves each engine-end function in reverse on them, reaching
+/// the engine's own states, and drops the request states in reverse;
+/// then each engine state drops once, in reverse bundle order, as php's
+/// `zend_destroy_modules` walks the bundle back to front, each
+/// `MSHUTDOWN` before that extension's state goes.
 #[test]
-fn an_engine_drops_its_engine_state_in_reverse_bundle_order() {
+fn an_engine_ends_on_a_shutdown_request_and_drops_its_engine_state_in_reverse() {
     let rec = Recording::start();
     let engine = Engine::cli_builder().extensions(&three()).build();
     serve(&engine);
@@ -247,6 +261,15 @@ fn an_engine_drops_its_engine_state_in_reverse_bundle_order() {
     assert_eq!(
         rec.events().between("served", "dropped").0,
         [
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(2, RequestStateBuilt),
+            Ext(2, EngineEnd(Some(0))),
+            Ext(1, EngineEnd(Some(0))),
+            Ext(0, EngineEnd(Some(0))),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
             Ext(2, EngineStateDropped(0)),
             Ext(1, EngineStateDropped(0)),
             Ext(0, EngineStateDropped(0)),

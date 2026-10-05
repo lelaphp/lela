@@ -15,15 +15,17 @@ mod test_ext;
 
 use test_ext::Event::{Ext, Mark};
 use test_ext::Phase::{
-    Deactivate, EngineStateBuilt, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit,
-    Rshutdown,
+    Deactivate, EngineEnd, EngineStateBuilt, EngineStateDropped, PostDeactivate, RequestStateBuilt,
+    RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 use test_ext::{Recording, TestExt};
 
-/// Two extensions declared through the facade, an engine built and one
-/// request served: the startup request, engine state in bundle order,
-/// then the request's phases in bundle order and in reverse, each
-/// request's states dropped in reverse.
+/// Two extensions declared through the facade, an engine built, one
+/// request served and the engine dropped: the startup request, engine
+/// state in bundle order, then the request's phases in bundle order and
+/// in reverse, each request's states dropped in reverse, and at the drop
+/// the shutdown request's engine end in reverse before the engine
+/// states drop in reverse.
 #[test]
 fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
     let rec = Recording::start();
@@ -33,6 +35,8 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
     rec.mark("built");
     let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
     rec.mark("served");
+    drop(engine);
+    rec.mark("dropped");
     assert_eq!(served.stdout, b"ran");
     assert_eq!(
         rec.events().0,
@@ -54,9 +58,20 @@ fn an_extension_declared_through_the_facade_is_handed_every_phase_in_order() {
             Ext(0, Deactivate),
             Ext(1, ResourceClosed),
             Ext(0, ResourceClosed),
+            Ext(1, PostDeactivate),
+            Ext(0, PostDeactivate),
             Ext(1, RequestStateDropped),
             Ext(0, RequestStateDropped),
             Mark("served"),
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(1, EngineEnd(Some(0))),
+            Ext(0, EngineEnd(Some(0))),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
+            Ext(1, EngineStateDropped(0)),
+            Ext(0, EngineStateDropped(0)),
+            Mark("dropped"),
         ]
     );
 }

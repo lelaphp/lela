@@ -2733,8 +2733,10 @@ impl EngineBuilder {
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
+            end: Arc::default(),
         };
         engine.register_ini(held, &configuration.loads, self.sapi_name);
+        engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
 }
@@ -3026,10 +3028,51 @@ fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
-/// by every request thread.
+/// by every request thread. The drop of its last clone ends it
+/// ([`EngineEnd`]).
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) shared: Arc<Shared>,
+    /// Held by every clone, so its drop is the last clone's.
+    end: Arc<EngineEnd>,
+}
+
+/// The engine end (ADR-0010): php's `php_module_shutdown` as far as an
+/// extension sees it, served once, from the drop of the engine's last
+/// clone, so no host can forget it and a forked child that drops its
+/// engine ends it too, as php's `php_module_shutdown` runs in each
+/// php-fpm child. Armed once the engine has started; an engine whose
+/// start was refused is not ended.
+#[derive(Default)]
+struct EngineEnd(OnceLock<(Arc<Shared>, &'static str)>);
+
+impl EngineEnd {
+    /// From here the drop of the engine's last clone ends `shared`, on a
+    /// request under the host's name `sapi_name`.
+    fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
+        let _ = self.0.set((Arc::clone(shared), sapi_name));
+    }
+}
+
+impl Drop for EngineEnd {
+    /// The shutdown request, the mirror of the startup request: request
+    /// states built in bundle order, each extension's engine-end function
+    /// in reverse ([`end_phase`]), the request dropped with its states in
+    /// reverse, and then, with the last owner of what every request
+    /// shares, the engine states in reverse (`zend_destroy_modules`).
+    /// What the request writes reaches no host.
+    fn drop(&mut self) {
+        let Some((shared, sapi_name)) = self.0.take() else {
+            return;
+        };
+        let description = RequestDescription {
+            sapi_name: sapi_name.to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&shared), description);
+        req.enter_phase(crate::api::request::Phase::EngineEnd);
+        end_phase(&shared.extensions, &mut req, |e| e.engine_end);
+    }
 }
 
 impl Engine {
@@ -3921,6 +3964,10 @@ impl Engine {
         req.ini_deactivate();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
+        // `zend_post_deactivate_modules`, after the executor is shut
+        // down and the request globals freed (`Z/main/main.c:2026-2029`),
+        // and before the host's deactivation hands over what is left.
+        end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
