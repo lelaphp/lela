@@ -204,7 +204,7 @@ abi::Path
 abi::PersistentList
 abi::Pool
 abi::Pool::drain
-abi::Pool::give
+abi::Pool::give_back
 abi::Pool::idle_len
 abi::Pool::new
 abi::Pool::take

@@ -277,10 +277,12 @@ pub struct Pool<K, V> {
 
 impl<K: Hash + Eq, V> Pool<K, V> {
     /// A pool keeping at most `capacity` idle entries; one given back past
-    /// the bound is dropped, which closes it. The engine's own for its
-    /// streams, and an extension's as a field of its engine state, as
-    /// persistent PDO's is; what a request took out it holds in a
-    /// [`Lent`] of its request state.
+    /// the bound is answered to the caller to close ([`give_back`]). The
+    /// engine's own for its streams, and an extension's as a field of its
+    /// engine state, as persistent PDO's is; what a request took out it
+    /// holds in a [`Lent`] of its request state.
+    ///
+    /// [`give_back`]: Pool::give_back
     #[must_use]
     pub fn new(capacity: usize) -> Pool<K, V> {
         Pool {
@@ -316,9 +318,13 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     }
 
     /// `entry` given back under `key` at the end of the request that
-    /// held it; past the bound it is handed back to the caller, whose
-    /// drop closes it outside the `Mutex`.
-    pub fn give(&self, key: K, entry: V) -> Option<V> {
+    /// held it; past the bound it is answered to the caller, the
+    /// extension that owns it, which closes it with the ending request,
+    /// outside the `Mutex` (ADR-0010's amendment of ADR-0005): an entry
+    /// leaves the pool only through its extension, never by a drop no
+    /// request sees.
+    #[must_use = "an entry past the bound is the caller's to close with the ending request"]
+    pub fn give_back(&self, key: K, entry: V) -> Option<V> {
         let mut idle = self.idle();
         if idle.values().map(Vec::len).sum::<usize>() >= self.capacity {
             return Some(entry);

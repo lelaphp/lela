@@ -246,7 +246,7 @@ pub(crate) fn deactivate(req: &mut Request) {
             conn.give_back(req);
         }
         if let Some(Pooled(pool)) = req.engine::<Pooled>() {
-            drop(pool.give(key, dbh));
+            drop(pool.give_back(key, dbh));
         }
     }
 }

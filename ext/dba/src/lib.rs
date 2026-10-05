@@ -205,7 +205,7 @@ fn deactivate(req: &mut Request) {
         };
         let back = req
             .engine::<Pooled>()
-            .and_then(|Pooled(pool)| pool.give(key, kept));
+            .and_then(|Pooled(pool)| pool.give_back(key, kept));
         if let Some(back) = back
             && let Ok(link) = back.take_up(req)
         {

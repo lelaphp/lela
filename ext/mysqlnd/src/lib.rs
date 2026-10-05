@@ -315,7 +315,7 @@ impl Handle {
         slot.refs -= 1;
         conn.net.give_back();
         let Idle(pool) = req.engine::<Idle>()?;
-        drop(pool.give(key.clone(), conn));
+        drop(pool.give_back(key.clone(), conn));
         Some(key)
     }
 
