@@ -90,3 +90,70 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
         "string(6) \"a|i:1;\"\n"
     );
 }
+
+/// What one engine's request writes of a `dba_popen` `cdb_make` file at
+/// `$f`, with `then` after the insert, and what a second engine reads of
+/// it: php's `zend_shutdown` finishes the file when it destroys the
+/// persistent list, its hash table written past the record and its
+/// bucket heads over the first 2,048 bytes, so the next process reads the
+/// value (#1804).
+fn written_then_read(name: &str, then: &str) -> (String, String) {
+    let path = std::env::temp_dir().join(format!("t1804-{name}-{}.cdb", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let path = path.display();
+    let built = || {
+        Engine::builder()
+            .extensions(&[php_ext_standard::extension(), php_ext_dba::extension()])
+            .ini("html_errors", "0")
+            .build()
+    };
+    let engine = built();
+    let write = format!(
+        "<?php $f = '{path}'; $d = dba_popen($f, 'n', 'cdb_make'); dba_insert('key0', 'value0', $d); {then}"
+    );
+    let written = engine.serve_capture(&write, Capture::default());
+    drop(engine);
+    let read = format!(
+        "<?php clearstatcache(); echo filesize('{path}'), \"\\n\"; var_dump(dba_fetch('key0', dba_open('{path}', 'r', 'cdb')));"
+    );
+    let served = built().serve_capture(&read, Capture::default());
+    let _ = std::fs::remove_file(path.to_string());
+    (
+        String::from_utf8_lossy(&written.stdout).into_owned(),
+        String::from_utf8_lossy(&served.stdout).into_owned(),
+    )
+}
+
+/// The oracle's bytes for the two processes: 2,066 bytes once the record
+/// is written, 2,082 once the first engine has ended, and the value read.
+#[test]
+fn a_persistent_cdb_make_file_is_finished_at_engine_end() {
+    let (written, read) = written_then_read("end", "clearstatcache(); echo filesize($f);");
+    assert_eq!(written, "2066");
+    assert_eq!(read, "2082\nstring(6) \"value0\"\n");
+}
+
+/// `dba_close` leaves a persistent link open, so the file is finished at
+/// engine end all the same.
+#[test]
+fn a_persistent_cdb_make_file_closed_is_finished_at_engine_end() {
+    let (written, read) = written_then_read(
+        "close",
+        "dba_close($d); clearstatcache(); echo filesize($f);",
+    );
+    assert_eq!(written, "2066");
+    assert_eq!(read, "2082\nstring(6) \"value0\"\n");
+}
+
+/// A fatal ends the request, and the engine's end finishes the file.
+#[test]
+fn a_persistent_cdb_make_file_is_finished_at_engine_end_after_a_fatal() {
+    let (written, read) = written_then_read("fatal", "undefined_function();");
+    assert!(
+        written.contains(
+            "Fatal error: Uncaught Error: Call to undefined function undefined_function()"
+        ),
+        "{written}"
+    );
+    assert_eq!(read, "2082\nstring(6) \"value0\"\n");
+}
