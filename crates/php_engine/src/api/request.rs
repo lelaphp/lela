@@ -1,10 +1,15 @@
 //! The request-environment group (design §4.4, §5.14): what a native
 //! reaches through `&mut Request`, the one parameter that says a function
-//! may re-enter PHP code (principle 9, ADR-0002). Ninety-eight methods,
-//! `api.lock`'s largest group. The skeleton answers each from what the
-//! request holds; the body bytes and the header block are kept on the
-//! request and handed to the sink by `serve`, which owns the commit
-//! moment; `serve` says what the request came to.
+//! may re-enter PHP code (principle 9, ADR-0002), `api.lock`'s largest
+//! group. The skeleton answers each from what the request holds; the
+//! body bytes and the header block are kept on the request and handed to
+//! the sink by `serve`, which owns the commit moment; `serve` says what
+//! the request came to.
+//!
+//! Each area of the request stands in a file of its own under
+//! `api/request/`, and the state an area alone reads is a struct whose
+//! fields are private to that file; this file holds the request itself,
+//! what more than one area reads, and its making.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -230,11 +235,13 @@ pub struct Request {
     /// every entry `NULL` until touched. Every op array's runtime cache
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
     map: MapTable,
-    /// The state area's state ([`state::RequestState`]).
+    /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
-    /// The ini area's state ([`ini::Ini`]).
+    /// The entries the request changed, their bytes, the host's locks
+    /// and the stage ([`ini::Ini`]).
     ini: ini::Ini,
-    /// The response area's state ([`response::Response`]).
+    /// The sink, the `php_output` layer, the header callback and the
+    /// connection's status ([`response::Response`]).
     response: response::Response,
     /// The diagnostics' state ([`diagnostics::Diagnostics`]).
     diagnostics: diagnostics::Diagnostics,
@@ -309,7 +316,7 @@ pub struct Request {
     /// php's `EG(lazy_objects_store)`: what goes with each lazy object's
     /// state, by its id ([`lazy`]).
     lazy: lazy::Table,
-    /// The include area's state ([`include::Include`]).
+    /// Which include is being opened ([`include::Include`]).
     include: include::Include,
     /// The extension whose `rinit` is being served, as
     /// `zend_activate_modules` reaches it ([`Request::activating`]).
@@ -324,12 +331,12 @@ pub struct Request {
     shutdown_functions: shutdown::ShutdownFunctions,
     /// `BG(user_tick_functions)` and `EG(ticks_count)` ([`ticks::Ticks`]).
     ticks: ticks::Ticks,
-    /// The autoload area's state ([`autoload::Autoload`]).
+    /// The autoloaders and `EG(in_autoload)` ([`autoload::Autoload`]).
     autoload: autoload::Autoload,
     /// The umask, the locale names and the start time
     /// ([`environment::Environment`]).
     environment: environment::Environment,
-    /// The paths area's state ([`paths::Paths`]).
+    /// `CWDG(realpath_cache)` ([`paths::Paths`]).
     paths: paths::Paths,
     cwd: PathBuf,
     /// The fibers running on this request, innermost last, each with the
@@ -693,16 +700,6 @@ impl Request {
         self.update_error_reporting();
         self.start_stack_limit();
     }
-
-    // -------------------------------------------------- crate-internal
-
-    // -------------------------------------------------- diagnostics
-
-    // -------------------------------------------------- symbols
-
-    // -------------------------------------------------- state
-
-    // -------------------------------------------------- environment
 
     /// The slot for a throwable PHP code served by a stream's kind, a
     /// filter or a user-space wrapper raised inside an operation whose
