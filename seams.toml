@@ -564,7 +564,7 @@ adr = "0004" # ext/* edges are the ones each crate declares; never php_engine, p
 [[edge]]
 from = "php_bundle"
 to = ["ext/*", "php_ext", "php_jit"]
-order = "topological"
+order = "registration"
 adr = ["0004", "0006"]
 [[edge]]
 from = "php_jit"
@@ -596,9 +596,11 @@ adr = "0008" # a host reaches the engine through php_sapi; php_ext only to decla
 [[rule]]
 id = "ext.no-locks"
 scope = "ext/*"
-deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*",
+              "std::sync::Once", "std::sync::OnceLock", "std::sync::LazyLock", "std::cell::OnceCell", "std::cell::LazyCell", "once_cell::*"]
+deny_macros = ["std::thread_local"]
 adr = "0005"
-text = "Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache."
+text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once or thread-local in ext/*. Cross-request caching is api::Cache."
 # Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
 # a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
 

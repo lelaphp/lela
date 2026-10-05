@@ -115,7 +115,7 @@ third-engine-design.md
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=ff11a9cfcf9b68aa2d9a752cc49d90bdff56896018846c09b86c7be89f9bec3d out=8b19b251e45618ab06dc3ecab8a7e95a558d008abd9568e6d6048e76c9ecd77b -->
+<!-- /computed in=d909eca6aced74ad4aba0f79d16bad46630037c46bd43401684cfadd39949ae9 out=8b19b251e45618ab06dc3ecab8a7e95a558d008abd9568e6d6048e76c9ecd77b -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -138,16 +138,16 @@ third-engine-design.md
 | generated.committed |  | generated | pass |
 | git.no-verify |  | deny_argv | no reading |
 | ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | no reading |
+| ticket.close-api |  | deny_pattern | fail |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | no reading |
+| lanes.nightly |  | deny_pattern | fail |
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=a4daa134fde21c5059edeee16e5ab4dcb8a9675947a195c448d28298268b63b2 out=6038e7364920afa63f4780852abfb2752f866f0c2935909accf6ebd5e1a421c8 -->
+<!-- /computed in=05a183404fad5946d56421624727c4117b67569c8138e400f1bb36d14ade736e out=b66867afeba0f4f2d56b242198efe491b959270b497220511bae93207f482b4b -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
