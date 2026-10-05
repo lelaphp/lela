@@ -134,6 +134,20 @@ impl Library {
         unsafe { sys::xmlInitParser() };
     }
 
+    /// `php_libxml_initialize`'s ZTS half (`Z/ext/libxml/libxml.c:941-947`):
+    /// `xmlSchemaInitTypes` and `xmlRelaxNGInitTypes`, the schema type
+    /// tables built once before any thread validates, since libxml2
+    /// builds them unguarded on first use. php's threaded build makes the
+    /// calls; this engine serves its requests on threads.
+    pub(crate) fn init_types() {
+        // SAFETY: no argument; called once for the process, before any
+        // request validates.
+        unsafe { sys::xmlSchemaInitTypes() };
+        // SAFETY: as above; the status is 0 once the types stand, and php
+        // does not read it.
+        let _ = unsafe { sys::xmlRelaxNGInitTypes() };
+    }
+
     /// `php_libxml_initialize`'s `xmlSetExternalEntityLoader`: php's
     /// loader, which every parse of the process reaches and which serves
     /// libxml's own default outside a call that lends a request.

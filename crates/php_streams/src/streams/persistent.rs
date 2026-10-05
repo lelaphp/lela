@@ -203,7 +203,7 @@ pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
             entry.socket.forget_request();
             // An entry past the pool's bound is closed here, outside the
             // lock.
-            drop(pool.give(held.key, Box::new(entry)));
+            drop(pool.give_back(held.key, Box::new(entry)));
         }
     }
 }

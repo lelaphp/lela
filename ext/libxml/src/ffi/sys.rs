@@ -606,6 +606,11 @@ unsafe extern "C" {
     pub(crate) safe static xmlStringTextNoenc: [xmlChar; 10];
 
     pub(crate) fn xmlInitParser();
+    /// The built-in XML Schema types, which a validation would otherwise
+    /// build on first use from whichever thread validates first.
+    pub(crate) fn xmlSchemaInitTypes();
+    /// The built-in RELAX NG types, likewise; 0 where they stand.
+    pub(crate) fn xmlRelaxNGInitTypes() -> c_int;
     /// `xmlFree`: libxml2 is built without per-thread allocators, so the
     /// function is one process-wide variable, set before any thread starts.
     pub(crate) static xmlFree: xmlFreeFunc;

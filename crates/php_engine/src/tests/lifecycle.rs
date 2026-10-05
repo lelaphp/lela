@@ -12,8 +12,8 @@ use crate::test::Capture;
 use Event::{Ext, Mark};
 use Phase::{
     Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped, Error,
-    PostDeactivate, PostStartup, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit,
-    Rshutdown,
+    PostDeactivate, PostStartup, ProcessStartRefused, ProcessStateBuilt, ProcessStateDropped,
+    ProcessStateReached, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 
 /// Three recording extensions, in bundle order.
@@ -490,4 +490,142 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
         events.between("served", "dropped").0,
         [Ext(0, EngineStateDropped(0))]
     );
+}
+
+/// The process scope (ADR-0010): two engines built one after the other
+/// in one process build the process state once, as the first engine
+/// carrying the extension starts it, in bundle order and before that
+/// extension's engine start, which is handed it; the second engine's
+/// engine start is handed the same one, and no engine's drop drops it,
+/// since no host ends the process scope. Its `N` is this test's alone,
+/// since the tests of this binary share the process.
+#[test]
+fn two_engines_in_one_process_build_the_process_state_once_and_never_drop_it() {
+    let rec = Recording::start();
+    let bundle = || [TestExt::<0>::extension(), TestExt::<100>::with_process()];
+    rec.mark("start");
+    let first = Engine::cli_builder().extensions(&bundle()).build();
+    rec.mark("first built");
+    let second = Engine::cli_builder().extensions(&bundle()).build();
+    rec.mark("second built");
+    serve(&first);
+    serve(&second);
+    drop(first);
+    drop(second);
+    rec.mark("dropped");
+    let events = rec.events();
+    let starts = |from, to| {
+        events
+            .between(from, to)
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .0
+    };
+    assert_eq!(
+        starts("start", "first built"),
+        [
+            Ext(0, EngineStateBuilt(0)),
+            Ext(100, ProcessStateBuilt),
+            Ext(100, ProcessStateReached(Some(0))),
+            Ext(100, EngineStateBuilt(0)),
+        ]
+    );
+    assert_eq!(
+        starts("first built", "second built"),
+        [
+            Ext(0, EngineStateBuilt(1)),
+            Ext(100, ProcessStateReached(Some(0))),
+            Ext(100, EngineStateBuilt(1)),
+        ]
+    );
+    let after = events.between("second built", "dropped");
+    assert_eq!(
+        after.handed(&EngineStateDropped(0)),
+        [100, 0],
+        "the engines do drop their engine states"
+    );
+    assert!(
+        after
+            .only(&[ProcessStateBuilt, ProcessStateDropped])
+            .0
+            .is_empty()
+    );
+}
+
+/// Two engines built at once on two threads of one process still build
+/// the process state once: the second waits on the first's build and is
+/// handed what it built.
+#[test]
+fn two_engines_built_at_once_build_the_process_state_once() {
+    let rec = Recording::start();
+    std::thread::scope(|threads| {
+        let build = || {
+            Engine::cli_builder()
+                .extensions(&[TestExt::<101>::with_process()])
+                .build()
+        };
+        let one = threads.spawn(build);
+        let other = threads.spawn(build);
+        drop((one.join(), other.join()));
+    });
+    let events = rec.events();
+    assert_eq!(events.handed(&ProcessStateBuilt), [101]);
+    assert_eq!(events.handed(&ProcessStateReached(Some(0))), [101, 101]);
+}
+
+/// A process start that refuses is php's `MINIT` failing on its library
+/// (sodium's `sodium_init()`), which php meets once per process and
+/// answers by ending the process: here the refusal is remembered for
+/// the process, so every later engine carrying the extension is refused
+/// with the same diagnostics, and the process start is not called again.
+/// No later extension starts, in either engine.
+#[test]
+fn a_refused_process_start_is_remembered_for_every_later_engine() {
+    let rec = Recording::start();
+    let bundle = || {
+        [
+            TestExt::<0>::extension(),
+            TestExt::<102>::process_refusing(),
+            TestExt::<2>::extension(),
+        ]
+    };
+    let refused = "\nWarning: test_ext_102 refuses to start its process in Unknown on line 0\n\nFatal error: Unable to start test_ext_102 module in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    rec.mark("start");
+    for _ in 0..2 {
+        let engine = Engine::cli_builder()
+            .sapi_name("cli")
+            .extensions(&bundle())
+            .build();
+        let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.exit_code, -2);
+    }
+    rec.mark("end");
+    let started = rec.events().between("start", "end").only(&[
+        EngineStateBuilt(0),
+        ProcessStartRefused,
+        ProcessStateBuilt,
+    ]);
+    assert_eq!(
+        started.0,
+        [
+            Ext(0, EngineStateBuilt(0)),
+            Ext(102, ProcessStartRefused),
+            Ext(0, EngineStateBuilt(1)),
+        ]
+    );
+}
+
+/// Two extensions that declare process states of one type are each
+/// started on their own, the process state held by the extension's name
+/// beside its type, and neither is handed the other's start.
+#[test]
+fn two_extensions_with_one_process_state_type_are_each_started() {
+    let rec = Recording::start();
+    let named = |name: &str| TestExt::<103>::with_process_named(name);
+    let _engine = Engine::cli_builder()
+        .extensions(&[named("test_ext_103_a"), named("test_ext_103_b")])
+        .build();
+    let events = rec.events();
+    assert_eq!(events.handed(&ProcessStateBuilt), [103, 103]);
 }
