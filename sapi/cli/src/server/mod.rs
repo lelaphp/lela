@@ -24,11 +24,15 @@ use log::{Log, Type};
 /// answers under it.
 pub(crate) const NAME: &str = "cli-server";
 
+/// `php_cli_server_log_level`'s default (`Z/sapi/cli/php_cli_server.c:223`),
+/// which each `-q` lowers.
+const LOG_LEVEL: u8 = 3;
+
 /// `sapi_cli_server_log_message` while php starts, before `-q` lowers the
-/// level (`Z/sapi/cli/php_cli_server.c:768`): the entry as a message, at
-/// the default level, which shows it.
+/// level (`Z/sapi/cli/php_cli_server.c:797-800`): the entry as a message,
+/// at the default level, which shows it.
 pub(crate) fn log_message(entry: &[u8]) {
-    Log::new(3, false).write(Type::Message, &String::from_utf8_lossy(entry));
+    Log::new(LOG_LEVEL, false).write(Type::Message, &String::from_utf8_lossy(entry));
 }
 
 /// What every connection of one server reads: the engine, the document
@@ -63,7 +67,7 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         }
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    let log = Log::new(3u8.saturating_sub(server.quiet).max(1), color);
+    let log = Log::new(LOG_LEVEL.saturating_sub(server.quiet).max(1), color);
     let address = String::from_utf8_lossy(&server.address).into_owned();
     let Some((host, port)) = parse_address(&address) else {
         return refuse(&format!("Invalid address: {address}\n"));
