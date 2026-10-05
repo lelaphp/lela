@@ -243,11 +243,12 @@ pub(crate) struct Mm {
     /// `free` and `gc`, and of nothing the heap does on its own behalf.
     observers: Observers,
     /// A debug build's record of what its sensors found
-    /// ([`crate::sensed`]), boxed so the address every chunk's header
-    /// holds stands while the heap moves, and dropped after the chunks
-    /// are given back.
+    /// ([`crate::sensed`]), shared so the address every chunk's header
+    /// holds stands while the heap moves and while any owner the engine
+    /// made holds a [`crate::sensed::Sensor`] on it, and dropped after
+    /// the chunks are given back and the last of those.
     #[cfg(debug_assertions)]
-    sensed: Box<crate::sensed::Record>,
+    sensed: crate::sensed::Sensor,
     /// A debug build's quarantine of each bin's last freed slots
     /// ([`Quarantine`]), held back from the free list.
     #[cfg(debug_assertions)]
@@ -278,7 +279,7 @@ impl Mm {
             overflow: false,
             observers: Observers::default(),
             #[cfg(debug_assertions)]
-            sensed: Box::default(),
+            sensed: crate::sensed::Sensor::new(),
             #[cfg(debug_assertions)]
             quarantine: [Quarantine::EMPTY; BINS],
         };
@@ -1218,11 +1219,17 @@ impl Mm {
         self.sensed.take()
     }
 
+    /// A way to this heap's sensed record ([`crate::sensed::Sensor`]).
+    #[cfg(debug_assertions)]
+    pub(crate) fn sensor(&self) -> crate::sensed::Sensor {
+        self.sensed.clone()
+    }
+
     /// `chunk` laid down as one of this heap's ([`chunk_init`]), its
     /// header naming this heap's sensed record in a debug build.
     fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {
         #[cfg(debug_assertions)]
-        chunk_init(chunk, num, &raw const *self.sensed);
+        chunk_init(chunk, num, self.sensed.record_at());
         #[cfg(not(debug_assertions))]
         chunk_init(chunk, num);
     }
@@ -1810,8 +1817,8 @@ pub(crate) mod freed {
         // of a chunk its heap still holds mapped, and that chunk's page
         // zero is the header `chunk_init` wrote.
         let record = unsafe { (*chunk.as_ptr()).sensed };
-        // SAFETY: the header names the record its heap boxed, which the
-        // heap drops only after it has given every chunk back, so the
+        // SAFETY: the header names the record its heap shares, which the
+        // heap lets go of only after it has given every chunk back, so the
         // record stands while the chunk is mapped.
         unsafe { &*record }.record(sensed);
     }

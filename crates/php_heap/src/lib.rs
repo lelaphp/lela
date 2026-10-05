@@ -78,6 +78,8 @@ pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
+#[cfg(debug_assertions)]
+pub use sensed::Sensor;
 pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
@@ -412,6 +414,17 @@ impl Heap {
         {
             None
         }
+    }
+
+    /// A debug build's way to this heap's sensed record, for a value
+    /// that reaches it through no chunk: what the engine's owner type
+    /// carries from where it is made, so an owner dropped unconsumed is
+    /// recorded here and raised where [`Heap::take_sensed`] is next
+    /// asked ([`Sensor`]).
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn sensor(&self) -> Sensor {
+        self.mm.sensor()
     }
 
     /// One more owner of `z`: a refcount increment for a refcounted
@@ -1014,6 +1027,38 @@ mod tests {
             assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
+    }
+
+    /// An owner dropped unconsumed is recorded through the sensor the
+    /// heap handed out, whatever the owner names, and raised once where
+    /// the heap is next asked, naming the line that made it, from the
+    /// thread the owner was dropped on as from the heap's own; a sensor
+    /// that outlives its heap records into a record nobody takes.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_sensor_records_an_owner_dropped_unconsumed_into_its_heap() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let sensor = heap.sensor();
+        let site = std::panic::Location::caller();
+        sensor.unconsumed(site);
+        sensor.unconsumed(std::panic::Location::caller());
+        assert_eq!(
+            heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"
+            )))
+        );
+        assert_eq!(heap.take_sensed(), None, "it is reported once");
+        let moved = heap.sensor();
+        let joined = std::thread::spawn(move || moved.unconsumed(site)).join();
+        assert!(joined.is_ok());
+        assert!(
+            heap.take_sensed().is_some(),
+            "a sensor dropped off the thread records"
+        );
+        drop(heap);
+        sensor.unconsumed(site);
     }
 
     /// A debug build stops at a second release of a block, #723's
