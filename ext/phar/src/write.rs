@@ -728,8 +728,8 @@ pub(crate) fn open_for_write(
         }
     };
     if let Some(context) = req.stream_ctx() {
-        let compress = php_ext_standard::stream_ctx_option(req, context, b"phar", b"compress")?;
-        let metadata = php_ext_standard::stream_ctx_option(req, context, b"phar", b"metadata")?;
+        let compress = context.option(req, b"phar", b"compress");
+        let metadata = context.option(req, b"phar", b"metadata");
         if let Target::Slot(slot) = data.target {
             if let Some(level) = compress.and_then(|v| v.as_int())
                 && level & !i64::from(ENT_COMPRESSION_MASK) == 0

@@ -31,9 +31,9 @@ use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerr
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
-    StreamOption, Xport, XportFactory, XportFailure,
+    StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
 };
-use crate::api::values::{PhpString, Resource};
+use crate::api::values::PhpString;
 use crate::streams::StreamLayer;
 use crate::streams::persistent::Persistent;
 
@@ -181,7 +181,7 @@ pub(crate) struct Socket {
     /// which php allocates persistent.
     data: Vec<Emalloc>,
     crypto: Option<Box<dyn Crypto>>,
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
     own: Option<Stream>,
     sock: Option<Sock>,
     label: &'static str,
@@ -326,7 +326,7 @@ impl Socket {
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`, as the stream set it, for the layer.
-    pub(crate) fn set_ctx(&mut self, context: Option<Resource>) {
+    pub(crate) fn set_ctx(&mut self, context: Option<StreamCtx>) {
         self.context = context;
     }
 

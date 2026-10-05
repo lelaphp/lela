@@ -11,7 +11,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
 };
-use php_ext::request::{Request, Stream, Streams as _};
+use php_ext::request::{Request, Stream, StreamCtx, Streams as _};
 use php_ext::values::{
     Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
 };
@@ -965,16 +965,13 @@ fn hash_update_file(
     // verified as php's body does: one given is the open's, and none
     // lays `FG(default_context)` down where no opener of the request has
     // yet.
-    if stream_context.is_none() {
-        php_ext_standard::default_stream_ctx(req)?;
-    }
-    let given = match stream_context {
-        Some(res) if res.type_name(req) != Some(b"stream-context".as_slice()) => {
-            let text = format!(
-                "{}(): supplied resource is not a valid Stream-Context resource",
-                req.active_function_name()
-            );
-            let refused = throw_error(req, "TypeError", &text);
+    let given = match stream_context.map(|res| StreamCtx::fetch(req, res)) {
+        None => {
+            StreamCtx::default_ctx(req)?;
+            None
+        }
+        Some(Ok(context)) => Some(context),
+        Some(Err(refused)) => {
             let path = filename.0.as_bytes();
             let carried =
                 while_pending(req, &refused, |req| hash_file_into(req, object, path, None));
@@ -983,7 +980,6 @@ fn hash_update_file(
             }
             return Err(refused);
         }
-        given => given,
     };
     hash_file_into(req, object, filename.0.as_bytes(), given)
 }
@@ -995,7 +991,7 @@ fn hash_file_into(
     req: &mut Request,
     object: PhpObject,
     filename: &[u8],
-    stream_context: Option<Resource>,
+    stream_context: Option<StreamCtx>,
 ) -> Result<bool, Thrown> {
     let opened = match stream_context {
         Some(ctx) => req.with_stream_ctx(Some(ctx), |req| req.open_stream(filename, b"rb", false)),

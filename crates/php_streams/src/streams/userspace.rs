@@ -151,7 +151,7 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
     let name = PhpString::new(req, b"context")?;
     let context = match req.streams().stream_ctx {
         Some(context) => {
-            let value = context.as_value();
+            let value = context.resource().as_value();
             req.addref(&value);
             value
         }

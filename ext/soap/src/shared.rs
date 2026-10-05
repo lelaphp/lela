@@ -41,7 +41,7 @@ pub(crate) enum ClientSlot {
     Classmap = 20,
     Features = 21,
     ConnectionTimeout = 22,
-    StreamContext = 23,
+    StreamCtx = 23,
     UserAgent = 24,
     KeepAlive = 25,
     SslMethod = 26,

@@ -17,16 +17,15 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Handshake, Opening, OptionAnswer, Request, Stream, StreamOption, StreamWrapper, Streams as _,
-    Xport, XportFailure,
+    Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, Stream, StreamCtx,
+    StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::State;
 use crate::sockets::{default_timeout, socket_options, timeval};
-use crate::streamsfuncs::notifier::{self, Code};
-use crate::streamsfuncs::{stream_ctx_option, stream_ctx_set_option, stream_ctx_unset_option};
+use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_url_decode};
 
 /// `HTTP_HEADER_MAX_LOCATION_SIZE`: 8192 less the ten bytes of
@@ -248,7 +247,7 @@ struct HttpOptions {
 impl HttpOptions {
     fn read(
         req: &mut Request,
-        ctx: Option<Resource>,
+        ctx: Option<StreamCtx>,
         label: &'static str,
     ) -> Result<HttpOptions, Thrown> {
         let parser = UriParser::of_ctx(req, ctx, b"http")?;
@@ -270,37 +269,35 @@ impl HttpOptions {
         let Some(ctx) = ctx else {
             return Ok(options);
         };
-        let get = |req: &mut Request, wrapper: &[u8], name: &[u8]| {
-            stream_ctx_option(req, ctx, wrapper, name)
-        };
+        let get = |req: &Request, wrapper: &[u8], name: &[u8]| ctx.option(req, wrapper, name);
         let string = |value: &Value| value.as_str_bytes().map(<[u8]>::to_vec);
         let filled = |value: &Value| string(value).filter(|s| !s.is_empty());
-        options.method = get(req, b"http", b"method")?.as_ref().and_then(filled);
-        options.header = get(req, b"http", b"header")?.as_ref().and_then(header_of);
-        options.user_agent = get(req, b"http", b"user_agent")?.as_ref().and_then(string);
-        options.content = get(req, b"http", b"content")?.as_ref().and_then(filled);
-        options.proxy = get(req, label.as_bytes(), b"proxy")?
+        options.method = get(req, b"http", b"method").as_ref().and_then(filled);
+        options.header = get(req, b"http", b"header").as_ref().and_then(header_of);
+        options.user_agent = get(req, b"http", b"user_agent").as_ref().and_then(string);
+        options.content = get(req, b"http", b"content").as_ref().and_then(filled);
+        options.proxy = get(req, label.as_bytes(), b"proxy")
             .as_ref()
             .and_then(filled);
-        if let Some(value) = get(req, b"http", b"request_fulluri")? {
+        if let Some(value) = get(req, b"http", b"request_fulluri") {
             options.request_fulluri = Some(truthy(req, &value));
         }
-        if let Some(value) = get(req, b"http", b"follow_location")? {
+        if let Some(value) = get(req, b"http", b"follow_location") {
             options.follow_location = Some(truthy(req, &value));
         }
-        if let Some(value) = get(req, b"http", b"max_redirects")? {
+        if let Some(value) = get(req, b"http", b"max_redirects") {
             options.max_redirects = Some(to_long(req, &value)?);
         }
-        if let Some(value) = get(req, b"http", b"protocol_version")? {
+        if let Some(value) = get(req, b"http", b"protocol_version") {
             options.protocol_version = Some(to_double(req, &value)?);
         }
-        if let Some(value) = get(req, label.as_bytes(), b"timeout")? {
+        if let Some(value) = get(req, label.as_bytes(), b"timeout") {
             options.timeout = Some(to_double(req, &value)?);
         }
-        if let Some(value) = get(req, b"http", b"ignore_errors")? {
+        if let Some(value) = get(req, b"http", b"ignore_errors") {
             options.ignore_errors = truthy(req, &value);
         }
-        if let Some(value) = get(req, b"http", b"auto_decode")? {
+        if let Some(value) = get(req, b"http", b"auto_decode") {
             options.auto_decode = Some(truthy(req, &value));
         }
         Ok(options)
@@ -374,7 +371,7 @@ impl Hop {
 /// throwable a notification's callback left, which the open raises once
 /// it is done, as php finds it pending then.
 struct Chain {
-    ctx: Option<Resource>,
+    ctx: Option<StreamCtx>,
     options: HttpOptions,
     opening: Opening,
     mode: Vec<u8>,
@@ -399,19 +396,25 @@ impl Chain {
     fn notify_info(
         &mut self,
         req: &mut Request,
-        code: Code,
+        code: NotifyCode,
         message: Option<&[u8]>,
         message_code: i64,
     ) {
         if self.thrown.is_none() {
-            let answered = notifier::info(req, self.ctx, code, message, message_code);
+            let answered = notify_info(req, self.ctx, code, message, message_code);
             self.keep(req, answered);
         }
     }
 
-    fn notify_error(&mut self, req: &mut Request, code: Code, message: &[u8], message_code: i64) {
+    fn notify_error(
+        &mut self,
+        req: &mut Request,
+        code: NotifyCode,
+        message: &[u8],
+        message_code: i64,
+    ) {
         if self.thrown.is_none() {
-            let answered = notifier::error(req, self.ctx, code, Some(message), message_code);
+            let answered = notify_error(req, self.ctx, code, Some(message), message_code);
             self.keep(req, answered);
         }
     }
@@ -614,14 +617,14 @@ fn tunnel(
         .unwrap_or_default()
         .to_vec();
     let given = match chain.ctx {
-        Some(ctx) => stream_ctx_option(req, ctx, b"ssl", b"peer_name")?.is_some(),
+        Some(ctx) => ctx.option(req, b"ssl", b"peer_name").is_some(),
         None => false,
     };
     let context = stream.ctx(req);
     let reset = match context {
         Some(context) if !given => {
             let value = Value::string(PhpString::new(req, &host)?);
-            stream_ctx_set_option(req, context, b"ssl", b"peer_name", &value)?;
+            context.set_option(req, b"ssl", b"peer_name", &value)?;
             req.release(value);
             true
         }
@@ -631,7 +634,7 @@ fn tunnel(
     header.extend_from_slice(&host);
     header.extend_from_slice(format!(":{} HTTP/1.0\r\n", resource.port.unwrap_or(0)).as_bytes());
     if let Some(ctx) = chain.ctx
-        && let Some(value) = stream_ctx_option(req, ctx, b"http", b"header")?
+        && let Some(value) = ctx.option(req, b"http", b"header")
     {
         match value.as_ref() {
             ValueRef::Array(lines) => {
@@ -652,7 +655,7 @@ fn tunnel(
     header.extend_from_slice(b"\r\n");
     let unset = |req: &mut Request| -> Result<(), Thrown> {
         match context {
-            Some(context) if reset => stream_ctx_unset_option(req, context, b"ssl", b"peer_name"),
+            Some(context) if reset => context.unset_option(req, b"ssl", b"peer_name"),
             _ => Ok(()),
         }
     };
@@ -788,13 +791,12 @@ fn wrap_http_ex(
         Some(d) => timeval(d),
         None => timeval(default_timeout(req).trunc()),
     };
-    let (socket, context) = socket_options(req, chain.ctx)?;
     let xport = Xport::Client {
         timeout,
         connect: true,
         persistent: None,
-        socket,
-        context,
+        socket: socket_options(req, chain.ctx)?,
+        context: chain.ctx,
     };
     let stream = match req.xport_create(&transport, xport)? {
         Ok(stream) => {
@@ -826,8 +828,8 @@ fn wrap_http_ex(
     } else {
         None
     };
-    notifier::attach(req, stream, chain.ctx);
-    chain.notify_info(req, Code::Connect, None, 0);
+    stream.set_ctx(req, chain.ctx);
+    chain.notify_info(req, NotifyCode::Connect, None, 0);
     if hop.header_init()
         && let Some(max) = chain.options.max_redirects
     {
@@ -915,7 +917,7 @@ fn wrap_http_ex(
             return out(req, chain, Some(stream), hop, &info, chunk_size);
         }
         if let Some(location) = info.location.clone() {
-            chain.notify_info(req, Code::Redirected, Some(&location), 0);
+            chain.notify_info(req, NotifyCode::Redirected, Some(&location), 0);
         }
         stream.free(req);
         info.chunked = false;
@@ -1029,7 +1031,7 @@ fn request_bytes(
         buf.extend_from_slice(b"Authorization: Basic ");
         buf.extend_from_slice(cstr(&crate::base64::encode(&scratch)));
         buf.extend_from_slice(b"\r\n");
-        chain.notify_info(req, Code::AuthRequired, None, 0);
+        chain.notify_info(req, NotifyCode::AuthRequired, None, 0);
     }
     let options = &chain.options;
     if !have.from
@@ -1192,9 +1194,9 @@ fn read_status(
     if (200..400).contains(&code) {
         ok = true;
     } else if code == 403 {
-        chain.notify_error(req, Code::AuthResult, &line, code);
+        chain.notify_error(req, NotifyCode::AuthResult, &line, code);
     } else {
-        chain.notify_error(req, Code::Failure, &line, code);
+        chain.notify_error(req, NotifyCode::Failure, &line, code);
     }
     let mut shown = line.as_slice();
     if shown.last() == Some(&b'\n') {
@@ -1302,7 +1304,7 @@ fn headers_parse(
         }
         info.location = Some(value);
     } else if starts(b"Content-Type:") {
-        chain.notify_info(req, Code::MimeTypeIs, Some(&value), 0);
+        chain.notify_info(req, NotifyCode::MimeTypeIs, Some(&value), 0);
     } else if starts(b"Content-Length:") {
         if value.first().is_some_and(u8::is_ascii_digit) && value.iter().all(u8::is_ascii_digit) {
             let parsed = value.iter().fold(0u64, |n, d| {
@@ -1310,7 +1312,15 @@ fn headers_parse(
             });
             info.file_size = usize::try_from(parsed.min(i64::MAX as u64)).unwrap_or(usize::MAX);
             if chain.thrown.is_none() {
-                let answered = notifier::file_size(req, chain.ctx, info.file_size, cstr(&last), 0);
+                let answered = notify(
+                    req,
+                    chain.ctx,
+                    Notification::FileSize {
+                        size: info.file_size,
+                        message: cstr(&last),
+                        message_code: 0,
+                    },
+                );
                 chain.keep(req, answered);
             }
         }
@@ -1401,7 +1411,14 @@ fn out(
         stream.set_wrapper_data(req, value);
     }
     if chain.thrown.is_none() {
-        let answered = notifier::progress_init(req, chain.ctx, 0, info.file_size);
+        let answered = notify(
+            req,
+            chain.ctx,
+            Notification::ProgressInit {
+                sofar: 0,
+                max: info.file_size,
+            },
+        );
         chain.keep(req, answered);
     }
     if let Some(chunk_size) = chunk_size {
@@ -1415,7 +1432,14 @@ fn out(
     }
     let unread = unread_bytes(req, stream)?;
     if unread > 0 && chain.thrown.is_none() {
-        let answered = notifier::progress_increment(req, chain.ctx, unread, 0);
+        let answered = notify(
+            req,
+            chain.ctx,
+            Notification::ProgressIncrement {
+                dsofar: unread,
+                dmax: 0,
+            },
+        );
         chain.keep(req, answered);
     }
     Ok(Some(stream))

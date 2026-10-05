@@ -34,7 +34,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw,
 };
-use php_ext::request::{Cast, Opening, Request, Resolve, Stream, Streams as _, Whence};
+use php_ext::request::{Cast, Opening, Request, Resolve, Stream, StreamCtx, Streams as _, Whence};
 use php_ext::values::{PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::ffi::{Magic, Read};
@@ -213,7 +213,7 @@ mod class {
             #[php(default = FILEINFO_NONE)] flags: i64,
             #[php(default = null)] context: Option<Resource>,
         ) -> Result<OrFalse<PhpString>, Thrown> {
-            file(req, "finfo::file", this.object(), filename, flags, context)
+            file(req, this.object(), filename, flags, context)
         }
 
         /// `finfo::buffer(string $string, int $flags, $context): string|false`,
@@ -446,24 +446,6 @@ fn identify_stream(req: &mut Request, magic: &mut Magic, stream: Stream) -> Opti
     answer
 }
 
-/// `php_stream_context_from_zval`: the `$context` a native was handed,
-/// refused where it is a resource of another type, php's `TypeError`
-/// naming `function`.
-fn context_of(
-    req: &mut Request,
-    function: &str,
-    context: Option<Resource>,
-) -> Result<Option<Resource>, Thrown> {
-    match context {
-        Some(resource) if resource.type_name(req) != Some(b"stream-context".as_slice()) => {
-            let text =
-                format!("{function}(): supplied resource is not a valid Stream-Context resource");
-            Err(throw(req, "TypeError", &text))
-        }
-        context => Ok(context),
-    }
-}
-
 /// `php_fileinfo_from_path`: the path opened through its wrapper under
 /// `$context`, `directory` for a directory, otherwise what libmagic
 /// finds in it.
@@ -471,7 +453,7 @@ fn from_path(
     req: &mut Request,
     magic: &mut Magic,
     path: &[u8],
-    context: Option<Resource>,
+    context: Option<StreamCtx>,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     let opening = Opening {
         warn: true,
@@ -493,7 +475,6 @@ fn from_path(
 /// `finfo_file`'s body, the function's and the method's.
 fn file(
     req: &mut Request,
-    function: &str,
     object: PhpObject,
     filename: Path,
     flags: i64,
@@ -504,7 +485,8 @@ fn file(
         if path.is_empty() {
             return Err(arg_value_error(req, 2, "not be empty"));
         }
-        let context = context_of(req, function, context)?;
+        // `php_stream_context_from_zval`'s fetch of a `$context` given.
+        let context = context.map(|res| StreamCtx::fetch(req, res)).transpose()?;
         let old = magic.flags();
         if flags != 0 {
             magic.set_flags(c_int(flags));
@@ -545,7 +527,7 @@ fn finfo_file(
     #[php(default = FILEINFO_NONE)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
 ) -> Result<OrFalse<PhpString>, Thrown> {
-    file(req, "finfo_file", finfo.object(), filename, flags, context)
+    file(req, finfo.object(), filename, flags, context)
 }
 
 /// `finfo_buffer`'s body, the function's and the method's: the
