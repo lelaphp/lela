@@ -37,7 +37,7 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     let host = if control || binary == pin.oracle.path {
         pin.sapi.phpdbg.as_ref().map(|dbg| dbg.path.clone())
     } else {
-        Some(binary.with_file_name(oracle::ENGINE_PHPDBG))
+        Some(binary.with_file_name(oracle::hosts::PHPDBG.binary))
     };
     host.filter(|path| path.is_file())
 }

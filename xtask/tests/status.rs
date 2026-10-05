@@ -532,8 +532,9 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 /// The corpus CI checks out (#1713): the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
-/// and where the targets under the pin are kept (#1733); the Markdown
-/// carries the same facts, and nothing is written.
+/// where the targets under the pin are kept (#1733), and the hosts the lane
+/// runs a test through, which CI builds (#1908); the Markdown carries the
+/// same facts, and nothing is written.
 #[test]
 fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let root = scratch("corpus");
@@ -567,6 +568,42 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         format!("target/phpt-runs/pin-{}-{}", pin.source.tag, pin.oracle.md5),
         "the targets are kept under the pin's tag and the oracle's digest"
     );
+    // The hosts the lane hands a test to (#1908), the binary under test
+    // first: each `sapi/*` crate of the workspace, by the package and the
+    // binary its own Cargo.toml names, which CI builds and spells nowhere.
+    let hosts: Vec<(String, String, String)> = corpus["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            let field = |k: &str| h[k].as_str().unwrap().to_owned();
+            (field("crate"), field("package"), field("binary"))
+        })
+        .collect();
+    assert_eq!(
+        hosts.first().map(|h| h.2.as_str()),
+        Some("php"),
+        "{hosts:?}"
+    );
+    let crates: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
+    assert_eq!(
+        crates,
+        ["sapi/cli", "sapi/cgi", "sapi/fpm", "sapi/phpdbg"],
+        "{hosts:?}"
+    );
+    for (krate, package, binary) in &hosts {
+        let cargo: toml::Table = toml::from_str(
+            &std::fs::read_to_string(workspace().join(krate).join("Cargo.toml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cargo["package"]["name"].as_str(), Some(package.as_str()));
+        let bins = cargo["bin"].as_array().unwrap();
+        assert!(
+            bins.iter()
+                .any(|b| b["name"].as_str() == Some(binary.as_str())),
+            "{krate} builds {binary}"
+        );
+    }
     let (_, again, _) = status(&root, &["--section", "corpus", "--format", "json"]);
     assert_eq!(again, json, "the key is the patterns', not the call's");
 
@@ -574,6 +611,10 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     assert!(ok, "{err}");
     assert!(md.contains(&format!("| key | {key} |")), "{md}");
     assert!(md.contains("/sapi/*/tests/"), "{md}");
+    assert!(
+        md.contains("| hosts | php_sapi_cli php_sapi_cgi php_sapi_fpm php_sapi_phpdbg |"),
+        "{md}"
+    );
     assert!(
         !root.join("target").exists(),
         "status ran nothing and wrote nothing"

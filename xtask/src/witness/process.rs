@@ -35,43 +35,16 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::anchor::Entry;
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
-/// A host whose witness build serves a fence: its package and the name
-/// of its `witness-trace` binary.
-#[derive(Debug, Clone, Copy)]
-struct Host {
-    package: &'static str,
-    binary: &'static str,
-}
-
-/// `sapi/cli`'s witness build, which serves a fence marked `process`.
-const CLI: Host = Host {
-    package: "php_sapi_cli",
-    binary: "php-witness",
-};
-
-/// `sapi/cgi`'s, which serves a fence with a `request`.
-const CGI: Host = Host {
-    package: "php_sapi_cgi",
-    binary: "php-cgi-witness",
-};
-
-/// `sapi/fpm`'s, which serves a fence with a `request fpm` (#1291).
-const FPM: Host = Host {
-    package: "php_sapi_fpm",
-    binary: "php-fpm-witness",
-};
-
-/// `sapi/phpdbg`'s, which serves a fence with a `request phpdbg`
-/// (#1348).
-const PHPDBG: Host = Host {
-    package: "php_sapi_phpdbg",
-    binary: "phpdbg-witness",
-};
+// The hosts a fence is served by, each its witness build: `sapi/cli`'s
+// serves a fence marked `process`, `sapi/cgi`'s one with a `request`,
+// `sapi/fpm`'s one with a `request fpm` (#1291) and `sapi/phpdbg`'s one
+// with a `request phpdbg` (#1348); `oracle::hosts` states each once.
 
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
@@ -271,7 +244,7 @@ pub(crate) fn served_as_cgi(
 fn built<'a>(
     slot: &'a OnceLock<Result<PathBuf, String>>,
     root: &Path,
-    host: Host,
+    host: EngineHost,
 ) -> Result<&'a Path> {
     slot.get_or_init(|| build(root, host).map_err(|e| format!("{e:#}")))
         .as_deref()
@@ -281,15 +254,15 @@ fn built<'a>(
 /// `cargo build -p <package> --bin <binary> --features witness-trace` in
 /// `root`, and where cargo put the binary: the target directory cargo
 /// was told of, or `root`'s own.
-fn build(root: &Path, host: Host) -> Result<PathBuf> {
-    let Host { package, binary } = host;
+fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
+    let (package, binary) = (host.package(), host.witness);
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .args([
             "build",
             "--quiet",
             "--package",
-            package,
+            &package,
             "--bin",
             binary,
             "--features",

@@ -23,6 +23,7 @@
 //! no source file (§10 rule 5).
 
 pub(crate) mod expect;
+pub(crate) mod hosts;
 pub(crate) mod linked;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1095,37 +1096,19 @@ impl<'a> Oracle<'a> {
 }
 
 /// The engine's binary, the one `sapi/cli` builds (design §4.1,
-/// ADR-0008).
-pub const ENGINE: &str = "php";
+/// ADR-0008): the first of [`hosts::HOSTS`].
+pub const ENGINE: &str = hosts::CLI.binary;
 
-/// Beside [`ENGINE`], the CGI host's binary, the one `sapi/cgi` builds
-/// (ADR-0008), which a CGI-shaped test is run through.
-pub(crate) const ENGINE_CGI: &str = "php-cgi";
-
-/// Beside [`ENGINE`], the `FastCGI` process manager's binary, the one
-/// `sapi/fpm` builds (ADR-0008), which `sapi/fpm/tests` start.
-pub(crate) const ENGINE_FPM: &str = "php-fpm";
-
-/// Beside [`ENGINE`], the debugger host's binary, the one `sapi/phpdbg`
-/// builds (ADR-0008), which a `--PHPDBG--` test is run through.
-pub(crate) const ENGINE_PHPDBG: &str = "phpdbg";
-
-/// The cargo line that builds [`ENGINE`], [`ENGINE_CGI`], [`ENGINE_FPM`]
-/// and [`ENGINE_PHPDBG`]: their crates by package, so the build turns on the
-/// features those crates declare and no others. A line naming the
-/// binaries alone builds them with every workspace member's features
-/// unified, the harness's extensions among them, which is not the binary
-/// the lane measures.
+/// The cargo line that builds every host of [`hosts::HOSTS`]: their crates
+/// by package, so the build turns on the features those crates declare and
+/// no others. A line naming the binaries alone builds them with every
+/// workspace member's features unified, the harness's extensions among
+/// them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    let packages: Vec<String> = [
-        crate::carried::BINARY,
-        "sapi/cgi",
-        "sapi/fpm",
-        "sapi/phpdbg",
-    ]
-    .iter()
-    .map(|krate| format!("-p {}", crate::layout::package(krate)))
-    .collect();
+    let packages: Vec<String> = hosts::HOSTS
+        .iter()
+        .map(|host| format!("-p {}", host.package()))
+        .collect();
     format!("cargo build {}", packages.join(" "))
 }
 
@@ -1352,27 +1335,26 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// tree with no engine source in it, are left as the engine: this says a
 /// binary is behind the tree only where it measured that it is.
 ///
-/// The CGI host's binary beside it, [`ENGINE_CGI`], is what a CGI-shaped
-/// test of the lane runs, and the `FastCGI` process manager's,
-/// [`ENGINE_FPM`], what `sapi/fpm/tests` start, and the debugger host's,
-/// [`ENGINE_PHPDBG`], what a `--PHPDBG--` test runs; since ADR-0008 each is
-/// built by a crate of its own, so a build of `php` alone leaves them
+/// The other hosts' binaries beside it ([`hosts::HOSTS`]) are what a
+/// CGI-shaped test, `sapi/fpm/tests` and a `--PHPDBG--` test of the lane
+/// run; since ADR-0008 each is built by a crate of its own, so a build of `php` alone leaves them
 /// where they were: where one stands there it is held to the tree with
 /// the engine's, and the lot is behind the tree when any is. Each is held
 /// to the sources it is built from, which are every host's but the other
 /// hosts' own, since writing `sapi/fpm` moves no `php` and cargo relinks
 /// none.
 fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
-    let hosts = [
-        (path.clone(), crate::carried::BINARY),
-        (path.with_file_name(ENGINE_CGI), "sapi/cgi"),
-        (path.with_file_name(ENGINE_FPM), "sapi/fpm"),
-        (path.with_file_name(ENGINE_PHPDBG), "sapi/phpdbg"),
-    ];
-    let behind = hosts.iter().find_map(|(binary, own)| {
+    let behind = hosts::HOSTS.iter().find_map(|host| {
+        // The binary under test is `path`, whatever its name; the other
+        // hosts stand beside it by theirs.
+        let binary = if *host == hosts::CLI {
+            path.clone()
+        } else {
+            path.with_file_name(host.binary)
+        };
         let built = binary.metadata().and_then(|at| at.modified()).ok()?;
-        let (source, written) = newest_source(root, Path::new(own))?;
-        (written > built).then(|| (binary.clone(), source))
+        let (source, written) = newest_source(root, Path::new(host.krate))?;
+        (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {
         return Runner::Engine(path);

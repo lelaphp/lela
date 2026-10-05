@@ -29,7 +29,7 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
     let host = if control || binary == pin.oracle.path {
         pin.sapi.fpm.as_ref().map(|fpm| fpm.path.clone())
     } else {
-        Some(binary.with_file_name(oracle::ENGINE_FPM))
+        Some(binary.with_file_name(oracle::hosts::FPM.binary))
     };
     host.filter(|path| path.is_file())
 }
@@ -47,7 +47,7 @@ pub(crate) fn place(subset: &Subset, host: Option<&Path>) -> Result<()> {
         let Some(parent) = place.dir.parent() else {
             continue;
         };
-        let link = parent.join(oracle::ENGINE_FPM);
+        let link = parent.join(oracle::hosts::FPM.binary);
         match std::fs::remove_file(&link) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
