@@ -61,7 +61,7 @@ fn main() {
 /// it did not build or start, which `configure` takes as a no.
 fn jit(library: &pkg_config::Library) -> Result<bool, String> {
     if env::var("HOST").ok() != env::var("TARGET").ok() {
-        return Ok(cross_compiling());
+        return Ok(host_cpu_answer());
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unset")?);
     let source = out.join("pcre2_jit.c");
@@ -72,11 +72,14 @@ fn jit(library: &pkg_config::Library) -> Result<bool, String> {
     for include in &library.include_paths {
         build.include(include);
     }
+    for (name, value) in &library.defines {
+        build.define(name, value.as_deref());
+    }
     let compiler = build
         .try_get_compiler()
         .map_err(|error| error.to_string())?;
     if compiler.is_like_msvc() {
-        return Ok(cross_compiling());
+        return Ok(host_cpu_answer());
     }
     let mut command = compiler.to_command();
     command.arg(&source).arg("-o").arg(&program);
@@ -95,13 +98,19 @@ fn jit(library: &pkg_config::Library) -> Result<bool, String> {
     let ran = Command::new(&program)
         .status()
         .map_err(|error| format!("the program: {error}"))?;
-    Ok(ran.success())
+    // `return !have_jit`: 0 or 1; any other exit is a program that did
+    // not start, the library out of the loader's reach.
+    match ran.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("the program did not start ({ran})")),
+    }
 }
 
 /// `configure`'s answer where it cannot start the program: `arm*`, `i386`
 /// to `i786`, `x86_64`, `mips*`, `powerpc*` and `sparc`, in Rust's names
 /// for those CPUs.
-fn cross_compiling() -> bool {
+fn host_cpu_answer() -> bool {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     matches!(arch.as_str(), "arm" | "x86" | "x86_64" | "sparc")
         || arch.starts_with("mips")

@@ -221,7 +221,8 @@ pub(crate) mod constants {
     /// `PCRE2_MINOR` of the header the pinned php was built against,
     /// 10.47's, not the linked library's minor.
     pub(crate) const PCRE_VERSION_MINOR: i64 = 47;
-    /// `PHP_PCRE_JIT_SUPPORT`, `HAVE_PCRE_JIT_SUPPORT` as `configure`
+    /// `PCRE_JIT_SUPPORT`, `@cvalue PHP_PCRE_JIT_SUPPORT`: the macro
+    /// `php_pcre.c` defines from `HAVE_PCRE_JIT_SUPPORT`, as `configure`
     /// decided it at build: `build.rs` compiles and starts `config0.m4`'s
     /// program against the library and sets the cfg `pcre_jit` where its
     /// `PCRE2_CONFIG_JIT` is 1, not `pcre2_config` of the library loaded
