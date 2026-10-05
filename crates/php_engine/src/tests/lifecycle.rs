@@ -615,3 +615,17 @@ fn a_refused_process_start_is_remembered_for_every_later_engine() {
         ]
     );
 }
+
+/// Two extensions that declare process states of one type are each
+/// started on their own, the process state held by the extension's name
+/// beside its type, and neither is handed the other's start.
+#[test]
+fn two_extensions_with_one_process_state_type_are_each_started() {
+    let rec = Recording::start();
+    let named = |name: &str| TestExt::<103>::with_process_named(name);
+    let _engine = Engine::cli_builder()
+        .extensions(&[named("test_ext_103_a"), named("test_ext_103_b")])
+        .build();
+    let events = rec.events();
+    assert_eq!(events.handed(&ProcessStateBuilt), [103, 103]);
+}

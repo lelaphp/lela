@@ -3032,6 +3032,24 @@ fn sort_modules(modules: &mut [Extension]) {
     }
 }
 
+/// One extension's `MINIT` (ADR-0010): its process start, called once
+/// for the process and its outcome kept ([`crate::process_scope`]), its
+/// process state then handed to `start` for this engine start and every
+/// later one, and its engine start, whose state joins `states`.
+fn start_module(
+    extension: &Extension,
+    start: &mut Start,
+    states: &mut States<Box<dyn Any + Send + Sync>>,
+) -> Result<(), Refusal> {
+    if let Some(process) = crate::process_scope::reach(extension).map_err(Refusal::clone)? {
+        start.process.push(process);
+    }
+    if let Some(build) = &extension.engine_state {
+        states.push(build(start)?);
+    }
+    Ok(())
+}
+
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
 fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
     extensions.iter().find_map(|e| {
@@ -3288,21 +3306,9 @@ impl Engine {
         // start, and the first that fails ends the startup
         // (`zend_startup_module_ex`).
         for (at, extension) in shared.extensions.iter().enumerate() {
-            let refusal = match crate::process_scope::reach(extension) {
-                Err(kept) => kept.clone(),
-                Ok(process) => {
-                    start.process.extend(process);
-                    let Some(build) = &extension.engine_state else {
-                        continue;
-                    };
-                    match build(&start) {
-                        Ok(state) => {
-                            shared.engine_states.push(state);
-                            continue;
-                        }
-                        Err(refusal) => refusal,
-                    }
-                }
+            let Err(refusal) = start_module(extension, &mut start, &mut shared.engine_states)
+            else {
+                continue;
             };
             let cut = marks
                 .iter()

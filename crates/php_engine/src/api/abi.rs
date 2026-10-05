@@ -76,7 +76,7 @@ pub struct Start {
     pub(crate) host: &'static str,
     /// The process states of this extension and of every one before it
     /// in bundle order, as each was started for the process.
-    pub(crate) process: Vec<&'static (dyn Any + Send + Sync)>,
+    pub(crate) process: Vec<crate::process_scope::ProcessState>,
 }
 
 impl Start {
@@ -430,8 +430,9 @@ pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 /// constants rewritten with every value the bundle registered.
 pub(crate) type ConstantsLink =
     Arc<dyn Fn(Vec<ConstDecl>, &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
-/// Builds one extension's process state, keyed by its type, or refuses
-/// to: called at most once per process ([`crate::process_scope`]).
+/// Builds one extension's process state, of the type named beside it,
+/// or refuses to: called at most once per process
+/// ([`crate::process_scope`]).
 pub(crate) type ProcessStateBuilder = (
     TypeId,
     Arc<dyn Fn() -> Result<Box<dyn Any + Send + Sync>, Refusal> + Send + Sync>,
@@ -1073,8 +1074,10 @@ impl ExtensionBuilder {
     /// meets once per process and answers by ending the process: it is
     /// remembered for the process, so every engine carrying the
     /// extension is refused with it, and the function is not called again.
-    /// Keyed by `P`, as an engine state is reached by its type, so the
-    /// type is the extension's own. Declared twice, the later stands.
+    /// Held for the extension by its name and `P`, so each extension's is
+    /// started on its own; [`Start::process`] finds the first of a type,
+    /// as [`Request::engine`] does, so the type is the extension's own.
+    /// Declared twice, the later stands.
     #[must_use]
     pub fn process_state<P: Send + Sync + 'static>(
         mut self,

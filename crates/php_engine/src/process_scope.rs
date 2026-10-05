@@ -8,7 +8,11 @@
 //! later engine is refused with the same refusal and the start is not
 //! called again. Nothing here is ever released; process exit releases it,
 //! as `xmlCleanupParser` and `curl_global_cleanup` are documented unsafe
-//! while another thread may use the library.
+//! while another thread may use the library. A forked child inherits
+//! what its parent started, as php's fpm children inherit what the
+//! master's `MINIT` started; a host forks from the thread that built its
+//! engine, never while another thread is building one, since a child
+//! would inherit that start half done.
 
 use std::any::{Any, TypeId};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -21,33 +25,35 @@ pub(crate) type ProcessState = &'static (dyn Any + Send + Sync);
 /// What one process start answered, kept for the process.
 type Outcome = Result<ProcessState, Refusal>;
 
-/// Each process state's once, by the state's type. The mutex is held
-/// only to find or add a once, never across a start, so two engines
-/// built at once on two threads wait on one start each and not on each
-/// other's.
-static HELD: Mutex<Vec<(TypeId, &'static OnceLock<Outcome>)>> = Mutex::new(Vec::new());
+/// Each process state's once, by its extension's name and the state's
+/// type, so two extensions are never handed one start between them. The
+/// mutex is held only to find or add a once, never across a start, so
+/// two engines built at once on two threads wait on one start each and
+/// not on each other's.
+static HELD: Mutex<Vec<(String, TypeId, &'static OnceLock<Outcome>)>> = Mutex::new(Vec::new());
 
 /// `extension`'s process state, started for the process the first time
 /// it is asked for and the same one afterwards, from any engine on any
 /// thread; `None` for an extension that declared none, and the kept
-/// refusal where its start refused.
+/// refusal where its start refused. A start that builds an engine
+/// carrying its own extension waits on itself.
 pub(crate) fn reach(extension: &Extension) -> Result<Option<ProcessState>, &'static Refusal> {
     let Some((key, build)) = &extension.process_state else {
         return Ok(None);
     };
-    let once = once(*key);
+    let once = once(&extension.name, *key);
     let outcome = once.get_or_init(|| build().map(|state| &*Box::leak(state)));
     outcome.as_ref().map(|&state| Some(state))
 }
 
-/// The once for the process state of type `key`, laid down the first
-/// time it is asked for.
-fn once(key: TypeId) -> &'static OnceLock<Outcome> {
+/// The once for `name`'s process state of type `key`, laid down the
+/// first time it is asked for.
+fn once(name: &str, key: TypeId) -> &'static OnceLock<Outcome> {
     let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&(_, once)) = held.iter().find(|(k, _)| *k == key) {
+    if let Some(&(_, _, once)) = held.iter().find(|(n, k, _)| n == name && *k == key) {
         return once;
     }
     let once: &'static OnceLock<Outcome> = Box::leak(Box::new(OnceLock::new()));
-    held.push((key, once));
+    held.push((name.to_owned(), key, once));
     once
 }

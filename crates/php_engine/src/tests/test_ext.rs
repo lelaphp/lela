@@ -328,10 +328,16 @@ impl<const N: u8> TestExt<N> {
     /// process, so a test that takes it takes an `N` no other test
     /// builds.
     pub(crate) fn with_process() -> Extension {
+        Self::with_process_named(&format!("test_ext_{N}"))
+    }
+
+    /// [`TestExt::with_process`] built under `name`, for a test of two
+    /// extensions whose process states are of one type.
+    pub(crate) fn with_process_named(name: &str) -> Extension {
         Self::builder()
             .process_state(|| Ok(Self::process_state()))
             .engine_state(|start| Ok(Self::engine_state_with_process(start)))
-            .build(&format!("test_ext_{N}"))
+            .build(name)
     }
 
     /// [`TestExt::builder`] with a process start that refuses, a warning
