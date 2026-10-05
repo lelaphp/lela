@@ -35,7 +35,7 @@ panic = "unwind"
 # is the toolchain's release build either way. Thin LTO and a single
 # codegen unit are left to release: they buy the bench lane and the shipped
 # binaries speed a lane does not read, at the cost of the build. The
-# harness names the profile once, as `xtask::profile::Profile::Lane`.
+# harness names the profile once, as `LANE` in xtask/src/oracle/profile.rs.
 [profile.release-da]
 inherits = "release"
 debug-assertions = true

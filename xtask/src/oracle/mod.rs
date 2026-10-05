@@ -1410,7 +1410,12 @@ impl Runner {
         }
         let looked: Vec<String> = profile::PREFERRED
             .iter()
-            .map(|profile| format!("target/{}/{ENGINE}", profile.dir()))
+            .map(|profile| {
+                profile
+                    .binary(Path::new("target"), ENGINE)
+                    .display()
+                    .to_string()
+            })
             .collect();
         Ok(Runner::Absent(format!(
             "the engine's binary is not built: none of {}; a CLI request reaches `serve` with php_engine (design §5), and `{}` builds the lanes'",

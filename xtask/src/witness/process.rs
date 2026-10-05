@@ -11,11 +11,11 @@
 //! The binary is `php-witness`, `sapi/cli`'s host built with
 //! `php_engine`'s `witness-trace`, which this module builds once per run
 //! with cargo where the run meets its first such fence, in the profile
-//! this harness was built in (`Profile::this_build`, #1994): so a lane
-//! whose harness is the correctness lanes' build serves its `process`
-//! fences in that build too, and the build shares the engine's compiled
-//! crates with this harness's, since both turn the same features on in
-//! one profile, so the build is the bundle, the host and a link. It
+//! this harness was built in (`Profile::this_build`, #1994). A lane whose
+//! harness is the correctness lanes' build serves its `process` fences in
+//! that build too. The build shares the engine's compiled crates with
+//! this harness's, since both turn the same features on in one profile:
+//! it is the bundle, the host and a link. It
 //! runs under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
@@ -260,7 +260,7 @@ fn built<'a>(
 /// the target directory cargo was told of, or `root`'s own.
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
     let (package, binary) = (host.package(), host.witness);
-    let profile = Profile::this_build();
+    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .args([

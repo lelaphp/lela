@@ -31,7 +31,7 @@ pub(crate) const LANE: Profile = Profile::ReleaseDa;
 /// own build first: a binary the tree has moved past is passed over for
 /// the next, so a machine that built one profile at the tree's tip runs
 /// that one, and one that built the lane's runs it before any other.
-pub(crate) const PREFERRED: [Profile; 3] = [Profile::ReleaseDa, Profile::Release, Profile::Dev];
+pub(crate) const PREFERRED: [Profile; 3] = [LANE, Profile::Release, Profile::Dev];
 
 impl Profile {
     /// The name `cargo --profile` takes.
@@ -59,9 +59,7 @@ impl Profile {
 
     /// The profile whose directory is `dir`, where it is one of these.
     fn of_dir(dir: &str) -> Option<Profile> {
-        [Profile::Dev, Profile::Release, Profile::ReleaseDa]
-            .into_iter()
-            .find(|profile| profile.dir() == dir)
+        PREFERRED.into_iter().find(|profile| profile.dir() == dir)
     }
 
     /// The profile this harness was built in, which `build.rs` reads off
@@ -69,10 +67,17 @@ impl Profile {
     /// fences through the engine linked into this binary, and builds the
     /// host of a `process` fence in the same profile, so the fence runs
     /// the build the rest of the lane does and the two share the engine's
-    /// compiled crates. A profile the harness does not name reads as
-    /// [`Profile::Dev`], the one cargo builds without being asked.
-    pub(crate) fn this_build() -> Profile {
-        Profile::of_dir(env!("XTASK_PROFILE_DIR")).unwrap_or(Profile::Dev)
+    /// compiled crates. A harness built in a profile this module does not
+    /// name has none, and the build that would need one says which
+    /// directory it was built in rather than guess.
+    pub(crate) fn this_build() -> Result<Profile, String> {
+        let dir = env!("XTASK_PROFILE_DIR");
+        Profile::of_dir(dir).ok_or_else(|| {
+            format!(
+                "this harness was built into the profile directory `{dir}`, which names none of the profiles `oracle::profile` states; build it in one of them, as `cargo run --profile {} -p xtask`",
+                LANE.name()
+            )
+        })
     }
 }
 
@@ -119,49 +124,66 @@ mod tests {
 
     /// The oracle job builds and runs every binary its correctness lanes
     /// read in the lane's profile, and none in plain release: each cargo
-    /// line of the job names `--profile` with [`LANE`]'s name, and none
-    /// names `--release`. The comments are read past, so prose that cites
-    /// a flag does not stand in for a line.
+    /// command of the job, its continuation lines joined, names
+    /// `--profile` followed by [`LANE`]'s name, and none names `--release`
+    /// or runs `cargo xtask`, which builds the harness in `dev`. The job is
+    /// the lines from its key to the next job's key at the same indent, and
+    /// comments are read past, so prose that cites a flag does not stand in
+    /// for a command. Three commands build: the harness (`XTASK`), the
+    /// hosts and the tree's test.
     #[test]
     fn the_oracle_job_builds_its_binaries_in_the_lanes_profile() {
         let text =
             std::fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
-        let job = text
-            .split_once("\n  oracle:\n")
-            .and_then(|(_, rest)| rest.split_once("\n  publish:\n"))
-            .map(|(job, _)| job)
-            .expect("dashboard.yml has an oracle job before its publish job");
-        let mut cargo = 0;
-        for (n, line) in job.lines().enumerate() {
-            let line = line.trim_start();
-            if line.starts_with('#') || !line.contains("cargo ") {
-                continue;
+        let mut lines = text.lines().skip_while(|line| *line != "  oracle:");
+        assert_eq!(
+            lines.next(),
+            Some("  oracle:"),
+            "dashboard.yml has an oracle job"
+        );
+        let job: Vec<&str> = lines
+            .take_while(|line| {
+                let key = line.strip_prefix("  ").unwrap_or_default();
+                !(key.ends_with(':') && key.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
+            })
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        let mut commands = Vec::new();
+        let mut open = String::new();
+        for line in job {
+            open.push_str(line.trim_end_matches('\\'));
+            open.push(' ');
+            if !line.ends_with('\\') {
+                commands.push(std::mem::take(&mut open));
             }
+        }
+        let mut cargo = 0;
+        for command in commands.iter().filter(|c| c.contains("cargo ")) {
+            let words: Vec<&str> = command.split_whitespace().collect();
+            assert!(!words.contains(&"--release"), "the oracle job: {command}");
             assert!(
-                !line.contains("--release"),
-                "the oracle job's line {}: {line}",
-                n + 1
+                !words.windows(2).any(|w| w == ["cargo", "xtask"]),
+                "the oracle job runs `$XTASK`, not `cargo xtask`: {command}"
             );
             assert!(
-                !line.contains("cargo xtask"),
-                "the oracle job's line {}: `cargo xtask` builds the harness in `dev`; the job runs `$XTASK`: {line}",
-                n + 1
-            );
-            assert!(
-                line.contains(&format!("--profile {}", LANE.name())),
-                "the oracle job's line {}: a cargo line names `--profile {}`: {line}",
-                n + 1,
+                words.windows(2).any(|w| w == ["--profile", LANE.name()]),
+                "the oracle job's cargo commands name `--profile {}`: {command}",
                 LANE.name()
             );
             cargo += 1;
         }
-        assert!(cargo >= 3, "the job's cargo lines: {cargo}");
+        assert_eq!(
+            cargo, 3,
+            "the harness, the hosts and the tree's test: {commands:#?}"
+        );
     }
 
     /// The directory each profile is built into names that profile back,
     /// and a directory no profile here names is none of them.
     #[test]
     fn a_profiles_directory_names_it() {
+        assert_eq!(PREFERRED[0], LANE, "the lanes' build is looked for first");
         for profile in PREFERRED {
             assert_eq!(Profile::of_dir(profile.dir()), Some(profile));
         }
