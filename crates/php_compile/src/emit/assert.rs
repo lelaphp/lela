@@ -134,7 +134,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.send_args(&plan, &arguments, Some(&callee))?;
-            self.call_op(self.get_call_op(Fbc::Native, false), line, plan.extra_named)
+            self.extended_call(self.get_call_op(Fbc::Native, false), line, plan.extra_named)
         } else {
             let pair = self.ns_func_name_literal(resolved)?;
             let plan = Plan::of(&arguments, None);
@@ -148,7 +148,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             self.send_args(&plan, &arguments, None)?;
-            self.call_op(self.get_call_op(Fbc::ByName, false), line, plan.extra_named)
+            self.extended_call(self.get_call_op(Fbc::ByName, false), line, plan.extra_named)
         };
         let after = self.next();
         if let (Where::Returned(var), Some(opline)) = (served, self.oplines.get_mut(check as usize))

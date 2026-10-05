@@ -65,10 +65,10 @@ impl Emit<'_> {
                 "Arrow functions on the right hand side of |> must be parenthesized",
             ));
         }
-        let value = self.expr(operand)?;
-        let value = match value {
+        let compiled = self.expr(operand)?;
+        let value = match compiled {
             Where::Cv(_) | Where::Returned(_) => {
-                let (op1_type, op1) = self.operand(value);
+                let (op1_type, op1) = self.operand(compiled);
                 let out = self.temporary();
                 self.push(Opline {
                     opcode: Opcode::QmAssign,
@@ -80,22 +80,26 @@ impl Emit<'_> {
                 });
                 Where::Temporary(out)
             }
-            Where::Temporary(_) | Where::Constant(_) => value,
+            Where::Temporary(_) | Where::Constant(_) => compiled,
         };
         let operand = self.peel(operand);
         let held = self.znodes.len();
         self.znodes.push((operand, value));
-        let called = self.pipe_call(operand, callable);
+        let called = self.pipe_call(operand, callable, compiled);
         self.znodes.truncate(held);
         called
     }
 
     /// The call [`Self::pipe`] builds over `operand`, the node standing
-    /// for the value it holds.
+    /// for the value it holds, and before it the `EXT_STMT` over
+    /// `compiled`, what the left side left before any `QM_ASSIGN` copied
+    /// it (`zend_do_extended_stmt(&operand_result)`), after the callable
+    /// where one is compiled ([`super::extended`]).
     fn pipe_call(
         &mut self,
         operand: tree::Expr,
         callable: tree::Expr,
+        compiled: Where,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let arguments = Args::of(&[operand], line);
@@ -111,20 +115,24 @@ impl Emit<'_> {
                     let name = self.text(token).to_vec();
                     let bare = name.strip_prefix(b"\\").unwrap_or(&name);
                     if !bare.eq_ignore_ascii_case(b"assert") {
+                        self.ext_stmt_over(Some(compiled));
                         return self.call(&name, &arguments, super::Fetch::Read);
                     }
                 }
                 callee @ (tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_)) => {
+                    self.ext_stmt_over(Some(compiled));
                     return self.call_var(callee, &arguments);
                 }
                 tree::Expr::ScopedAccessExpr(scoped) => {
                     let class = self.class_spec(self.parsed.tree[scoped].scope);
                     let method = self.scoped_method_of(scoped)?;
+                    self.ext_stmt_over(Some(compiled));
                     return self.static_call(class, method, &arguments);
                 }
                 tree::Expr::MemberAccessExpr(access) if !self.is_nullsafe(access) => {
                     let method = self.member_of(access)?;
                     let object = self.parsed.tree[access].obj;
+                    self.ext_stmt_over(Some(compiled));
                     return self.method_call(object, method, &arguments, false);
                 }
                 _ => {}
@@ -133,6 +141,7 @@ impl Emit<'_> {
         // `$foo |> $expr` is `($expr)($foo)`: the callable compiled, and
         // called as the value it left.
         let callee = self.expr(callable)?;
+        self.ext_stmt_over(Some(compiled));
         self.znodes.push((callable, callee));
         self.call_var(callable, &arguments)
     }

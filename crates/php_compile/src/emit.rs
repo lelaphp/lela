@@ -128,6 +128,7 @@ mod attributes;
 mod by_name;
 mod chain;
 mod export;
+mod extended;
 mod hooks;
 mod imports;
 mod list;
@@ -370,6 +371,7 @@ pub(crate) enum Fbc {
     ByName,
 }
 
+#[allow(clippy::struct_excessive_bools)] // php's compiler globals, each one fact of the compile
 pub(crate) struct Emit<'a> {
     /// The parse this compiles: the tree the walk reads (design §4.9),
     /// and the token stream and the source a name, a value and a doc
@@ -388,6 +390,9 @@ pub(crate) struct Emit<'a> {
     known_classes: &'a [ClassDecl],
     /// The hooks the host replaced, [`Options::hooked`].
     hooked: crate::Hooked,
+    /// Whether the extended oplines are emitted,
+    /// [`Options::extended_info`].
+    extended_info: bool,
     /// The request's, [`Options::request_classes`].
     request_classes: crate::RequestClasses<'a>,
     /// `zend_flf_functions` over them, what a `FRAMELESS_ICALL_*`'s
@@ -1184,6 +1189,7 @@ pub(crate) fn unit(
         functions: options.functions,
         known_classes: options.classes,
         hooked: options.hooked,
+        extended_info: options.extended_info,
         request_classes: options.request_classes,
         frameless: frameless_table(options.functions),
         namespace: None,
@@ -1348,7 +1354,8 @@ fn resolve_fast_calls(oplines: &mut [Opline], try_catch: &[TryCatch]) {
 
 /// `pass_two`'s `ZEND_ASSERT_CHECK` arm (`Z/Zend/zend_opcode.c:1190`):
 /// what the check leaves is unused where what the call returns is, the
-/// call being the opline before the check's jump target, which
+/// call being the opline before the check's jump target, or the one
+/// before that where the target follows an `EXT_FCALL_END`, which
 /// [`Emit::do_free`] marked `UNUSED` where nothing reads what it returns.
 fn unused_assert_checks(oplines: &mut [Opline]) {
     for at in 0..oplines.len() {
@@ -1358,11 +1365,15 @@ fn unused_assert_checks(oplines: &mut [Opline]) {
         else {
             continue;
         };
-        let unused = check
-            .op2
-            .checked_sub(1)
-            .and_then(|call| oplines.get(call as usize))
-            .is_some_and(|call| call.out_type == OperandKind::Unused);
+        let call = check.op2.checked_sub(1).and_then(|call| {
+            let found = oplines.get(call as usize)?;
+            if found.opcode == Opcode::ExtFcallEnd {
+                oplines.get(call.checked_sub(1)? as usize)
+            } else {
+                Some(found)
+            }
+        });
+        let unused = call.is_some_and(|call| call.out_type == OperandKind::Unused);
         if unused && let Some(check) = oplines.get_mut(at) {
             check.out_type = OperandKind::Unused;
         }
@@ -1695,6 +1706,7 @@ impl Emit<'_> {
             // `declare(ticks)` scope stands ([`Self::tick`]).
             Stmt::EchoStmt(id) => {
                 for part in &tree[id].exprs {
+                    self.ext_stmt();
                     let value = self.expr(*part)?;
                     let (op1_type, op1) = self.operand(value);
                     self.push(Opline {
@@ -1749,6 +1761,7 @@ impl Emit<'_> {
             Stmt::TryStmt(id) => self.r#try(id)?,
             Stmt::UnsetStmt(id) => {
                 for target in &tree[id].targets {
+                    self.ext_stmt();
                     self.unset(*target)?;
                     self.tick();
                 }
@@ -1756,6 +1769,7 @@ impl Emit<'_> {
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::GlobalStmt(id) => {
                 for var in tree[id].vars.clone() {
+                    self.ext_stmt();
                     self.global_var(var)?;
                     self.tick();
                 }
@@ -3451,6 +3465,7 @@ impl Emit<'_> {
             let (line, init) = (declarator.line, declarator.init);
             let name = self.variable_name(declarator.var);
             self.line = line;
+            self.ext_stmt();
             if name == b"this" {
                 return Err(self.compile_error("Cannot use $this as static variable"));
             }
@@ -4141,6 +4156,7 @@ impl Emit<'_> {
             };
             self.depth = self.depth.saturating_add(1);
             self.line = value.line(self.parsed);
+            self.ext_stmt();
             self.statements_seen = self.statements_seen.saturating_add(1);
             match short {
                 // `zend_compile_func_decl` wraps an arrow function's
@@ -4158,7 +4174,10 @@ impl Emit<'_> {
             self.tick();
             self.depth = self.depth.saturating_sub(1);
         }
+        // `zend_compile_func_decl_ex`'s `zend_do_extended_stmt(NULL)`
+        // before the implicit return, on the closing brace's line.
         self.line = function.end_line;
+        self.ext_stmt();
         let body = self.finish(false, line, function.end_line)?;
         Ok((
             FunctionDecl {
@@ -4734,6 +4753,9 @@ impl Emit<'_> {
         line_end: u32,
     ) -> Result<OpArray, CompileError> {
         self.final_return(return_one)?;
+        if self.extended_info {
+            extended::update_extended_stmts(&mut self.oplines);
+        }
         self.resolve_jumps()?;
         if self.fn_flags.generator {
             // `pass_two`'s `ZEND_RETURN` arm (`Z/Zend/zend_opcode.c:1213`).
@@ -5066,6 +5088,9 @@ impl Emit<'_> {
         self.active_constants.clear();
         self.active_class = None;
         self.active_parent = None;
+        // `zend_compile_stmt(stmt_ast)` over the body put these in the
+        // enclosing op array before the declaration's opline.
+        self.ext_stmts_at(&class.statements);
         self.line = line;
         if is_enum {
             self.verify_enum(at, &name)?;
@@ -8116,12 +8141,28 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11685`): the
-    /// statement, then a `ZEND_TICKS` where a `declare(ticks)` scope
-    /// stands and the statement is none of `zend_is_unticked_stmt`'s, a
-    /// block or a label here (the class members it also names are no
-    /// statements of this walk).
+    /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11685`): an
+    /// `EXT_STMT` where the engine compiles with extended info
+    /// ([`extended`]), the statement, then a `ZEND_TICKS` where a
+    /// `declare(ticks)` scope stands, each where the statement is none of
+    /// `zend_is_unticked_stmt`'s, a block or a label here (the class
+    /// members it also names are no statements of this walk, and
+    /// [`Self::class_entry`] stands their `EXT_STMT`s). `echo`, `unset`,
+    /// `global` and `static` are php's `ZEND_AST_STMT_LIST` of one
+    /// statement per element, so each element is preceded and ticked
+    /// where [`Self::statement`] compiles it, and the list is neither.
     pub(super) fn stmt(&mut self, stmt: Stmt) -> Result<(), CompileError> {
+        if !matches!(
+            stmt,
+            Stmt::Block(_)
+                | Stmt::LabelStmt(_)
+                | Stmt::EchoStmt(_)
+                | Stmt::UnsetStmt(_)
+                | Stmt::GlobalStmt(_)
+                | Stmt::StaticVarStmt(_)
+        ) {
+            self.ext_stmt();
+        }
         self.statement(stmt)?;
         if !matches!(stmt, Stmt::Block(_) | Stmt::LabelStmt(_)) {
             self.tick();
@@ -8251,6 +8292,7 @@ impl Emit<'_> {
         self.do_free(step);
         self.update_jump_target_to_next(jump);
         let cond = self.expr_list(cond)?;
+        self.ext_stmt();
         self.emit_cond_jump(cond, start);
         self.end_loop(continue_at);
         Ok(())
@@ -8335,6 +8377,7 @@ impl Emit<'_> {
             };
             if index > 0 {
                 self.line = arm.line;
+                self.ext_stmt();
             }
             let cond = self.expr(cond)?;
             let opnum_jmpz = self.cond_jump_forward(Opcode::Jmpz, cond);
@@ -10215,7 +10258,7 @@ impl Emit<'_> {
     ///
     /// php steps back over `END_SILENCE` and `OP_DATA` to reach the
     /// opline that left the value, and for a `VAR` over `EXT_FCALL_END`
-    /// too, which is never emitted here; so `@f();` marks the call's
+    /// too, which a compile with extended info emits after a call; so `@f();` marks the call's
     /// `VAR` unused through the `END_SILENCE` after it, and `@$a = 1;`
     /// the `ASSIGN`'s temporary.
     fn do_free(&mut self, value: Where) {
@@ -10272,7 +10315,7 @@ impl Emit<'_> {
                 self.free(OperandKind::Tmp, at);
             }
             Where::Returned(at) => {
-                let Some(last) = self.last_that_left_a_value() else {
+                let Some(last) = self.last_that_left_a_var() else {
                     return;
                 };
                 if last.out_type == OperandKind::Var && last.out == at {
@@ -10316,6 +10359,17 @@ impl Emit<'_> {
             .iter_mut()
             .rev()
             .find(|opline| !matches!(opline.opcode, Opcode::OpData | Opcode::EndSilence))
+    }
+
+    /// [`Self::last_that_left_a_value`] for a `VAR`, which steps back
+    /// over the `EXT_FCALL_END` after a call as well.
+    fn last_that_left_a_var(&mut self) -> Option<&mut Opline> {
+        self.oplines.iter_mut().rev().find(|opline| {
+            !matches!(
+                opline.opcode,
+                Opcode::OpData | Opcode::EndSilence | Opcode::ExtFcallEnd
+            )
+        })
     }
 
     /// `zend_emit_op(NULL, ZEND_FREE, op1, NULL)`: the temporary or the
@@ -11436,6 +11490,7 @@ impl Emit<'_> {
         kind: IncludeKind,
         path: tree::Expr,
     ) -> Result<Where, CompileError> {
+        self.ext_fcall(Opcode::ExtFcallBegin);
         let value = self.expr(path)?;
         let (op1_type, op1) = self.operand(value);
         let out = self.temporary();
@@ -11448,6 +11503,7 @@ impl Emit<'_> {
             extended_value: kind.attr(),
             ..Opline::default()
         });
+        self.ext_fcall(Opcode::ExtFcallEnd);
         Ok(Where::Returned(out))
     }
 
@@ -15534,7 +15590,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         let fbc = if known { Fbc::Native } else { Fbc::ByName };
-        Ok(self.call_op(self.get_call_op(fbc, false), line, false))
+        Ok(self.extended_call(self.get_call_op(fbc, false), line, false))
     }
 
     /// `zend_compile_call`: `CG(function_table)` read first
@@ -15825,7 +15881,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.send_args(&plan, arguments, None)?;
-        let served = self.call_op(Opcode::DoFcall, line, plan.extra_named);
+        let served = self.extended_call(Opcode::DoFcall, line, plan.extra_named);
         self.do_free(served);
         Ok(Where::Returned(out))
     }
@@ -17572,7 +17628,7 @@ impl Emit<'_> {
             return Ok(Where::Temporary(out));
         }
         self.send_args(plan, arguments, callee)?;
-        Ok(self.call_op(opcode, line, plan.extra_named))
+        Ok(self.extended_call(opcode, line, plan.extra_named))
     }
 
     /// `zend_get_call_op` (`Z/Zend/zend_compile.c:3919-3949`): the
@@ -18872,6 +18928,7 @@ mod tests {
             functions: options.functions,
             known_classes: options.classes,
             hooked: options.hooked,
+            extended_info: options.extended_info,
             request_classes: options.request_classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
@@ -18970,6 +19027,7 @@ mod tests {
             properties: Vec::new(),
             constants: Vec::new(),
             methods: Vec::new(),
+            statements: Vec::new(),
             line: 1,
             end_line: 1,
         };
