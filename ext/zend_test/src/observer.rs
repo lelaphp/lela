@@ -325,7 +325,7 @@ impl Serves {
             (None, Some(function)) => {
                 Serves::function_of(observed, function, observed.function_scope())
             }
-            (None, None) => Serves::File(b"[no active file]".to_vec()),
+            (None, None) => Serves::File(NO_ACTIVE_FILE.to_vec()),
         }
     }
 
@@ -337,13 +337,13 @@ impl Serves {
         }
     }
 
-    /// A frame of php's `prev_execute_data` chain: a fiber's bottom
-    /// frame and a native's call name no file, which php writes as
-    /// `[no active file]`.
+    /// A frame of php's `prev_execute_data` chain: one that names no
+    /// function by its file, and a fiber's bottom frame, which names no
+    /// file either, as php writes a NULL `op_array.filename`.
     fn chain(req: &Request, frame: &ChainFrame<'_>) -> Serves {
         match frame.function() {
             Some(function) => Serves::function_of(req, function, frame.function_scope()),
-            None => Serves::File(frame.filename().unwrap_or(b"[no active file]").to_vec()),
+            None => Serves::File(frame.filename().unwrap_or(NO_ACTIVE_FILE).to_vec()),
         }
     }
 
@@ -368,6 +368,10 @@ impl Serves {
         named
     }
 }
+
+/// What `observer_show_init` and `observer_show_init_backtrace` write
+/// for a frame with no file.
+const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
 
 /// `%*s` with php's width: two spaces a level.
 fn indent(depth: usize) -> Vec<u8> {
