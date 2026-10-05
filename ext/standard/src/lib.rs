@@ -104,6 +104,9 @@ pub use string::strip_tags_ex;
 // encoding's characters with (design §4.10).
 pub use string::next_utf8_char as php_next_utf8_char;
 pub use var::{Serializer, Unserializer, php_unserialize_with_options};
+// `php_var.h`'s `php_var_export_ex`, which zend_test's observer writes a
+// return value with (`observer.c`'s `get_retval_info`; design §4.10).
+pub use var::export as php_var_export_ex;
 
 /// What `file.h`, `php_filestat.h`, `scanf.h` and `main/php_glob.h`
 /// declare `PHPAPI` for `spl_directory.c`, which calls them directly
