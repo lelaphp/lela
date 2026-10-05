@@ -3975,6 +3975,8 @@ impl Engine {
     /// neither the ini nor the session file a failing `rinit` needs
     /// (#1634).
     fn start_failed(mut req: Request, sink: &mut dyn OutputSink) -> Observables {
+        #[cfg(debug_assertions)]
+        req.end_in_sensed();
         let fatal = match req.ending() {
             Some(Ending::Fatal(logged)) => Some(logged.clone()),
             _ => None,
@@ -4245,15 +4247,9 @@ impl Engine {
         // and before the host's deactivation hands over what is left.
         end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
         // A debug build's last sensing point, after the request's last
-        // release: what its sensors found outside the loop, in a
-        // request-end function or as the request's tables were freed, is
-        // raised here as the `InternalError` it would have ended the
-        // request in at the loop, so no refusal goes unraised.
+        // release.
         #[cfg(debug_assertions)]
-        if let Some(sensed) = req.take_sensed() {
-            req.end_in(&sensed);
-            req.catch_bailout();
-        }
+        req.end_in_sensed();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`

@@ -3,16 +3,18 @@
 //! through the type's own addref and not the request's, and the debug
 //! build refuses it at the refcounted header and ends the request in
 //! the `InternalError` naming the line that asked: at the loop's next
-//! sensing point when the native ran inside the program, and at the
-//! request's end when it ran in a request-end function, outside the loop.
+//! sensing point when the native ran inside the program, and where the
+//! request ends when it ran outside the loop, in a request-end function
+//! or in a start that then failed.
 
 use php_heap::Zval;
 use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
+use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{PhpString, Value};
-use crate::engine::Engine;
+use crate::engine::{Engine, RequestDescription};
 use crate::test::Capture;
 
 /// A value of `kind` made out of the request's heap and its one owner
@@ -127,4 +129,45 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
     assert!(stdout.contains(SITE), "{stdout}");
     assert!(stdout.contains(" in Unknown on line 0\n"), "{stdout}");
     assert_eq!(served.exit_code, 255);
+}
+
+/// A request-start function as faulty, whose error then fails the start.
+fn freed_addref_at_rinit(req: &mut Request) -> Result<(), Thrown> {
+    if let Some(z) = freed(req, b"string") {
+        addref_by_kind(z);
+    }
+    Err(crate::api::raising::throw_error(
+        req,
+        "Error",
+        "start refused",
+    ))
+}
+
+/// A refusal made where the request's start then failed, which serves no
+/// handler and no request end, is raised where the start-failed request
+/// ends, after the start's own fatal.
+#[test]
+fn an_addref_of_a_freed_block_before_a_failed_start_is_raised_where_it_ends() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .rinit(freed_addref_at_rinit)
+            .build("freed_use_at_start")])
+        .build();
+    let mut sink = Capture::default();
+    let observed = engine.serve(
+        RequestDescription {
+            sapi_name: String::from("cli"),
+            script_name: Some(b"Standard input code".to_vec()),
+            source: Some(b"<?php echo 'ran';".to_vec()),
+            cwd: std::env::current_dir().unwrap_or_default(),
+            ..RequestDescription::default()
+        },
+        &mut sink,
+    );
+    let stdout = String::from_utf8_lossy(&sink.stdout);
+    assert!(observed.start_failed);
+    assert!(stdout.contains("Uncaught Error: start refused"), "{stdout}");
+    assert!(stdout.contains(REFUSED), "{stdout}");
+    assert!(stdout.contains(SITE), "{stdout}");
+    assert!(!stdout.contains("ran"), "{stdout}");
 }

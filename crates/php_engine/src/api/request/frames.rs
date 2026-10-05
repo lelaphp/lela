@@ -652,10 +652,7 @@ impl Request {
     /// a refcount operation on a block the heap had freed among them, as
     /// the `InternalError` fatal that ends the request; the first of
     /// them, and taken. The loop asks after every handler, and
-    /// [`Engine::shutdown_request`] once more after the request's last
-    /// release, so what was sensed outside the loop is raised too.
-    ///
-    /// [`Engine::shutdown_request`]: crate::engine::Engine::shutdown_request
+    /// [`Request::end_in_sensed`] asks where the request ends.
     #[cfg(debug_assertions)]
     pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
         let dirty = self.frames.dirty.take().map(|dirty| {
@@ -668,6 +665,28 @@ impl Request {
             ))
         });
         dirty.or_else(|| self.heap.take_sensed())
+    }
+
+    /// A debug build's sensing point outside the loop, where a request
+    /// ends: [`Engine::shutdown_request`] after the request's last
+    /// release and [`Engine::start_failed`] where its startup failed.
+    /// What the sensors found that no handler step was left to ask for,
+    /// in a request-end function or as the request's tables were freed,
+    /// ends the request here in the `InternalError` the loop would have
+    /// ended it in, rendered with nothing executing, so no refusal goes
+    /// unraised. It is a step of its own, as each step of
+    /// `php_request_shutdown` is its own `zend_try`, so a fatal raised
+    /// before it and still leaving does not keep it from being rendered.
+    ///
+    /// [`Engine::shutdown_request`]: crate::engine::Engine::shutdown_request
+    /// [`Engine::start_failed`]: crate::engine::Engine::start_failed
+    #[cfg(debug_assertions)]
+    pub(crate) fn end_in_sensed(&mut self) {
+        if let Some(sensed) = self.take_sensed() {
+            self.catch_bailout();
+            self.end_in(&sensed);
+            self.catch_bailout();
+        }
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
