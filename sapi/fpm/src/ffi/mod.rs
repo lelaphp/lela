@@ -1,7 +1,6 @@
 //! What php-fpm asks of the C library that neither Rust's standard library
 //! nor `nix` answers safely, the host's one `unsafe` home (ADR-0008): the
-//! fork that makes a child, the signal handlers of the master and of a
-//! child, the anonymous shared memory the scoreboard lives in, the
+//! signal handlers of the master and of a child, the anonymous shared memory the scoreboard lives in, the
 //! descriptors a reload inherits by number, the process's environment,
 //! priority and title, the local time `strftime` writes, and the stop
 //! and the task port or the attachment a slow request's trace takes. Each
@@ -23,19 +22,6 @@ use std::ffi::CString;
 use std::mem::MaybeUninit;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
-
-use nix::unistd::ForkResult;
-
-/// `fork(2)`, as `fpm_children_make` and the daemonizing
-/// `fpm_unix_init_main` call it: the child is this single-threaded
-/// process again, the master serving no request and so holding no
-/// thread but its own.
-pub(crate) fn fork() -> nix::Result<ForkResult> {
-    // SAFETY: the master is single-threaded when it forks: it serves no
-    // request, so no execution timer or other thread of the engine's
-    // stands, and the child runs on the one thread it inherits.
-    unsafe { nix::unistd::fork() }
-}
 
 /// A value made of atomics alone, which every byte pattern of zeros is
 /// valid for and which several processes may read and write at once.
