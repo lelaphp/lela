@@ -273,6 +273,12 @@ fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&ZendGenerator) -> R
     object.native::<ZendGenerator>(req).map(f)
 }
 
+/// `generator->value`, the value it yielded last, borrowed: no owner
+/// taken, `UNDEF` before its first `yield`.
+pub(crate) fn value(req: &Request, generator: PhpObject) -> Value {
+    read(req, generator, |g| g.value).unwrap_or_else(Value::undef)
+}
+
 /// `zend_generator_frame_gc` (`Z/Zend/zend_generators.c:399`): what a
 /// generator with a frame holds, its value, key, return value and
 /// delegated values, its frame by [`exec::unfinished_execution_gc`]
@@ -1098,6 +1104,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         if !req.is_pending() {
             req.vm_mut().advance(frame);
         }
+        crate::observer::generator_resumed(req, frame);
         let run = req.resume_loop();
         let served = run(req, frame);
         if req.vm().frames().len() > standing {

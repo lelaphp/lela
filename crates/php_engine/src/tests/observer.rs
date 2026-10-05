@@ -18,16 +18,20 @@ use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
 use Event::Ext;
-use Phase::{Begin, End, Error, ObserverInit};
+use Phase::{Begin, End, Error, FiberDestroy, FiberInit, FiberSwitch, ObserverInit};
 
-/// The observer's events alone, and the diagnostics `zend_error_cb`
-/// was handed among them, in the order recorded.
+/// The observer's events alone, the fiber notices among them, and the
+/// diagnostics `zend_error_cb` was handed among them, in the order
+/// recorded.
 pub(super) fn observed(events: &Events) -> Vec<Event> {
     events
         .only(&[
             ObserverInit(String::new()),
             Begin(String::new()),
             End(String::new(), None),
+            FiberInit(String::new()),
+            FiberSwitch(String::new(), String::new()),
+            FiberDestroy(String::new()),
             Error(String::new()),
         ])
         .0
@@ -442,8 +446,8 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
 
     // A frame a generator's body called stands above the generator's
     // frame, which the resumption pops on its way out of the fatal: it
-    // is ended before that, after the fatal is rendered. The generator's
-    // own frame is not begun at its call (#1811).
+    // is ended before that, after the fatal is rendered, and the
+    // generator's frame, begun at its resumption, after it.
     let resumed = observed(&events.between("generator", "end"));
     let fatal = resumed
         .iter()
@@ -455,7 +459,12 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             .skip(fatal.unwrap_or_default() + 1)
             .cloned()
             .collect::<Vec<_>>(),
-        [end(0, "b", None), end(0, "a", None), end(0, file, None)],
+        [
+            end(0, "b", None),
+            end(0, "g", None),
+            end(0, "a", None),
+            end(0, file, None)
+        ],
         "every open frame ended once after the fatal: {resumed:?}"
     );
 }
@@ -687,6 +696,715 @@ fn a_natives_throwable_stands_pending_while_its_end_handlers_are_called() {
                     Some(String::from("1"))
                 )
             ),
+        ]
+    );
+}
+
+/// The fibers' names as the creation notices render them, without
+/// their status, and the closures' as the observer was asked of them,
+/// each in the order they came: the names a test's expectation is
+/// written over.
+fn named_in(events: &[Event]) -> (Vec<String>, Vec<String>) {
+    let fibers = events
+        .iter()
+        .filter_map(|e| match e {
+            Ext(_, FiberInit(name)) => name.strip_suffix(" init").map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    let closures = events
+        .iter()
+        .filter_map(|e| match e {
+            Ext(_, ObserverInit(name)) if name.starts_with("{closure") => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    (fibers, closures)
+}
+
+/// The one fiber and the one closure [`named_in`] finds, held to be
+/// one each.
+fn one_named_in(events: &[Event]) -> (String, String) {
+    let (fibers, closures) = named_in(events);
+    assert!(
+        fibers.len() == 1 && closures.len() == 1 && fibers.iter().all(|f| f.starts_with('#')),
+        "one fiber and one closure: {events:?}"
+    );
+    (fibers.concat(), closures.concat())
+}
+
+fn fiber_init(n: u8, context: &str) -> Event {
+    Ext(n, FiberInit(context.to_owned()))
+}
+
+fn switch(n: u8, from: &str, to: &str) -> Event {
+    Ext(n, FiberSwitch(from.to_owned(), to.to_owned()))
+}
+
+fn destroy(n: u8, context: &str) -> Event {
+    Ext(n, FiberDestroy(context.to_owned()))
+}
+
+/// A generator's frame is begun at each resumption and ended at each
+/// suspension with what it yielded, and not at its call
+/// (`observer_generator_01.phpt` to `_03`): the frame's slot is
+/// resolved at its first resumption; a `yield from` another generator
+/// ends the delegating frame with what it yielded last and resumes the
+/// one delegated to, whose `return` ends it with what it returned, and
+/// the delegating frame's own `return` ends it with its own.
+#[test]
+fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction bar() { for ($i = 10; $i < 12; $i++) { yield $i; } }\n\
+         function foo() { yield 0; yield from bar(); yield 42; return 1337; }\n\
+         function run() { $g = foo(); foreach ($g as $v) { echo $v, ','; } return $g->getReturn(); }\n\
+         echo run();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "0,10,11,42,1337");
+    let file = "file 'main.php'";
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "run"),
+            begin(0, "run"),
+            init(0, "foo"),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            init(0, "bar"),
+            begin(0, "bar"),
+            end(0, "bar", Some("10")),
+            begin(0, "bar"),
+            end(0, "bar", Some("11")),
+            begin(0, "bar"),
+            end(0, "bar", Some("null")),
+            begin(0, "foo"),
+            end(0, "foo", Some("42")),
+            begin(0, "foo"),
+            end(0, "foo", Some("1337")),
+            init(0, "Generator::getReturn"),
+            begin(0, "Generator::getReturn"),
+            end(0, "Generator::getReturn", Some("1337")),
+            end(0, "run", Some("1337")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A generator resumed by `current()`, `next()` and `send()` rather than
+/// by `foreach` (`observer_generator_04.phpt`): its first read runs it
+/// to its first `yield`, each `next()` and the `send()` is one
+/// resumption, and a read of a generator not resumed again begins
+/// nothing but the read.
+#[test]
+fn a_generator_resumed_by_hand_pairs_each_resumption() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_by_hand");
+    rec.mark("by_hand");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { $i = 0; while (true) { if (yield $i++) break; } }\n\
+         function run() { $g = foo();\n\
+         while ($g->current() !== null) { echo $g->current(); if ($g->current() === 2) { $g->send('Boop'); } $g->next(); }\n\
+         return 'Done'; }\necho run();\n",
+    );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "012Done");
+    let file = "file 'main.php'";
+    let events = rec.events();
+    // A native read of the generator, begun and ended with what it gave.
+    let read = |name: &str, gave: &str| [begin(0, name), end(0, name, Some(gave))];
+    let current = |gave: &str| read("Generator::current", gave);
+    let mut expected = vec![
+        init(0, file),
+        begin(0, file),
+        init(0, "run"),
+        begin(0, "run"),
+        init(0, "Generator::current"),
+        begin(0, "Generator::current"),
+        init(0, "foo"),
+        begin(0, "foo"),
+        end(0, "foo", Some("0")),
+        end(0, "Generator::current", Some("0")),
+    ];
+    expected.extend(current("0"));
+    expected.extend(current("0"));
+    expected.extend([
+        init(0, "Generator::next"),
+        begin(0, "Generator::next"),
+        begin(0, "foo"),
+        end(0, "foo", Some("1")),
+        end(0, "Generator::next", Some("null")),
+    ]);
+    for _ in 0..3 {
+        expected.extend(current("1"));
+    }
+    expected.extend([
+        begin(0, "Generator::next"),
+        begin(0, "foo"),
+        end(0, "foo", Some("2")),
+        end(0, "Generator::next", Some("null")),
+    ]);
+    for _ in 0..3 {
+        expected.extend(current("2"));
+    }
+    expected.extend([
+        init(0, "Generator::send"),
+        begin(0, "Generator::send"),
+        begin(0, "foo"),
+        end(0, "foo", Some("null")),
+        end(0, "Generator::send", Some("null")),
+    ]);
+    expected.extend(read("Generator::next", "null"));
+    expected.extend(current("null"));
+    expected.extend([end(0, "run", Some("'Done'")), end(0, file, Some("1"))]);
+    assert_eq!(observed(&events.between("by_hand", "end")), expected);
+}
+
+/// A generator that throws out of its body (`observer_generator_05.phpt`)
+/// is ended with nothing, as every frame the throwable leaves is, after
+/// the native that made the throwable.
+#[test]
+fn a_generator_left_by_a_throwable_is_ended_with_nothing() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_thrown");
+    rec.mark("thrown");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { yield 0; yield 1; throw new Exception('Oops!'); }\n\
+         function run() { foreach (foo() as $v) { echo $v; } return 'unseen'; }\necho run();\n",
+    );
+    rec.mark("end");
+    let file = "file 'main.php'";
+    let events = rec.events();
+    // Up to the main file's end; what renders the throwable after it,
+    // `Exception::__toString`, is the natives' (#1810).
+    let thrown = observed(&events.between("thrown", "end"));
+    let rendered = thrown
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: Oops!")));
+    assert!(rendered.is_some(), "the throwable is rendered: {thrown:?}");
+    let file_ended = thrown
+        .iter()
+        .position(|e| *e == end(0, file, None))
+        .map_or(0, |at| at + 1);
+    assert_eq!(
+        thrown[..file_ended],
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "run"),
+            begin(0, "run"),
+            init(0, "foo"),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("1")),
+            begin(0, "foo"),
+            init(0, "Exception::__construct"),
+            begin(0, "Exception::__construct"),
+            end(0, "Exception::__construct", Some("null")),
+            end(0, "foo", None),
+            end(0, "run", None),
+            end(0, file, None),
+        ]
+    );
+}
+
+/// php's fiber notices (`observer_fiber_01.phpt`,
+/// `observer_fiber_functions_01.phpt`): the creation as the start lays
+/// the stack down, each switch handed the fiber left, running or dead,
+/// and the fiber entered, new or suspended, and the destruction once
+/// the dead fiber's resumer is served again; and a frame begun inside
+/// the fiber is ended inside it, after the switch back into it.
+#[test]
+fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { return Fiber::suspend() . 'i'; }\n\
+         $fiber = new Fiber(function () { return inner(); });\n\
+         $fiber->start();\n$fiber->resume('r');\necho $fiber->getReturn();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "ri");
+    let events = observed(&rec.events().between("built", "served"));
+    let (fiber, closure) = one_named_in(&events);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    let file = "file 'main.php'";
+    assert_eq!(
+        events,
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
+            switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "Fiber::suspend", Some("'r'")),
+            end(0, "inner", Some("'ri'")),
+            end(0, closure, Some("'ri'")),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("'ri'")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// Each stack's open frames are its own (#1809's note on #1811): a
+/// fiber suspended inside `inner`, its frame open at the same height on
+/// the fiber's stack as `declined`'s on the request's, which the
+/// observer declined and never begins, so `declined`'s return ends
+/// nothing; `inner` is ended inside the fiber with what it returned, and
+/// the `Fiber::suspend` it waits in with what the resume sent.
+#[test]
+fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_chain");
+    rec.mark("same_height");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { Fiber::suspend(); return 'i'; }\nfunction declined() { return 'd'; }\n\
+         $fiber = new Fiber(function () { return inner(); });\n\
+         $fiber->start();\necho declined();\n$fiber->resume();\necho $fiber->getReturn();\n",
+    );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "di");
+    let file = "file 'main.php'";
+    let same_height = observed(&rec.events().between("same_height", "end"));
+    let (fiber, closure) = one_named_in(&same_height);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    assert_eq!(
+        same_height,
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
+            switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "declined"),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
+            end(0, "inner", Some("'i'")),
+            end(0, closure, Some("'i'")),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("'i'")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A fiber inside a fiber switches with its resumer, not with the
+/// request's own stack, each `Fiber::start`, `suspend` and `resume` is
+/// ended on the stack it was begun on, and each fiber is destroyed once
+/// its resumer is served again (`observer_fiber_03.phpt`).
+#[test]
+fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_nested");
+    rec.mark("nested");
+    let nested = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction in2() { Fiber::suspend(); return 2; }\n\
+         function in1() { $f = new Fiber(function () { return in2(); }); $f->start(); Fiber::suspend(); $f->resume(); return 1; }\n\
+         $fiber = new Fiber(function () { return in1(); });\n\
+         $fiber->start();\necho 'm';\n$fiber->resume();\necho $fiber->getReturn();\n",
+    );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&nested.stdout), "m1");
+    let file = "file 'main.php'";
+    let nested = observed(&rec.events().between("nested", "end"));
+    let (fibers, closures) = named_in(&nested);
+    assert!(
+        fibers.len() == 2 && closures.len() == 2,
+        "two fibers, two closures: {nested:?}"
+    );
+    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let (outer, inner) = (at(&fibers, 0), at(&fibers, 1));
+    let (outer_closure, inner_closure) = (at(&closures, 0), at(&closures, 1));
+    let (outer_closure, inner_closure) = (outer_closure.as_str(), inner_closure.as_str());
+    let outer = |status: &str| format!("{outer} {status}");
+    let inner = |status: &str| format!("{inner} {status}");
+    assert_eq!(
+        nested,
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &outer("init")),
+            switch(0, "main running", &outer("init")),
+            init(0, outer_closure),
+            begin(0, outer_closure),
+            init(0, "in1"),
+            begin(0, "in1"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &inner("init")),
+            switch(0, &outer("running"), &inner("init")),
+            init(0, inner_closure),
+            begin(0, inner_closure),
+            init(0, "in2"),
+            begin(0, "in2"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
+            switch(0, &inner("running"), &outer("suspended")),
+            end(0, "Fiber::start", Some("null")),
+            begin(0, "Fiber::suspend"),
+            switch(0, &outer("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            init(0, "Fiber::resume"),
+            begin(0, "Fiber::resume"),
+            switch(0, "main running", &outer("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
+            begin(0, "Fiber::resume"),
+            switch(0, &outer("running"), &inner("suspended")),
+            end(0, "Fiber::suspend", Some("null")),
+            end(0, "in2", Some("2")),
+            end(0, inner_closure, Some("2")),
+            switch(0, &inner("dead"), &outer("suspended")),
+            destroy(0, &inner("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            end(0, "in1", Some("1")),
+            end(0, outer_closure, Some("1")),
+            switch(0, &outer("dead"), "main suspended"),
+            destroy(0, &outer("dead")),
+            end(0, "Fiber::resume", Some("null")),
+            init(0, "Fiber::getReturn"),
+            begin(0, "Fiber::getReturn"),
+            end(0, "Fiber::getReturn", Some("1")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A fatal inside a fiber (`observer_fiber_functions_03.phpt`) ends the
+/// fiber's open frames after it is rendered, the innermost first; the
+/// switch out of the dead fiber and its destruction are noticed; then
+/// the resumer's open frames are ended, as php's `zend_bailout()` raised
+/// again on the resumer leaves them to `zend_observer_fcall_end_all`. A
+/// fiber suspended meanwhile keeps its frames open, never ended, as php
+/// leaves a suspended fiber's at a fatal.
+#[test]
+fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_fatal");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction held() { Fiber::suspend(); }\n\
+         $kept = new Fiber(function () { held(); });\n$kept->start();\n\
+         function deep() { $s = '.'; while (true) { $s .= $s; } }\n\
+         function resumer($f) { $f->resume(); }\n\
+         $fiber = new Fiber(function () { Fiber::suspend(); deep(); });\n$fiber->start();\n\
+         ini_set('memory_limit', '2M');\nresumer($fiber);\n",
+    );
+    rec.mark("served");
+    let events = observed(&rec.events().between("built", "served"));
+    let fatal = events
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")));
+    assert!(fatal.is_some(), "the fatal is rendered: {events:?}");
+    let (fibers, closures) = named_in(&events);
+    assert!(
+        fibers.len() == 2 && closures.len() == 2,
+        "two fibers, two closures: {events:?}"
+    );
+    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let (fiber, kept_closure, closure) = (at(&fibers, 1), at(&closures, 0), at(&closures, 1));
+    assert_eq!(
+        events[fatal.unwrap_or_default() + 1..],
+        [
+            end(0, "deep", None),
+            end(0, &closure, None),
+            switch(0, &format!("{fiber} dead"), "main suspended"),
+            destroy(0, &format!("{fiber} dead")),
+            end(0, "Fiber::resume", None),
+            end(0, "resumer", None),
+            end(0, "file 'main.php'", None),
+        ],
+        "{events:?}"
+    );
+    for name in ["held", kept_closure.as_str()] {
+        assert!(
+            events.contains(&begin(0, name))
+                && !events
+                    .iter()
+                    .any(|e| matches!(e, Ext(_, End(n, _)) if n == name)),
+            "{name} is begun and never ended: {events:?}"
+        );
+    }
+}
+
+/// A fiber still suspended as the request ends
+/// (`observer_fiber_functions_02.phpt`): the main file has ended, the
+/// fiber is destroyed by switching into it, every frame it left open is
+/// ended with nothing as the graceful exit unwinds it, and the switch
+/// out of it and its destruction are noticed.
+#[test]
+fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_destroyed");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { Fiber::suspend(); }\n\
+         $fiber = new Fiber(function () { inner(); });\n$fiber->start();\n",
+    );
+    rec.mark("served");
+    let events = observed(&rec.events().between("built", "served"));
+    let (fiber, closure) = one_named_in(&events);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    let file = "file 'main.php'";
+    assert_eq!(
+        events,
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "Fiber::__construct"),
+            begin(0, "Fiber::__construct"),
+            end(0, "Fiber::__construct", Some("null")),
+            init(0, "Fiber::start"),
+            begin(0, "Fiber::start"),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            init(0, "Fiber::suspend"),
+            begin(0, "Fiber::suspend"),
+            switch(0, &fiber("running"), "main suspended"),
+            end(0, "Fiber::start", Some("null")),
+            end(0, file, Some("1")),
+            switch(0, "main running", &fiber("suspended destroyed")),
+            end(0, "Fiber::suspend", None),
+            end(0, "inner", None),
+            end(0, closure, None),
+            switch(0, &fiber("dead destroyed"), "main suspended"),
+            destroy(0, &fiber("dead destroyed")),
+        ]
+    );
+}
+
+/// Two fibers still suspended as the request ends, one held by the
+/// other's closure (`observer_fiber_05.phpt`): the outer is destroyed,
+/// and the inner as the outer's frame gives it up, each switched into
+/// marked destroyed, and each switched out of dead in the reverse order,
+/// php's `destroying`, `destroying`, `destroyed`, `destroyed`; and a
+/// fiber `Fiber::throw()` resumed that does not catch
+/// (`observer_fiber_06.phpt`) leaves dead marked as having thrown, php's `threw`.
+#[test]
+fn a_fiber_destroyed_or_thrown_into_is_noticed_as_such() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_flags");
+    rec.mark("nested");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\n$fiber = new Fiber(function () {\n\
+         Fiber::suspend();\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
+         $fiber->start();\nFiber::suspend(); });\n$fiber->start();\n$fiber->resume();\n",
+    );
+    rec.mark("thrown");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n$fiber->start();\n\
+         try { $fiber->throw(new Exception); } catch (Exception $e) {}\n",
+    );
+    rec.mark("end");
+    let switched = |events: &Events| -> Vec<Event> {
+        observed(events)
+            .into_iter()
+            .filter(|e| matches!(e, Ext(_, FiberSwitch(..) | FiberDestroy(_))))
+            .collect()
+    };
+    let events = rec.events();
+
+    let nested = observed(&events.between("nested", "thrown"));
+    let (fibers, _) = named_in(&nested);
+    assert_eq!(fibers.len(), 2, "two fibers: {nested:?}");
+    let at = |i: usize| fibers.get(i).cloned().unwrap_or_default();
+    let (outer, inner) = (at(0), at(1));
+    let outer = |status: &str| format!("{outer} {status}");
+    let inner = |status: &str| format!("{inner} {status}");
+    assert_eq!(
+        switched(&events.between("nested", "thrown")),
+        [
+            switch(0, "main running", &outer("init")),
+            switch(0, &outer("running"), "main suspended"),
+            switch(0, "main running", &outer("suspended")),
+            switch(0, &outer("running"), &inner("init")),
+            switch(0, &inner("running"), &outer("suspended")),
+            switch(0, &outer("running"), "main suspended"),
+            switch(0, "main running", &outer("suspended destroyed")),
+            switch(
+                0,
+                &outer("running destroyed"),
+                &inner("suspended destroyed")
+            ),
+            switch(0, &inner("dead destroyed"), &outer("suspended destroyed")),
+            destroy(0, &inner("dead destroyed")),
+            switch(0, &outer("dead destroyed"), "main suspended"),
+            destroy(0, &outer("dead destroyed")),
+        ]
+    );
+
+    let thrown = observed(&events.between("thrown", "end"));
+    let (fiber, _) = one_named_in(&thrown);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    assert_eq!(
+        switched(&events.between("thrown", "end")),
+        [
+            switch(0, "main running", &fiber("init")),
+            switch(0, &fiber("running"), "main suspended"),
+            switch(0, "main running", &fiber("suspended")),
+            switch(0, &fiber("dead threw"), "main suspended"),
+            destroy(0, &fiber("dead threw")),
+        ]
+    );
+}
+
+/// The resumptions a generator is served by other than `foreach`, each
+/// a begin and an end as php's `zend_generator_resume` makes them: a
+/// `yield from` over an array, ended at the `YIELD_FROM` with what it
+/// yielded last and its values served unobserved; `Generator::throw()`
+/// into it, caught inside; a generator destroyed suspended in a `try`,
+/// whose `finally` is served by a resumption that is ended with nothing,
+/// as php's forced close leaves it through
+/// `zend_dispatch_try_catch_finally_helper`'s uncaught arm; and a
+/// generator resumed inside a fiber, begun and ended there, and given up
+/// suspended outside any `try`, which resumes nothing.
+#[test]
+fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_paths");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { yield 0; yield from [1, 2];\n\
+         try { yield 3; } catch (Exception $e) { echo 'c'; }\n\
+         try { yield 4; } finally { echo 'f'; } }\n\
+         function run() { $g = foo(); foreach ($g as $v) { echo $v; if ($v === 3) { $g->throw(new Exception); echo $g->current(); break; } } }\n\
+         run();\n\
+         $fiber = new Fiber(function () { $g = foo(); echo $g->current(); });\n$fiber->start();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "0123c4f0");
+    let events = observed(&rec.events().between("built", "served"));
+    let foo: Vec<Event> = events
+        .iter()
+        .filter(|e| matches!(e, Ext(_, Begin(n) | End(n, _)) if n == "foo"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        foo,
+        [
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("3")),
+            begin(0, "foo"),
+            end(0, "foo", Some("4")),
+            begin(0, "foo"),
+            end(0, "foo", None),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
         ]
     );
 }

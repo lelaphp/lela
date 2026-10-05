@@ -88,6 +88,7 @@ mod methods;
 use methods::visibility_string;
 mod objects;
 mod observing;
+pub(crate) use observing::ObservedChain;
 mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
