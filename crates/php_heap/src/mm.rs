@@ -248,6 +248,10 @@ pub(crate) struct Mm {
     /// are given back.
     #[cfg(debug_assertions)]
     sensed: Box<crate::sensed::Record>,
+    /// A debug build's quarantine of each bin's last freed slots
+    /// ([`Quarantine`]), held back from the free list.
+    #[cfg(debug_assertions)]
+    quarantine: [Quarantine; BINS],
 }
 
 impl Mm {
@@ -275,6 +279,8 @@ impl Mm {
             observers: Observers::default(),
             #[cfg(debug_assertions)]
             sensed: Box::default(),
+            #[cfg(debug_assertions)]
+            quarantine: [Quarantine::EMPTY; BINS],
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             mm.chunk_init(chunk, 0);
@@ -717,6 +723,10 @@ impl Mm {
     fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
+        #[cfg(debug_assertions)]
+        if self.free_slot[bin_num].is_null() {
+            self.evict_oldest(bin_num);
+        }
         let slot = match NonNull::new(self.free_slot[bin_num]) {
             Some(slot) => {
                 // SAFETY: a slot on the free list is free memory of this
@@ -778,16 +788,32 @@ impl Mm {
     unsafe fn free_small(&mut self, at: NonNull<u8>, bin_num: usize) {
         self.size = self.size.saturating_sub(BIN_DATA_SIZE[bin_num]);
         #[cfg(debug_assertions)]
-        freed::given_back(at, BIN_DATA_SIZE[bin_num]);
-        let slot: *mut FreeSlot = at.as_ptr().cast();
-        // SAFETY: the caller has given the slot up, so its bytes are the
-        // heap's again and the link word may be written over them.
+        {
+            freed::given_back(at, BIN_DATA_SIZE[bin_num]);
+            self.quarantine(at.cast(), bin_num);
+        }
+        #[cfg(not(debug_assertions))]
+        // SAFETY: the caller's contract, handed on.
+        unsafe {
+            self.push_free(at.cast(), bin_num);
+        }
+    }
+
+    /// The free slot at `slot` on the head of its bin's free list.
+    ///
+    /// # Safety
+    ///
+    /// `slot` is a slot of bin `bin_num` in this heap that nothing holds
+    /// and no free list or quarantine names.
+    unsafe fn push_free(&mut self, slot: NonNull<FreeSlot>, bin_num: usize) {
+        // SAFETY: the caller's contract: the slot's bytes are the heap's
+        // and the link word may be written over them.
         unsafe {
             slot.write(FreeSlot {
                 next: self.free_slot[bin_num],
             });
         };
-        self.free_slot[bin_num] = slot;
+        self.free_slot[bin_num] = slot.as_ptr();
     }
 
     /// `zend_mm_alloc_large` (`Z/Zend/zend_alloc.c:1114`): whole pages,
@@ -978,6 +1004,8 @@ impl Mm {
     /// back and resets the count of every other, so the next sweep
     /// starts from zero.
     fn gc_heap(&mut self) -> usize {
+        #[cfg(debug_assertions)]
+        self.drain_quarantine();
         for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
             let elements = elements as u32;
             let mut has_free_pages = false;
@@ -1526,6 +1554,127 @@ unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
     unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), len) };
 }
 
+/// The freed slots a debug build holds back per bin (#1980).
+#[cfg(debug_assertions)]
+const QUARANTINE: usize = 16;
+
+/// A debug build's quarantine of one bin (#1991): the bin's last
+/// [`QUARANTINE`] freed slots, oldest first, held back from the free
+/// list. php's free list is last in, first out, so the slot a block was
+/// just freed from is the next one its bin hands out, and the handing
+/// out clears the mark the freed-use guard reads ([`freed`]) before a
+/// stale use of the block can meet it: the guard would find the
+/// commonest use-after-free, a value used after its block is given back
+/// and one of its size made, only when nothing of that size was made in
+/// between. Held back, the slot keeps its mark until sixteen more of its
+/// bin are freed, and a stale use of it is found the first time.
+///
+/// A slot leaves by eviction, onto the head of the free list, after its
+/// mark and the poison in its first word are found as they were laid
+/// ([`freed::untouched`]); one written over is recorded as the
+/// `InternalError` naming the block. It leaves when a seventeenth slot of
+/// its bin is freed, when its bin's free list is empty and an allocation
+/// asks, so that a bin carves a `run` where php's does and not sixteen
+/// slots sooner, and at the start of the heap's GC, so that the sweep and
+/// the limit see every free slot php's would. What the quarantine
+/// changes is which free slot a bin hands out, which nothing in PHP
+/// observes; `memory_get_usage()` counts a slot freed when it enters, as
+/// php counts it freed in `zend_mm_free_small`. A release build has
+/// none of it.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+struct Quarantine {
+    /// A ring of the held slots, [`Quarantine::len`] of them from
+    /// [`Quarantine::oldest`] on.
+    slots: [Option<NonNull<FreeSlot>>; QUARANTINE],
+    oldest: usize,
+    len: usize,
+}
+
+#[cfg(debug_assertions)]
+impl Quarantine {
+    const EMPTY: Quarantine = Quarantine {
+        slots: [None; QUARANTINE],
+        oldest: 0,
+        len: 0,
+    };
+
+    /// `slot` held as the newest, and the oldest given up where the ring
+    /// was full.
+    fn hold(&mut self, slot: NonNull<FreeSlot>) -> Option<NonNull<FreeSlot>> {
+        let evicted = (self.len == QUARANTINE)
+            .then(|| self.take_oldest())
+            .flatten();
+        self.slots[(self.oldest + self.len) % QUARANTINE] = Some(slot);
+        self.len += 1;
+        evicted
+    }
+
+    /// The slot held longest, given up.
+    fn take_oldest(&mut self) -> Option<NonNull<FreeSlot>> {
+        if self.len == 0 {
+            return None;
+        }
+        let slot = self.slots[self.oldest].take();
+        self.oldest = (self.oldest + 1) % QUARANTINE;
+        self.len -= 1;
+        slot
+    }
+
+    /// The slot held shortest, given up.
+    fn take_newest(&mut self) -> Option<NonNull<FreeSlot>> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.slots[(self.oldest + self.len) % QUARANTINE].take()
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Mm {
+    /// The slot at `slot` of bin `bin_num`, freed, poisoned and held in
+    /// its bin's quarantine, and the slot it pushes out evicted.
+    fn quarantine(&mut self, slot: NonNull<FreeSlot>, bin_num: usize) {
+        freed::poison(slot.cast());
+        if let Some(evicted) = self.quarantine[bin_num].hold(slot) {
+            self.evict(evicted, bin_num);
+        }
+    }
+
+    /// Bin `bin_num`'s oldest held slot evicted, where it holds one.
+    fn evict_oldest(&mut self, bin_num: usize) {
+        if let Some(slot) = self.quarantine[bin_num].take_oldest() {
+            self.evict(slot, bin_num);
+        }
+    }
+
+    /// Every held slot evicted, the newest of each bin first, so its free
+    /// list hands them out oldest first.
+    fn drain_quarantine(&mut self) {
+        for bin_num in 0..BINS {
+            while let Some(slot) = self.quarantine[bin_num].take_newest() {
+                self.evict(slot, bin_num);
+            }
+        }
+    }
+
+    /// A slot out of bin `bin_num`'s quarantine checked and put on its
+    /// free list: one whose mark or poison was written over is recorded.
+    fn evict(&mut self, slot: NonNull<FreeSlot>, bin_num: usize) {
+        let size = BIN_DATA_SIZE[bin_num];
+        if !freed::untouched(slot.cast(), size) {
+            self.sensed.record(crate::sensed::Sensed::FreedWrite {
+                at: slot.as_ptr().addr(),
+                size,
+            });
+        }
+        // SAFETY: the slot was freed into the quarantine, which held the
+        // only name of it, and left it on the way here.
+        unsafe { self.push_free(slot, bin_num) };
+    }
+}
+
 /// A debug build's mark on a block the heap has freed (design §10), so
 /// that a refcount operation on one is found where it is made and not
 /// several allocations later, where a write into a freed bin slot's link
@@ -1533,8 +1682,9 @@ unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
 ///
 /// The mark is two words, the second and third of the block, laid when a
 /// bin slot or a `run` is given back and cleared when one is handed out,
-/// so a block the heap has out never carries it. The first word is left
-/// alone, being the free list's link. The pattern is no live value's:
+/// so a block the heap has out never carries it. The first word of a bin
+/// slot is the poison while the slot is in its bin's [`Quarantine`] and
+/// the free list's link once it leaves. The pattern is no live value's:
 /// where every refcounted value keeps a hash and a length, a flags word
 /// and a pointer, a store index and a class number, a zval's payload and
 /// its type byte, or a list index and a type number, the pair of odd
@@ -1567,6 +1717,39 @@ pub(crate) mod freed {
             // given up, and the mark is inside it past the link word.
             unsafe { mark.write(MARK) };
         }
+    }
+
+    /// The first word of a slot in the quarantine, read as the header's
+    /// two halves: its type word is zero, so a stale use reads the block
+    /// as a counted, mutable value, as it read the free list's link, and
+    /// meets the guard; its count is one no live value holds.
+    const POISON: u64 = if cfg!(target_endian = "little") {
+        0x0000_0000_A5A5_A5A5
+    } else {
+        0xA5A5_A5A5_0000_0000
+    };
+
+    /// The slot at `at` poisoned as it enters the quarantine.
+    pub(crate) fn poison(at: NonNull<u8>) {
+        let first: *mut u64 = at.as_ptr().cast();
+        // SAFETY: the slot is one of this heap's its owner has given up,
+        // eight-aligned and at least eight bytes.
+        unsafe { first.write(POISON) };
+    }
+
+    /// Whether the slot of `size` bytes at `at` still carries the poison
+    /// and the mark laid as it entered the quarantine.
+    pub(crate) fn untouched(at: NonNull<u8>, size: usize) -> bool {
+        let first: *const u64 = at.as_ptr().cast();
+        // SAFETY: the slot is one of this heap's held in the quarantine,
+        // so its first word is readable and nothing has it out.
+        let poisoned = unsafe { first.read() } == POISON;
+        poisoned
+            && mark_of(at, size).is_none_or(|mark| {
+                // SAFETY: as above, and the mark is inside the slot.
+                let mark = unsafe { mark.read() };
+                mark == MARK
+            })
     }
 
     /// The block of `size` bytes at `at` is its caller's from here.

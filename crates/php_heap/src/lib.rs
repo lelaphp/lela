@@ -394,9 +394,11 @@ impl Heap {
     /// engine last asked, as the `InternalError` fatal that ends the
     /// request: a refcount operation refused because the block it named
     /// was one this heap had freed, naming the block, the operation and
-    /// the line that asked for it. The first only, and taken, so it is raised once;
-    /// the refused operation itself did nothing, so the free list the
-    /// block's first word links stands. The engine asks after every
+    /// the line that asked for it, or a write into a freed block found as
+    /// it left its bin's quarantine, naming the block. The first only,
+    /// and taken, so it is raised once; the refused operation itself did
+    /// nothing, and the written block goes on to the free list, so the
+    /// free list stands. The engine asks after every
     /// handler and once more at the request's end, so a refusal made
     /// outside the loop, in a request-end function or as the request's
     /// tables are freed, is raised too. A release build senses nothing
@@ -1017,10 +1019,11 @@ mod tests {
     /// A debug build stops at a second release of a block, #723's
     /// defect planted: the first release frees the string, the second
     /// finds the block the heap's own and is refused, recorded as the
-    /// `InternalError` naming the block, the operation and this line,
-    /// and the free list the block's first word links is untouched, so
-    /// the bin hands the block out once and then the next one. An addref
-    /// of a freed block is refused the same way.
+    /// `InternalError` naming the block, the operation and this line.
+    /// The refused release wrote nothing, so the block leaves the
+    /// quarantine as it entered it when the heap's GC drains it, and
+    /// nothing more is recorded. An addref of a freed block is refused
+    /// the same way, and so is the string's own release.
     #[cfg(debug_assertions)]
     #[test]
     fn a_release_of_a_freed_block_is_refused_and_named_where_it_was_made() {
@@ -1050,18 +1053,6 @@ mod tests {
         assert_eq!(hooks.heap.take_sensed(), None, "it is reported once");
         assert_eq!(hooks.heap.memory_usage(false), start);
 
-        let again = hooks.heap.string(b"a string of its own block");
-        let next = hooks.heap.string(b"a string of its own block");
-        assert_eq!(again.as_ref().map(|s| s.address().as_ptr().addr()), Ok(at));
-        assert!(
-            next.as_ref()
-                .is_ok_and(|s| s.address().as_ptr().addr() != at),
-            "the free list's link was not written over"
-        );
-        for s in [again, next].into_iter().flatten() {
-            hooks.heap.release_string(s);
-        }
-
         hooks.heap.addref(z);
         assert!(matches!(
             hooks.heap.take_sensed(),
@@ -1070,19 +1061,7 @@ mod tests {
 
         // The string's own release, which decrements through the type
         // and not through `Heap::release`, is refused at the header the
-        // same way. The bin's list is the two blocks just given back,
-        // the later first, and still hands out exactly those two.
-        let given_back: Vec<usize> = {
-            let a = hooks.heap.string(b"a string of its own block");
-            let b = hooks.heap.string(b"a string of its own block");
-            let both = [a, b].into_iter().flatten().collect::<Vec<_>>();
-            let at: Vec<usize> = both.iter().map(|s| s.address().as_ptr().addr()).collect();
-            for s in both {
-                hooks.heap.release_string(s);
-            }
-            at.into_iter().rev().collect()
-        };
-        assert!(given_back.contains(&at));
+        // same way.
         hooks.heap.release_string(s);
         let site = line!() - 1;
         assert_eq!(
@@ -1092,19 +1071,165 @@ mod tests {
                 file!()
             )))
         );
-        let handed: Vec<Str> = (0..2)
+        hooks.heap.gc_mem_caches();
+        assert_eq!(
+            hooks.heap.take_sensed(),
+            None,
+            "a refused operation wrote into the block"
+        );
+        assert_eq!(hooks.heap.memory_usage(false), start);
+    }
+
+    /// The bin of a block just freed hands out another slot, and the
+    /// block keeps its mark until sixteen more of its bin are freed: a
+    /// value used after its block is given back and one of its size made
+    /// is refused the first time it happens, where a free list that handed the
+    /// block straight back would have cleared the mark and counted the
+    /// new value's owner one more. The seventeenth slot freed evicts the
+    /// first, and a block of the bin is handed out again in the order
+    /// the bin's quarantine gave them up.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_most_recently_freed_slot_of_a_bin_is_held_back_and_its_use_refused() {
+        let _alone = alone();
+        let mut hooks = Recorder { heap: Heap::new() };
+        let made = hooks.heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(stale) = made else {
+            return;
+        };
+        let at = stale.address().as_ptr().addr();
+        hooks.heap.release_string(stale);
+        let fresh = hooks.heap.string(b"a string of its own block");
+        assert!(
+            fresh
+                .as_ref()
+                .is_ok_and(|s| s.address().as_ptr().addr() != at),
+            "the bin handed the block just freed straight back"
+        );
+        stale.addref();
+        assert!(matches!(
+            hooks.heap.take_sensed(),
+            Some(Fatal::Error(message))
+                if message.starts_with(&format!("InternalError: an addref of the block at {at:#x}, which the heap has freed"))
+        ));
+
+        let more: Vec<Str> = (0..QUARANTINED)
             .filter_map(|_| hooks.heap.string(b"a string of its own block").ok())
             .collect();
-        assert_eq!(
-            handed
-                .iter()
-                .map(|s| s.address().as_ptr().addr())
-                .collect::<Vec<_>>(),
-            given_back,
-            "the free list's link was not written over"
-        );
-        for s in handed {
+        assert_eq!(more.len(), QUARANTINED);
+        assert!(more.iter().all(|s| s.address().as_ptr().addr() != at));
+        for s in more {
             hooks.heap.release_string(s);
+        }
+        assert_eq!(hooks.heap.take_sensed(), None, "an eviction found a write");
+        let again: Vec<Str> = (0..QUARANTINED + 2)
+            .filter_map(|_| hooks.heap.string(b"a string of its own block").ok())
+            .collect();
+        assert!(
+            again.iter().any(|s| s.address().as_ptr().addr() == at),
+            "the evicted block never came back"
+        );
+        for s in again.into_iter().chain(fresh) {
+            hooks.heap.release_string(s);
+        }
+        assert_eq!(hooks.heap.take_sensed(), None);
+    }
+
+    /// How many freed slots a bin holds back in a debug build.
+    #[cfg(debug_assertions)]
+    const QUARANTINED: usize = 16;
+
+    /// A write into a block its bin's quarantine holds is found as the
+    /// block leaves, recorded as the `InternalError` naming the block:
+    /// over the poison in its first word or over the mark after it, and
+    /// when the block leaves by eviction or by the heap's GC.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_write_into_a_quarantined_slot_is_found_as_it_leaves() {
+        type Leave = fn(&mut Heap);
+        let _alone = alone();
+        let leaves: [(&str, Leave); 2] = [
+            ("evicted", |heap| {
+                let more: Vec<Str> = (0..QUARANTINED)
+                    .filter_map(|_| heap.string(b"a string of its own block").ok())
+                    .collect();
+                for s in more {
+                    heap.release_string(s);
+                }
+            }),
+            ("drained", |heap| {
+                heap.gc_mem_caches();
+            }),
+        ];
+        for (how, leave) in leaves {
+            for word in [0, 1, 2] {
+                let mut heap = Heap::new();
+                let made = heap.string(b"a string of its own block");
+                assert!(made.is_ok(), "the heap would not allocate");
+                let Ok(s) = made else {
+                    return;
+                };
+                let at = s.address();
+                heap.release_string(s);
+                let words: *mut u64 = at.as_ptr().cast();
+                // SAFETY: the block is a freed slot of `heap`'s bin, its
+                // chunk still mapped, and the three words are inside it;
+                // the write is the stale one planted.
+                unsafe { words.wrapping_add(word).write(7) };
+                assert_eq!(heap.take_sensed(), None, "{how} {word}");
+                leave(&mut heap);
+                assert_eq!(
+                    heap.take_sensed(),
+                    Some(Fatal::Error(format!(
+                        "InternalError: a write into the 56-byte block at {:#x} after the heap freed it, found as it left the quarantine",
+                        at.as_ptr().addr()
+                    ))),
+                    "{how} {word}"
+                );
+            }
+        }
+    }
+
+    /// An allocation that finds its bin's free list empty takes the
+    /// quarantine's oldest slot, checked, before it carves a `run`, so
+    /// the `runs` a bin takes are the ones php's takes: a `run` of the
+    /// 3072-byte bin holds four slots, and four freed and four made are
+    /// the same four, oldest first, with a write into the first found
+    /// as it leaves.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_bin_takes_its_quarantined_slots_before_a_new_run() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let make = |heap: &mut Heap| -> Vec<Str> {
+            (0..4)
+                .filter_map(|_| heap.string(&[b'x'; 3000]).ok())
+                .collect()
+        };
+        let first = make(&mut heap);
+        assert_eq!(first.len(), 4);
+        let at: Vec<usize> = first.iter().map(|s| s.address().as_ptr().addr()).collect();
+        let written = first[0].address();
+        for s in first {
+            heap.release_string(s);
+        }
+        let first: *mut u64 = written.as_ptr().cast();
+        // SAFETY: the block is a freed slot of `heap`'s 3072-byte bin, its
+        // chunk still mapped; the write is the stale one planted.
+        unsafe { first.write(7) };
+        let second = make(&mut heap);
+        let again: Vec<usize> = second.iter().map(|s| s.address().as_ptr().addr()).collect();
+        assert_eq!(again, at, "the oldest slot first, and no new run");
+        assert_eq!(
+            heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: a write into the 3072-byte block at {:#x} after the heap freed it, found as it left the quarantine",
+                written.as_ptr().addr()
+            )))
+        );
+        for s in second {
+            heap.release_string(s);
         }
     }
 
@@ -1130,10 +1255,10 @@ mod tests {
     /// An addref of a freed block through each type's own addref, not
     /// the heap's, is refused at the refcounted header every path
     /// reaches, recorded as the `InternalError` naming the block, the
-    /// operation and the line that asked, and leaves the free list
-    /// standing: of two blocks freed, the later first, the bin hands
-    /// out the earlier and then the one its link names, where an
-    /// increment of the link would hand out an address one past it.
+    /// operation and the line that asked, and writes nothing: the block
+    /// leaves its bin's quarantine with the poison in its first word,
+    /// where an increment would have moved it, when the heap's GC drains
+    /// the quarantine.
     #[cfg(debug_assertions)]
     #[test]
     fn an_addref_of_a_freed_block_through_each_type_is_refused_at_the_header() {
@@ -1182,22 +1307,12 @@ mod tests {
                 "{kind}"
             );
 
-            let again = make(&mut hooks.heap);
-            let next = make(&mut hooks.heap);
+            hooks.heap.gc_mem_caches();
             assert_eq!(
-                again.as_ref().ok().copied().and_then(at),
-                Some(block),
-                "{kind}"
+                hooks.heap.take_sensed(),
+                None,
+                "the refused addref of the {kind} wrote into its block"
             );
-            assert_eq!(
-                next.as_ref().ok().copied().and_then(at),
-                at(other),
-                "the free list's link under the {kind} was written over"
-            );
-            for z in [again, next].into_iter().flatten() {
-                Heap::release(&mut hooks, z);
-            }
-            assert_eq!(hooks.heap.take_sensed(), None, "{kind}");
         }
     }
 

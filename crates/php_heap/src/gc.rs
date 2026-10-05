@@ -17,7 +17,8 @@ use crate::ZvalType;
 /// ([`crate::mm::freed`]). One that is is recorded in its heap's sensed
 /// record ([`crate::sensed`]), with the operation and the line that
 /// asked for it, and the operation is refused, so nothing is written
-/// over the free list's link in the block's first word.
+/// over the block's first word, the poison its bin's quarantine checks
+/// as the block leaves.
 #[cfg(debug_assertions)]
 pub(crate) fn refuses_freed(
     at: std::ptr::NonNull<u8>,
