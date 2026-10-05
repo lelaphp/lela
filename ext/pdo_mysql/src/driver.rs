@@ -131,7 +131,7 @@ pub(crate) fn error_of(req: &mut Request, server: Mysqlnd, ps: Option<&Ps>) -> F
 pub(crate) fn warning_count(req: &mut Request, conn: &mut dyn Connection) -> i64 {
     let any: &mut dyn std::any::Any = conn;
     match any.downcast_mut::<Db>() {
-        Some(db) => match handle(req, db.id) {
+        Some(db) => match db.handle(req) {
             Some(h) => i64::from(h.server.status(req).warning_count),
             None => 0,
         },
@@ -241,7 +241,9 @@ impl Connector for Driver {
         let state = req.state::<State>();
         let id = state.handles.len();
         state.handles.push(Some(h));
-        Ok(Box::new(Db { id, idle: None }))
+        Ok(Box::new(Db {
+            place: Place::Held(id),
+        }))
     }
 }
 
@@ -340,20 +342,48 @@ fn low32(n: i64) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// The connection: the number of its `pdo_mysql_db_handle`.
+/// The connection: where its `pdo_mysql_db_handle` stands.
 pub(crate) struct Db {
-    pub(crate) id: usize,
+    place: Place,
+}
+
+/// Where a connection's `pdo_mysql_db_handle` stands.
+enum Place {
+    /// In the request's table, at this number.
+    Held(usize),
     /// A persistent connection the request gave back to the engine's
-    /// pool: its `pdo_mysql_db_handle`, out of the request's table, and
-    /// the key mysqlnd keeps the connection under until a request takes
-    /// it up.
-    idle: Option<(H, Vec<u8>)>,
+    /// pool: out of the request's table, with the key mysqlnd keeps the
+    /// connection under until a request takes it up.
+    Idle(H, Vec<u8>),
+    /// In no request's table: given back and not kept, or kept and gone
+    /// by the time a request asked for it.
+    Gone,
 }
 
 impl Db {
+    /// The number of its `pdo_mysql_db_handle` in the request's table.
+    fn id(&self) -> Option<usize> {
+        match self.place {
+            Place::Held(id) => Some(id),
+            Place::Idle(..) | Place::Gone => None,
+        }
+    }
+
+    /// Its `pdo_mysql_db_handle` in the request's table.
+    fn handle(&self, req: &mut Request) -> Option<H> {
+        handle(req, self.id()?)
+    }
+
+    /// Its `pdo_mysql_db_handle` changed by `f`.
+    fn update(&self, req: &mut Request, f: impl FnOnce(&mut H)) {
+        if let Some(id) = self.id() {
+            update(req, id, f);
+        }
+    }
+
     /// Its `pdo_mysql_db_handle`, refusing a closed connection as `Silent`.
     fn h(&self, req: &mut Request) -> Result<H, Failure> {
-        handle(req, self.id).ok_or_else(Failure::silent)
+        self.handle(req).ok_or_else(Failure::silent)
     }
 }
 
@@ -366,7 +396,8 @@ impl Connection for Db {
         options: Option<php_ext::values::PhpArray>,
     ) -> Result<Prepared, Failure> {
         let h = self.h(req)?;
-        let mut stmt = Stmt::new(self.id);
+        let id = self.id().ok_or_else(Failure::silent)?;
+        let mut stmt = Stmt::new(id);
         let emulated = |stmt: Stmt| Prepared {
             statement: Box::new(stmt),
             placeholders: Placeholders::Emulated,
@@ -395,7 +426,7 @@ impl Connection for Db {
         }
         stmt.num_params = ps.parameter_count();
         stmt.ps = Some(ps);
-        update(req, self.id, |h| h.own_columns = true);
+        update(req, id, |h| h.own_columns = true);
         stmt.max_length = option_long(req, options, attr::MAX_COLUMN_LEN, 0)? & 1 != 0;
         Ok(Prepared {
             statement: Box::new(stmt),
@@ -513,7 +544,7 @@ impl Connection for Db {
 
     /// `pdo_mysql_in_transaction`.
     fn in_transaction(&mut self, req: &mut Request) -> Option<bool> {
-        let h = handle(req, self.id)?;
+        let h = self.handle(req)?;
         Some(h.server.status(req).server_status & IN_TRANS != 0)
     }
 
@@ -524,33 +555,32 @@ impl Connection for Db {
         attr: i64,
         value: &Value,
     ) -> Result<(), Failure> {
-        let id = self.id;
         match attr {
             attr::AUTOCOMMIT => {
                 let on = bool_attribute(req, value)?;
                 let h = self.h(req)?;
                 if h.auto_commit != on {
-                    update(req, id, |h| h.auto_commit = on);
+                    self.update(req, |h| h.auto_commit = on);
                     self.set_attribute_autocommit(req)?;
                 }
             }
             attr::DEFAULT_STR_PARAM => {
                 let n = long_attribute(req, value)?;
-                update(req, id, |h| {
+                self.update(req, |h| {
                     h.assume_national_character_set_strings = n == STR_NATL;
                 });
             }
             Mysql::ATTR_USE_BUFFERED_QUERY => {
                 let on = bool_attribute(req, value)?;
-                update(req, id, |h| h.buffered = on);
+                self.update(req, |h| h.buffered = on);
             }
             attr::EMULATE_PREPARES => {
                 let on = bool_attribute(req, value)?;
-                update(req, id, |h| h.emulate_prepare = on);
+                self.update(req, |h| h.emulate_prepare = on);
             }
             attr::FETCH_TABLE_NAMES => {
                 let on = bool_attribute(req, value)?;
-                update(req, id, |h| h.fetch_table_names = on);
+                self.update(req, |h| h.fetch_table_names = on);
             }
             attr::STRINGIFY_FETCHES => {
                 let on = bool_attribute(req, value)?;
@@ -643,16 +673,8 @@ impl Connection for Db {
     /// int(1)
     /// ```
     fn check_liveness(&mut self, req: &mut Request) -> bool {
-        if let Some((mut h, key)) = self.idle.take() {
-            let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
-                return false;
-            };
-            h.server = server;
-            let state = req.state::<State>();
-            self.id = state.handles.len();
-            state.handles.push(Some(h));
-        }
-        let Some(h) = handle(req, self.id) else {
+        self.take_up(req);
+        let Some(h) = self.handle(req) else {
             return false;
         };
         matches!(h.server.command(req, Command::Ping), Ok(true))
@@ -660,40 +682,73 @@ impl Connection for Db {
 
     /// `pdo_mysql_request_shutdown`: `mysqlnd_end_psession`.
     fn persistent_shutdown(&mut self, req: &mut Request) {
-        if let Some(h) = handle(req, self.id) {
+        if let Some(h) = self.handle(req) {
             let _ = h.server.end_psession(req);
         }
     }
 
     /// The connection out of the request's tables and kept by mysqlnd,
     /// its `pdo_mysql_db_handle` kept here, for the next request to take
-    /// up.
+    /// up. One mysqlnd did not keep, past its pool's bound and closed
+    /// there, is gone, so the next request's `check_liveness` finds it
+    /// dead.
     fn give_back(&mut self, req: &mut Request) {
-        let Some(h) = handle(req, self.id) else {
+        let Some(id) = self.id() else {
             return;
         };
-        if let Some(key) = h.server.give_back(req) {
-            if let Some(slot) = req.state::<State>().handles.get_mut(self.id) {
-                *slot = None;
-            }
-            self.idle = Some((h, key));
+        let Some(h) = handle(req, id) else {
+            return;
+        };
+        let kept = h.server.give_back(req);
+        if let Some(slot) = req.state::<State>().handles.get_mut(id) {
+            *slot = None;
         }
+        self.place = match kept {
+            Some(key) => Place::Idle(h, key),
+            None => Place::Gone,
+        };
     }
 
-    /// `mysql_handle_closer`.
+    /// `mysql_handle_closer`, over a connection the request gave back
+    /// taken up first, as PDO closes one past its pool's bound.
     fn close(&mut self, req: &mut Request) {
-        if let Some(h) = handle(req, self.id) {
+        self.take_up(req);
+        let Some(id) = self.id() else {
+            return;
+        };
+        if let Some(h) = handle(req, id) {
             let _ = h
                 .server
                 .close(req, php_ext_mysqlnd::client::CloseType::Explicit);
         }
-        if let Some(slot) = req.state::<State>().handles.get_mut(self.id) {
+        if let Some(slot) = req.state::<State>().handles.get_mut(id) {
             *slot = None;
         }
+        self.place = Place::Gone;
     }
 }
 
 impl Db {
+    /// A connection given back to the engine's pool held in the request's
+    /// table again, with the connection mysqlnd keeps under its key, or
+    /// gone where mysqlnd keeps none there; one not given back stays where
+    /// it stands.
+    fn take_up(&mut self, req: &mut Request) {
+        if !matches!(self.place, Place::Idle(..)) {
+            return;
+        }
+        let Place::Idle(mut h, key) = std::mem::replace(&mut self.place, Place::Gone) else {
+            return;
+        };
+        let Ok(Some(server)) = Mysqlnd::take_up(req, &key) else {
+            return;
+        };
+        h.server = server;
+        let state = req.state::<State>();
+        self.place = Place::Held(state.handles.len());
+        state.handles.push(Some(h));
+    }
+
     /// `mysql_handle_autocommit` after the attribute changed.
     fn set_attribute_autocommit(&self, req: &mut Request) -> Result<(), Failure> {
         let h = self.h(req)?;
