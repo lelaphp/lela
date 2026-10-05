@@ -857,11 +857,12 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// and every link of `zend_throw_exception_hook` the bundle supplied
 /// ([`ExtensionBuilder::thrown`]) told of it first, from the top, with
 /// it standing in php's slot as php's hook reads `EG(exception)`, and
-/// before the unwind leaves the frame: what a frame the throwable
-/// leaves owes its observers is the unwind's, in `unwind_from`'s
-/// uncaught arm as php's `zend_observer_fcall_end(execute_data, NULL)`
-/// stands in `zend_dispatch_try_catch_finally_helper`
-/// (`Z/Zend/zend_vm_def.h:8157-8161`), never here. As php's, the hooks
+/// before the unwind leaves the frame. What a frame the throwable
+/// leaves owes its observers is the unwind's and not this home's: php
+/// ends them in `zend_dispatch_try_catch_finally_helper`'s uncaught arm
+/// (`zend_observer_fcall_end(execute_data, NULL)`,
+/// `Z/Zend/zend_vm_def.h:8157-8161`), which is `unwind_from` here, where
+/// the observer seam's end will stand (#1809). As php's, the hooks
 /// are told nothing where a throwable stands pending already, which
 /// php chains the new one over and returns before the hook, nor where
 /// nothing executes, which php renders without it.
@@ -869,7 +870,8 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// [`ExtensionBuilder::thrown`]: crate::api::abi::ExtensionBuilder::thrown
 pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
     let thrown = Thrown::of(Some(object));
-    if req.is_pending() || !req.executing() {
+    // A bundle that set no hook pays nothing more for a throw.
+    if req.shared.supplied.thrown.links().is_empty() || req.is_pending() || !req.executing() {
         return thrown;
     }
     let shared = std::sync::Arc::clone(&req.shared);

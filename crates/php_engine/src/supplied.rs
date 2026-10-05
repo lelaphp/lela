@@ -950,7 +950,7 @@ mod tests {
         use crate::api::values::PhpObject;
         use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, message_of, record};
         const TYPE: &str = "strlen(): Argument #1 ($string) must be of type string, array given";
-        fn told(req: &mut Request, throwable: PhpObject) {
+        fn shown(req: &mut Request, throwable: PhpObject) {
             let message = message_of(req, throwable);
             req.write(format!("[{message}]").as_bytes());
             record(8, Phase::Thrown(message));
@@ -958,7 +958,7 @@ mod tests {
         let recording = Recording::start();
         let extensions = [
             TestExt::<7>::extension(),
-            TestExt::<8>::builder().thrown(told).build("test_ext_8"),
+            TestExt::<8>::builder().thrown(shown).build("test_ext_8"),
         ];
         let out = printed(
             &extensions,
