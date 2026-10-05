@@ -372,7 +372,10 @@ impl Heap {
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
-    /// when the last gives it up. An interned string is never freed.
+    /// when the last gives it up. An interned string is never freed. A
+    /// debug build's freed-use guard is the header's decrement, and names
+    /// the caller.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_string(&mut self, s: Str) {
         if s.is_interned() || s.delref() != 0 {
             return;
