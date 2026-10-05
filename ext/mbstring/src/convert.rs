@@ -14,7 +14,7 @@ use crate::tables::{
 use crate::text::{decode_runs, new_string, substitute, value_error};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, docref, pending};
+use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -877,7 +877,14 @@ fn convert_value(
 }
 
 /// Each element of an array the walk owns converted in its slot; `true`
-/// where a recursion stopped it.
+/// where a recursion stopped it. A converted string is written back
+/// under the key it stood at, which the array keeps, as php's
+/// `ZEND_HASH_FOREACH_VAL` (`Z/ext/mbstring/mbstring.c:3828`) writes
+/// through the bucket and leaves its key alone: the walk's keys are
+/// views, so it replaces in place and
+/// never hands one to a write that takes a key's owner. The array is
+/// the walk's own and nothing it serves removes a key, so a key gone
+/// is the `InternalError` of a broken invariant.
 fn convert_array_in(
     req: &mut Request,
     mut array: PhpArray,
@@ -892,7 +899,15 @@ fn convert_array_in(
                 return Ok(true);
             }
             Walk::Kept => {}
-            Walk::Replace(new) => array.set(req, key, new)?,
+            Walk::Replace(new) => {
+                if !array.replace(req, &key, new)? {
+                    array.unprotect();
+                    return Err(fatal(
+                        req,
+                        "InternalError: mb_convert_variables lost a key of the array it converts",
+                    ));
+                }
+            }
         }
     }
     array.unprotect();
@@ -919,6 +934,29 @@ fn convert_array_in(
 /// }
 /// string(6) "EUC-JP"
 /// string(3) "あ"
+/// ```
+///
+/// A converted element stays under its key, and the array keeps a key
+/// built by concatenation: a string of the key's size allocated after the
+/// conversion is another block.
+///
+/// ```php
+/// $k = 'kkkkk'; $z = 'ZZZZZ';
+/// $a = [$k . $k => "\xe9", 'n' => ["\xed"]];
+/// mb_convert_variables('UTF-8', 'ISO-8859-1', $a);
+/// $x = $z . $z;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(2) {
+///   ["kkkkkkkkkk"]=>
+///   string(2) "é"
+///   ["n"]=>
+///   array(1) {
+///     [0]=>
+///     string(2) "í"
+///   }
+/// }
 /// ```
 ///
 /// Detection over many strings weighs each candidate's demerits once a
