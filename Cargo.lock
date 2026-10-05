@@ -1026,6 +1026,7 @@ dependencies = [
 name = "php_ext_pcre"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "pcre2-sys",
  "php_ext",
  "pkg-config",
