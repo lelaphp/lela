@@ -2594,10 +2594,11 @@ impl EngineBuilder {
     /// ([`php_compile::Options::extended_info`]). It is the engine's,
     /// beside the tier's hooks: every request compiles under it, what a
     /// host evaluates as a string of its own excepted, and the file
-    /// cache keeps such units apart from a plain engine's.
+    /// cache keeps such units apart from a plain engine's. `on` is what
+    /// the host's line said; off is php's default.
     #[must_use]
-    pub fn extended_info(mut self) -> EngineBuilder {
-        self.extended_info = true;
+    pub fn extended_info(mut self, on: bool) -> EngineBuilder {
+        self.extended_info = on;
         self
     }
 

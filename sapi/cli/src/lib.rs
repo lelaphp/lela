@@ -257,12 +257,8 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: bool) -> E
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
-        .cli_shell();
-    let builder = if extended_info {
-        builder.extended_info()
-    } else {
-        builder
-    };
+        .cli_shell()
+        .extended_info(extended_info);
     let builder = php_sapi::ini::CLI_HARDCODED
         .iter()
         .fold(builder, |builder, (name, value)| builder.ini(name, value));
@@ -293,11 +289,7 @@ fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: boo
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
-        .skip_shebang();
-    let builder = if extended_info {
-        builder.extended_info()
-    } else {
-        builder
-    };
+        .skip_shebang()
+        .extended_info(extended_info);
     php_sapi::start(natives::server(builder), ini, server::log_message)
 }

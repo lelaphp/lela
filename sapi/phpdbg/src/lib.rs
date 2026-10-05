@@ -171,12 +171,8 @@ pub fn main() -> ExitCode {
         .extensions(&extensions)
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
-        .skip_shebang();
-    let builder = if line.extended_info {
-        builder.extended_info()
-    } else {
-        builder
-    };
+        .skip_shebang()
+        .extended_info(line.extended_info);
     let engine = php_sapi::start(builder, &line.ini, log_message);
 
     let mut session = Session::new();

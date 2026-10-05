@@ -841,12 +841,8 @@ fn engine(
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
-        .tier::<php_bundle::Tier>();
-    let builder = if extended_info {
-        builder.extended_info()
-    } else {
-        builder
-    };
+        .tier::<php_bundle::Tier>()
+        .extended_info(extended_info);
     let builder = natives::declare(builder, origin).skip_shebang_while("cgi.check_shebang_line");
     php_sapi::start(builder, ini, |entry| Process.log(entry))
 }

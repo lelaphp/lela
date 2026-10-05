@@ -223,18 +223,14 @@ fn log_message(entry: &[u8]) {
 /// with extended info where the line carried `-e`.
 fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
-    let builder = Engine::builder()
+    Engine::builder()
         .ini_files(startup.files.clone())
         .sapi_name(worker::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
-        .additional_extension(natives::extension());
-    if startup.extended_info {
-        builder.extended_info()
-    } else {
-        builder
-    }
+        .extended_info(startup.extended_info)
+        .additional_extension(natives::extension())
 }
 
 /// `text` on stdout.

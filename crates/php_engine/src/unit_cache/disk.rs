@@ -286,11 +286,11 @@ mod tests {
     #[test]
     fn extended_info_keeps_its_units_apart() {
         let build = |engine: crate::Engine| engine.shared.units.build;
-        let extended = build(crate::Engine::cli_builder().extended_info().build());
+        let extended = build(crate::Engine::cli_builder().extended_info(true).build());
         assert_ne!(extended, build(crate::Engine::cli_builder().build()));
         assert_eq!(
             extended,
-            build(crate::Engine::cli_builder().extended_info().build())
+            build(crate::Engine::cli_builder().extended_info(true).build())
         );
     }
 

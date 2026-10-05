@@ -282,10 +282,8 @@ pub mod test {
         let mut builder = Engine::builder()
             .extensions(&extensions)
             .configure(super::CONFIGURE)
-            .tier::<super::Tier>();
-        if extended_info {
-            builder = builder.extended_info();
-        }
+            .tier::<super::Tier>()
+            .extended_info(extended_info);
         for (name, value) in ini {
             builder = builder.ini(name, value);
         }
