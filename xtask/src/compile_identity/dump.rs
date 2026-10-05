@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{Corpus, Judged, Judgement, LINT, REGIME, linked};
+use super::{Corpus, Judged, Judgement, LINT, linked};
 use crate::divergence::Registry;
 use crate::oracle::{self, Invocation, Oracle, Program, Verdict as Compared};
 use crate::phpt::file::Phpt;
@@ -53,6 +53,8 @@ pub(super) struct Dumps<'a> {
     /// `-l`, the one flag before the program, held as the invocation takes
     /// it.
     flags: [String; 1],
+    /// The regimes both binaries dump under, `dump` first.
+    regimes: Vec<&'a str>,
 }
 
 impl<'a> Dumps<'a> {
@@ -60,6 +62,7 @@ impl<'a> Dumps<'a> {
         oracle: &'a Oracle<'a>,
         registry: &'a Registry,
         compiler: Compiler<'a>,
+        regimes: &[&'a str],
     ) -> Result<Dumps<'a>> {
         Ok(Dumps {
             oracle,
@@ -67,6 +70,7 @@ impl<'a> Dumps<'a> {
             compiler,
             dir: Programs::new()?,
             flags: [LINT.to_owned()],
+            regimes: regimes.to_vec(),
         })
     }
 
@@ -111,15 +115,15 @@ impl<'a> Dumps<'a> {
     }
 
     /// What one binary prints compiling the program: the pin's recipe, its
-    /// `dump` regime and `-l`, which compiles the file and does not run
-    /// it. php prints its op arrays on the second stream, so the dump is
+    /// `dump` regime and any regime after it, and `-l`, which compiles the
+    /// file and does not run it. php prints its op arrays on the second stream, so the dump is
     /// what that stream carries; the first holds `-l`'s own sentence,
     /// which is no op array and is not compared.
     fn dump(&self, binary: &Path, program: &Path) -> Result<Dumped> {
         let out = self
             .oracle
             .run_under(&Invocation {
-                regime: Some(REGIME),
+                regimes: &self.regimes,
                 flags: &self.flags,
                 ..Invocation::new(binary, Program::File(program))
             })

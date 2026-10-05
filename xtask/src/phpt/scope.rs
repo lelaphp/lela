@@ -1,9 +1,11 @@
-//! A corpus reading's scope, `<subset>[@control][@<lane>][@against]`:
-//! the subset, and what the run was beside it. The writers render it here
-//! and every reader parses it here, so `status`, `done`'s stamp and the
-//! comparisons all read one subset off `X@control@against` (#1744).
+//! A corpus reading's scope,
+//! `<subset>[@control][@<lane>][@regime=<name>][@against]`: the subset,
+//! and what the run was beside it. The writers render it here and every
+//! reader parses it here, so `status`, `done`'s stamp and the comparisons
+//! all read one subset off `X@control@against` (#1744).
 //! `compile-identity` writes its control's scope through it as well, the
-//! same grammar over a corpus of its own.
+//! same grammar over a corpus of its own, and the regime it dumped under
+//! beside `dump` where it was asked for one (#1822).
 
 use std::fmt;
 use std::str::FromStr;
@@ -15,6 +17,8 @@ use super::Lane;
 
 /// What separates the subset from each suffix after it.
 const AT: char = '@';
+/// What a regime's suffix opens with, ahead of the pin's name for it.
+const REGIME: &str = "regime=";
 
 /// One reading's scope, decoded once.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +30,9 @@ pub(crate) struct Scope {
     pub control: bool,
     /// The compiled tier's lane the run was under (jit-design.md §7).
     pub lane: Option<Lane>,
+    /// The `[regime.<name>]` of the pin the run stood under beside the
+    /// lane's own, by name (#1822).
+    pub regime: Option<String>,
     /// The comparison of the run against a kept commit's (#664).
     pub against: bool,
 }
@@ -58,6 +65,7 @@ impl Scope {
             subset: subset.to_owned(),
             control: false,
             lane: None,
+            regime: None,
             against: false,
         }
     }
@@ -101,6 +109,9 @@ impl fmt::Display for Scope {
         if let Some(lane) = self.lane {
             write!(f, "{AT}{}", lane.as_str())?;
         }
+        if let Some(regime) = &self.regime {
+            write!(f, "{AT}{REGIME}{regime}")?;
+        }
         if self.against {
             write!(f, "{AT}{}", Comparison::Against.as_str())?;
         }
@@ -114,6 +125,7 @@ impl fmt::Display for Scope {
 enum Place {
     Control,
     Lane,
+    Regime,
     Against,
 }
 
@@ -135,23 +147,26 @@ impl FromStr for Scope {
                 .iter()
                 .copied()
                 .find(|lane| lane.as_str() == suffix);
-            let place = match lane {
+            let regime = suffix.strip_prefix(REGIME).filter(|name| !name.is_empty());
+            let place = match (lane, regime) {
                 _ if suffix == Comparison::Control.as_str() => Place::Control,
-                Some(_) => Place::Lane,
-                None if suffix == Comparison::Against.as_str() => Place::Against,
+                (Some(_), _) => Place::Lane,
+                (None, Some(_)) => Place::Regime,
+                (None, None) if suffix == Comparison::Against.as_str() => Place::Against,
                 _ => bail!(
-                    "the scope {text:?} carries `{AT}{suffix}`, which is no control, lane or comparison"
+                    "the scope {text:?} carries `{AT}{suffix}`, which is no control, lane, regime or comparison"
                 ),
             };
             if last.is_some_and(|last| last >= place) {
                 bail!(
-                    "the scope {text:?} carries `{AT}{suffix}` out of the order `<subset>[{AT}control][{AT}<lane>][{AT}against]`"
+                    "the scope {text:?} carries `{AT}{suffix}` out of the order `<subset>[{AT}control][{AT}<lane>][{AT}{REGIME}<name>][{AT}against]`"
                 );
             }
             last = Some(place);
             match place {
                 Place::Control => scope.control = true,
                 Place::Lane => scope.lane = lane,
+                Place::Regime => scope.regime = regime.map(str::to_owned),
                 Place::Against => scope.against = true,
             }
         }
@@ -209,11 +224,33 @@ mod tests {
                     subset: subset.to_owned(),
                     control,
                     lane,
+                    regime: None,
                     against,
                 },
                 "{text}"
             );
             assert_eq!(scope.to_string(), text);
+        }
+    }
+
+    /// `compile-identity` under a regime beside `dump` keeps a reading of
+    /// its own, its control's too, and reads back as the parts that
+    /// spelled it (#1822).
+    #[test]
+    fn a_regime_is_a_suffix_of_its_own_after_the_lane() {
+        for (text, control) in [
+            ("php-src@regime=extended-info", false),
+            ("php-src@control@regime=extended-info", true),
+        ] {
+            let scope: Scope = text.parse().unwrap();
+            assert_eq!(scope.subset, "php-src");
+            assert_eq!(scope.control, control);
+            assert_eq!(scope.regime.as_deref(), Some("extended-info"));
+            assert_eq!(scope.to_string(), text);
+        }
+        for text in ["X@regime=", "X@regime=a@force", "X@regime=a@regime=b"] {
+            let refused = text.parse::<Scope>().unwrap_err().to_string();
+            assert!(refused.contains(text), "{text}: {refused}");
         }
     }
 

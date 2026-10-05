@@ -52,6 +52,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
+#[allow(clippy::struct_excessive_bools)] // php's compile-time ini entries and compiler options, each one fact
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
     /// The file name the unit and its errors carry.
@@ -143,6 +144,16 @@ pub struct Options<'a> {
     /// Which of php's execution hooks the host replaced, [`Hooked`],
     /// which `zend_get_call_op` reads; none for an engine with no tier.
     pub hooked: Hooked,
+    /// `CG(compiler_options) & ZEND_COMPILE_EXTENDED_INFO`, which a
+    /// host's `-e` sets for every file and `eval` the engine compiles
+    /// (#1780): an `EXT_STMT` before each statement, and an
+    /// `EXT_FCALL_BEGIN` and `EXT_FCALL_END` around each call
+    /// `zend_compile_call_common` makes and each `include` or `eval`,
+    /// where `zend_do_extended_stmt`, `zend_do_extended_fcall_begin` and
+    /// `zend_do_extended_fcall_end` emit them. What a host evaluates as
+    /// a string of its own, `-r`'s code, is compiled without it, as
+    /// `zend_eval_stringl` compiles under `ZEND_COMPILE_DEFAULT_FOR_EVAL`.
+    pub extended_info: bool,
 }
 
 impl Default for Options<'_> {
@@ -164,6 +175,7 @@ impl Default for Options<'_> {
             keys_before: 0,
             multibyte: None,
             hooked: Hooked::NONE,
+            extended_info: false,
         }
     }
 }

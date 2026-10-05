@@ -109,7 +109,7 @@ impl Binary {
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
         let observed = oracle.run_under(&Invocation {
-            regime,
+            regimes: regime.as_slice(),
             env: &env,
             ..Invocation::new(binary, Program::Snippet(snippet))
         })?;

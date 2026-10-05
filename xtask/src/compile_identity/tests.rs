@@ -220,13 +220,13 @@ fn every_reading_states_the_denominator() {
     let root = crate::built_root();
     let (_tree, corpus) = corpus("reading", &[]);
     let red = tally(3, &[Judgement::Fail, Judgement::Fail, Judgement::Fail]);
-    let red = reading(&red, &root, &corpus, &engine(), None).unwrap();
+    let red = reading(&red, &root, &corpus, &engine(), None, None).unwrap();
     assert_eq!(red.instrument, INSTRUMENT);
     assert_eq!(red.status, Status::Fail);
     assert!(red.message.contains("3 of 3 files differ"), "{red:#?}");
 
     let green = tally(2, &[Judgement::Pass, Judgement::Pass]);
-    let green = reading(&green, &root, &corpus, &engine(), None).unwrap();
+    let green = reading(&green, &root, &corpus, &engine(), None, None).unwrap();
     assert_eq!(green.status, Status::Pass);
     assert!(green.message.contains("2 of 2"), "{green:#?}");
 
@@ -237,6 +237,7 @@ fn every_reading_states_the_denominator() {
         &root,
         &corpus,
         &engine(),
+        None,
         Some("the pinned php is not at /nowhere"),
     )
     .unwrap();
@@ -260,9 +261,32 @@ fn the_control_is_scoped_apart_from_the_engines_reading() {
         &corpus,
         &control,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(control.scope, format!("{}@control", corpus.scope));
+    // A run under a regime beside `dump` keeps a reading of its own too,
+    // its control's after the control's mark (#1822).
+    let under = |runner: &Runner| {
+        reading(
+            &tally(1, &[Judgement::Pass]),
+            &root,
+            &corpus,
+            runner,
+            Some("extended-info"),
+            None,
+        )
+        .unwrap()
+        .scope
+    };
+    assert_eq!(
+        under(&engine()),
+        format!("{}@regime=extended-info", corpus.scope)
+    );
+    assert_eq!(
+        under(&Runner::Control(PathBuf::from("/pinned/php"))),
+        format!("{}@control@regime=extended-info", corpus.scope)
+    );
     assert_eq!(control.status, Status::Skip);
     assert!(
         control.message.contains("control of the lane"),
