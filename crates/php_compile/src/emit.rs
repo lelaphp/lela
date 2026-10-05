@@ -10372,20 +10372,21 @@ impl Emit<'_> {
     /// is the one that left the value `zend_do_free` is given: php walks
     /// back over both from the last opline before it reads what one left.
     fn last_that_left_a_value(&mut self) -> Option<&mut Opline> {
-        self.oplines
-            .iter_mut()
-            .rev()
-            .find(|opline| !matches!(opline.opcode, Opcode::OpData | Opcode::EndSilence))
+        self.last_stepping_past(&[])
     }
 
     /// [`Self::last_that_left_a_value`] for a `VAR`, which steps back
     /// over the `EXT_FCALL_END` after a call as well.
     fn last_that_left_a_var(&mut self) -> Option<&mut Opline> {
+        self.last_stepping_past(&[Opcode::ExtFcallEnd])
+    }
+
+    /// The last opline that is no `OP_DATA`, no `END_SILENCE` and none
+    /// of `also`.
+    fn last_stepping_past(&mut self, also: &[Opcode]) -> Option<&mut Opline> {
         self.oplines.iter_mut().rev().find(|opline| {
-            !matches!(
-                opline.opcode,
-                Opcode::OpData | Opcode::EndSilence | Opcode::ExtFcallEnd
-            )
+            !matches!(opline.opcode, Opcode::OpData | Opcode::EndSilence)
+                && !also.contains(&opline.opcode)
         })
     }
 
