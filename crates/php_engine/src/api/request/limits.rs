@@ -6,6 +6,7 @@
 //! and the stack limit are [`Limits`]'s, whose fields no file but this
 //! one reads.
 
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
@@ -117,6 +118,54 @@ impl AsRef<AtomicBool> for State {
     /// The word a posted signal raises: the one the loop tests.
     fn as_ref(&self) -> &AtomicBool {
         &self.raised
+    }
+}
+
+/// The time limit suspended while this stands
+/// ([`Request::suspend_time_limit`], #1814), over the request or over
+/// what holds it, an observer's frame ([`Observed`]): what it derefs to,
+/// so the handler that holds it keeps everything it had. Its drop is
+/// the resume.
+///
+/// [`Observed`]: crate::api::abi::Observed
+#[must_use = "the time limit is resumed when the guard is dropped, at once where it is not held"]
+pub struct TimeLimitSuspended<'a, T: AsMut<Request> = Request> {
+    held: &'a mut T,
+}
+
+impl<'a, T: AsMut<Request>> TimeLimitSuspended<'a, T> {
+    /// The time limit of the request `held` reaches suspended, until the
+    /// guard is dropped.
+    pub(crate) fn over(held: &'a mut T) -> Self {
+        held.as_mut().limits.timer.suspend();
+        TimeLimitSuspended { held }
+    }
+}
+
+impl<T: AsMut<Request>> Deref for TimeLimitSuspended<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.held
+    }
+}
+
+impl<T: AsMut<Request>> DerefMut for TimeLimitSuspended<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.held
+    }
+}
+
+impl<T: AsMut<Request>> Drop for TimeLimitSuspended<'_, T> {
+    /// The resume: the time the limit had left counts on from here.
+    fn drop(&mut self) {
+        self.held.as_mut().limits.timer.resume();
+    }
+}
+
+impl AsMut<Request> for Request {
+    /// The request a [`TimeLimitSuspended`] over the request suspends.
+    fn as_mut(&mut self) -> &mut Request {
+        self
     }
 }
 
@@ -235,6 +284,48 @@ impl Request {
         every: Option<std::time::Duration>,
     ) -> Option<Periodic> {
         self.limits.timer.start_periodic(first, every)
+    }
+
+    /// The time limit suspended (#1814) for as long as the guard this
+    /// answers stands: the execution timer that `max_execution_time` and
+    /// `set_time_limit()` arm stops counting, its `hard_timeout` stage
+    /// with it, and the time it had left counts on from the guard's drop.
+    /// What a handler that blocks takes first, a debugger waiting on its
+    /// client above all: blocked past the limit, the timeout would be
+    /// raised under it, and blocked `hard_timeout` seconds more, the
+    /// process would end with no shutdown, where a person stepping
+    /// through the program had only been slow. xdebug keeps the limit
+    /// from biting by refusing `set_time_limit()` while a session is
+    /// active (`zif_xdebug_set_time_limit`); here the handler says so,
+    /// and the guard says when it stops.
+    ///
+    /// The guard derefs to the request, so the handler serves the
+    /// request through it, PHP code it calls among what it does, all of
+    /// it untimed; [`Observed::suspend_time_limit`] is the same guard
+    /// over an observer's frame. Dropping it is the only resume, so a
+    /// handler does not leave the limit suspended by returning early, nor
+    /// by a fatal under it, since a `zend_bailout` here is a value the
+    /// handler returns through, never a jump past its drop; a guard
+    /// handed to `mem::forget` leaves the request untimed to its end.
+    /// Guards nest, and the outermost one's drop is the resume.
+    ///
+    /// The deadline is taken out of the request's timer and its time
+    /// left kept, so with nothing else scheduled the timer's thread is
+    /// joined until the resume, and a periodic interrupt an extension
+    /// started counts on through it: a profiler's clock is its own. A
+    /// limit set while it is suspended, `set_time_limit()` from PHP code
+    /// the handler calls, is kept whole for the resume and, as any
+    /// `set_time_limit()` does, clears a timeout raised and not yet
+    /// taken, where xdebug refuses the call during a session; a timeout
+    /// raised before the suspend and not cleared so is still raised at
+    /// the loop's next check, since its time was up. The limit counts
+    /// wall-clock time, as php's does on the oracle's platform
+    /// (`ITIMER_REAL`) and in its threaded build (`CLOCK_BOOTTIME`); a
+    /// handler that polls its client would spend even a CPU clock.
+    ///
+    /// [`Observed::suspend_time_limit`]: crate::api::abi::Observed::suspend_time_limit
+    pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_> {
+        TimeLimitSuspended::over(self)
     }
 
     /// The periods of `periodic` elapsed since the last time this was

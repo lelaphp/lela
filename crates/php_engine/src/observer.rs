@@ -119,7 +119,7 @@ use php_unit::Unit;
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{FrameView, Request};
+use crate::api::request::{FrameView, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, PhpObject, Value};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
@@ -211,6 +211,14 @@ impl DerefMut for Observed<'_> {
     }
 }
 
+impl AsMut<Request> for Observed<'_> {
+    /// The request whose time limit a [`TimeLimitSuspended`] over the
+    /// frame suspends.
+    fn as_mut(&mut self) -> &mut Request {
+        self.req
+    }
+}
+
 impl Observed<'_> {
     /// The frame observed, `execute_data`, read for as long as the
     /// handler does not write through the request: what it serves, where
@@ -258,6 +266,13 @@ impl Observed<'_> {
             Observable::Code(frame) => self.req.frame_view(frame).function_scope(),
             Observable::Native(call) => self.req.method_class(call.function),
         }
+    }
+
+    /// [`Request::suspend_time_limit`] over the observed frame: the
+    /// guard derefs to this, so the frame's reads stay the handler's while
+    /// it blocks, a debugger's answers to its client among them.
+    pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {
+        TimeLimitSuspended::over(self)
     }
 
     /// `EX(func)->op_array.filename`: the file the op array was compiled

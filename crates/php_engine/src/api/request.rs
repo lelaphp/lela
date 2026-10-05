@@ -80,7 +80,7 @@ mod hooks;
 mod inspect;
 mod lazy;
 mod limits;
-pub use limits::Interrupt;
+pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
