@@ -139,6 +139,9 @@ pub struct Invocation {
     pub no_chdir: bool,
     /// `-a`: `Interactive mode enabled` said first.
     pub interactive: bool,
+    /// `-e`, read from a shell alone: the engine compiles with extended
+    /// info (`Z/sapi/cgi/cgi_main.c:2307`).
+    pub extended_info: bool,
 }
 
 /// The command line, read: the engine's entries and what is asked.
@@ -189,6 +192,7 @@ impl Options {
             head: Head::Written,
             no_chdir: false,
             interactive: false,
+            extended_info: false,
         };
         if skip {
             return Options {
@@ -258,6 +262,7 @@ fn shell_pass(argv: &[Vec<u8>], mut invocation: Invocation) -> Ask {
         match code {
             b'a' => invocation.interactive = true,
             b'C' => invocation.no_chdir = true,
+            b'e' => invocation.extended_info = true,
             b'f' => {
                 invocation.file = value;
                 invocation.head = Head::Quiet;
@@ -776,18 +781,19 @@ pub fn main() -> ExitCode {
     let argv: Vec<OsString> = words.collect();
     let env = environment();
     let options = Options::parse(&argv, &env);
-    let engine = |ini: &[(Vec<u8>, Vec<u8>)], origin| {
+    let engine = |ini: &[(Vec<u8>, Vec<u8>)], origin, extended_info| {
         engine(
             ini,
             php_sapi::ini::search(NAME, &options.ini_search, false),
             origin,
+            extended_info,
         )
     };
     let status = match &options.ask {
         // `main` starts php before its second pass answers the usage
         // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
-            let _ = engine(&options.ini, Origin::Shell);
+            let _ = engine(&options.ini, Origin::Shell, false);
             let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
             let _ = std::io::stdout()
                 .lock()
@@ -795,9 +801,17 @@ pub fn main() -> ExitCode {
             *exit_code
         }
         // `-v` and `-m` are read by the pass a shell's line alone is given.
-        Ask::Version => print(&version(&engine(&options.ini, Origin::Shell))),
-        Ask::Extensions => print(&php_sapi::modules(&engine(&options.ini, Origin::Shell))),
-        Ask::Serve(invocation) => serve(&engine(&options.ini, invocation.origin), invocation, env),
+        Ask::Version => print(&version(&engine(&options.ini, Origin::Shell, false))),
+        Ask::Extensions => print(&php_sapi::modules(&engine(
+            &options.ini,
+            Origin::Shell,
+            false,
+        ))),
+        Ask::Serve(invocation) => serve(
+            &engine(&options.ini, invocation.origin, invocation.extended_info),
+            invocation,
+            env,
+        ),
     };
     php_sapi::exit_code(status)
 }
@@ -813,8 +827,14 @@ fn print(text: &str) -> i32 {
 /// after them ([`natives::declare`]), started over the `files` found and
 /// the line's `ini` ([`php_sapi::start`]); a file's shebang
 /// line passed over while `cgi.check_shebang_line` is on, as `main` sets
-/// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`).
-fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, origin: Origin) -> Engine {
+/// `CG(skip_shebang)` under it (`Z/sapi/cgi/cgi_main.c:2523`); with
+/// extended info where a shell's line carried `-e`.
+fn engine(
+    ini: &[(Vec<u8>, Vec<u8>)],
+    files: IniFiles,
+    origin: Origin,
+    extended_info: bool,
+) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .ini_files(files)
@@ -822,6 +842,11 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, origin: Origin) -> Engine
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
+    let builder = if extended_info {
+        builder.extended_info()
+    } else {
+        builder
+    };
     let builder = natives::declare(builder, origin).skip_shebang_while("cgi.check_shebang_line");
     php_sapi::start(builder, ini, |entry| Process.log(entry))
 }
@@ -862,6 +887,22 @@ mod tests {
             served(options).map(|i| (i.origin, i.file, i.head, i.no_chdir)),
             Some((Origin::Server, None, Head::Written, false))
         );
+    }
+
+    /// `-e` is read by the pass a shell's line alone is given
+    /// (`Z/sapi/cgi/cgi_main.c:2307`): from a shell the engine compiles
+    /// with extended info, and under a server the switch is never read.
+    #[test]
+    fn extended_info_is_a_shell_s_switch() {
+        let shell = served(parse(&["-e", "t.php"], &[]));
+        assert_eq!(
+            shell.map(|i| (i.extended_info, i.words)),
+            Some((true, vec![b"t.php".to_vec()]))
+        );
+        let server = served(parse(&["-e", "t.php"], &[("REQUEST_METHOD", "GET")]));
+        assert_eq!(server.map(|i| i.extended_info), Some(false));
+        let plain = served(parse(&["t.php"], &[]));
+        assert_eq!(plain.map(|i| i.extended_info), Some(false));
     }
 
     #[test]

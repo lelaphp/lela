@@ -81,6 +81,7 @@ const HARDCODED: [(&str, &str); 8] = [
 ];
 
 /// What the line asked for.
+#[allow(clippy::struct_excessive_bools)] // phpdbg's switches, each one fact of the line
 #[derive(Debug, Default)]
 struct Line {
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -97,6 +98,9 @@ struct Line {
     verbose: bool,
     exec: Option<Vec<u8>>,
     args: Vec<Vec<u8>>,
+    /// `-e`, `ext_stmt`: the engine compiles with extended info
+    /// (`phpdbg.c:1250`, `:1498`).
+    extended_info: bool,
 }
 
 /// The line read as `main` reads it (`phpdbg.c:1186-1286`).
@@ -126,6 +130,7 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
                     b'n' => line.search.ignore = true,
                     b'b' => line.boring = true,
                     b'v' => line.verbose = true,
+                    b'e' => line.extended_info = true,
                     b'i' => line.init_file = (!value.is_empty()).then_some(value),
                     _ => {}
                 }
@@ -167,6 +172,11 @@ pub fn main() -> ExitCode {
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
         .skip_shebang();
+    let builder = if line.extended_info {
+        builder.extended_info()
+    } else {
+        builder
+    };
     let engine = php_sapi::start(builder, &line.ini, log_message);
 
     let mut session = Session::new();
