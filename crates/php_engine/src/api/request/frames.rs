@@ -3,7 +3,7 @@
 //! call, its slots read and written, the receivers it was lent, and the
 //! frame left and popped; the fibers each with the stack that resumed
 //! them, and the chain of frames and calls a backtrace walks. A debug
-//! build's record of a temporary written over an owner is [`Frames`]'s,
+//! build's record of a temporary written over an owner is `Frames`'s,
 //! whose field no file but this one reads; the stack and the VM stay on
 //! the request, since every area reaches them.
 

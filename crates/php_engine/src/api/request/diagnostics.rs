@@ -78,7 +78,10 @@ struct LastError {
     line: u32,
 }
 
-/// The diagnostics' state, whose fields no file but this one reads.
+/// `EG(error_reporting)`, the last error, the user handlers and their
+/// stacks, the startup's record, the `display_errors` word, the log's
+/// guards and the assertion callback, whose fields no file but this one
+/// reads.
 #[derive(Default)]
 pub(super) struct Diagnostics {
     /// `EG(error_reporting)`, the mask a diagnostic is held to

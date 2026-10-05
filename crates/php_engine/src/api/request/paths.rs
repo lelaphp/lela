@@ -25,7 +25,7 @@ pub struct RealpathEntry {
     pub size: i64,
 }
 
-/// The paths area's state, whose fields no file but this one reads.
+/// `CWDG(realpath_cache)`, whose field no file but this one reads.
 pub(super) struct Paths {
     /// `CWDG(realpath_cache)`, which every absolute path resolved through
     /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).

@@ -230,7 +230,9 @@ impl OutputSink for Kept {
     }
 }
 
-/// The response area's state, whose fields no file but this one reads.
+/// The sink, the `php_output` layer, the header callback, the
+/// connection's status and whether the host closed the response, whose
+/// fields no file but this one reads.
 pub(super) struct Response {
     /// Where what passed the `php_output` layer goes, php's
     /// `sapi_module.ub_write`, and the header block, the log and the

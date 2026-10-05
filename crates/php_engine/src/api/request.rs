@@ -295,7 +295,7 @@ pub struct Request {
     /// operation returns, which is when [`Request::serve_native`] raises
     /// it, and before which no more such code is served.
     pub(crate) stream_thrown: Option<Thrown>,
-    /// `BG(user_shutdown_function_names)`.
+    /// `BG(user_shutdown_function_names)` ([`shutdown::ShutdownFunctions`]).
     shutdown_functions: shutdown::ShutdownFunctions,
     /// `BG(user_tick_functions)` and `EG(ticks_count)` ([`ticks::Ticks`]).
     ticks: ticks::Ticks,
@@ -332,7 +332,7 @@ pub struct Request {
     returned: Value,
     /// The interrupt, the timer and the stack limit ([`limits::Limits`]).
     limits: limits::Limits,
-    /// The frames' debug record ([`frames::Frames`]).
+    /// The frames' debug record (`frames::Frames`).
     #[cfg(debug_assertions)]
     frames: frames::Frames,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
@@ -647,7 +647,8 @@ impl Request {
 
     /// `php_request_startup` and `zend_activate` over a request just
     /// laid: the host's constant, each extension's request state, the
-    /// timer, the memory limit, the collector and the error level.
+    /// timer, the memory limit, the collector, the error level and the
+    /// stack limit.
     fn activate(&mut self) {
         self.register_sapi_constant();
         self.build_request_states();
