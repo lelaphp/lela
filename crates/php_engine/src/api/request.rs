@@ -613,6 +613,11 @@ pub use crate::signal::{
     DEFERRED_WORDS, Deferred, Receiving, Reentry, SIGNAL_POST, Siginfo, take_signals,
 };
 
+/// Which side of [`Request::fork`] the caller stands on, and the child's
+/// id the parent is handed: `php_process`'s, which the engine's one home
+/// for fork calls (#1807).
+pub use crate::fork::{Forked, Pid};
+
 /// `php_select` (`Z/main/php_network.h:83`) over the host fds streams
 /// were cast to with [`Cast::Select`]: the read, write and except sets
 /// each cut to the fds that came ready within `timeout`, `None` to wait
@@ -814,6 +819,9 @@ pub struct Request {
     description: RequestDescription,
     /// What the program left uncaught, kept for a host that renders it.
     kept_uncaught: Option<crate::engine::Uncaught>,
+    /// The request in flight, which no fork but its own happens beside
+    /// (#1807, [`Request::fork`]).
+    _inside: crate::fork::Inside,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
     /// `None` records nothing. The field exists in a build with the
@@ -1653,6 +1661,7 @@ impl Request {
             trace: None,
             description,
             kept_uncaught: None,
+            _inside: crate::fork::Inside::enter(),
             heap,
             stack,
             vm: Vm::default(),
@@ -1836,7 +1845,7 @@ impl Request {
     /// no thread (ADR-0005, ADR-0010): one thread per request serves the
     /// execution timer and every periodic interrupt alike, and is joined
     /// once a change leaves no deadline, around a fork
-    /// ([`Request::forked`]) and at the request's end.
+    /// ([`Request::fork`]) and at the request's end.
     ///
     /// It is served through the interrupt hook the extension supplies
     /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
@@ -1871,17 +1880,47 @@ impl Request {
         self.timer.stop_periodic(periodic);
     }
 
-    /// `fork` called with no thread of the engine's alive in this
-    /// request (ADR-0010, Threads): the request's timer thread is joined
-    /// before it, and after it started again over the same deadlines in
-    /// the process that called it, which loses none of them; in the
-    /// child every deadline is dropped, the execution timer's and each
-    /// periodic interrupt's, as a child inherits no interval timer and no
-    /// POSIX timer, so it runs untimed until it sets a limit of its own.
-    /// What `pcntl_fork` forks through, until the engine's one home for
-    /// fork asks it (#1807).
-    pub fn forked<R>(&mut self, fork: impl FnOnce() -> R) -> R {
-        self.timer.forked(fork)
+    /// `fork(2)` from this request, the engine's one home for it (#1807,
+    /// as #1779 ruled), which `pcntl_fork` asks: the process copied with
+    /// this request alone inside the engine and no thread of the engine's
+    /// alive (ADR-0010, Threads), returning in both as [`Forked::Parent`]
+    /// with the child's id and as [`Forked::Child`]. The request's timer
+    /// thread is joined before it, and after it started again in the
+    /// parent over the same deadlines, which loses none of them, as php's
+    /// interval timer counts on across the fork; in the child what php's
+    /// `php_child_init` restores is restored: every deadline is dropped,
+    /// the execution timer's and each periodic interrupt's, as a child
+    /// inherits no interval timer and no POSIX timer, so it runs untimed
+    /// until it sets a limit of its own, in its copy of this request.
+    ///
+    /// Two seconds of a three-second limit spent before the fork leave one
+    /// after it; a limit counted again from the fork would end the program
+    /// two seconds later.
+    ///
+    /// ```php
+    /// $start = microtime(true);
+    /// set_time_limit(3);
+    /// while (microtime(true) - $start < 2) {}
+    /// if (($child = pcntl_fork()) === 0) { exit(0); }
+    /// register_shutdown_function(function () use ($start) {
+    ///     echo microtime(true) - $start < 4.5 ? "counted from before the fork\n" : "counted again from the fork\n";
+    /// });
+    /// pcntl_waitpid($child, $status);
+    /// for (;;) {}
+    /// ```
+    /// ```expect exit=255 process wall=3s
+    /// Fatal error: Maximum execution time of 3 seconds exceeded in %s on line 10
+    /// counted from before the fork
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `EBUSY` where another request is in flight in the process, on a
+    /// host that serves on threads, whose other threads would leave the
+    /// child what they held; otherwise the OS error `fork(2)` failed with,
+    /// `EAGAIN` and `ENOMEM` among them, and no process was made.
+    pub fn fork(&mut self) -> std::io::Result<Forked> {
+        self.timer.forked(crate::fork::fork_request)
     }
 
     // -------------------------------------------------- crate-internal

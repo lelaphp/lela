@@ -22,7 +22,6 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use php_heap::Fatal;
@@ -129,12 +128,13 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// taken, with no thread to release it, and hung at exit, where its own
 /// main thread takes it. Ending wakes the thread rather than waiting out
 /// its deadline, so a join costs a wake and an exit, never the seconds
-/// left. That is what a fork stands on (ADR-0010, Threads): `pcntl_fork`
-/// forks through [`Timer::forked`], which joins the thread first and
-/// starts it again after in the parent over the same schedule, whose
-/// deadlines are instants, so a periodic interrupt keeps its grid and
-/// the execution timer its stage; the engine's one home for fork asks
-/// the same (#1807).
+/// left. That is what a fork stands on (ADR-0010, Threads): the thread
+/// is one [`crate::fork::spawn`] started, which no fork happens beside,
+/// and the engine's one home for fork (#1807) forks through
+/// [`Timer::forked`], which joins the thread first and starts it again
+/// after in the parent over the same schedule, whose deadlines are
+/// instants, so a periodic interrupt keeps its grid and the execution
+/// timer its stage.
 ///
 /// A timer in a process forked from the one that started its thread
 /// other than through [`Timer::forked`] has no thread there, since a
@@ -220,7 +220,7 @@ pub(crate) struct Timer {
     shared: Arc<Shared>,
     /// The thread, from the change that set a deadline to the one that
     /// leaves none, a fork or the drop.
-    thread: Option<JoinHandle<()>>,
+    thread: Option<crate::fork::Thread>,
     /// The process that started the thread, the only one it is in.
     started_in: Process,
     /// How many periodic interrupts were started, which numbers the next.
@@ -317,7 +317,7 @@ impl Timer {
         self.change(|schedule| schedule.periodic.retain(|period| period.id != id));
     }
 
-    /// [`Request::forked`]: the thread joined, `fork` called, and the
+    /// [`Request::fork`]: the thread joined, `fork` called, and the
     /// thread started again over the same deadlines in the process that
     /// called it, or every deadline dropped in a child, which inherits
     /// none, as a child inherits no interval timer.
@@ -358,9 +358,7 @@ impl Timer {
         self.shared.held().phase = Phase::Starting;
         let shared = Arc::clone(&self.shared);
         let raised = self.interrupt.clone();
-        let Ok(thread) = thread::Builder::new()
-            .name(String::from("php-request-timer"))
-            .spawn(move || shared.serve(&raised))
+        let Some(thread) = crate::fork::spawn("php-request-timer", move || shared.serve(&raised))
         else {
             return;
         };
@@ -374,8 +372,7 @@ impl Timer {
         if let Some(thread) = self.thread.take() {
             self.shared.held().phase = Phase::Unset;
             self.shared.woken.notify_all();
-            // A thread that panicked has ended all the same.
-            let _ = thread.join();
+            thread.join();
         }
     }
 
@@ -384,7 +381,9 @@ impl Timer {
     /// forgotten (see [`Timer`]), so what follows starts afresh.
     fn forget_if_forked(&mut self) {
         if self.thread.is_some() && !self.started_in.is_current() {
-            std::mem::forget(self.thread.take());
+            if let Some(thread) = self.thread.take() {
+                thread.forget();
+            }
             std::mem::forget(std::mem::take(&mut self.shared));
         }
     }
@@ -609,6 +608,7 @@ fn terminate(seconds: i64, hard: u64) -> ! {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::thread;
     use std::time::Instant;
 
     use php_unit::{OpArray, Opcode, Opline, OplineIdx, Unit};

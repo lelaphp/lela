@@ -10,7 +10,6 @@
 use std::ffi::CString;
 
 use nix::errno::Errno;
-use nix::unistd::ForkResult;
 use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
 #[cfg(target_vendor = "apple")]
 use php_ext::attr::php_class;
@@ -21,7 +20,7 @@ use php_ext::raising::arity;
 #[cfg(target_vendor = "apple")]
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
-use php_ext::request::Request;
+use php_ext::request::{Forked, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::{State, failed, ffi};
@@ -41,10 +40,10 @@ use crate::{State, failed, ffi};
 /// int(3)
 /// ```
 ///
-/// The engine's timer thread is joined before the fork and started
-/// again after it in the parent, over the deadlines it had
-/// (`Request::forked`): the parent's limit, counted from before the
-/// fork, still stops it, and the child inherits none.
+/// The fork is the engine's ([`Request::fork`], #1807): its timer thread
+/// is joined before the fork and started again after it in the parent,
+/// over the deadlines it had, so the parent's limit, counted from before
+/// the fork, still stops it, and the child inherits none.
 ///
 /// ```php
 /// set_time_limit(1);
@@ -57,10 +56,11 @@ use crate::{State, failed, ffi};
 /// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
-    match req.forked(ffi::fork) {
-        Ok(ForkResult::Parent { child }) => child.as_raw().into(),
-        Ok(ForkResult::Child) => 0,
-        Err(errno) => {
+    match req.fork() {
+        Ok(Forked::Parent { child }) => child.as_raw().into(),
+        Ok(Forked::Child) => 0,
+        Err(error) => {
+            let errno = Errno::from_raw(error.raw_os_error().unwrap_or(0));
             failed(req, errno);
             let n = errno as i32;
             let message = match errno {

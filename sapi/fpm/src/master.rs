@@ -531,17 +531,17 @@ impl Fpm {
                 return false;
             }
         };
-        match crate::ffi::fork() {
+        match php_sapi::fork() {
             Err(e) => {
-                zlog_sys!(Error @ fpm_unix_init_main:622, e, "failed to daemonize");
+                zlog_sys!(Error @ fpm_unix_init_main:622, crate::conf::errno(&e), "failed to daemonize");
                 false
             }
-            Ok(nix::unistd::ForkResult::Child) => {
+            Ok(php_sapi::Forked::Child) => {
                 drop(read);
                 self.send_config_pipe = Some(write);
                 true
             }
-            Ok(nix::unistd::ForkResult::Parent { .. }) => {
+            Ok(php_sapi::Forked::Parent { .. }) => {
                 drop(write);
                 zlog!(
                     Debug @ fpm_unix_init_main:643,

@@ -8,6 +8,7 @@ EachLine
 Engine
 EngineBuilder
 FileHandles
+Forked
 HostValue
 IniEvent
 IniFile
@@ -23,6 +24,7 @@ PHP_LOCALSTATEDIR
 PHP_PREFIX
 PHP_SYSCONFDIR
 PHP_VERSION
+Pid
 Primary
 ProcessTitle
 RequestDescription
@@ -30,3 +32,4 @@ ResponseHead
 Routed
 Uncaught
 WebRequest
+fork

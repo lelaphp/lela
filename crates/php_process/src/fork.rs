@@ -59,9 +59,11 @@ pub fn fork() -> io::Result<Forked> {
     // POSIX's async-signal-safe rule for the child of a process with
     // other threads is not one this function can see or enforce: no type
     // here witnesses that the process has one thread, so it rests on the
-    // engine, the one consumer the `process` seam admits, forking with
-    // none of its own alive, which #1807 builds; until then nothing
-    // calls this function.
+    // engine, the one consumer the `process` seam admits, whose one home
+    // for fork (#1807) calls this only while it holds the type that says
+    // every thread it started is joined and no other request is in
+    // flight; a host's own threads are the host's to keep out of a
+    // process that forks.
     let id = unsafe { libc::fork() };
     match id {
         -1 => Err(io::Error::last_os_error()),
