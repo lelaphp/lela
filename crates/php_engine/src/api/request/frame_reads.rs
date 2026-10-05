@@ -37,7 +37,7 @@ use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::exec::{self, FrameState, Vm};
 
-use super::Request;
+use super::{OpArrayView, Request};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
 /// as an extension stores it: read again through [`Request::frame_of`],
@@ -144,6 +144,15 @@ impl<'a> FrameView<'a> {
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.as_ref())
             .unwrap_or_default()
+    }
+
+    /// `EX(func)->op_array`: the op array the frame serves, a
+    /// function's or an included, evaluated or main file's, read
+    /// ([`OpArrayView`]).
+    #[must_use]
+    pub fn op_array(&self) -> Option<OpArrayView<'a>> {
+        let state = self.state()?;
+        exec::body_of(&state.unit, state.body).map(OpArrayView::of)
     }
 
     /// `EX(opline)->lineno`: the line the frame stands on, the call's
