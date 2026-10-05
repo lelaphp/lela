@@ -1918,10 +1918,12 @@ fn a_test_gets_run_tests_environment_and_pipes_for_its_streams() {
 /// The target (#1184): the runner's control keeps the oracle's verdict on
 /// every test under the pin's key, and an engine's reading of the subset
 /// then carries met-of-target. The oracle misses `oracle-miss.phpt`, whose
-/// expectation no php meets, so it is outside the target and the engine's
-/// fail on it is counted there and not against the target; the engine
-/// meets the one test the oracle meets. Before the control has run, the
-/// engine's reading says how to take a target and carries no such number.
+/// expectation no php meets, and skips `oracle-skip.phpt`, so both are
+/// outside the target, each named with why the oracle left it out (#2033),
+/// and the engine's fail on the miss is counted there and not against the
+/// target; the engine meets the one test the oracle meets. Before the
+/// control has run, the engine's reading says how to take a target and
+/// carries no such number.
 #[test]
 fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
     let Some(binary) = oracle() else { return };
@@ -1935,6 +1937,10 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
             (
                 "oracle-miss.phpt",
                 "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\ntwo\n",
+            ),
+            (
+                "oracle-skip.phpt",
+                "--TEST--\nSkip\n--SKIPIF--\n<?php die(\"skip For Linux only\"); ?>\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
             ),
         ],
     );
@@ -1969,15 +1975,21 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
         kept["verdicts"]["phpt:php-src/ext/fixture/tests/met.phpt"],
         "pass"
     );
+    assert_eq!(
+        kept["skips"]["phpt:php-src/ext/fixture/tests/oracle-skip.phpt"],
+        "For Linux only"
+    );
 
     let reading = scratch.run(&registry(""), &scratch.engine);
     assert_eq!(count(&reading, "target"), 1, "{reading:#?}");
     assert_eq!(count(&reading, "met"), 1, "{reading:#?}");
-    assert_eq!(count(&reading, "outside"), 1, "{reading:#?}");
+    assert_eq!(count(&reading, "outside"), 2, "{reading:#?}");
     assert!(
-        reading
-            .message
-            .contains("1 of 1 target tests met, 1 outside"),
+        reading.message.contains(
+            "1 of 1 target tests met (ext/fixture/tests/met.phpt), 2 outside (missed by the \
+             oracle, output differs: ext/fixture/tests/oracle-miss.phpt; skipped by the oracle \
+             \"For Linux only\": ext/fixture/tests/oracle-skip.phpt)"
+        ),
         "{}",
         reading.message
     );
