@@ -730,69 +730,6 @@ impl Request {
         self.fatal_of(interned).map(PhpString::of)
     }
 
-    pub(crate) fn precision(&self) -> i32 {
-        self.ini_number(b"precision", 14)
-    }
-
-    /// `short_open_tag`, php's `CG(short_tags)`: whether a `<?` opens
-    /// code in the source this request compiles, which its scanner reads
-    /// at every tag it meets (`Z/Zend/zend_language_scanner.l:2331`).
-    /// php's built-in default is on (`DEFAULT_SHORT_OPEN_TAG`), which is
-    /// what an engine with no entry for it answers, and the entry is
-    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no `ini_set()` of the
-    /// request's moves it. `token_get_all` reads the same entry, which
-    /// is why it is the request's and not the engine's alone.
-    pub(crate) fn short_open_tag(&self) -> bool {
-        self.ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool)
-    }
-
-    /// `EG(assertions)`, php's `zend.assertions` read as
-    /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
-    /// `1` compiles and runs an assertion, `0` compiles it behind an
-    /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
-    pub(crate) fn assertions(&self) -> i64 {
-        self.ini_get(b"zend.assertions")
-            .map_or(1, Request::ini_parse_bytes)
-    }
-
-    /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an
-    /// `ini_set()`: a value that moves the entry to or from a negative
-    /// one is php's warning and a refusal that keeps the entry as it
-    /// was, since what is compiled already was compiled under it; any
-    /// other value is taken.
-    ///
-    /// ```php
-    /// var_dump(ini_get('zend.assertions'), ini_set('zend.assertions', '-1'), ini_set('zend.assertions', '0'), ini_get('zend.assertions'), ini_set('zend.assertions', '1'));
-    /// ```
-    /// ```expect
-    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in %s on line 2
-    /// string(1) "1"
-    /// bool(false)
-    /// string(1) "1"
-    /// string(1) "0"
-    /// string(1) "0"
-    /// ```
-    fn assertions_updated(&mut self, value: &[u8]) -> bool {
-        let (current, next) = (self.assertions(), Request::ini_parse_bytes(value));
-        if current != next && (current < 0 || next < 0) {
-            crate::api::raising::warning(
-                self,
-                "zend.assertions may be completely enabled or disabled only in php.ini",
-            );
-            return false;
-        }
-        true
-    }
-
-    /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
-    /// and `json_encode` print a float at; -1, its default, asks for the
-    /// shortest text that reads back as the same double.
-    #[must_use]
-    pub fn serialize_precision(&self) -> i32 {
-        self.ini_number(b"serialize_precision", -1)
-    }
-
     /// The request headers the host received, `getallheaders()`, as
     /// strings of the request's.
     pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
