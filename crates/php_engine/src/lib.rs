@@ -39,7 +39,6 @@ mod interfaces;
 mod interrupt;
 mod multibyte;
 mod natives;
-mod observer;
 mod open_basedir;
 mod ops;
 mod output;

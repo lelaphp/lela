@@ -5686,9 +5686,7 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
-        crate::observer::call(self);
         let served = entry(self);
-        crate::observer::returned(self);
         match (served, self.stream_thrown.take()) {
             (Ok(value), Some(thrown)) => {
                 self.release(value);
