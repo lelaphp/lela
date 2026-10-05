@@ -8,4 +8,4 @@ use crate::api;
 mod lifecycle;
 mod periodic;
 mod pool;
-mod test_ext;
+pub(crate) mod test_ext;

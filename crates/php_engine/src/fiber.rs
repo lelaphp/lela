@@ -1488,7 +1488,12 @@ fn switch_refused(req: &mut Request) -> Result<(), Thrown> {
 fn delegate(req: &mut Request, transfer: Transfer) -> Result<Value, Thrown> {
     match transfer {
         Transfer::Value(value) => Ok(value),
-        Transfer::Throw(thrown) => Err(thrown),
+        // `zend_throw_exception_internal`, which tells the hooks again of
+        // a throwable a switch carried.
+        Transfer::Throw(thrown) => Err(match thrown.exception().copied() {
+            Some(object) => crate::api::raising::throw_object(req, object),
+            None => thrown,
+        }),
         Transfer::GracefulExit => {
             req.throw_graceful_exit();
             Err(Thrown::of(None))

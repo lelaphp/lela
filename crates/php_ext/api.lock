@@ -38,6 +38,7 @@ abi::ClassRef
 abi::ClassUnserialize
 abi::CloneObj
 abi::CloneObjWith
+abi::Compiled
 abi::ConstArray
 abi::ConstValue
 abi::CurrentPlace
@@ -55,6 +56,12 @@ abi::Encodings::lexer_compatible
 abi::Encodings::list
 abi::Encodings::name
 abi::Encodings::unicode
+abi::ErrorBeneath
+abi::ErrorBeneath::file
+abi::ErrorBeneath::level
+abi::ErrorBeneath::line
+abi::ErrorBeneath::message
+abi::ErrorBeneath::serve
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
@@ -66,6 +73,7 @@ abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::compile_file
+abi::ExtensionBuilder::compile_string
 abi::ExtensionBuilder::constants
 abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::deactivate
@@ -73,8 +81,10 @@ abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_end
 abi::ExtensionBuilder::engine_state
+abi::ExtensionBuilder::error
 abi::ExtensionBuilder::fatal_logged
 abi::ExtensionBuilder::functions
+abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::input_filter
@@ -91,6 +101,7 @@ abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::shell
 abi::ExtensionBuilder::stream_hooks
+abi::ExtensionBuilder::thrown
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::ExtensionBuilder::treat_data
@@ -109,6 +120,8 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::GcBeneath
+abi::GcBeneath::collect
 abi::Header
 abi::Header::header
 abi::Header::register
@@ -225,6 +238,10 @@ abi::Static
 abi::Std
 abi::StreamHooks
 abi::StreamOpenHook
+abi::StringBeneath
+abi::StringBeneath::compile
+abi::StringBeneath::name
+abi::StringBeneath::source
 abi::This
 abi::This::object
 abi::This::payload_mut

@@ -2,8 +2,6 @@
 //! ([`crate::tier`]): the stack a serving's entry slot stands on, and
 //! the properties phpdbg reads off a pending throwable.
 
-use std::sync::Arc;
-
 use php_compile::SourceKind;
 use php_heap::{Fatal, FrameRef, VmStack};
 
@@ -114,11 +112,9 @@ impl Request {
 
     /// The code block itself, on a frame of its own over the global table.
     fn code_over(&mut self, name: &[u8], code: &[u8]) -> Result<Evaluated, Fatal> {
-        let shared = Arc::clone(&self.shared);
-        let unit = match shared.compile_for(self, code, name, SourceKind::Eval) {
+        let unit = match self.compile_eval(code, name) {
             Ok(unit) => unit,
-            Err(refused) => {
-                let thrown = self.refused_include(&refused, name, SourceKind::Eval);
+            Err(thrown) => {
                 self.leave_pending(&thrown);
                 return Ok(Evaluated::NotCompiled);
             }
@@ -146,11 +142,9 @@ impl Request {
     fn evaluate_over(&mut self, scope: Option<FrameRef>, code: &[u8]) -> Result<Evaluated, Fatal> {
         const NAME: &[u8] = b"eval()'d code";
         let source = [&b"return "[..], code, b";"].concat();
-        let shared = Arc::clone(&self.shared);
-        let unit = match shared.compile_for(self, &source, NAME, SourceKind::Eval) {
+        let unit = match self.compile_eval(&source, NAME) {
             Ok(unit) => unit,
-            Err(refused) => {
-                let thrown = self.refused_include(&refused, NAME, SourceKind::Eval);
+            Err(thrown) => {
                 self.leave_pending(&thrown);
                 return Ok(Evaluated::NotCompiled);
             }
