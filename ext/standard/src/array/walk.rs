@@ -270,26 +270,90 @@ struct Walk<'a> {
     recursive: bool,
 }
 
-/// One level of `php_array_walk` over what the cell `holder` holds: an
-/// array walked by a hash iterator registered at its first element
-/// (`zend_hash_iterator_add`), whatever the array's own pointer says,
-/// and given up on every way out (`zend_hash_iterator_del`).
+/// Where the walk over an array the cell holds begins: its first
+/// element, `zend_hash_internal_pointer_reset_ex`, for the array the walk
+/// was given; the array's own pointer, `_zend_hash_get_current_pos`, for
+/// one a callback put in the cell in the place of an object.
+#[derive(Clone, Copy)]
+enum Start {
+    First,
+    Pointer,
+}
+
+/// How the walk over one table ended: past its last row, or with the
+/// cell holding something else, which `walk_holder` reads.
+enum Ended {
+    Done,
+    Replaced,
+}
+
+/// One level of `php_array_walk` over what the cell `holder` holds, read
+/// again whenever a callback put something else there: an array walked
+/// by a hash iterator, an object by its property table, and anything
+/// else php's `TypeError`.
 fn walk_holder(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thrown> {
-    let start = holder.get();
-    if let Some(object) = start.as_object().copied() {
-        return walk_object(req, object, walk);
+    let mut start = Start::First;
+    loop {
+        let now = holder.get();
+        let ended = if let Some(object) = now.as_object().copied() {
+            walk_object(req, holder, object, walk)?
+        } else if now.as_array().is_some() {
+            walk_array(req, holder, start, walk)?
+        } else if matches!(start, Start::First) {
+            return Err(fatal(
+                req,
+                "InternalError: array_walk's variable holds no array or object",
+            ));
+        } else {
+            return Err(throw_error(
+                req,
+                "TypeError",
+                "Iterated value is no longer an array or object",
+            ));
+        };
+        match ended {
+            Ended::Done => return Ok(()),
+            Ended::Replaced => start = Start::Pointer,
+        }
     }
-    let Some(table) = holder.separate_array(req)? else {
-        return Ok(());
+}
+
+/// `php_array_walk` over the array the cell `holder` holds, separated:
+/// a hash iterator registered at the bucket `start` names
+/// (`zend_hash_iterator_add`) and given up on every way out
+/// (`zend_hash_iterator_del`).
+fn walk_array(
+    req: &mut Request,
+    holder: PhpRef,
+    start: Start,
+    walk: &Walk,
+) -> Result<Ended, Thrown> {
+    let table = held_array(req, holder)?;
+    let first = match start {
+        Start::First => table.live_from(0).map(|(first, _, _)| first),
+        Start::Pointer => pointer_bucket(table),
     };
-    // `zend_hash_internal_pointer_reset_ex`: the first live bucket.
-    let Some((first, _, _)) = table.live_from(0) else {
-        return Ok(());
+    let Some(first) = first else {
+        return Ok(Ended::Done);
     };
     let at = HashIterator::new(req, &table, first);
     let walked = walk_buckets(req, holder, table, at, walk);
     at.release(req);
     walked
+}
+
+/// The bucket of `table`'s internal pointer, `_zend_hash_get_current_pos`;
+/// `None` where it stands past the last element.
+fn pointer_bucket(table: PhpArray) -> Option<u32> {
+    let at = table.cursor_key()?;
+    let mut pos = 0;
+    while let Some((found, key, _)) = table.live_from(pos) {
+        if key == at {
+            return Some(found);
+        }
+        pos = found.saturating_add(1);
+    }
+    None
 }
 
 /// `php_array_walk`'s loop over an array: the element at the bucket the
@@ -299,20 +363,21 @@ fn walk_holder(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thr
 /// moved the iterator (`zend_hash_iterator_pos_ex`), so an element the
 /// callback removed ahead is not visited, one it appended is, and a key
 /// it removed and wrote again is visited again where it now stands.
-/// Another array is walked from that array's own pointer, separated; an
-/// object by its properties; anything else is php's `TypeError`. Nothing
-/// of the table is kept across a callback but the iterator.
+/// Another array is walked on from where the iterator stands in it, at
+/// its own pointer unless it is a copy of this one, separated; what is
+/// no array ends this table's walk. Nothing of the table is kept across
+/// a callback but the iterator.
 fn walk_buckets(
     req: &mut Request,
     holder: PhpRef,
     mut table: PhpArray,
     at: HashIterator,
     walk: &Walk,
-) -> Result<(), Thrown> {
+) -> Result<Ended, Thrown> {
     let mut pos = at.position(req, &table);
     loop {
         let Some((found, key, value)) = table.live_from(pos) else {
-            return Ok(());
+            return Ok(Ended::Done);
         };
         // `ZVAL_MAKE_REF(zv)`: the element a reference in place. php
         // writes the cell into the table as it stands; the face writes
@@ -340,21 +405,13 @@ fn walk_buckets(
         at.set_position(req, pos);
         visit(req, reference, &key, walk)?;
         // "Reload array and position -- both may have changed".
-        let now = holder.get();
-        if let Some(now) = now.as_array().copied() {
-            if !now.is_same(table) {
-                table = held_array(req, holder)?;
-            }
-            pos = at.position(req, &table);
-        } else if let Some(object) = now.as_object().copied() {
-            return walk_object(req, object, walk);
-        } else {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                "Iterated value is no longer an array or object",
-            ));
+        let Some(now) = holder.get().as_array().copied() else {
+            return Ok(Ended::Replaced);
+        };
+        if !now.is_same(table) {
+            table = held_array(req, holder)?;
         }
+        pos = at.position(req, &table);
     }
 }
 
@@ -453,28 +510,113 @@ fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result
 ///   int(50)
 /// }
 /// ```
-fn walk_object(req: &mut Request, object: PhpObject, walk: &Walk) -> Result<(), Thrown> {
-    let mut visited: HashSet<Key> = HashSet::new();
+///
+/// The walk holds an owner of each name it has read until it ends, so a
+/// dynamic property the callback removes leaves its name to the walk,
+/// and it holds the object only while the cell does: the cell is read
+/// again after every call, an object the callback let go of is
+/// destroyed there, and what the cell holds then is walked, another
+/// object from its first property, an array from its own pointer, and
+/// anything else php's `TypeError`.
+///
+/// ```php
+/// $o = new stdClass; for ($i = 0; $i < 4; $i++) { $name = "p" . $i; $o->$name = $i; }
+/// array_walk($o, function (&$v, $k) use ($o) { echo " $k=$v"; if ($v === 0) { unset($o->p1, $o->p2); $name = "q" . $v; $o->$name = 9; } $v = -$v; }); echo "\n";
+/// var_dump($o);
+/// class D { public $a = 1; public $b = 2; function __destruct() { echo " dtor"; } }
+/// $o = new D;
+/// try { array_walk($o, function ($v, $k) { global $o; echo " $k"; $o = null; }); } catch (TypeError $e) { echo " ", $e->getMessage(), "\n"; }
+/// $o = new D;
+/// array_walk($o, function ($v, $k) { global $o; echo " $k=$v"; if ($v === 1) { $o = new D; $o->a = 7; } }); echo "\n";
+/// $o = new stdClass; $o->a = 1; $o->b = 2;
+/// array_walk($o, function ($v, $k) { global $o; echo " $k=$v"; if ($k === 'a') { $p = [5, 6, 7]; next($p); $o = $p; } }); echo "\n";
+/// ```
+/// ```expect
+///  p0=0 p3=3 q0=9
+/// object(stdClass)#1 (3) {
+///   ["p0"]=>
+///   int(0)
+///   ["p3"]=>
+///   int(-3)
+///   ["q0"]=>
+///   int(-9)
+/// }
+///  a dtor Iterated value is no longer an array or object
+///  a=1 dtor a=7 b=2
+///  dtor a=1 1=6 2=7
+/// ```
+fn walk_object(
+    req: &mut Request,
+    holder: PhpRef,
+    object: PhpObject,
+    walk: &Walk,
+) -> Result<Ended, Thrown> {
+    let mut names = Names::default();
+    let walked = walk_rows(req, holder, object, walk, &mut names);
+    names.release(req);
+    walked
+}
+
+/// [`walk_object`]'s rounds: the rows of the property table whose names
+/// the walk has not read yet, each visited unless a callback removed it
+/// since, until a round finds none or the cell `holder` holds another
+/// value than `object`.
+fn walk_rows(
+    req: &mut Request,
+    holder: PhpRef,
+    object: PhpObject,
+    walk: &Walk,
+    names: &mut Names,
+) -> Result<Ended, Thrown> {
     loop {
-        let pending: Vec<Key> = object
-            .entries(req)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|key| !visited.contains(key))
-            .collect();
+        let mut pending = Vec::new();
+        for (key, _) in object.entries(req)? {
+            if names.take(req, &key) {
+                pending.push(key);
+            }
+        }
         if pending.is_empty() {
-            return Ok(());
+            return Ok(Ended::Done);
         }
         for key in pending {
-            visited.insert(key.clone());
             // A row an earlier callback removed is not visited.
             if object.row(req, &key)?.is_none() {
                 continue;
             }
             let cell = object.typed_row_ref(req, &key)?;
-            let visited_row = visit(req, cell, &key, walk);
+            let visited = visit(req, cell, &key, walk);
             req.release(cell.as_value());
-            visited_row?;
+            visited?;
+            // "Reload array and position": the walk of this object goes
+            // on only while the cell holds it.
+            if holder.get().as_object() != Some(&object) {
+                return Ok(Ended::Replaced);
+            }
+        }
+    }
+}
+
+/// The names of an object's rows a walk has read, one owner of each held
+/// from the round that read it to the walk's end.
+#[derive(Default)]
+struct Names(HashSet<Key>);
+
+impl Names {
+    /// `key` taken up with an owner of its own, `false` where the walk
+    /// has read it already.
+    fn take(&mut self, req: &mut Request, key: &Key) -> bool {
+        if self.0.contains(key) {
+            return false;
+        }
+        let owned = key_copy(req, key);
+        self.0.insert(owned);
+        true
+    }
+
+    /// The owners given up, on every way out of the walk.
+    fn release(self, req: &mut Request) {
+        for key in self.0 {
+            req.release(key_value(&key));
         }
     }
 }
