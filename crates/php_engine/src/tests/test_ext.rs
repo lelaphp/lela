@@ -22,9 +22,11 @@
 //! [`TestExt::builder`] and replaces that one declaration before it
 //! builds, with a function that calls [`record`] as these do. A phase
 //! added to [`TestExt::builder`] shows in every sequence a test spells
-//! out whole, on purpose. A scope built once per process (#1800) is
-//! held by a test whose `N` no other test builds, since the tests of
-//! one binary share the process.
+//! out whole, on purpose. The process scope stands apart: built
+//! once per process (ADR-0010), and the tests of one binary share the
+//! process, so [`TestExt::builder`] declares no process state, and a
+//! test that wants one takes [`TestExt::with_process`] or
+//! [`TestExt::process_refusing`] under an `N` no other test builds.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -60,6 +62,19 @@ pub(crate) enum Phase {
     EngineStateDropped(u32),
     /// Its engine start refused, as [`TestExt::refusing`] declares it.
     EngineStartRefused,
+    /// Its process state was built, as [`TestExt::with_process`]
+    /// declares it.
+    ProcessStateBuilt,
+    /// Its process state was dropped, which no process scope ever is.
+    ProcessStateDropped,
+    /// Its process start refused, as [`TestExt::process_refusing`]
+    /// declares it.
+    ProcessStartRefused,
+    /// Its engine start, as [`TestExt::with_process`] declares it, was
+    /// handed its process state: the number of process states this
+    /// extension had built before that one, `None` where it was handed
+    /// none.
+    ProcessStateReached(Option<u32>),
     /// Its `rinit` ran, and the number of the engine state the request
     /// reached, `None` where it reached none.
     Rinit(Option<u32>),
@@ -243,6 +258,17 @@ impl<const N: u8> Drop for RequestSlot<N> {
     }
 }
 
+/// Extension `N`'s process state, numbered as it is built.
+pub(crate) struct ProcessSlot<const N: u8> {
+    built: u32,
+}
+
+impl<const N: u8> Drop for ProcessSlot<N> {
+    fn drop(&mut self) {
+        record(N, Phase::ProcessStateDropped);
+    }
+}
+
 /// Extension `N`'s engine state, numbered as it is built.
 pub(crate) struct EngineSlot<const N: u8> {
     engine: u32,
@@ -296,12 +322,60 @@ impl<const N: u8> TestExt<N> {
         Err(Refusal::new().raise(Level::Warning, message))
     }
 
-    fn engine_state() -> EngineSlot<N> {
-        let built = guard(&LOG)
+    /// [`TestExt::builder`] with a process state declared, and its
+    /// engine start replaced by one that records the process state it
+    /// was handed before it builds its engine state. Built once per
+    /// process, so a test that takes it takes an `N` no other test
+    /// builds.
+    pub(crate) fn with_process() -> Extension {
+        Self::builder()
+            .process_state(|| Ok(Self::process_state()))
+            .engine_state(|start| Ok(Self::engine_state_with_process(start)))
+            .build(&format!("test_ext_{N}"))
+    }
+
+    /// [`TestExt::builder`] with a process start that refuses, a warning
+    /// raised first, as sodium's `MINIT` raises `sodium_init()` where
+    /// the library fails to start. Called once per process, so a test that
+    /// takes it takes an `N` no other test builds.
+    pub(crate) fn process_refusing() -> Extension {
+        Self::builder()
+            .process_state(Self::refuse_process)
+            .build(&format!("test_ext_{N}"))
+    }
+
+    fn process_state() -> ProcessSlot<N> {
+        let built = Self::counted(&Phase::ProcessStateBuilt);
+        record(N, Phase::ProcessStateBuilt);
+        ProcessSlot { built }
+    }
+
+    fn refuse_process() -> Result<ProcessSlot<N>, Refusal> {
+        record(N, Phase::ProcessStartRefused);
+        let message = format!("test_ext_{N} refuses to start its process");
+        Err(Refusal::new().raise(Level::Warning, message))
+    }
+
+    fn engine_state_with_process(start: &Start) -> EngineSlot<N> {
+        let reached = start.process::<ProcessSlot<N>>().map(|slot| slot.built);
+        record(N, Phase::ProcessStateReached(reached));
+        Self::engine_state()
+    }
+
+    /// How many times extension `N` was handed `phase`'s kind so far.
+    fn counted(phase: &Phase) -> u32 {
+        let kind = std::mem::discriminant(phase);
+        let count = guard(&LOG)
             .iter()
-            .filter(|e| matches!(e, Event::Ext(n, Phase::EngineStateBuilt(_)) if *n == N))
+            .filter(
+                |e| matches!(e, Event::Ext(n, p) if *n == N && std::mem::discriminant(p) == kind),
+            )
             .count();
-        let engine = u32::try_from(built).unwrap_or(u32::MAX);
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    fn engine_state() -> EngineSlot<N> {
+        let engine = Self::counted(&Phase::EngineStateBuilt(0));
         record(N, Phase::EngineStateBuilt(engine));
         EngineSlot { engine }
     }

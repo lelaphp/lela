@@ -3276,35 +3276,46 @@ impl Engine {
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
-        let start = Start {
+        let mut start = Start {
             ini: StartupIni {
                 entries: shared.ini.clone(),
             },
             host: sapi_name,
+            process: Vec::new(),
         };
-        // `zend_startup_modules`: each engine start in bundle order, and
-        // the first that fails ends the startup (`zend_startup_module_ex`).
+        // `zend_startup_modules`: each `MINIT` in bundle order, its process
+        // start (once for the process, ADR-0010) and then its engine
+        // start, and the first that fails ends the startup
+        // (`zend_startup_module_ex`).
         for (at, extension) in shared.extensions.iter().enumerate() {
-            let Some(build) = &extension.engine_state else {
-                continue;
-            };
-            match build(&start) {
-                Ok(state) => shared.engine_states.push(state),
-                Err(refusal) => {
-                    let cut = marks
-                        .iter()
-                        .find(|(owner, _)| *owner > at)
-                        .map_or(encoding_at, |(_, len)| *len);
-                    let before = raised.get(..cut).into_iter().flatten();
-                    let encoding = raised.get(encoding_at..modules_end).into_iter().flatten();
-                    let mut shown = Refusal::new();
-                    shown.raised = before.chain(encoding).cloned().collect();
-                    shown.raised.extend(refusal.raised);
-                    let failed = format!("Unable to start {} module", extension.name);
-                    shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
-                    break;
+            let refusal = match crate::process_scope::reach(extension) {
+                Err(kept) => kept.clone(),
+                Ok(process) => {
+                    start.process.extend(process);
+                    let Some(build) = &extension.engine_state else {
+                        continue;
+                    };
+                    match build(&start) {
+                        Ok(state) => {
+                            shared.engine_states.push(state);
+                            continue;
+                        }
+                        Err(refusal) => refusal,
+                    }
                 }
-            }
+            };
+            let cut = marks
+                .iter()
+                .find(|(owner, _)| *owner > at)
+                .map_or(encoding_at, |(_, len)| *len);
+            let before = raised.get(..cut).into_iter().flatten();
+            let encoding = raised.get(encoding_at..modules_end).into_iter().flatten();
+            let mut shown = Refusal::new();
+            shown.raised = before.chain(encoding).cloned().collect();
+            shown.raised.extend(refusal.raised);
+            let failed = format!("Unable to start {} module", extension.name);
+            shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
+            break;
         }
         shared.startup_raised = raised;
     }

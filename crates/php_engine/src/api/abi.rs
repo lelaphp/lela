@@ -67,13 +67,16 @@ pub struct StartupIni {
 }
 
 /// What an extension's engine start is handed, php's `MINIT` as it runs
-/// inside `php_module_startup` (ADR-0010): the startup ini and the
-/// host's name, `sapi_module.name`. Read through its accessors, so a
-/// later field is not a breaking change.
+/// inside `php_module_startup` (ADR-0010): the startup ini, the host's
+/// name, `sapi_module.name`, and the process states. Read through its
+/// accessors, so a later field is not a breaking change.
 #[derive(Debug)]
 pub struct Start {
     pub(crate) ini: StartupIni,
     pub(crate) host: &'static str,
+    /// The process states of this extension and of every one before it
+    /// in bundle order, as each was started for the process.
+    pub(crate) process: Vec<&'static (dyn Any + Send + Sync)>,
 }
 
 impl Start {
@@ -90,6 +93,18 @@ impl Start {
     #[must_use]
     pub fn host(&self) -> &str {
         self.host
+    }
+
+    /// The process state of type `P` (ADR-0010), what an
+    /// [`ExtensionBuilder::process_state`] of this extension or of one
+    /// before it in bundle order built, once for the process; an engine
+    /// state that needs it past its start holds the reference. `None`
+    /// for a type no such extension built.
+    #[must_use]
+    pub fn process<P: Send + Sync + 'static>(&self) -> Option<&'static P> {
+        self.process
+            .iter()
+            .find_map(|&state| state.downcast_ref::<P>())
     }
 }
 
@@ -415,6 +430,12 @@ pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 /// constants rewritten with every value the bundle registered.
 pub(crate) type ConstantsLink =
     Arc<dyn Fn(Vec<ConstDecl>, &Keyed<TypeId, Registered>) -> Vec<ConstDecl> + Send + Sync>;
+/// Builds one extension's process state, keyed by its type, or refuses
+/// to: called at most once per process ([`crate::process_scope`]).
+pub(crate) type ProcessStateBuilder = (
+    TypeId,
+    Arc<dyn Fn() -> Result<Box<dyn Any + Send + Sync>, Refusal> + Send + Sync>,
+);
 /// Builds one extension's engine state as the engine starts, once, or
 /// refuses to.
 pub(crate) type EngineStateBuilder =
@@ -774,6 +795,7 @@ pub struct Extension {
     pub(crate) on_modify: Vec<(Vec<u8>, OnModify)>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
+    pub(crate) process_state: Option<ProcessStateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<EndFunction>,
@@ -870,6 +892,7 @@ pub struct ExtensionBuilder {
     on_modify: Vec<(Vec<u8>, OnModify)>,
     dependencies: Vec<Dependency>,
     request_state: Option<StateBuilder>,
+    process_state: Option<ProcessStateBuilder>,
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
     rshutdown: Option<EndFunction>,
@@ -1034,6 +1057,33 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn request_state<T: Default + Send + 'static>(mut self) -> ExtensionBuilder {
         self.request_state = Some((TypeId::of::<T>(), || Box::new(T::default())));
+        self
+    }
+
+    /// Declare process state, the process start (ADR-0010): built at
+    /// most once per process, the first time an engine carrying the
+    /// extension is built, in bundle order and before the extension's
+    /// engine start, which reaches it through [`Start::process`] as a
+    /// `&'static P`; held by the engine, never by the extension, and
+    /// never ended, since no host ends the process scope (process exit
+    /// releases it). It sees nothing an engine is configured with, so two
+    /// engines built differently cannot race to define it: where C
+    /// library global initialisation lives, `xmlInitParser` and its kin.
+    /// A [`Refusal`] is php's `MINIT` failing on its library, which php
+    /// meets once per process and answers by ending the process: it is
+    /// remembered for the process, so every engine carrying the
+    /// extension is refused with it, and the function is not called again.
+    /// Keyed by `P`, as an engine state is reached by its type, so the
+    /// type is the extension's own. Declared twice, the later stands.
+    #[must_use]
+    pub fn process_state<P: Send + Sync + 'static>(
+        mut self,
+        build: fn() -> Result<P, Refusal>,
+    ) -> ExtensionBuilder {
+        self.process_state = Some((
+            TypeId::of::<P>(),
+            Arc::new(move || build().map(|state| Box::new(state) as Box<dyn Any + Send + Sync>)),
+        ));
         self
     }
 
@@ -1522,6 +1572,7 @@ impl ExtensionBuilder {
             on_modify: self.on_modify,
             dependencies: self.dependencies,
             request_state: self.request_state,
+            process_state: self.process_state,
             engine_state: self.engine_state,
             rinit: self.rinit,
             rshutdown: self.rshutdown,

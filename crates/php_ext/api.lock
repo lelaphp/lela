@@ -93,6 +93,7 @@ abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
+abi::ExtensionBuilder::process_state
 abi::ExtensionBuilder::program_ended
 abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
@@ -239,6 +240,7 @@ abi::StandardHandlesHook
 abi::Start
 abi::Start::host
 abi::Start::ini
+abi::Start::process
 abi::StartupIni
 abi::Static
 abi::Std
