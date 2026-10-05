@@ -143,10 +143,9 @@ impl Request {
     /// call. A frame of `function` already begun is not begun again.
     ///
     /// The slot is the request's, in the runtime cache of the function's
-    /// op array, so what one request adds no other request sees, and the
-    /// unit the function was compiled into, shared by every request, is
-    /// not written. A function of an extension has its slot where
-    /// natives are observed; this reaches a function of the program.
+    /// op array or in the request's table of natives' slots, so what one
+    /// request adds no other request sees, and the unit the function was
+    /// compiled into, shared by every request, is not written.
     ///
     /// [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
     pub fn add_begin_handler(&mut self, function: Function, begin: BeginHandler) -> bool {
@@ -199,10 +198,14 @@ impl Request {
         usize::try_from(self.shared.observers).unwrap_or(usize::MAX)
     }
 
-    /// `ZEND_OBSERVER_DATA(function)`: the slot in the runtime cache of
-    /// the op array a function of the program serves, none where the
-    /// cache is not laid down yet or the function is an extension's.
+    /// `ZEND_OBSERVER_DATA(function)`: a native's slot in the request's
+    /// table of natives' slots, or the slot in the runtime cache of the
+    /// op array a function of the program serves; none where the table
+    /// or the cache is not laid down that far yet.
     fn function_observer_slot(&mut self, function: Function) -> Option<&mut Slot> {
+        if let Some(place) = self.native_place(function) {
+            return self.observing.natives.get_mut(place);
+        }
         let user = self.user_function(function)?;
         let (unit, body) = (std::sync::Arc::clone(&user.unit), user.body);
         let code = exec::body_of(&unit, body)?;

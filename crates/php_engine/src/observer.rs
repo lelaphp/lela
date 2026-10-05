@@ -67,7 +67,8 @@
 //! removed from one function while a request is served
 //! ([`Request::add_begin_handler`] and its kin, php's
 //! `zend_observer_add_begin_handler`) writes the slot in that request's
-//! runtime cache, so the unit every request shares stays as published
+//! runtime cache, or its table of natives' slots for a native, so the
+//! unit every request shares stays as published
 //! (principle 3), and the next request resolves the function afresh.
 //! The begin and end walks read the slot for each handler they call, as
 //! php's walk the slot in place, so a handler removed mid-walk moves

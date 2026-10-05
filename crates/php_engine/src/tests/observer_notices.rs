@@ -521,3 +521,64 @@ fn a_handler_that_removes_itself_is_handed_the_next_to_call() {
         ]
     );
 }
+
+fn native_init(observed: &mut Observed<'_>) -> ObserverHandlers {
+    let act: fn(&mut Observed<'_>) = match observed_name(observed).as_str() {
+        "add" => add_to_native,
+        "remove" => remove_from_native,
+        _ => return ObserverHandlers::default(),
+    };
+    ObserverHandlers {
+        begin: Some(act),
+        end: None,
+    }
+}
+
+fn add_to_native(observed: &mut Observed<'_>) {
+    let native = observed.function_named(b"strcmp");
+    let strncmp = observed.function_named(b"strncmp");
+    let added = native.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
+    let unresolved = strncmp.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
+    acted(format!("add {added} unresolved {unresolved}"));
+}
+
+fn remove_from_native(observed: &mut Observed<'_>) {
+    let native = observed.function_named(b"strcmp");
+    let removed = native.and_then(|f| observed.remove_begin_handler(f, extra_begin));
+    acted(format!("remove {}", removed.is_some()));
+}
+
+/// A native's slot takes a handler added and gives it up as a
+/// function's does: php's `zend_observer_add_begin_handler` and its kin take any
+/// `zend_function`, and a native's slot is the request's internal
+/// runtime cache (`zend_observer_fcall_internal_function_extension`);
+/// one no call in the request has resolved takes nothing.
+#[test]
+fn a_native_takes_a_handler_added_and_removed_for_one_request() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .observer(native_init)
+            .build("test_ext_0")])
+        .build();
+    let dir = scratch("native");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction add() {}\nfunction remove() {}\n\
+         strcmp('a', 'b'); add(); strcmp('b', 'c'); remove(); strcmp('c', 'd');\n",
+    );
+    rec.mark("served");
+    assert_eq!(
+        only(
+            &rec.events().between("built", "served"),
+            &[Begin(String::new())]
+        ),
+        [
+            Ext(0, Begin("add true unresolved false".to_owned())),
+            Ext(0, Begin("extra strcmp".to_owned())),
+            Ext(0, Begin("remove true".to_owned())),
+        ]
+    );
+}
