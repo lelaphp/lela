@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use php_proto::http::{self, Credentials, Events, Parser};
@@ -21,7 +21,7 @@ use php_sapi::{
 
 use super::Site;
 use super::log::Type;
-use crate::ffi::Interest;
+use crate::ffi::{Interest, Polled};
 
 /// Where one connection stands.
 pub(super) enum Connection {
@@ -47,19 +47,30 @@ impl Connection {
         })
     }
 
-    /// The socket's fd and what the loop waits on it for, `None` once it
-    /// is closed.
-    pub(super) fn interest(&self) -> Option<(RawFd, Interest)> {
+    /// The socket as the loop waits on it, for a read while the request
+    /// is read and for a write while a response is sent
+    /// (`php_cli_server_poller_add`); `None` once it is closed.
+    pub(super) fn polled(&self) -> Option<Polled> {
         match self {
-            Connection::Reading(client) => Some((client.stream.as_raw_fd(), Interest::Read)),
-            Connection::Sending(client, _) => Some((client.stream.as_raw_fd(), Interest::Write)),
+            Connection::Reading(client) => {
+                Some(Polled::new(client.stream.as_raw_fd(), Interest::Read))
+            }
+            Connection::Sending(client, _) => {
+                Some(Polled::new(client.stream.as_raw_fd(), Interest::Write))
+            }
             Connection::Closed => None,
         }
     }
 
-    /// The socket ready for what [`Connection::interest`] waited on it
-    /// for: `php_cli_server_recv_event_read_request` for a request being
-    /// read, which serves the request once it is whole, and
+    /// Whether the connection is still open, and so kept by the loop.
+    pub(super) fn is_open(&self) -> bool {
+        !matches!(self, Connection::Closed)
+    }
+
+    /// The socket ready for what [`Connection::polled`] waited on it for:
+    /// `php_cli_server_recv_event_read_request`
+    /// (`Z/sapi/cli/php_cli_server.c:2636`) for a request being read,
+    /// which serves the request once it is whole, and
     /// `php_cli_server_send_event` for a response being sent.
     pub(super) fn ready(self, site: &Arc<Site>) -> Connection {
         match self {
@@ -69,7 +80,8 @@ impl Connection {
         }
     }
 
-    /// `php_cli_server_client_dtor_wrapper` as `php_cli_server_dtor`
+    /// `php_cli_server_client_dtor_wrapper`
+    /// (`Z/sapi/cli/php_cli_server.c:2415`) as `php_cli_server_dtor`
     /// destroys the clients: the socket shut, nothing logged.
     pub(super) fn drop_unlogged(self) {
         if let Connection::Reading(client) | Connection::Sending(client, _) = self {
@@ -583,11 +595,14 @@ impl Wire {
         };
         while !bytes.is_empty() {
             match stream.write(bytes) {
+                Ok(0) => {
+                    self.stream = None;
+                    return false;
+                }
                 Ok(sent) => bytes = bytes.get(sent..).unwrap_or_default(),
-                Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error)
                     if error.kind() == ErrorKind::WouldBlock
-                        && crate::ffi::writable_within(stream.as_raw_fd(), 10_000) => {}
+                        && crate::ffi::writable_within(stream.as_raw_fd(), SEND_WAIT) => {}
                 Err(_) => {
                     self.stream = None;
                     return false;
@@ -597,6 +612,10 @@ impl Wire {
         true
     }
 }
+
+/// How long a PHP request's write waits for a socket that takes no more,
+/// in milliseconds: `send_through`'s `tv` of ten seconds.
+const SEND_WAIT: i32 = 10_000;
 
 /// The sink a PHP request holds, `sapi_cli_server_ub_write` and
 /// `sapi_cli_server_send_headers`: the body and the head onto the
@@ -907,7 +926,8 @@ impl Pending {
 
 /// `php_cli_server_send_event` (`Z/sapi/cli/php_cli_server.c:2668`): the
 /// next 131072 bytes of the file read where everything before them went
-/// (`php_cli_server_content_sender_pull`), as much as the socket takes
+/// (`php_cli_server_content_sender_pull`, `Z/sapi/cli/php_cli_server.c:1137`),
+/// as much as the socket takes
 /// sent, and the connection closed once all of it is written, the peer
 /// went away or the file could not be read.
 fn send(site: &Site, mut client: Client, mut pending: Pending) -> Connection {
@@ -934,7 +954,6 @@ fn send(site: &Site, mut client: Client, mut pending: Pending) -> Connection {
             Ok(0) => return close(site, &client),
             Ok(sent) => pending.sent += sent,
             Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => return close(site, &client),
         }
     }

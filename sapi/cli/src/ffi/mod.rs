@@ -63,7 +63,7 @@ fn wait_writable() {
     let _ = writable_within(1, 60_000);
 }
 
-/// `php_pollfd_for(fd, POLLOUT, timeout)`: whether `fd` takes a write
+/// `php_pollfd_for(fd, POLLOUT, timeout)` (`Z/main/php_network.h:180`): whether `fd` takes a write
 /// within `millis`; false where the wait ran out, failed or a signal cut
 /// it short.
 pub(crate) fn writable_within(fd: RawFd, millis: i32) -> bool {
@@ -127,14 +127,15 @@ impl Polled {
     /// socket counted as ready, so the read or write that follows says
     /// which.
     pub(crate) fn ready(&self) -> bool {
-        self.0.revents & (self.0.events | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+        self.0.revents & (self.0.events | libc::POLLHUP | libc::POLLERR) != 0
     }
 }
 
 /// `php_cli_server_poller_poll` (`Z/sapi/cli/php_cli_server.c:876`): a
 /// wait of at most `millis` for any of `fds` to be ready, and how many
 /// are; the error where the wait failed, `EINTR` where a signal cut it
-/// short.
+/// short, and `EBADF` where one of `fds` is not open, as `select(2)`
+/// fails the whole wait over it.
 pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
     let Ok(count) = libc::nfds_t::try_from(fds.len()) else {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
@@ -143,7 +144,11 @@ pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
     // pointer, the slice's own, live and that long for the call: a
     // `Polled` is a `pollfd` by `repr(transparent)`.
     let ready = unsafe { libc::poll(fds.as_mut_ptr().cast::<libc::pollfd>(), count, millis) };
-    usize::try_from(ready).map_err(|_| std::io::Error::last_os_error())
+    let ready = usize::try_from(ready).map_err(|_| std::io::Error::last_os_error())?;
+    if fds.iter().any(|fd| fd.0.revents & libc::POLLNVAL != 0) {
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+    }
+    Ok(ready)
 }
 
 /// `php_cli_server_get_system_time` (`Z/sapi/cli/php_cli_server.c:267`):

@@ -1,8 +1,9 @@
 //! `php -S` is php's event loop (`Z/sapi/cli/php_cli_server.c:2770`,
 //! #1884 as #1779 ruled): one thread waits on every connection at once,
 //! reads each request as its bytes arrive, and serves the requests one
-//! after another on that thread. Each test is held to what the oracle at
-//! 8.5.9 does with the same files under `php -n -S`.
+//! after another on that thread. Each expectation is what the oracle at
+//! 8.5.9 did with the same files under `php -n -S` when the test was
+//! written; nothing here runs it.
 
 mod server;
 

@@ -8,7 +8,9 @@
 //! `php_cli_server_do_event_loop` serves them (#1884, as #1779 ruled). No
 //! request is ever in flight beside another, so a `pcntl_fork` from one
 //! forks as under the CLI, and the child serves on in the loop it was
-//! forked from, as php's does. The log is php's: the startup line, one
+//! forked from, as php's does. `PHP_CLI_SERVER_WORKERS`, for which php
+//! forks the server into worker processes before it serves, is not read
+//! yet (#1885). The log is php's: the startup line, one
 //! line as each connection is accepted and closed, one per response, each
 //! after the local time `asctime` writes, on stderr, as many as the level
 //! `-q` lowers leaves.
@@ -26,6 +28,7 @@ use std::sync::atomic::Ordering;
 use php_sapi::{Engine, PHP_VERSION};
 
 use crate::ffi::{Interest, Polled};
+
 use crate::options::Server;
 use client::Connection;
 use log::{Log, Type};
@@ -33,6 +36,11 @@ use log::{Log, Type};
 /// `sapi_module.name` for the built-in server: what `php_sapi_name()`
 /// answers under it.
 pub(crate) const NAME: &str = "cli-server";
+
+/// How long the loop waits before it reads the flag a `SIGINT` sets
+/// again, in milliseconds: `php_cli_server_do_event_loop`'s `tv` of one
+/// second.
+const WAIT: i32 = 1000;
 
 /// `php_cli_server_log_level`'s default (`Z/sapi/cli/php_cli_server.c:223`),
 /// which each `-q` lowers.
@@ -101,7 +109,8 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         }
     };
     // Non-blocking, so a connection another process accepted first leaves
-    // this one's `accept` empty rather than stalled (`php_cli_server_ctor`).
+    // this one's `accept` empty rather than stalled (`php_cli_server_ctor`,
+    // `Z/sapi/cli/php_cli_server.c:2577-2584`).
     if listener.set_nonblocking(true).is_err() {
         log.write(Type::Error, "Failed to make server socket non-blocking");
         return 1;
@@ -135,7 +144,7 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
 /// a wait of at most a second on the listening socket and every open
 /// connection, each for what it waits on, then each that is ready
 /// answered in the order of its fd, as `php_cli_server_poller_iter_on_active`
-/// walks them: the listening socket's one connection accepted, a
+/// (`Z/sapi/cli/php_cli_server.c:883`) walks them: the listening socket's one connection accepted, a
 /// request read on and served once whole, a response sent on. The flag a
 /// `SIGINT` sets is read before each wait; once it is set every
 /// connection still open is shut and dropped with nothing logged, as
@@ -151,12 +160,11 @@ fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) -> i32 {
     let mut clients: BTreeMap<RawFd, Connection> = BTreeMap::new();
     let mut status = 0;
     while !stop.load(Ordering::Relaxed) {
-        let mut polled: Vec<Polled> = std::iter::once((listening, Interest::Read))
-            .chain(clients.values().filter_map(Connection::interest))
-            .map(|(fd, interest)| Polled::new(fd, interest))
+        let mut polled: Vec<Polled> = std::iter::once(Polled::new(listening, Interest::Read))
+            .chain(clients.values().filter_map(Connection::polled))
             .collect();
         polled.sort_by_key(Polled::fd);
-        match crate::ffi::poll(&mut polled, 1000) {
+        match crate::ffi::poll(&mut polled, WAIT) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
@@ -165,15 +173,19 @@ fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) -> i32 {
                 break;
             }
         }
+        let mut failed = false;
         for fd in polled.iter().filter(|fd| fd.ready()).map(Polled::fd) {
             if fd == listening {
-                accept(site, listener, &mut clients);
+                failed |= !accept(site, listener, &mut clients);
             } else if let Some(connection) = clients.remove(&fd) {
                 let connection = connection.ready(site);
-                if connection.interest().is_some() {
+                if connection.is_open() {
                     clients.insert(fd, connection);
                 }
             }
+        }
+        if failed {
+            site.log.write(Type::Error, "Failed to poll event");
         }
     }
     for connection in clients.into_values() {
@@ -183,25 +195,33 @@ fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) -> i32 {
 }
 
 /// `accept` on the listening socket, as
-/// `php_cli_server_do_event_for_each_fd_callback` answers it: the
+/// `php_cli_server_do_event_for_each_fd_callback`
+/// (`Z/sapi/cli/php_cli_server.c:2704`) answers it: the
 /// connection made non-blocking, `%s Accepted` logged and its request
-/// waited on; nothing where another process took the connection first,
-/// and php's line where the accept failed.
-fn accept(site: &Site, listener: &TcpListener, clients: &mut BTreeMap<RawFd, Connection>) {
+/// waited on; nothing where another process took the connection first.
+/// False where the accept failed, after php's line, or the connection
+/// could not be made non-blocking, which the loop answers with
+/// `Failed to poll event` once the pass is over, as
+/// `php_cli_server_do_event_for_each_fd` (`:2755`) does.
+fn accept(site: &Site, listener: &TcpListener, clients: &mut BTreeMap<RawFd, Connection>) -> bool {
     match listener.accept() {
         Ok((stream, peer)) => {
             if stream.set_nonblocking(true).is_err() {
-                return;
+                return false;
             }
             let name = peer_name(peer);
             site.log.write(Type::Message, &format!("{name} Accepted"));
             clients.insert(stream.as_raw_fd(), Connection::accepted(stream, name));
+            true
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(error) => site.log.write(
-            Type::Error,
-            &format!("Failed to accept a client (reason: {})", strerror(&error)),
-        ),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error) => {
+            site.log.write(
+                Type::Error,
+                &format!("Failed to accept a client (reason: {})", strerror(&error)),
+            );
+            false
+        }
     }
 }
 
