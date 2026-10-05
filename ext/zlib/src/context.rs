@@ -5,11 +5,9 @@
 //! `inflate_get_read_len` with their buffer growth copied, since it
 //! decides when `inflate_add` asks zlib for more room.
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, Union};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Raw, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
@@ -103,24 +101,25 @@ impl DeflateContext {}
 /// `get_constructor` refusing in the words of the class's own init,
 /// `clone_obj` php's null slot and `compare`
 /// `zend_objects_not_comparable`.
-pub(crate) struct Handlers(&'static str);
+pub(crate) struct Handlers(Refusals);
 
-pub(crate) static INFLATE: Handlers =
-    Handlers("Cannot directly construct InflateContext, use inflate_init() instead");
-pub(crate) static DEFLATE: Handlers =
-    Handlers("Cannot directly construct DeflateContext, use deflate_init() instead");
+pub(crate) static INFLATE: Handlers = Handlers::refusing("inflate_init()");
+pub(crate) static DEFLATE: Handlers = Handlers::refusing("deflate_init()");
+
+impl Handlers {
+    const fn refusing(instead: &'static str) -> Handlers {
+        Handlers(
+            Refusals::NONE
+                .construction(Some(instead))
+                .cloning()
+                .comparison(),
+        )
+    }
+}
 
 impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(req, "Error", self.0))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        self.0
     }
 
     /// `deflate_context_free_obj` and `inflate_context_free_obj`: the
@@ -138,16 +137,6 @@ impl ObjectHandlers for Handlers {
         {
             stream.end(req);
         }
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

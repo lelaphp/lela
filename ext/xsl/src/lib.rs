@@ -22,8 +22,8 @@
 mod ffi;
 
 use php_ext::abi::{
-    Callable, CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers,
-    OrFalse, Path, PropertyPlace, PropertyRead, Raw, Std, This, True, Union,
+    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, OrFalse,
+    Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
 };
 use php_ext::attr::{php_class, php_const};
 use php_ext::call::{lookup_class, new_object};
@@ -164,7 +164,14 @@ fn read_int(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<i64, Th
     Ok(n)
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `xsl_objects_new`: the default preferences, and the two limits at
     /// libxslt's own.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -190,10 +197,6 @@ impl ObjectHandlers for Handlers {
             callbacks.release(req);
         }
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `xsl_objects_read_property`: a write fetch of a validated property

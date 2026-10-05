@@ -309,7 +309,7 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
     };
     let back = req
         .engine::<crate::Pooled>()
-        .and_then(|crate::Pooled(pool)| pool.give(key.to_vec(), id));
+        .and_then(|crate::Pooled(pool)| pool.give_back(key.to_vec(), id));
     if let Some(back) = back
         && let Ok(Some(handle)) = Mysqlnd::take_up(req, &back)
     {

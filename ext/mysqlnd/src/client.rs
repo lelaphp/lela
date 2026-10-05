@@ -161,7 +161,9 @@ impl Mysqlnd {
     /// ends: taken out of the request's table, this owner gone, and kept
     /// by the engine with its socket under the key answered, which the
     /// owner's pool entry holds in place of the connection php's holds;
-    /// `None` where it is no persistent connection that connected.
+    /// `None` where it is no persistent connection that connected, or
+    /// where the engine's pool is at its bound, which closes it with this
+    /// request.
     pub fn give_back(self, req: &mut Request) -> Option<Vec<u8>> {
         self.0.give_back(req)
     }

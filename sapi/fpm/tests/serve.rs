@@ -180,6 +180,69 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     assert!(body.ends_with("\r\n\r\nfpm-fcgi 1"), "{body:?}");
 }
 
+/// A child that has served `pm.max_requests` ends its engine on the way
+/// out, as php's child calls `php_module_shutdown`: a `dba_popen`
+/// `cdb_make` file the request left open is finished there, so the next
+/// child's request reads the value, the oracle's php-fpm's bytes for the
+/// same two requests (#1804).
+#[test]
+fn a_child_past_its_max_requests_finishes_a_persistent_cdb_make_file() {
+    let dir = tree("engine-end");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let mut written = std::fs::read_to_string(&path).unwrap();
+    written.push_str("pm.max_requests = 1\n");
+    std::fs::write(&path, written).unwrap();
+    let file = dir.join("t1804.cdb");
+    let writer = dir.join("writer.php");
+    let reader = dir.join("reader.php");
+    std::fs::write(
+        &writer,
+        format!(
+            "<?php $f = '{}'; $d = dba_popen($f, 'n', 'cdb_make'); dba_insert('key0', 'value0', $d); clearstatcache(); echo filesize($f);",
+            file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &reader,
+        format!(
+            "<?php $f = '{}'; clearstatcache(); echo filesize($f), ' '; var_dump(dba_fetch('key0', dba_open($f, 'r', 'cdb')));",
+            file.display()
+        ),
+    )
+    .unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let first = connect(&socket, started)
+        .map(|s| response(s, &writer))
+        .unwrap_or_default();
+    // The next child is the one that answers once the first has gone.
+    let second = connect(&socket, Instant::now())
+        .map(|s| response(s, &reader))
+        .unwrap_or_default();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status();
+    let _ = master.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let first = String::from_utf8_lossy(&first);
+    let second = String::from_utf8_lossy(&second);
+    assert!(first.ends_with("\r\n\r\n2066"), "{first:?}");
+    assert!(
+        second.ends_with("\r\n\r\n2082 string(6) \"value0\"\n"),
+        "{second:?}"
+    );
+}
+
 /// A log line with its time, the pids and a child's lifetime masked: the
 /// number after `pid`, `child` and `after` is `N`.
 #[cfg(target_os = "macos")]

@@ -135,7 +135,7 @@ fn raise_kept(req: &mut Request) {
 /// The class, in a `mod` of its own so `finfo` names the parameter of
 /// the functions and the class only as `class::finfo`.
 mod class {
-    use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Path, This, True};
+    use php_ext::abi::{OrFalse, Path, Refusals, This, True};
     use php_ext::attr::php_class;
     use php_ext::raising::{Thrown, throw, throwing_warnings};
     use php_ext::request::Request;
@@ -257,15 +257,7 @@ mod class {
 
     /// `finfo_object_handlers`: `std_object_handlers` with php's null
     /// `clone_obj`; `free_obj`'s `magic_close` is the payload's drop.
-    pub(crate) struct Handlers;
-
-    pub(crate) static FINFO: Handlers = Handlers;
-
-    impl ObjectHandlers for Handlers {
-        fn clone_obj(&self) -> Option<CloneObj> {
-            None
-        }
-    }
+    pub(crate) const FINFO: Refusals = Refusals::NONE.cloning();
 }
 
 /// The set an object holds, taken out for `f`, or php's `Invalid finfo
