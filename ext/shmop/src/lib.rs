@@ -23,16 +23,14 @@
 
 mod ffi;
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse};
+use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Refusals};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, fatal, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::PhpString;
 
 use crate::ffi::Segment;
 
@@ -112,37 +110,10 @@ impl Shmop {}
 /// refusing, `clone_obj` php's null slot and `compare`
 /// `zend_objects_not_comparable`; `free_obj`'s `shmdt` is the payload's
 /// drop.
-pub(crate) struct Handlers;
-
-pub(crate) static SHMOP: Handlers = Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct Shmop, use shmop_open() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
-}
+const SHMOP: Refusals = Refusals::NONE
+    .construction(Some("shmop_open()"))
+    .cloning()
+    .comparison();
 
 /// What `f` answers of a `Shmop`'s segment, or the `InternalError` for
 /// one no native opened.

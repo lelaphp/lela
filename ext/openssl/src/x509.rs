@@ -5,7 +5,7 @@
 
 use std::os::unix::ffi::OsStrExt;
 
-use php_ext::abi::{Instance, OrFalse, Ref, Union, Untyped};
+use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
@@ -19,7 +19,7 @@ use crate::decode::{
 use crate::ffi::x509::{Asn1String, Checked, Name, Store};
 use crate::ffi::{self, Bio, Certificate, Digest};
 use crate::key::{Half, key_from};
-use crate::{Handlers, hex, put, put_bytes, store_errors};
+use crate::{hex, put, put_bytes, store_errors};
 
 /// A `php_openssl_certificate_object`: the certificate it holds.
 #[derive(Default)]
@@ -75,8 +75,7 @@ pub(crate) struct OpenSSLCertificate;
 impl OpenSSLCertificate {}
 
 /// `php_openssl_certificate_object_handlers`.
-pub(crate) static HANDLERS: Handlers =
-    Handlers("Cannot directly construct OpenSSLCertificate, use openssl_x509_read() instead");
+pub(crate) const HANDLERS: Refusals = crate::refusals("openssl_x509_read()");
 
 /// `object_init_ex(return_value, php_openssl_certificate_ce)` holding
 /// the certificate.

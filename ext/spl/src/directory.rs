@@ -13,7 +13,7 @@
 
 use php_ext::abi::{
     CloneObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
-    Path as PathArg, Raw, Ref, Std, This, Union, Untyped, Variadic,
+    Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object};
@@ -2154,17 +2154,20 @@ impl ObjectHandlers for Handlers {
     }
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for FileHandlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         HANDLERS.free_obj(req, object);
     }
 
     fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
         HANDLERS.dtor_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `spl_filesystem_object_get_method_check`: every method, the

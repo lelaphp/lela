@@ -40,13 +40,10 @@ mod inifile;
 mod link;
 mod natives;
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool};
+use php_ext::abi::{Extension, ExtensionBuilder, Lent, ObjectHandlers, Pool, Refusals};
 use php_ext::attr::php_class;
-use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, TypeTag, Value};
 
@@ -325,31 +322,15 @@ pub(crate) struct Handlers;
 
 pub(crate) static CONNECTION: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("dba_open() or dba_popen()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw(
-            req,
-            "Error",
-            "Cannot directly construct Dba\\Connection, use dba_open() or dba_popen() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     /// `dba_connection_cast_object`: `(int)` is the object's id, as it
