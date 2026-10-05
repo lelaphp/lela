@@ -12,7 +12,8 @@
 //!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
 //!   `zend_post_startup_cb`, `php_rfc1867_callback`);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`,
-//!   `zend_observers_fcall_list`);
+//!   `zend_observers_fcall_list`, the observer's three notice lists and
+//!   its three fiber lists);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
 //!   functions, the CLI's shell callbacks);
@@ -37,13 +38,14 @@ use php_unit::decl::Name;
 
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
-    Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, ObserverInit,
-    PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook, TicksHook, TreatDataHook,
-    UploadHook,
+    Extension, FatalLoggedHook, FiberHandler, FiberSwitchHandler, GcCollectHook, InputFilterHook,
+    InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook,
+    TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
 use crate::api::values::PhpString;
+use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
@@ -115,6 +117,12 @@ pub(crate) struct Supplies {
     pub(crate) intercepts: Vec<(Name, Entry)>,
     pub(crate) registered: Vec<(TypeId, Registered)>,
     pub(crate) observers: Vec<ObserverInit>,
+    pub(crate) error_observers: Vec<ErrorObserver>,
+    pub(crate) functions_declared: Vec<FunctionDeclared>,
+    pub(crate) classes_linked: Vec<ClassLinked>,
+    pub(crate) fiber_init: Vec<FiberHandler>,
+    pub(crate) fiber_switch: Vec<FiberSwitchHandler>,
+    pub(crate) fiber_destroy: Vec<FiberHandler>,
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -187,6 +195,25 @@ pub(crate) struct Resolved {
     /// and `zend_observer_fcall_install` asks every one of a function in
     /// that order (design §4.3 seam 9, [`crate::observer`]).
     pub(crate) observers: Listed<ObserverInit>,
+    /// `zend_observer_error_callbacks`, as `zend_observer_error_register`
+    /// (`Z/Zend/zend_observer.c:367`) appends to it, every one told of
+    /// each diagnostic in that order ([`crate::observer::error`]).
+    pub(crate) error_observers: Listed<ErrorObserver>,
+    /// `zend_observer_function_declared_callbacks`, as
+    /// `zend_observer_function_declared_register` (`:331`) appends to it
+    /// ([`crate::observer::function_declared`]).
+    pub(crate) functions_declared: Listed<FunctionDeclared>,
+    /// `zend_observer_class_linked_callbacks`, as
+    /// `zend_observer_class_linked_register` (`:349`) appends to it
+    /// ([`crate::observer::class_linked`]).
+    pub(crate) classes_linked: Listed<ClassLinked>,
+    /// `zend_observer_fiber_init`, `zend_observer_fiber_switch` and
+    /// `zend_observer_fiber_destroy` (`Z/Zend/zend_observer.c:33-35`),
+    /// each walked in the order its handlers were registered
+    /// ([`crate::observer::fiber_switched`]).
+    pub(crate) fiber_init: Listed<FiberHandler>,
+    pub(crate) fiber_switch: Listed<FiberSwitchHandler>,
+    pub(crate) fiber_destroy: Listed<FiberHandler>,
     /// Served once the primary program has ended.
     pub(crate) program_ended: Listed<fn(&mut Request)>,
     /// The unit cache's one question, which opcache's
@@ -247,6 +274,12 @@ impl Resolved {
             table.ticks.install(own.ticks);
             table.cached.install(own.cached);
             table.observers.install_all(own.observers);
+            table.error_observers.install_all(own.error_observers);
+            table.functions_declared.install_all(own.functions_declared);
+            table.classes_linked.install_all(own.classes_linked);
+            table.fiber_init.install_all(own.fiber_init);
+            table.fiber_switch.install_all(own.fiber_switch);
+            table.fiber_destroy.install_all(own.fiber_destroy);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);
@@ -419,6 +452,12 @@ impl<H: Copy> Listed<H> {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = H> + '_ {
         self.0.iter().copied()
+    }
+
+    /// Whether no supplier appended one, php's `zend_observer_*_observed`
+    /// word for a notice's list.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// How many the list holds, as a `u32`.

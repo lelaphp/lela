@@ -4492,11 +4492,26 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
             raised.line,
         );
     }
-    let declared = req.declare_classes(unit) && req.declare_functions(unit);
+    let linked = match req.declare_classes(unit) {
+        Some(linked) if req.declare_functions(unit) => Some(linked),
+        _ => None,
+    };
+    // The observers are told what the load declared where php tells
+    // them: as its compile declares, before the compile's record is
+    // raised, or, where opcache serves the unit, at the load after it
+    // raised the cached file's warnings (`Z/ext/opcache/ZendAccelerator.c:1939-1945`).
+    // A load that ended the request tells nothing.
+    let accelerated = linked.as_ref().is_some_and(|linked| linked.accelerated);
+    if let Some(linked) = linked.as_ref().filter(|_| !accelerated) {
+        crate::observer::declared_at_load(req, unit, linked);
+    }
     if let Some(recording) = recording {
         req.emit_recorded(recording);
     }
-    declared
+    if let Some(linked) = linked.as_ref().filter(|_| accelerated) {
+        crate::observer::declared_at_load(req, unit, linked);
+    }
+    linked.is_some()
 }
 
 /// A program in `file` the compiler refused: `php_error_cb` renders it

@@ -181,13 +181,16 @@ impl Request {
     /// places, `zend_fiber_capture_vm_state` and
     /// `zend_fiber_restore_vm_state` as one swap. The VM stack carries
     /// the current frame and the entry slot with it, so neither is
-    /// saved on its own.
+    /// saved on its own; the chain of open observed frames goes with the
+    /// stack its frames stand on, the swap php's observer makes at the
+    /// switch's notice (`Z/Zend/zend_observer.c:423-424`).
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         // The execution left off the running chain keeps what it was
         // lent ([`exec::Receiver`]).
         self.own_lent_receivers();
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
+        self.swap_observing(&mut other.observing);
         self.swap_error_reporting(&mut other.error_reporting);
         self.swap_stack_limit(&mut other.stack_limit);
     }
@@ -368,15 +371,6 @@ impl Request {
     /// evaluated or main file's op array, which is no function.
     pub(crate) fn frame_function(&self, frame: FrameRef) -> Option<Function> {
         self.vm.at(frame).and_then(|state| state.function)
-    }
-
-    /// `EX(func)->op_array.filename`: the file the op array `frame`
-    /// serves was compiled from.
-    pub(crate) fn frame_filename(&self, frame: FrameRef) -> Option<&[u8]> {
-        self.vm
-            .at(frame)
-            .and_then(|state| exec::body_of(&state.unit, state.body))
-            .map(|code| code.filename.0.as_ref())
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`

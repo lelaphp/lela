@@ -14,6 +14,7 @@
 //! `ZVAL_COPY_VALUE` and `FREE_OP` as [`take_operand`], [`operand`] and
 //! [`free_operand`].
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use php_heap::{FrameRef, MapPtr, MapTable, Zval};
@@ -461,6 +462,13 @@ pub(crate) struct FrameState {
     /// function called twice reads on its second call what its first
     /// primed.
     runtime_cache: MapPtr<RuntimeCache>,
+    /// The frame's identity, given the first time an extension keeps it
+    /// ([`crate::api::request::FrameId`]) and never given again in the
+    /// request; none until then. It moves with the state, so a
+    /// generator's frame keeps it across its resumptions as php's
+    /// `execute_data` is one, and a frame pushed later where this one
+    /// stood has none or another.
+    pub(crate) identity: Cell<Option<crate::api::request::Identity>>,
 }
 
 /// One op array's runtime cache for one request, what
@@ -523,6 +531,20 @@ impl RuntimeCache {
 /// assigned the op array at publication ([`OpArray::runtime_cache`]).
 pub(crate) fn runtime_cache_of(code: &OpArray) -> MapPtr<RuntimeCache> {
     MapPtr::new(code.runtime_cache)
+}
+
+/// `ZEND_OBSERVER_DATA(function)` reached through the function rather
+/// than a frame, as `zend_observer_add_begin_handler` and its kin reach
+/// it: the observer slot of `code`'s runtime cache in the request's map
+/// table, none where the cache was never laid down, php's
+/// `RUN_TIME_CACHE` still `NULL`.
+pub(crate) fn observer_slot_of<'map>(
+    map: &'map mut MapTable,
+    code: &OpArray,
+) -> Option<&'map mut crate::observer::Slot> {
+    let ptr = runtime_cache_of(code);
+    map.get(ptr)?.slots.as_ref()?;
+    Some(&mut map.map(ptr).observer)
 }
 
 /// The runtime cache laid down for an activation of `body`, before its
@@ -898,6 +920,7 @@ impl Vm {
             fast_calls: Vec::new(),
             op_array: None,
             runtime_cache,
+            identity: Cell::new(None),
         });
     }
 
@@ -1024,10 +1047,21 @@ impl Vm {
     /// `frame` serves, in the request's map table; unresolved for a frame
     /// that stands nowhere.
     pub(crate) fn observer_slot(&self, map: &MapTable, frame: FrameRef) -> crate::observer::Slot {
+        self.observer_slot_held(map, frame)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// [`Vm::observer_slot`] borrowed where it stands, for the walks that
+    /// read one handler of it at a time.
+    pub(crate) fn observer_slot_held<'map>(
+        &self,
+        map: &'map MapTable,
+        frame: FrameRef,
+    ) -> Option<&'map crate::observer::Slot> {
         self.at(frame)
             .and_then(|state| map.get(state.runtime_cache))
-            .map(|cache| cache.observer.clone())
-            .unwrap_or_default()
+            .map(|cache| &cache.observer)
     }
 
     /// The observer slot of the op array `frame` serves, resolved to

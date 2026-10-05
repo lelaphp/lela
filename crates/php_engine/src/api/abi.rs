@@ -29,7 +29,11 @@ use crate::supplied::{Keyed, Registered, Supplies};
 mod class;
 mod marshal;
 
-pub use crate::observer::{BeginHandler, EndHandler, Observed, ObserverHandlers, ObserverInit};
+pub use crate::observer::{
+    BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
+    ObservedFiber, ObserverHandlers, ObserverInit, Removed,
+};
+use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
@@ -1309,22 +1313,107 @@ impl ExtensionBuilder {
         self
     }
 
-    /// An observer of user calls, `zend_observer_fcall_register` at
-    /// `MINIT` (design §4.3 seam 9): `init` is asked of each function on
-    /// its first call in a request, and of each included, evaluated or
-    /// main file's frame as it is pushed, which handlers observe it; a
-    /// begin handler runs as the frame is pushed, before its parameters
-    /// are received, and an end handler as it is left, handed what it
-    /// returned, or nothing where an unwind or a fatal left it. Every
-    /// frame begun with an end handler is ended once. The bundle's
-    /// observers are asked in the order the extensions start, and an
-    /// extension may declare more than one; begin handlers are called in that
-    /// order and end handlers in its reverse. A generator's frame is not
-    /// begun at its call. With none declared, a call pays one load and
-    /// one branch at the push and one at the return.
+    /// An observer of user calls and natives,
+    /// `zend_observer_fcall_register` at `MINIT` (design §4.3 seam 9):
+    /// `init` is asked of each function, user or native, on its first
+    /// call in a request, and of each included, evaluated or main file's
+    /// frame as it is pushed, which handlers observe it; a begin handler
+    /// runs as the frame is pushed, before its parameters are received,
+    /// or before a native's entry, and an end handler as it is left,
+    /// handed what it returned, or nothing where an unwind or a fatal
+    /// left it or a native a call opcode served left a throwable
+    /// standing. Every frame begun with an end handler is ended once.
+    /// The bundle's observers are asked in the order the extensions
+    /// start, and an extension may declare more than one; begin handlers
+    /// are called in that order and end handlers in its reverse. A
+    /// generator's frame is not begun at its call: it is begun at each
+    /// resumption and ended at each suspension with what it yielded, and
+    /// at its `return` with what it returned. With none declared, a call
+    /// pays one load and one branch at the push and one at the return.
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
         self.supplies.observers.push(init);
+        self
+    }
+
+    /// An observer of diagnostics, `zend_observer_error_register` at
+    /// `MINIT` (design §4.3 seam 9): `observer` is told of every
+    /// diagnostic `zend_error` raises, its level, file, line and
+    /// message, before the user's error handler or the `zend_error_cb`
+    /// chain ([`ExtensionBuilder::error`]) is handed it and whatever
+    /// `error_reporting` says, and of every uncaught throwable rendered,
+    /// as the `E_ERROR` it becomes; a diagnostic a compile records is told
+    /// when it is raised after. It changes nothing of how the diagnostic
+    /// is served: that is the `zend_error_cb` chain's. The bundle's are
+    /// told in the order the extensions start, and an extension may
+    /// declare more than one.
+    #[must_use]
+    pub fn error_observer(mut self, observer: ErrorObserver) -> ExtensionBuilder {
+        self.supplies.error_observers.push(observer);
+        self
+    }
+
+    /// An observer of declared functions,
+    /// `zend_observer_function_declared_register` at `MINIT`: `observer`
+    /// is told of each function a request declares, with the lowered name
+    /// it is declared under, as a file's top-level functions are declared
+    /// when it loads, before its first line runs, and as a
+    /// `DECLARE_FUNCTION` declares one written inside a block. A file
+    /// served from the engine's cache is told again on every load, as
+    /// opcache tells php's observers on every hit.
+    #[must_use]
+    pub fn function_declared_observer(mut self, observer: FunctionDeclared) -> ExtensionBuilder {
+        self.supplies.functions_declared.push(observer);
+        self
+    }
+
+    /// An observer of linked classes,
+    /// `zend_observer_class_linked_register` at `MINIT`: `observer` is
+    /// told of each class a request links into its table, with the
+    /// lowered name it stands under, as a file's classes bound early are
+    /// linked when it loads, as a `DECLARE_CLASS` links one, and as
+    /// `class_alias()` gives a class of the program another name. An
+    /// anonymous class's declaration tells none, as php's
+    /// `DECLARE_ANON_CLASS` does not, save one opcache's load linked,
+    /// which it tells with the file's others; nor does an alias of an
+    /// extension's class. A file served from the engine's cache is told
+    /// again on every load.
+    #[must_use]
+    pub fn class_linked_observer(mut self, observer: ClassLinked) -> ExtensionBuilder {
+        self.supplies.classes_linked.push(observer);
+        self
+    }
+
+    /// Told of each fiber's creation, `zend_observer_fiber_init_register`
+    /// at `MINIT` (design §4.3 seam 9): `Fiber::start` has laid the
+    /// fiber's stack down and has not yet switched into it. The bundle's
+    /// handlers are called in the order the extensions start, an
+    /// extension's in the order it declared them.
+    #[must_use]
+    pub fn fiber_init(mut self, handler: FiberHandler) -> ExtensionBuilder {
+        self.supplies.fiber_init.push(handler);
+        self
+    }
+
+    /// Told of each switch between fibers, the request's own stack
+    /// among them, `zend_observer_fiber_switch_register`: handed the
+    /// fiber left and the fiber entered, while the one left is still the
+    /// one served. Every frame a fiber that ended in a fatal left open
+    /// has been ended by then; each fiber's open frames are its own, so
+    /// what is begun in a fiber is ended in it.
+    #[must_use]
+    pub fn fiber_switch(mut self, handler: FiberSwitchHandler) -> ExtensionBuilder {
+        self.supplies.fiber_switch.push(handler);
+        self
+    }
+
+    /// Told of each fiber given back once it is dead and its resumer is
+    /// served again, `zend_observer_fiber_destroy_register`. A fiber
+    /// never started was never created, and one still suspended when the
+    /// request ends in a fatal is never told of.
+    #[must_use]
+    pub fn fiber_destroy(mut self, handler: FiberHandler) -> ExtensionBuilder {
+        self.supplies.fiber_destroy.push(handler);
         self
     }
 

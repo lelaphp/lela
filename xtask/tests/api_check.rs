@@ -334,7 +334,7 @@ fn a_use_path_across_a_denied_module_edge_fails() {
 
 #[test]
 fn a_bundle_order_that_is_not_topological_fails() {
-    let readings = readings("bundle");
+    let readings = api_check::hold(&under("topological"), &fixture("bundle"), false).unwrap();
     let bundle = of(&readings, "php_bundle");
     assert_eq!(bundle.status, Status::Fail);
     assert!(
@@ -347,17 +347,23 @@ fn a_bundle_order_that_is_not_topological_fails() {
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
-/// The tracked manifest with `php_bundle`'s edge read as
-/// `order = "registration"`, the value #1778 ruled and a person writes.
-fn under_registration() -> Manifest {
+/// The tracked manifest with `php_bundle`'s edge read as `order`, so a
+/// test holds the order it names whatever the tracked row says.
+fn under(order: &str) -> Manifest {
     let mut manifest = Manifest::load(workspace()).unwrap();
     let edge = manifest
         .edges
         .iter_mut()
         .find(|e| e.from == "php_bundle")
         .unwrap();
-    edge.order = Some("registration".to_owned());
+    edge.order = Some(order.to_owned());
     manifest
+}
+
+/// The tracked manifest with `php_bundle`'s edge read as
+/// `order = "registration"`, the value #1778 ruled.
+fn under_registration() -> Manifest {
+    under("registration")
 }
 
 /// `order = "registration"`: each extension's feature switches on the

@@ -62,6 +62,9 @@ mod environment;
 mod execution;
 mod extensions;
 pub use extensions::InfoRow;
+mod frame_reads;
+pub(crate) use frame_reads::Identity;
+pub use frame_reads::{FrameId, FrameView};
 mod frames;
 use frames::{Link, Slots, links_of};
 mod hash_bytes;
@@ -77,14 +80,16 @@ mod hooks;
 mod inspect;
 mod lazy;
 mod limits;
-pub use limits::Interrupt;
+pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 mod methods;
 use methods::visibility_string;
 mod objects;
 mod observing;
+pub(crate) use observing::ObservedChain;
 mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
@@ -327,6 +332,8 @@ pub struct Request {
     bailout: bool,
     /// The open observed frames ([`observing::Observing`]).
     observing: observing::Observing,
+    /// The frame identities given so far ([`frame_reads::FrameIds`]).
+    frame_ids: frame_reads::FrameIds,
     /// Where the request stands ([`ending::Progress`]).
     progress: ending::Progress,
     /// Where the destructors' walk was cut short ([`objects::Objects`]).
@@ -630,6 +637,7 @@ impl Request {
             raised: None,
             bailout: false,
             observing: observing::Observing::default(),
+            frame_ids: frame_reads::FrameIds::default(),
             progress: ending::Progress::default(),
             objects: objects::Objects::default(),
             returned: Value::null(),
