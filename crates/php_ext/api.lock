@@ -571,6 +571,7 @@ request::Persisted
 request::Pid
 request::Pid::as_raw
 request::PreloadStatistics
+request::Raised
 request::Readiness
 request::RealpathEntry
 request::Receiving
@@ -724,6 +725,7 @@ request::Request::periods_elapsed
 request::Request::persistent_list
 request::Request::phpinfo_as_text
 request::Request::preloading
+request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear

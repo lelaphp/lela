@@ -643,8 +643,12 @@ impl Request {
         self.raised.is_some() || self.bailout
     }
 
-    /// What stands in php's slot, a view, no owner taken.
-    pub(crate) fn raised(&self) -> Option<Raised> {
+    /// What stands in php's slot, `EG(exception)`, a view, no owner
+    /// taken: what an observer's end handler reads where the frame it is
+    /// handed is left by a throwable or an exit, as `observer.c`'s
+    /// `observer_end` names its class.
+    #[must_use]
+    pub fn raised(&self) -> Option<Raised> {
         self.raised
     }
 
@@ -682,9 +686,10 @@ pub(super) enum Saved {
 
 /// What stands in php's `EG(exception)`: a throwable, or one of the two
 /// exits php unwinds as objects of internal classes no `catch` names
-/// and `zend_exception_error` renders nothing for.
+/// and `zend_exception_error` renders nothing for, `UnwindExit` and
+/// `GracefulExit`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Raised {
+pub enum Raised {
     /// A throwable, whose one owner is the slot's.
     Throwable(PhpObject),
     /// `zend_ce_unwind_exit`, what `exit` throws: no `finally` block is
