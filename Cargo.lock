@@ -1300,6 +1300,7 @@ dependencies = [
 name = "php_ext_zlib"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "libz-sys",
  "php_ext",
  "php_ext_standard",
