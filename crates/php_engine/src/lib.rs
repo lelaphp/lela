@@ -45,6 +45,7 @@ mod output;
 mod preload;
 #[cfg(test)]
 mod probe;
+mod process_scope;
 mod rfc1867;
 mod signal;
 mod supplied;
