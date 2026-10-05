@@ -65,7 +65,7 @@ pub use extensions::InfoRow;
 mod frame_reads;
 mod frame_writes;
 pub(crate) use frame_reads::Identity;
-pub use frame_reads::{FrameId, FrameView};
+pub use frame_reads::{ChainFrame, FrameId, FrameView};
 mod frames;
 use frames::{Link, Slots, links_of};
 mod hash_bytes;

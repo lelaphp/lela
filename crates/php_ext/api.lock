@@ -223,6 +223,7 @@ abi::Observed::frame
 abi::Observed::function
 abi::Observed::function_scope
 abi::Observed::suspend_time_limit
+abi::Observed::walk
 abi::ObservedFiber
 abi::ObservedFiber::destroyed
 abi::ObservedFiber::fiber
@@ -493,6 +494,11 @@ request::BuildDefs::system
 request::CacheStatus
 request::CachedFile
 request::Cast
+request::ChainFrame
+request::ChainFrame::filename
+request::ChainFrame::frame
+request::ChainFrame::function
+request::ChainFrame::function_scope
 request::Closer
 request::Closer::close
 request::ConstIdx
@@ -534,6 +540,7 @@ request::FrameView::function_scope
 request::FrameView::id
 request::FrameView::line
 request::FrameView::op_array
+request::FrameView::walk
 request::HandlerCall
 request::HandlerOp
 request::HandlerStatus

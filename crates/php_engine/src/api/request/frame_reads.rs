@@ -25,6 +25,13 @@
 //! more word as none, and the number is given the first time an
 //! extension asks.
 //!
+//! The walk php's `prev_execute_data` makes from a frame is
+//! [`FrameView::walk`] (#2027): every frame of the chain, the user frames
+//! [`FrameView::caller`] steps between and the frames php has where this
+//! engine has none, a native's call, a suspended generator's frame a
+//! resumption runs through, and a fiber's bottom frame, each a
+//! [`ChainFrame`] read as a function and scope or a file.
+//!
 //! [`Observed::frame`]: crate::api::abi::Observed::frame
 
 use std::cell::Cell;
@@ -35,9 +42,9 @@ use php_heap::FrameRef;
 
 use crate::api::call::Function;
 use crate::api::values::ClassId;
-use crate::exec::{self, FrameState, Vm};
+use crate::exec::{self, FrameState, Site, Vm};
 
-use super::{OpArrayView, Request};
+use super::{Link, OpArrayView, Request, Slots, links_of};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
 /// as an extension stores it: read again through [`Request::frame_of`],
@@ -166,7 +173,8 @@ impl<'a> FrameView<'a> {
     /// below this one, on its stack or, below a fiber's first frame, on
     /// the stack that resumed the fiber; none below the request's first.
     /// A frame being popped is passed over, as php has moved
-    /// `EG(current_execute_data)` past it.
+    /// `EG(current_execute_data)` past it. The frames php links between
+    /// two user frames are [`FrameView::walk`]'s.
     #[must_use]
     pub fn caller(&self) -> Option<FrameView<'a>> {
         let mut stack = self.stack;
@@ -190,6 +198,168 @@ impl<'a> FrameView<'a> {
                     at: frame,
                 });
             }
+        }
+    }
+}
+
+impl<'a> FrameView<'a> {
+    /// php's `prev_execute_data` walk from this frame: the frame itself,
+    /// then every frame below it, innermost first, as
+    /// `observer_show_init_backtrace` walks it. Where
+    /// [`FrameView::caller`] steps from user frame to user frame, the
+    /// walk meets every frame php links: a native's call between two
+    /// user frames, the frames of the generators a resumption runs
+    /// through, a delegating generator's below the one it delegates to,
+    /// and below a fiber's first frame the fiber's bottom frame, then
+    /// the stack that resumed it.
+    #[must_use]
+    pub fn walk(&self) -> std::vec::IntoIter<ChainFrame<'a>> {
+        let req = self.req;
+        let mut walk = vec![ChainFrame {
+            req,
+            read: Read::Stack(*self),
+        }];
+        let state = self.state();
+        // The generators the frame's own generator runs through stand
+        // below it, ahead of the calls and frames it was pushed over.
+        if let Some(generator) = state.and_then(|state| state.generator) {
+            walk.extend(
+                req.placeholder_links(generator)
+                    .into_iter()
+                    .map(|link| ChainFrame::of(req, self.stack, self.vm, &link)),
+            );
+        }
+        let calls = state.map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        if let Some((stack, _)) = req.executions().nth(self.stack) {
+            walk.extend(
+                links_of(stack, self.vm, 0..self.at.0 as usize, 0..calls, &|root| {
+                    req.placeholder_links(root)
+                })
+                .into_iter()
+                .map(|link| ChainFrame::of(req, self.stack, self.vm, &link)),
+            );
+        }
+        req.walk_below(self.stack, &mut walk);
+        walk.into_iter()
+    }
+}
+
+/// One frame of php's `prev_execute_data` chain, read while the request
+/// is borrowed ([`FrameView::walk`]): a user frame standing on a stack,
+/// which [`ChainFrame::frame`] reads whole, or a frame php has where this
+/// engine keeps none on a stack: a native's call, a suspended
+/// generator's frame a resumption runs through (php's `execute_fake`
+/// placeholder expanded, `zend_generator_check_placeholder_frame`), an
+/// attribute's dummy frame, and a fiber's bottom frame, whose
+/// `zend_fiber_function` names no function and no file.
+#[derive(Clone, Copy)]
+pub struct ChainFrame<'a> {
+    req: &'a Request,
+    read: Read<'a>,
+}
+
+/// What a [`ChainFrame`] is read off.
+#[derive(Clone, Copy)]
+enum Read<'a> {
+    /// A user frame on a stack.
+    Stack(FrameView<'a>),
+    /// A suspended generator's frame, kept on its object.
+    Kept(&'a FrameState),
+    /// A native's call being served.
+    Native(Function),
+    /// `zend_get_attribute_object`'s dummy frame.
+    Site(&'a Site),
+    /// `fiber->stack_bottom`, below a fiber's first frame.
+    FiberBottom,
+}
+
+impl std::fmt::Debug for ChainFrame<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_tuple("ChainFrame");
+        match &self.read {
+            Read::Stack(view) => debug.field(view),
+            Read::Kept(_) => debug.field(&"kept"),
+            Read::Native(function) => debug.field(function),
+            Read::Site(_) => debug.field(&"site"),
+            Read::FiberBottom => debug.field(&"fiber bottom"),
+        };
+        debug.finish()
+    }
+}
+
+/// `EX(func)->op_array.filename` of the op array a frame's state serves.
+fn file_of(state: &FrameState) -> Option<&[u8]> {
+    exec::body_of(&state.unit, state.body).map(|code| code.filename.0.as_ref())
+}
+
+impl<'a> ChainFrame<'a> {
+    /// The frame `link`, on the stack `stack` counts down the chain.
+    fn of(req: &'a Request, stack: usize, vm: &'a Vm, link: &Link<'a>) -> ChainFrame<'a> {
+        let read = match *link {
+            Link::Frame(Slots::Stack(_, at), _) => Read::Stack(FrameView {
+                req,
+                stack,
+                vm,
+                at: FrameRef(u32::try_from(at).unwrap_or(u32::MAX)),
+            }),
+            Link::Frame(Slots::Kept(_), state) => Read::Kept(state),
+            Link::Call(call) => Read::Native(call.function),
+            Link::Site(site) => Read::Site(site),
+        };
+        ChainFrame { req, read }
+    }
+
+    /// The frame read whole, where it is a user frame standing on a
+    /// stack: its line, its op array and its identity to keep. `None`
+    /// for every other frame of the chain, which no stack holds.
+    #[must_use]
+    pub fn frame(&self) -> Option<FrameView<'a>> {
+        match self.read {
+            Read::Stack(view) => Some(view),
+            Read::Kept(_) | Read::Native(_) | Read::Site(_) | Read::FiberBottom => None,
+        }
+    }
+
+    /// `EX(func)` where it names a function: a user function or method,
+    /// a closure or a native; `None` for an included, evaluated or main
+    /// file's op array, an attribute's dummy frame and a fiber's bottom
+    /// frame, whose `function_name` is `NULL`.
+    #[must_use]
+    pub fn function(&self) -> Option<Function> {
+        match self.read {
+            Read::Stack(view) => view.function(),
+            Read::Kept(state) => state.function,
+            Read::Native(function) => Some(function),
+            Read::Site(_) | Read::FiberBottom => None,
+        }
+    }
+
+    /// `EX(func)->common.scope`: the class a method, native or not, is
+    /// declared in, the one a closure is bound to, and the includer's
+    /// for a file's frame.
+    #[must_use]
+    pub fn function_scope(&self) -> Option<ClassId> {
+        match self.read {
+            Read::Stack(view) => view.function_scope(),
+            Read::Kept(state) => self.req.scope_of(state),
+            Read::Native(function) => self.req.method_class(function),
+            Read::Site(_) | Read::FiberBottom => None,
+        }
+    }
+
+    /// `EX(func)->op_array.filename` where `EX(func)` is user code: the
+    /// file a frame's op array was compiled from, an attribute's site;
+    /// `None` for a native's call and a fiber's bottom frame, which php
+    /// writes as `[no active file]`.
+    #[must_use]
+    pub fn filename(&self) -> Option<&'a [u8]> {
+        match self.read {
+            Read::Stack(view) => view.state().and_then(file_of),
+            Read::Kept(state) => file_of(state),
+            Read::Site(site) => Some(&site.file),
+            Read::Native(_) | Read::FiberBottom => None,
         }
     }
 }
@@ -276,5 +446,62 @@ impl Request {
                 at: FrameRef(u32::try_from(at).ok()?),
             })
         })
+    }
+
+    /// The walk from a native's call to `function` ([`FrameView::walk`]):
+    /// the call, then the frames and calls below it. The native being
+    /// served is the call on top of the running stack; were it not, the
+    /// call is read alone above the whole chain.
+    pub(crate) fn native_walk(&self, function: Function) -> std::vec::IntoIter<ChainFrame<'_>> {
+        let mut walk = vec![ChainFrame {
+            req: self,
+            read: Read::Native(function),
+        }];
+        let vm = &self.vm;
+        let served = vm.calls().len();
+        let (frames, calls) = match vm.serving_call() {
+            Some(call) if call.function == function => {
+                let at = served.saturating_sub(1);
+                // The frames pushed before the call: a frame pushed while
+                // it is served counts it among the calls below.
+                let frames = vm
+                    .frames()
+                    .iter()
+                    .take_while(|state| {
+                        usize::try_from(state.calls_below).is_ok_and(|below| below <= at)
+                    })
+                    .count();
+                (frames, at)
+            }
+            _ => (vm.frames().len(), served),
+        };
+        walk.extend(
+            links_of(&self.stack, vm, 0..frames, 0..calls, &|root| {
+                self.placeholder_links(root)
+            })
+            .into_iter()
+            .map(|link| ChainFrame::of(self, 0, vm, &link)),
+        );
+        self.walk_below(0, &mut walk);
+        walk.into_iter()
+    }
+
+    /// The stacks below the one `from` counts down the chain, each
+    /// under the bottom frame of the fiber it resumed: php links
+    /// `fiber->stack_bottom` to the frame that resumed the fiber.
+    fn walk_below<'a>(&'a self, from: usize, walk: &mut Vec<ChainFrame<'a>>) {
+        for (stack, (on, vm)) in self.executions().enumerate().skip(from.saturating_add(1)) {
+            walk.push(ChainFrame {
+                req: self,
+                read: Read::FiberBottom,
+            });
+            walk.extend(
+                links_of(on, vm, 0..vm.frames().len(), 0..vm.calls().len(), &|root| {
+                    self.placeholder_links(root)
+                })
+                .into_iter()
+                .map(|link| ChainFrame::of(self, stack, vm, &link)),
+            );
+        }
     }
 }
