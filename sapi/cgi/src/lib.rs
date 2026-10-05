@@ -772,7 +772,10 @@ pub fn main() -> ExitCode {
         )
     };
     let status = match &options.ask {
+        // `main` starts php before its second pass answers the usage
+        // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
+            let _ = engine(&options.ini, Origin::Shell);
             let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
             let _ = std::io::stdout()
                 .lock()

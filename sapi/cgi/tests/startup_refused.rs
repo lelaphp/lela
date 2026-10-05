@@ -32,3 +32,17 @@ fn a_refused_start_ends_the_process_before_the_file_is_opened() {
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert_eq!(out.status.code(), Some(254));
 }
+
+/// `-h` is answered after php has started, so the refusal stands in its
+/// place and the usage is never written.
+#[test]
+fn a_refused_start_ends_the_process_before_the_usage() {
+    let out = Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+        .args(["-n", "-d", &format!("ffi.preload={MISSING}"), "-h"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.ends_with("Stack trace:\n#0 {main}\n"), "{stdout}");
+    assert!(!stdout.contains("Usage:"), "{stdout}");
+    assert_eq!(out.status.code(), Some(254));
+}
