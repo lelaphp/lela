@@ -527,13 +527,14 @@ fn a_regimes_args_reach_both_binaries() {
 }
 
 /// The linked compiler has no command line, so a `dump` regime that
-/// carries `args` is refused before anything is dumped, naming the regime
-/// and its arguments, rather than the arguments dropped from the engine's
-/// side alone (#1780: no flag is swallowed silently).
+/// carries an argument it does not take is refused before anything is
+/// dumped, naming the regime and its arguments, rather than the argument
+/// dropped from the engine's side alone (#1780: no flag is swallowed
+/// silently). `-e` it takes, as every host takes it (#1822).
 #[test]
-fn the_linked_compiler_refuses_a_dump_regime_that_carries_args() {
+fn the_linked_compiler_refuses_a_dump_regime_that_carries_args_it_does_not_take() {
     let mut scratch = Scratch::new("linked-args");
-    scratch.dump_with_args(&["-e"]);
+    scratch.dump_with_args(&["-e", "-H"]);
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         ..Ask::default()
@@ -542,7 +543,74 @@ fn the_linked_compiler_refuses_a_dump_regime_that_carries_args() {
         compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap_err();
     let refused = format!("{refused:#}");
     assert!(
-        refused.contains("[regime.dump]") && refused.contains("\"-e\""),
+        refused.contains("[regime.dump]") && refused.contains("\"-H\""),
+        "{refused}"
+    );
+}
+
+/// The program `--regime extended-info` is held to beside the fixture
+/// corpus: a statement of each kind php puts an extended opline before,
+/// at or around (#1822).
+const EXTENDED: &str = "<?php\nfunction f($a) { return $a + 1; }\n\
+    if ($x) { f(1); } elseif ($y) { echo 2; } else { echo 3; }\n\
+    for ($i = 0; $i < 2; $i++) { echo $i; }\ninclude 'x.php';\n\
+    $v = 1 |> f(...);\necho 1, 2;\nunset($a, $b);\n\
+    $o = new ArrayObject([]);\nclass C { public $p; public $q, $r; function m() { return 1; } }\n\
+    enum E { case A; case B; }\n$g = fn($x) => $x;\n";
+
+/// A second regime beside `dump` (#1822): `--regime extended-info`, the
+/// tracked pin's row of php's `-e`, is handed to both sides after `dump`,
+/// so the oracle dumps with extended info and the linked compiler is
+/// built with it as a host's `-e` builds it, and the reading keeps a
+/// scope of its own beside the plain run's. The plain run of the same
+/// corpus is its control: what differs between the two is the regime,
+/// and both are byte-identical.
+#[test]
+fn a_second_regime_holds_the_linked_compiler_under_extended_info() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::of("extended", &["identity.phpt", "plain.php"]);
+    fs::write(scratch.corpus.join("extended.php"), EXTENDED).unwrap();
+    let asked = |regime: Option<&str>| {
+        scratch.ask(
+            &registry(""),
+            &Ask {
+                corpus: Some(scratch.corpus.clone()),
+                regime: regime.map(str::to_owned),
+                ..Ask::default()
+            },
+        )
+    };
+    let extended = asked(Some("extended-info"));
+    assert_eq!(extended.scope, "corpus@regime=extended-info");
+    assert_eq!(extended.status, Status::Pass, "{extended:#?}");
+    assert_eq!(count(&extended, "identical"), 3, "{extended:#?}");
+    let plain = asked(None);
+    assert_eq!(plain.scope, "corpus");
+    assert_eq!(plain.status, Status::Pass, "{plain:#?}");
+    assert_eq!(count(&plain, "identical"), 3, "{plain:#?}");
+}
+
+/// The regime a run names is the pin's: one it does not carry refuses
+/// the run before anything is dumped, naming the flag.
+#[test]
+fn a_regime_the_pin_does_not_carry_refuses_the_run() {
+    let scratch = Scratch::new("unknown-regime");
+    let refused = compile_identity::run(
+        &scratch.root,
+        &scratch.manifest,
+        &registry(""),
+        &Ask {
+            corpus: Some(scratch.corpus.clone()),
+            regime: Some("no-such-regime".to_owned()),
+            ..Ask::default()
+        },
+    )
+    .unwrap_err();
+    let refused = format!("{refused:#}");
+    assert!(
+        refused.contains("--regime no-such-regime") && refused.contains("extended-info"),
         "{refused}"
     );
 }
