@@ -49,9 +49,8 @@ fn run() -> Result<(), String> {
     for path in read {
         println!("cargo::rerun-if-changed={path}");
     }
-    let (version, vernum) = expanded
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("php_zlib_header"))
+    let (version, vernum) = after_marker(&expanded, "php_zlib_header")
+        .as_deref()
         .and_then(macros)
         .ok_or("<zlib.h> defines no string ZLIB_VERSION and integer ZLIB_VERNUM")?;
     let header = format!(
@@ -71,7 +70,10 @@ fn macros(tokens: &str) -> Option<(String, i64)> {
     if version.contains('\\') {
         return None;
     }
-    let number = rest.trim().trim_end_matches(['u', 'U', 'l', 'L']);
+    let number = rest
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(['u', 'U', 'l', 'L']);
     let vernum = match number
         .strip_prefix("0x")
         .or_else(|| number.strip_prefix("0X"))
@@ -80,4 +82,18 @@ fn macros(tokens: &str) -> Option<(String, i64)> {
         None => number.parse().ok()?,
     };
     Some((version.to_owned(), vernum))
+}
+
+/// The tokens the preprocessor wrote after `marker`, the line markers
+/// dropped and the rest joined: GCC breaks a line where a macro from a
+/// system header expands, writing `# 2 "file" 3 4` before the expansion,
+/// where clang keeps it on the marker's line.
+fn after_marker(expanded: &str, marker: &str) -> Option<String> {
+    let joined = expanded
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = joined.rfind(marker)?;
+    Some(joined[at + marker.len()..].trim().to_owned())
 }
