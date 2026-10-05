@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Cache, PostStartup, StartupIni};
-use php_ext::raising::{Level, startup, warning};
+use php_ext::abi::{Cache, Refusal, Start};
+use php_ext::raising::{Level, warning};
 use php_ext::request::Request;
 
 use crate::ffi::{self, Library};
@@ -273,31 +273,35 @@ fn preload_warnings(path: &[u8], fail: &Fail) -> Vec<String> {
 }
 
 /// What preloading made, for every request: the scopes `ffi.preload`
-/// loaded over one arena, the warnings of the header that failed it,
-/// and the cache the opcache preload's `FFI::load` registers its scopes
-/// in.
+/// loaded over one arena, and the cache the opcache preload's
+/// `FFI::load` registers its scopes in.
 pub(crate) struct Preloads {
     types: Arc<Types>,
-    refused: Vec<String>,
     startup: Vec<(Vec<u8>, Arc<Scope>)>,
     registered: Cache<Vec<u8>, Option<(Types, Scope)>>,
 }
 
 /// `zend_ffi_preload(FFI_G(preload))` at startup (`MINIT`): each path of
 /// the list, `:`-separated, a glob where it has a `*`, `?` or `[`, loaded
-/// into its scope, `C` where the header names none; the first that fails
-/// ends the list, and its warnings wait for [`post_startup`].
-pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
+/// into its scope, `C` where the header names none. The first that fails
+/// fails the start, `PHP_MINIT_FUNCTION(ffi)` returning `FAILURE`: its
+/// warnings are raised, then the engine's `Unable to start FFI module`,
+/// and the host ends the process with `php_error_cb`'s `exit(-2)`
+/// (`Z/main/main.c:1505-1507`).
+///
+/// The test `a_failed_preload_refuses_startup` holds a missing file and
+/// a redeclaration to the oracle's bytes.
+pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
     let mut types = Types::default();
     let mut scopes: Vec<(Vec<u8>, Scope)> = Vec::new();
-    let mut refused = Vec::new();
-    let list = ini
+    let list = start
+        .ini()
         .entries
         .iter()
         .find(|(name, _)| name.as_slice() == PRELOAD.as_bytes())
         .and_then(|(_, value)| value.clone())
         .unwrap_or_default();
-    'list: for part in list.split(|b| *b == b':').filter(|part| !part.is_empty()) {
+    for part in list.split(|b| *b == b':').filter(|part| !part.is_empty()) {
         let paths = if part.iter().any(|b| matches!(b, b'*' | b'?' | b'[')) {
             glob(part)
         } else {
@@ -308,8 +312,10 @@ pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
             let loaded = match load_header(&path, &mut types, preload, Some(&scopes)) {
                 Ok(loaded) => loaded,
                 Err(fail) => {
-                    refused = preload_warnings(&path, &fail);
-                    break 'list;
+                    let warnings = preload_warnings(&path, &fail).into_iter();
+                    return Err(warnings.fold(Refusal::new(), |refusal, warning| {
+                        refusal.raise(Level::Warning, warning)
+                    }));
                 }
             };
             let name = loaded.scope_name.unwrap_or_else(|| b"C".to_vec());
@@ -319,34 +325,14 @@ pub(crate) fn engine_state(ini: &StartupIni) -> Preloads {
             merge(&mut scopes, name, loaded.scope);
         }
     }
-    Preloads {
+    Ok(Preloads {
         types: Arc::new(types),
-        refused,
         startup: scopes
             .into_iter()
             .map(|(name, scope)| (name, Arc::new(scope)))
             .collect(),
         registered: Cache::new(1024),
-    }
-}
-
-/// `PHP_MINIT_FUNCTION(ffi)`'s failure, which php raises as it starts:
-/// the warnings of the header `ffi.preload` failed on, then
-/// `zend_startup_module_ex`'s `E_CORE_ERROR`, and nothing served, the
-/// process ending as `zend_error_noreturn` ends it at startup.
-///
-/// The test `a_failed_preload_refuses_startup` holds a missing file and
-/// a redeclaration to the oracle's bytes.
-pub(crate) fn post_startup(req: &mut Request) -> PostStartup {
-    let refused = match req.engine::<Preloads>() {
-        Some(preloads) if !preloads.refused.is_empty() => preloads.refused.clone(),
-        _ => return PostStartup::Serve,
-    };
-    for warning in &refused {
-        startup(req, Level::Warning, warning);
-    }
-    startup(req, Level::CoreError, "Unable to start FFI module");
-    PostStartup::Refuse { status: -2 }
+    })
 }
 
 /// A scope merged into the one of the same name, each name kept where

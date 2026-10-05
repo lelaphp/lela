@@ -1,17 +1,19 @@
 //! The Extension seam's lifecycle as `TestExt` records it (design §4.3,
-//! §7.1; ADR-0005), each property that holds today. Drop order is not
-//! asserted: request state and engine state drop front to back where
-//! ADR-0005 says reverse, and #1788 asserts the reverse as it fixes it.
+//! §7.1; ADR-0005, ADR-0010), each property that holds today: a scope's
+//! states are built in bundle order and dropped in its reverse, on every
+//! request a request state is built for and at engine drop.
 
-use super::test_ext::{Event, Events, Phase, Recording, TestExt};
-use crate::api::abi::Extension;
+use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
+use crate::api::abi::{Extension, PostStartup as Answer};
+use crate::api::request::Request;
 use crate::engine::Engine;
 use crate::test::Capture;
 
 use Event::{Ext, Mark};
 use Phase::{
-    Deactivate, EngineStateBuilt, EngineStateDropped, RequestStateBuilt, RequestStateDropped,
-    ResourceClosed, Rinit, Rshutdown,
+    Deactivate, EngineEnd, EngineStartRefused, EngineStateBuilt, EngineStateDropped, Error,
+    PostDeactivate, PostStartup, ProcessStartRefused, ProcessStateBuilt, ProcessStateDropped,
+    ProcessStateReached, RequestStateBuilt, RequestStateDropped, ResourceClosed, Rinit, Rshutdown,
 };
 
 /// Three recording extensions, in bundle order.
@@ -42,8 +44,10 @@ fn serve(engine: &Engine) {
 /// bundle order; at the end each `rshutdown` in reverse, each
 /// `deactivate` in reverse, then the resources the request left open
 /// closed from the top down (`zend_close_rsrc_list`), which is reverse
-/// again for resources opened in bundle order; each request state
-/// dropped once, after all of it.
+/// again for resources opened in bundle order; then each
+/// `post_deactivate` in reverse, after `shutdown_executor`
+/// (`zend_post_deactivate_modules`); each request state dropped once,
+/// after all of it, in reverse.
 #[test]
 fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_closed_last() {
     let rec = Recording::start();
@@ -51,12 +55,8 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
     rec.mark("built");
     serve(&engine);
     rec.mark("served");
-    let request = rec.events().between("built", "served");
-    let dropped = request.handed_each(&RequestStateDropped);
-    assert_eq!(dropped, [0, 1, 2]);
-    let (handed, last) = request.0.split_at(request.0.len() - dropped.len());
     assert_eq!(
-        handed,
+        rec.events().between("built", "served").0,
         [
             Ext(0, RequestStateBuilt),
             Ext(1, RequestStateBuilt),
@@ -73,19 +73,21 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
             Ext(2, ResourceClosed),
             Ext(1, ResourceClosed),
             Ext(0, ResourceClosed),
+            Ext(2, PostDeactivate),
+            Ext(1, PostDeactivate),
+            Ext(0, PostDeactivate),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
         ]
-    );
-    assert!(
-        last.iter()
-            .all(|e| matches!(e, Ext(_, RequestStateDropped)))
     );
 }
 
 /// Building an engine lays the startup request first, on which php's
 /// `php_module_startup` registers the ini entries: it builds every
-/// request state in bundle order and drops each before any engine state
-/// exists. Then each engine state is built once, in bundle order, and
-/// nothing else is handed to an extension until a request.
+/// request state in bundle order and drops each in reverse before any
+/// engine state exists. Then each engine state is built once, in bundle
+/// order, and nothing else is handed to an extension until a request.
 #[test]
 fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gone() {
     let rec = Recording::start();
@@ -97,16 +99,17 @@ fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gon
         .position(|e| matches!(e, Ext(_, EngineStateBuilt(_))))
         .unwrap_or(events.len());
     let (startup, after) = events.split_at(engine_start);
-    let startup = Events(startup.to_vec());
     assert_eq!(
-        startup.without(&RequestStateDropped).0,
+        startup,
         [
             Ext(0, RequestStateBuilt),
             Ext(1, RequestStateBuilt),
             Ext(2, RequestStateBuilt),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
         ]
     );
-    assert_eq!(startup.handed_each(&RequestStateDropped), [0, 1, 2]);
     assert_eq!(
         after,
         [
@@ -188,12 +191,441 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
         ]
     );
     assert!(events.between("served", "first dropped").0.is_empty());
-    assert_eq!(
-        events.between("first dropped", "clone dropped").0,
-        [Ext(0, EngineStateDropped(0))]
-    );
+    let ended = |engine| {
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(0, EngineEnd(Some(engine))),
+            Ext(0, RequestStateDropped),
+            Ext(0, EngineStateDropped(engine)),
+        ]
+    };
+    assert_eq!(events.between("first dropped", "clone dropped").0, ended(0));
     assert_eq!(
         events.between("clone dropped", "second dropped").0,
-        [Ext(0, EngineStateDropped(1))]
+        ended(1)
     );
+}
+
+/// A refusal from the last extension's `post_startup`, as opcache's
+/// `accel_post_startup` refuses a configuration it cannot start under:
+/// the request laid to ask builds every request state in bundle order,
+/// serves nothing, and drops them in reverse, as a served one does.
+/// The engine's drop then ends no extension, as no host of php's calls
+/// `php_module_shutdown` once `php_module_startup` failed
+/// (`Z/sapi/cli/php_cli.c:1341-1350`); its engine states only drop.
+#[test]
+fn a_refused_request_drops_its_request_state_in_reverse() {
+    fn refuse<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
+        Answer::Refuse { status: 3 }
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .post_startup(refuse::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    rec.mark("refused");
+    assert_eq!((served.stdout.as_slice(), served.exit_code), (&b""[..], 3));
+    assert_eq!(
+        rec.events().between("built", "refused").0,
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(2, RequestStateBuilt),
+            Ext(2, PostStartup),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
+        ]
+    );
+    drop(engine);
+    rec.mark("dropped");
+    assert_eq!(
+        rec.events().between("refused", "dropped").0,
+        [
+            Ext(2, EngineStateDropped(0)),
+            Ext(1, EngineStateDropped(0)),
+            Ext(0, EngineStateDropped(0)),
+        ]
+    );
+}
+
+/// Dropping the last clone of an engine ends it: the shutdown request,
+/// the mirror of the startup one, builds every request state in bundle
+/// order, serves each engine-end function in reverse on them, reaching
+/// the engine's own states, and drops the request states in reverse;
+/// then each engine state drops once, in reverse bundle order, as php's
+/// `zend_destroy_modules` walks the bundle back to front, each
+/// `MSHUTDOWN` before that extension's state goes.
+#[test]
+fn an_engine_ends_on_a_shutdown_request_and_drops_its_engine_state_in_reverse() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder().extensions(&three()).build();
+    serve(&engine);
+    rec.mark("served");
+    drop(engine);
+    rec.mark("dropped");
+    assert_eq!(
+        rec.events().between("served", "dropped").0,
+        [
+            Ext(0, RequestStateBuilt),
+            Ext(1, RequestStateBuilt),
+            Ext(2, RequestStateBuilt),
+            Ext(2, EngineEnd(Some(0))),
+            Ext(1, EngineEnd(Some(0))),
+            Ext(0, EngineEnd(Some(0))),
+            Ext(2, RequestStateDropped),
+            Ext(1, RequestStateDropped),
+            Ext(0, RequestStateDropped),
+            Ext(2, EngineStateDropped(0)),
+            Ext(1, EngineStateDropped(0)),
+            Ext(0, EngineStateDropped(0)),
+        ]
+    );
+}
+
+/// A request-end function that raises a fatal, as an extension's
+/// `RSHUTDOWN` may through `zend_error_noreturn`.
+fn fatal<const N: u8>(req: &mut Request) {
+    record(N, Rshutdown);
+    let _ = crate::api::raising::fatal(req, &format!("raised by {N}"));
+}
+
+/// php serves the request-end functions with nothing executing
+/// (`zend_deactivate_modules` empties `EG(current_execute_data)`), so a
+/// fatal raised in one is rendered at `Unknown` on line zero, with the
+/// trace `zend_fetch_debug_backtrace` takes from no frame, and the
+/// request ends in its status.
+#[test]
+fn a_fatal_in_a_request_end_function_is_raised_where_nothing_is_executing() {
+    let _rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .rshutdown(fatal::<0>)
+            .build("test_ext_0")])
+        .build();
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "ran\nFatal error: raised by 0 in Unknown on line 0\nStack trace:\n#0 {main}\n"
+    );
+    assert_eq!(served.exit_code, 255);
+}
+
+/// Two request-end functions that each raise a fatal: php serves each
+/// in a `zend_try` of its own (`zend_deactivate_modules`,
+/// `Z/Zend/zend_API.c:3441-3448`), so both fatals are rendered, the
+/// first extension's function is still served after them, and every
+/// later phase of the request still runs.
+#[test]
+fn each_request_end_function_is_guarded_on_its_own() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::builder()
+                .rshutdown(fatal::<1>)
+                .build("test_ext_1"),
+            TestExt::<2>::builder()
+                .rshutdown(fatal::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    rec.mark("served");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "ran\nFatal error: raised by 2 in Unknown on line 0\nStack trace:\n#0 {main}\n\
+         \nFatal error: raised by 1 in Unknown on line 0\nStack trace:\n#0 {main}\n"
+    );
+    assert_eq!(served.exit_code, 255);
+    let events = rec.events().between("built", "served");
+    assert_eq!(events.handed(&Rshutdown), [2, 1, 0]);
+    assert_eq!(events.handed(&Deactivate), [2, 1, 0]);
+    assert_eq!(events.handed(&ResourceClosed), [2, 1, 0]);
+    assert_eq!(events.handed(&RequestStateDropped), [2, 1, 0]);
+}
+
+/// The same guard on `deactivate`, which ADR-0010 gives every end
+/// phase: two extensions' `deactivate` each raising a fatal, both
+/// rendered, the first extension's still served, and the resources
+/// still closed after them.
+#[test]
+fn each_deactivate_function_is_guarded_on_its_own() {
+    fn fatal_deactivate<const N: u8>(req: &mut Request) {
+        record(N, Deactivate);
+        let _ = crate::api::raising::fatal(req, &format!("raised by {N}"));
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::builder()
+                .deactivate(fatal_deactivate::<1>)
+                .build("test_ext_1"),
+            TestExt::<2>::builder()
+                .deactivate(fatal_deactivate::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+    rec.mark("served");
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(stdout.contains("Fatal error: raised by 2 in Unknown on line 0"));
+    assert!(stdout.contains("Fatal error: raised by 1 in Unknown on line 0"));
+    let events = rec.events().between("built", "served");
+    assert_eq!(events.handed(&Deactivate), [2, 1, 0]);
+    assert_eq!(events.handed(&ResourceClosed), [2, 1, 0]);
+}
+
+/// However a request ends, its request states drop in reverse: the
+/// request laid to ask `post_startup` when it answers serve, a program
+/// that calls `exit`, and one that ends in a fatal.
+#[test]
+fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
+    fn serve_on<const N: u8>(_: &mut Request) -> Answer {
+        record(N, PostStartup);
+        Answer::Serve
+    }
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .post_startup(serve_on::<2>)
+                .build("test_ext_2"),
+        ])
+        .build();
+    rec.mark("built");
+    let exited = engine.serve_capture("<?php exit(4);", Capture::default());
+    rec.mark("exited");
+    let failed = engine.serve_capture("<?php undefined();", Capture::default());
+    rec.mark("failed");
+    assert_eq!((exited.exit_code, failed.exit_code), (4, 255));
+    let events = rec.events();
+    let asked_and_exited = events.between("built", "exited");
+    assert_eq!(asked_and_exited.handed(&PostStartup), [2]);
+    assert_eq!(
+        asked_and_exited.handed(&RequestStateDropped),
+        [2, 1, 0, 2, 1, 0]
+    );
+    assert_eq!(
+        events
+            .between("exited", "failed")
+            .handed(&RequestStateDropped),
+        [2, 1, 0]
+    );
+}
+
+/// An engine start that refuses, php's `MINIT` returning `FAILURE`
+/// (ADR-0010): the extension before it starts, it is handed its start
+/// with the host's name and refuses, and the one after it never starts,
+/// as `zend_startup_module_ex` ends `zend_startup_modules`. The engine
+/// serves nothing: every request is the refusal, what the start raised
+/// and then php's `Unable to start` fatal as `php -n` writes it, with
+/// the status of php's `exit(-2)`, and no extension is handed a
+/// request's start or end. The request states built are the rendering
+/// request's, which the startup request builds too. The one engine
+/// state built drops with the engine. The `error` link of the extension
+/// that started is told both diagnostics, as php's `php_error_cb` is the
+/// error callback a link saved at `MINIT` while php starts; that the
+/// never-started extension's link is told too is #1953's, so the
+/// sequence is read without the error links.
+#[test]
+fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
+    let rec = Recording::start();
+    rec.mark("start");
+    let engine = Engine::cli_builder()
+        .sapi_name("cli")
+        .extensions(&[
+            TestExt::<0>::extension(),
+            TestExt::<1>::refusing(),
+            TestExt::<2>::extension(),
+        ])
+        .build();
+    rec.mark("built");
+    let refused = "\nWarning: test_ext_1 refuses to start under 'cli' in Unknown on line 0\n\nFatal error: Unable to start test_ext_1 module in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    for _ in 0..2 {
+        let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.exit_code, -2);
+    }
+    rec.mark("served");
+    drop(engine);
+    rec.mark("dropped");
+    let events = rec.events();
+    let requests = |from, to| {
+        events
+            .between(from, to)
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .without(&Error(String::new()))
+            .0
+    };
+    assert_eq!(
+        requests("start", "built"),
+        [Ext(0, EngineStateBuilt(0)), Ext(1, EngineStartRefused)]
+    );
+    assert_eq!(requests("built", "served"), []);
+    let told: Vec<String> = (events.between("built", "served").0.into_iter())
+        .filter_map(|e| match e {
+            Ext(0, Error(message)) => Some(message),
+            _ => None,
+        })
+        .collect();
+    let warning = "test_ext_1 refuses to start under 'cli'";
+    let fatal = "Unable to start test_ext_1 module";
+    assert_eq!(told, [warning, fatal, warning, fatal]);
+    assert_eq!(
+        events.between("served", "dropped").0,
+        [Ext(0, EngineStateDropped(0))]
+    );
+}
+
+/// The process scope (ADR-0010): two engines built one after the other
+/// in one process build the process state once, as the first engine
+/// carrying the extension starts it, in bundle order and before that
+/// extension's engine start, which is handed it; the second engine's
+/// engine start is handed the same one, and no engine's drop drops it,
+/// since no host ends the process scope. Its `N` is this test's alone,
+/// since the tests of this binary share the process.
+#[test]
+fn two_engines_in_one_process_build_the_process_state_once_and_never_drop_it() {
+    let rec = Recording::start();
+    let bundle = || [TestExt::<0>::extension(), TestExt::<100>::with_process()];
+    rec.mark("start");
+    let first = Engine::cli_builder().extensions(&bundle()).build();
+    rec.mark("first built");
+    let second = Engine::cli_builder().extensions(&bundle()).build();
+    rec.mark("second built");
+    serve(&first);
+    serve(&second);
+    drop(first);
+    drop(second);
+    rec.mark("dropped");
+    let events = rec.events();
+    let starts = |from, to| {
+        events
+            .between(from, to)
+            .without(&RequestStateBuilt)
+            .without(&RequestStateDropped)
+            .0
+    };
+    assert_eq!(
+        starts("start", "first built"),
+        [
+            Ext(0, EngineStateBuilt(0)),
+            Ext(100, ProcessStateBuilt),
+            Ext(100, ProcessStateReached(Some(0))),
+            Ext(100, EngineStateBuilt(0)),
+        ]
+    );
+    assert_eq!(
+        starts("first built", "second built"),
+        [
+            Ext(0, EngineStateBuilt(1)),
+            Ext(100, ProcessStateReached(Some(0))),
+            Ext(100, EngineStateBuilt(1)),
+        ]
+    );
+    let after = events.between("second built", "dropped");
+    assert_eq!(
+        after.handed(&EngineStateDropped(0)),
+        [100, 0],
+        "the engines do drop their engine states"
+    );
+    assert!(
+        after
+            .only(&[ProcessStateBuilt, ProcessStateDropped])
+            .0
+            .is_empty()
+    );
+}
+
+/// Two engines built at once on two threads of one process still build
+/// the process state once: the second waits on the first's build and is
+/// handed what it built.
+#[test]
+fn two_engines_built_at_once_build_the_process_state_once() {
+    let rec = Recording::start();
+    std::thread::scope(|threads| {
+        let build = || {
+            Engine::cli_builder()
+                .extensions(&[TestExt::<101>::with_process()])
+                .build()
+        };
+        let one = threads.spawn(build);
+        let other = threads.spawn(build);
+        drop((one.join(), other.join()));
+    });
+    let events = rec.events();
+    assert_eq!(events.handed(&ProcessStateBuilt), [101]);
+    assert_eq!(events.handed(&ProcessStateReached(Some(0))), [101, 101]);
+}
+
+/// A process start that refuses is php's `MINIT` failing on its library
+/// (sodium's `sodium_init()`), which php meets once per process and
+/// answers by ending the process: here the refusal is remembered for
+/// the process, so every later engine carrying the extension is refused
+/// with the same diagnostics, and the process start is not called again.
+/// No later extension starts, in either engine.
+#[test]
+fn a_refused_process_start_is_remembered_for_every_later_engine() {
+    let rec = Recording::start();
+    let bundle = || {
+        [
+            TestExt::<0>::extension(),
+            TestExt::<102>::process_refusing(),
+            TestExt::<2>::extension(),
+        ]
+    };
+    let refused = "\nWarning: test_ext_102 refuses to start its process in Unknown on line 0\n\nFatal error: Unable to start test_ext_102 module in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    rec.mark("start");
+    for _ in 0..2 {
+        let engine = Engine::cli_builder()
+            .sapi_name("cli")
+            .extensions(&bundle())
+            .build();
+        let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
+        assert_eq!(String::from_utf8_lossy(&served.stdout), refused);
+        assert_eq!(served.exit_code, -2);
+    }
+    rec.mark("end");
+    let started = rec.events().between("start", "end").only(&[
+        EngineStateBuilt(0),
+        ProcessStartRefused,
+        ProcessStateBuilt,
+    ]);
+    assert_eq!(
+        started.0,
+        [
+            Ext(0, EngineStateBuilt(0)),
+            Ext(102, ProcessStartRefused),
+            Ext(0, EngineStateBuilt(1)),
+        ]
+    );
+}
+
+/// Two extensions that declare process states of one type are each
+/// started on their own, the process state held by the extension's name
+/// beside its type, and neither is handed the other's start.
+#[test]
+fn two_extensions_with_one_process_state_type_are_each_started() {
+    let rec = Recording::start();
+    let named = |name: &str| TestExt::<103>::with_process_named(name);
+    let _engine = Engine::cli_builder()
+        .extensions(&[named("test_ext_103_a"), named("test_ext_103_b")])
+        .build();
+    let events = rec.events();
+    assert_eq!(events.handed(&ProcessStateBuilt), [103, 103]);
 }

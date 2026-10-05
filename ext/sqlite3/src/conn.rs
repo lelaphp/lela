@@ -4,13 +4,13 @@
 
 use std::collections::BTreeMap;
 
-use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Path, This, Untyped};
+use php_ext::abi::{Callable, Instance, ObjectHandlers, OrFalse, Path, Refusals, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
-use php_ext::request::{Request, Resolve};
+use php_ext::request::{Request, Resolve, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
@@ -261,7 +261,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `php_sqlite3_object_free_storage`: the authorizer and every
     /// function and collation given up, the statements finalized and the
     /// connection closed.
@@ -286,10 +293,6 @@ impl ObjectHandlers for Handlers {
         for handler in handlers {
             handler.release(req);
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `php_sqlite3_get_gc`: the authorizer, the functions and the

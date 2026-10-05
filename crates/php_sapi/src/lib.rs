@@ -34,10 +34,10 @@ use std::process::ExitCode;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
-    FileHandles, HostValue, IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method, Observables,
-    OutputSink, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX,
-    PHP_SYSCONFDIR, PHP_VERSION, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
-    Uncaught, WebRequest,
+    FileHandles, Forked, HostValue, IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method,
+    Observables, OutputSink, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR,
+    PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid, Primary, ProcessTitle, RequestDescription,
+    ResponseHead, Routed, Uncaught, WebRequest, fork,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
@@ -62,11 +62,59 @@ pub mod tier {
 /// engine's INI grammar over its defaults in the order given, and what
 /// that reading wrote for `stderr` written there, as php's `ini_error`
 /// writes it during startup.
+///
+/// An extension whose start refused ends the process here, before the
+/// host does anything of its own, as `php_error_cb` ends it with
+/// `exit(-2)` for the `E_CORE_ERROR` of a failed `MINIT`
+/// (`Z/main/main.c:1505-1507`) in every host alike: what php displays
+/// written past the `php_output` layer to the process's stdout, or to its
+/// stderr under `display_errors=stderr`, and what it logs handed to
+/// `log_message`, the host's `sapi_module.log_message` as it stands
+/// while php starts ([`Engine::refused`]).
 #[must_use]
-pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> Engine {
+pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn(&[u8])) -> Engine {
     let engine = prepare(builder, ini).build();
     let _ = std::io::stderr().lock().write_all(engine.startup_errors());
+    if let Some(status) = engine.refused(&mut Starting(log_message)) {
+        let _ = std::io::stdout().lock().flush();
+        std::process::exit(status);
+    }
     engine
+}
+
+/// Where php writes while it starts, before any request: the body
+/// straight to the process's stdout (`php_output_direct`, which
+/// `php_output_startup` points at `php_output_stdout`), the error stream
+/// to its stderr, no head, and the log through the host's function, each
+/// as it is written.
+struct Starting(fn(&[u8]));
+
+impl OutputSink for Starting {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+        let _ = std::io::stdout().lock().write_all(bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) {
+        let _ = std::io::stdout().lock().flush();
+    }
+
+    fn send_headers(&mut self, _head: &ResponseHead) {}
+
+    fn log(&mut self, entry: &[u8]) {
+        (self.0)(entry);
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        let _ = std::io::stderr().lock().write_all(bytes);
+    }
+
+    /// Each call reaches the process as it is made, so a diagnostic's
+    /// log line and its display stand in the order `php_error_cb` writes
+    /// them.
+    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
+        Some(Box::new(Starting(self.0)))
+    }
 }
 
 /// [`start`]'s builder before it is built: the witness lane's trace and

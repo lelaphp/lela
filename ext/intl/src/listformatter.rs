@@ -1,6 +1,6 @@
 //! `listformatter/`: `IntlListFormatter` over ICU's `ulistfmt_*`.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, This};
+use php_ext::abi::{OrFalse, Refusals, This};
 use php_ext::attr::php_class;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
@@ -27,14 +27,7 @@ impl Carrier for ListFormatterObject {
 }
 
 /// `listformatter_handlers`: `std_object_handlers` with no clone.
-pub(crate) struct Handlers;
-pub(crate) static HANDLERS: Handlers = Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-}
+pub(crate) const HANDLERS: Refusals = Refusals::NONE.cloning();
 
 /// `INTL_MAX_LOCALE_LEN`.
 const MAX_LOCALE_LEN: usize = 156;

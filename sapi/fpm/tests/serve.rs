@@ -100,7 +100,12 @@ fn response(stream: UnixStream, script: &Path) -> Vec<u8> {
 
 /// What request 1 with `pairs` as its parameters writes on
 /// `FCGI_STDOUT`, read off `stream` to its end.
-fn request(mut stream: UnixStream, pairs: &[(&str, &str)]) -> Vec<u8> {
+fn request(stream: UnixStream, pairs: &[(&str, &str)]) -> Vec<u8> {
+    request_within(stream, pairs, Duration::from_secs(10))
+}
+
+/// [`request`], waiting up to `wait` for each read.
+fn request_within(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> Vec<u8> {
     let mut params = Vec::new();
     for &(name, value) in pairs {
         params.push(u8::try_from(name.len()).unwrap());
@@ -113,9 +118,7 @@ fn request(mut stream: UnixStream, pairs: &[(&str, &str)]) -> Vec<u8> {
     out.extend(record(4, &[]));
     out.extend(record(5, &[]));
     stream.write_all(&out).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stream.set_read_timeout(Some(wait)).unwrap();
     let mut body = Vec::new();
     loop {
         let mut header = [0u8; 8];
@@ -175,6 +178,69 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     let _ = std::fs::remove_dir_all(&dir);
     let body = String::from_utf8_lossy(&body);
     assert!(body.ends_with("\r\n\r\nfpm-fcgi 1"), "{body:?}");
+}
+
+/// A child that has served `pm.max_requests` ends its engine on the way
+/// out, as php's child calls `php_module_shutdown`: a `dba_popen`
+/// `cdb_make` file the request left open is finished there, so the next
+/// child's request reads the value, the oracle's php-fpm's bytes for the
+/// same two requests (#1804).
+#[test]
+fn a_child_past_its_max_requests_finishes_a_persistent_cdb_make_file() {
+    let dir = tree("engine-end");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let mut written = std::fs::read_to_string(&path).unwrap();
+    written.push_str("pm.max_requests = 1\n");
+    std::fs::write(&path, written).unwrap();
+    let file = dir.join("t1804.cdb");
+    let writer = dir.join("writer.php");
+    let reader = dir.join("reader.php");
+    std::fs::write(
+        &writer,
+        format!(
+            "<?php $f = '{}'; $d = dba_popen($f, 'n', 'cdb_make'); dba_insert('key0', 'value0', $d); clearstatcache(); echo filesize($f);",
+            file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &reader,
+        format!(
+            "<?php $f = '{}'; clearstatcache(); echo filesize($f), ' '; var_dump(dba_fetch('key0', dba_open($f, 'r', 'cdb')));",
+            file.display()
+        ),
+    )
+    .unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let first = connect(&socket, started)
+        .map(|s| response(s, &writer))
+        .unwrap_or_default();
+    // The next child is the one that answers once the first has gone.
+    let second = connect(&socket, Instant::now())
+        .map(|s| response(s, &reader))
+        .unwrap_or_default();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status();
+    let _ = master.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let first = String::from_utf8_lossy(&first);
+    let second = String::from_utf8_lossy(&second);
+    assert!(first.ends_with("\r\n\r\n2066"), "{first:?}");
+    assert!(
+        second.ends_with("\r\n\r\n2082 string(6) \"value0\"\n"),
+        "{second:?}"
+    );
 }
 
 /// A log line with its time, the pids and a child's lifetime masked: the
@@ -458,3 +524,103 @@ fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
         format!("{head}string(1) \"5\"\nstring(2) \"-1\"\nbool(false)\n")
     );
 }
+
+/// #1807: the fork stress of the engine's execution timer
+/// (`crates/php_engine/src/interrupt.rs`, which the CLI serves), served
+/// by php-fpm's child: eight workers each fork 1875 children straight
+/// after a `set_time_limit()`, and each child arms a timer of its own,
+/// whose thread a child forked beside a thread that held the standard
+/// library's thread table could not start. A forked process of php-fpm's
+/// child that ends its request goes back to the child's loop, as php's
+/// does, so the children and the workers leave by `exec` rather than by
+/// `exit`, so a child's own request end is the CLI's fence to hold, not
+/// this one; a child not gone within five seconds is hung, and killed. The
+/// request itself is untimed, as the CLI's is, since php-fpm's
+/// `max_execution_time` of thirty seconds would count the waits.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn the_fork_stress_passes_under_a_child() {
+    let dir = tree("fork");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let script = dir.join("stress.php");
+    std::fs::write(&script, STRESS).unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let script = script.display().to_string();
+    let pairs = [
+        ("SCRIPT_FILENAME", script.as_str()),
+        ("REQUEST_METHOD", "GET"),
+    ];
+    let body = connect(&socket, started)
+        .map(|s| request_within(s, &pairs, Duration::from_mins(5)))
+        .unwrap_or_default();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status();
+    let _ = master.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.ends_with(
+            "\r\n\r\n0 of 15000 children hung, 0 did not fork or end with status 0\n\
+             0 of 8 workers did not end with status 0\n"
+        ),
+        "{body:?}"
+    );
+}
+
+/// The stress [`the_fork_stress_passes_under_a_child`] serves.
+const STRESS: &str = r#"<?php
+set_time_limit(0);
+$leave = fn () => pcntl_exec('/bin/sh', ['-c', 'exit 0']);
+$tally = [];
+for ($w = 0; $w < 8; $w++) {
+    $tally[$w] = tempnam(sys_get_temp_dir(), 'timer');
+    if (($workers[$w] = pcntl_fork()) !== 0) { continue; }
+    $hung = $otherwise = 0;
+    for ($forked = 0; $forked < 1875; $forked += 25) {
+        $children = [];
+        for ($i = 0; $i < 25; $i++) {
+            set_time_limit(30);
+            $child = pcntl_fork();
+            if ($child === 0) { set_time_limit(30); $leave(); exit(1); }
+            if ($child < 0) { $otherwise++; } else { $children[$child] = true; }
+        }
+        $deadline = microtime(true) + 5;
+        while ($children && microtime(true) < $deadline) {
+            $gone = pcntl_waitpid(-1, $status, WNOHANG);
+            if ($gone <= 0) { usleep(1000); continue; }
+            unset($children[$gone]);
+            if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $otherwise++; }
+        }
+        foreach ($children as $child => $_) {
+            posix_kill($child, SIGKILL);
+            pcntl_waitpid($child, $status);
+            $hung++;
+        }
+    }
+    file_put_contents($tally[$w], "$hung $otherwise");
+    $leave();
+    exit(1);
+}
+$hung = $otherwise = $workers_otherwise = 0;
+foreach ($workers as $w => $worker) {
+    pcntl_waitpid($worker, $status);
+    if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $workers_otherwise++; }
+    [$h, $o] = explode(' ', file_get_contents($tally[$w])) + [0, 0];
+    $hung += (int) $h;
+    $otherwise += (int) $o;
+    unlink($tally[$w]);
+}
+echo "$hung of 15000 children hung, $otherwise did not fork or end with status 0\n";
+echo "$workers_otherwise of 8 workers did not end with status 0\n";
+"#;

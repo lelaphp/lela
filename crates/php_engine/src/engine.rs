@@ -30,8 +30,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    DependencyKind, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify, StartupIni,
-    Validation,
+    DependencyKind, EndFunction, Entry, Extension, IniStage, NativeNew, ObjectHandlers, OnModify,
+    Refusal, Start, StartupIni, States, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::Level;
@@ -40,8 +40,7 @@ use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
-use crate::streams::Standard;
-use crate::supplied::{Keyed, Last, Resolved};
+use crate::supplied::{Keyed, Last, Phase, Resolved};
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -329,6 +328,15 @@ impl Drop for Fds {
     }
 }
 
+/// Which of the host's three standard streams a [`FileHandles`] slot
+/// holds, fd 0, 1 or 2 under php's CLI, as a `php://` path names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standard {
+    Stdin = 0,
+    Stdout = 1,
+    Stderr = 2,
+}
+
 impl FileHandles {
     /// The three over copies of the host's fds, as `dup(2)` makes them,
     /// closed when the last description holding them is dropped.
@@ -602,7 +610,7 @@ pub(crate) struct Shared {
     /// parents declare, which never changes.
     pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
     constants: Vec<ConstDecl>,
-    pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
+    pub(crate) engine_states: States<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
@@ -639,6 +647,10 @@ pub(crate) struct Shared {
     startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
+    /// Where an extension's engine start refused: the host's name and
+    /// the [`Refusal`] with `Unable to start %s module` raised after what
+    /// the extension raised ([`Engine::refused`]).
+    refused: Option<(&'static str, Refusal)>,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -675,10 +687,12 @@ pub(crate) struct Shared {
     /// functions ([`crate::multibyte`]).
     pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
-    /// The persistent pool (design §4.10, #1172): the sockets
-    /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
-    /// php's `EG(persistent_list)`, each lent to one request at a time.
-    pub(crate) persistent: crate::api::abi::Pool<Vec<u8>, crate::streams::persistent::Entry>,
+    /// The persistent pool (design §4.10, #1172), php's
+    /// `EG(persistent_list)`: what the stream layer keeps between
+    /// requests, the sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT`
+    /// open, each lent to one request at a time
+    /// ([`Request::persistent_list`](crate::api::request::Request::persistent_list)).
+    pub(crate) persistent: Arc<crate::api::abi::PersistentList>,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -2329,11 +2343,12 @@ fn at_stub_places(
 }
 
 /// `phar_intercept_functions_init` and opcache's
-/// `zend_accel_override_file_functions` for every extension, in bundle
-/// order: each native an extension intercepts has its entry replaced,
-/// and the entry it replaced goes in front of its row of what this
-/// answers, so a later interception stands over an earlier one, as
-/// opcache's handler is saved over phar's.
+/// `zend_accel_override_file_functions` for every extension, in the
+/// order php installs them ([`Phase`]): each native an extension
+/// intercepts has its entry replaced, and the entry it replaced goes in
+/// front of its row of what this answers, so a later interception
+/// stands over an earlier one, as opcache's handler is saved over
+/// phar's.
 fn intercept(
     functions: &[FunctionDecl],
     entries: &mut [Entry],
@@ -2573,13 +2588,15 @@ impl EngineBuilder {
         extensions.extend(self.additional_extension);
         sort_modules(&mut extensions);
         // Each extension's supplies taken out of it, by its number in
-        // `module_registry`, which numbers Core 0 and the bundle from 1.
-        let mut supplied = Resolved::resolve(
-            extensions
-                .iter_mut()
-                .zip(1u32..)
-                .map(|(e, at)| (ExtensionId(at), std::mem::take(&mut e.supplies))),
-        );
+        // `module_registry`, which numbers Core 0 and the bundle from 1,
+        // and installed by the phase it starts in.
+        let mut supplied = Resolved::resolve(extensions.iter_mut().zip(1u32..).map(|(e, at)| {
+            (
+                ExtensionId(at),
+                Phase::of(e),
+                std::mem::take(&mut e.supplies),
+            )
+        }));
         if !self.cli_shell {
             supplied.shell = Last::default();
         }
@@ -2701,7 +2718,7 @@ impl EngineBuilder {
                 parents,
                 placed,
                 constants,
-                engine_states: Vec::new(),
+                engine_states: States::new(),
                 ini,
                 constant_values,
                 sapi_names,
@@ -2712,6 +2729,7 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
+                refused: None,
                 configuration: configuration.table,
                 sections: configuration.sections,
                 ini_files,
@@ -2723,15 +2741,17 @@ impl EngineBuilder {
                 locked,
                 script_encodings: Vec::new(),
                 units,
-                persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
+                persistent: Arc::new(crate::api::abi::Pool::new(PERSISTENT_ENTRIES)),
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
             }),
+            end: Arc::default(),
         };
         engine.register_ini(held, &configuration.loads, self.sapi_name);
+        engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
 }
@@ -3012,6 +3032,24 @@ fn sort_modules(modules: &mut [Extension]) {
     }
 }
 
+/// One extension's `MINIT` (ADR-0010): its process start, called once
+/// for the process and its outcome kept ([`crate::process_scope`]), its
+/// process state then handed to `start` for this engine start and every
+/// later one, and its engine start, whose state joins `states`.
+fn start_module(
+    extension: &Extension,
+    start: &mut Start,
+    states: &mut States<Box<dyn Any + Send + Sync>>,
+) -> Result<(), Refusal> {
+    if let Some(process) = crate::process_scope::reach(extension).map_err(Refusal::clone)? {
+        start.process.push(process);
+    }
+    if let Some(build) = &extension.engine_state {
+        states.push(build(start)?);
+    }
+    Ok(())
+}
+
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
 fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
     extensions.iter().find_map(|e| {
@@ -3023,10 +3061,69 @@ fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
-/// by every request thread.
+/// by every request thread. The drop of its last clone ends it
+/// ([`EngineEnd`]).
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) shared: Arc<Shared>,
+    /// Held by every clone, so its drop is the last clone's.
+    end: Arc<EngineEnd>,
+}
+
+/// The engine end (ADR-0010): php's `php_module_shutdown` as far as an
+/// extension sees it, served once, from the drop of the engine's last
+/// clone, so no host can forget it and a forked child that drops its
+/// engine ends it too, as php's `php_module_shutdown` runs in each
+/// php-fpm child: there the engine the child serves on, which the host
+/// builds for its pool, while the master's copy the fork made is the
+/// master's to end. Armed once the engine has started; an engine whose
+/// start was refused is not ended.
+#[derive(Default)]
+struct EngineEnd(OnceLock<(Arc<Shared>, &'static str)>);
+
+impl EngineEnd {
+    /// From here the drop of the engine's last clone ends `shared`, on a
+    /// request under the host's name `sapi_name`.
+    fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
+        let _ = self.0.set((Arc::clone(shared), sapi_name));
+    }
+}
+
+impl Drop for EngineEnd {
+    /// `php_module_shutdown`'s `zend_shutdown` (`Z/Zend/zend.c:1162-1170`):
+    /// the engine's own persistent sockets closed first, as
+    /// `EG(persistent_list)` is destroyed first; then the shutdown
+    /// request, the mirror of the startup request: request states built
+    /// in bundle order, each extension's engine-end function in reverse
+    /// ([`end_phase`]), the request dropped with its states in reverse;
+    /// and then, with the last owner of what every request shares, the
+    /// engine states in reverse (`zend_destroy_modules`). What the
+    /// request writes reaches no host. A start an extension refused, or
+    /// the extensions' post-startup refused, ends nothing: a failed
+    /// `MINIT` ends php's process from `php_error_cb` (`exit(-2)`), and no
+    /// host of php's calls `php_module_shutdown` once
+    /// `php_module_startup` failed.
+    fn drop(&mut self) {
+        let Some((shared, sapi_name)) = self.0.take() else {
+            return;
+        };
+        if shared.refused.is_some()
+            || matches!(
+                shared.started.get(),
+                Some(crate::preload::Started::Refused(_))
+            )
+        {
+            return;
+        }
+        drop(shared.persistent.drain());
+        let description = RequestDescription {
+            sapi_name: sapi_name.to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&shared), description);
+        req.enter_phase(crate::api::request::Phase::EngineEnd);
+        end_phase(&shared.extensions, &mut req, |e| e.engine_end);
+    }
 }
 
 impl Engine {
@@ -3119,12 +3216,12 @@ impl Engine {
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         loads: &Loads,
-        sapi_name: &str,
+        sapi_name: &'static str,
     ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
         // a process builds sets it and every later one finds it set.
-        php_heap::reset_lc_ctype_locale();
+        php_process::reset_lc_ctype_locale();
         // `zend_register_ini_entries_ex` walks each module's entries in
         // its `PHP_INI_BEGIN()` order, the modules in startup order, and
         // finds the host's value for each: the handlers meet the values
@@ -3148,7 +3245,14 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         let failed = register_extensions(&mut req, loads);
+        // Where each extension's handlers start raising, by its place in
+        // the bundle: a refused start shows what php raised before it,
+        // which is nothing of a later extension's (`Engine::refused`).
+        let mut marks = Vec::new();
         for (name, value, activate) in held {
+            let owner = (self.shared.extensions.iter())
+                .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
+            marks.push((owner.unwrap_or(usize::MAX), req.startup_raised_len()));
             req.set_ini_stage(if activate {
                 IniStage::Activate
             } else {
@@ -3162,10 +3266,13 @@ impl Engine {
             }
         }
         req.set_ini_stage(IniStage::Startup);
+        let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
         if taken_encoding == crate::multibyte::Startup::Refused {
             taken.push((b"zend.script_encoding".to_vec(), None));
         }
+        // What php raises after `zend_startup_modules` follows.
+        let modules_end = req.startup_raised_len();
         disable_warnings(&mut req);
         startup_directives(&mut req, &self.shared);
         let raised = req.end_startup();
@@ -3184,19 +3291,67 @@ impl Engine {
             shared.ini.retain(|(n, _)| *n != name);
             shared.ini.push((name, value));
         }
-        shared.startup_raised = raised;
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
-        let startup = StartupIni {
-            entries: shared.ini.clone(),
+        let mut start = Start {
+            ini: StartupIni {
+                entries: shared.ini.clone(),
+            },
+            host: sapi_name,
+            process: Vec::new(),
         };
-        shared.engine_states = shared
-            .extensions
-            .iter()
-            .filter_map(|e| e.engine_state.as_ref())
-            .map(|build| build(&startup))
-            .collect();
+        // `zend_startup_modules`: each `MINIT` in bundle order, its process
+        // start (once for the process, ADR-0010) and then its engine
+        // start, and the first that fails ends the startup
+        // (`zend_startup_module_ex`).
+        for (at, extension) in shared.extensions.iter().enumerate() {
+            let Err(refusal) = start_module(extension, &mut start, &mut shared.engine_states)
+            else {
+                continue;
+            };
+            let cut = marks
+                .iter()
+                .find(|(owner, _)| *owner > at)
+                .map_or(encoding_at, |(_, len)| *len);
+            let before = raised.get(..cut).into_iter().flatten();
+            let encoding = raised.get(encoding_at..modules_end).into_iter().flatten();
+            let mut shown = Refusal::new();
+            shown.raised = before.chain(encoding).cloned().collect();
+            shown.raised.extend(refusal.raised);
+            let failed = format!("Unable to start {} module", extension.name);
+            shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
+            break;
+        }
+        shared.startup_raised = raised;
+    }
+
+    /// Where an extension's engine start refused ([`Refusal`]): what php
+    /// displays as its `MINIT` fails, written to `sink` as `php_error_cb`
+    /// writes a startup error, past the `php_output` layer and under the
+    /// startup ini's `display_errors`, `html_errors` and `log_errors`;
+    /// then the status php ends the process with, the `-2` of its
+    /// `exit(-2)` (`Z/main/main.c:1505-1507`), the same in every host.
+    /// What php raised before the failed start comes first: the host's
+    /// values the handlers of the extensions up to it met, never a later
+    /// extension's nor what php raises after `zend_startup_modules`.
+    /// `None` for an engine that started. Every request a refused engine
+    /// is asked for is refused so.
+    pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
+        let (host, refused) = self.shared.refused.as_ref()?;
+        let description = RequestDescription {
+            sapi_name: (*host).to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&self.shared), description);
+        if let Some(held) = sink.held() {
+            req.hold(held);
+        }
+        for (level, message) in &refused.raised {
+            req.note_startup_error(*level, message);
+        }
+        crate::preload::hand_over(&mut req, sink);
+        Some(-2)
     }
 
     /// What php writes to the process's `stderr` while it starts up and
@@ -3609,6 +3764,14 @@ impl Engine {
         sink: &mut dyn OutputSink,
         traced: bool,
     ) -> Result<Request, Observables> {
+        // php never reaches `zend_post_startup` past a failed `MINIT`.
+        if let Some(status) = self.refused(sink) {
+            return Err(Observables {
+                exit_code: status,
+                headers_sent: true,
+                ..Observables::default()
+            });
+        }
         if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
             return Err(Observables {
                 exit_code: status,
@@ -3675,7 +3838,7 @@ impl Engine {
         if !web {
             let _ = req.arm(php_unit::AutoGlobal::Server);
         }
-        let _ = req.register_file_handles();
+        let _ = req.register_file_handles(false);
         req.enter_phase(crate::api::request::Phase::Running);
         Ok(req)
     }
@@ -3896,12 +4059,7 @@ impl Engine {
         req: &mut Request,
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(rshutdown) = extension.rshutdown {
-                rshutdown(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.rshutdown);
         crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
@@ -3909,14 +4067,8 @@ impl Engine {
         req.destroy_uploaded_files();
         // `zend_deactivate` reaches `shutdown_executor`: each extension's
         // `deactivate`, in reverse, before the resources are closed.
-        for extension in self.shared.extensions.iter().rev() {
-            if let Some(deactivate) = extension.deactivate {
-                deactivate(req);
-            }
-        }
-        req.catch_bailout();
+        end_phase(&self.shared.extensions, req, |e| e.deactivate);
         req.close_resources();
-        req.return_persistent();
         req.free_user_handlers();
         req.destroy_symbol_table();
         req.destroy_static_vars();
@@ -3928,6 +4080,10 @@ impl Engine {
         req.ini_deactivate();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
+        // `zend_post_deactivate_modules`, after the executor is shut
+        // down and the request globals freed (`Z/main/main.c:2026-2029`),
+        // and before the host's deactivation hands over what is left.
+        end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
@@ -3979,6 +4135,23 @@ impl Engine {
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
         self.transaction(description, sink, Work::Serve, true)
+    }
+}
+
+/// One end phase of the extensions' (ADR-0010): `hook` of each that
+/// declared one, in reverse bundle order, each in a `zend_try` of its
+/// own, as `zend_deactivate_modules` serves each extension's `RSHUTDOWN`
+/// (`Z/Zend/zend_API.c:3441-3448`). A fatal one raises is rendered and
+/// ends that function only; the next is still served, and a fatal it
+/// raises is rendered too.
+fn end_phase(
+    extensions: &[Extension],
+    req: &mut Request,
+    hook: fn(&Extension) -> Option<EndFunction>,
+) {
+    for serve in extensions.iter().rev().filter_map(hook) {
+        serve(req);
+        req.catch_bailout();
     }
 }
 
@@ -4322,44 +4495,12 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     !exited && !req.bailing_out() && req.ending().is_none()
 }
 
-/// The extensions of the pinned build in the order `internal_functions.c`
-/// starts them, what its `php -n` answers `get_loaded_extensions()` in
-/// past `Core`: the order php's `MINIT`s register their stream wrappers
-/// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The engine starts the
-/// bundle's order as [`sort_modules`] leaves it, which is not the pinned
-/// build's (`openssl` after `standard`, `random` near the front), so the
-/// tables are put in this order after the extensions start
-/// ([`serve_rinits`]).
-#[rustfmt::skip]
-const MODULE_STARTUP: [&str; 65] = [
-    "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
-    "curl", "dba", "uri", "json", "mbstring", "SPL", "FFI", "fileinfo", "filter", "ftp", "gd",
-    "gettext", "gmp", "hash", "iconv", "intl", "session", "ldap", "standard", "libxml", "mysqlnd",
-    "mysqli", "odbc", "Zend OPcache", "pcntl", "PDO", "pdo_dblib", "pdo_mysql", "PDO_ODBC",
-    "pdo_pgsql", "pdo_sqlite", "pgsql", "Phar", "posix", "random", "readline", "Reflection",
-    "exif", "shmop", "SimpleXML", "snmp", "soap", "sockets", "sodium", "sysvmsg", "sysvsem",
-    "sysvshm", "tidy", "tokenizer", "dom", "xml", "xmlreader", "xmlwriter", "xsl", "zip",
-];
-
-/// Where php starts the extension `name`, [`MODULE_STARTUP`]'s place
-/// for it, the names compared without regard to case as php compares
-/// them; one php does not build starts after every one it does.
-fn startup_rank(name: &str) -> usize {
-    MODULE_STARTUP
-        .iter()
-        .position(|started| started.eq_ignore_ascii_case(name))
-        .unwrap_or(MODULE_STARTUP.len())
-}
-
-/// Each extension's `rinit` in startup order, with the stream wrappers
-/// and filters each registers placed in php's startup order
-/// ([`MODULE_STARTUP`]): every extension registers into empty tables,
-/// its rows are gathered under its rank, and the tables are the rows
-/// stably sorted by rank, the engine's own wrappers ahead until the
-/// extension that registers them places them. A registration made once
-/// the program runs goes on at the end, as php's does. The pinned build
-/// has `zip`, which the bundle has not:
+/// Each extension's `rinit` in startup order, `zend_activate_modules`,
+/// with the extension being activated named to what it registers
+/// ([`Request::activating`](crate::api::request::Request::activating)),
+/// so the stream layer places the wrappers and filters each registers in
+/// php's startup order. The pinned build has `zip`, which the bundle has
+/// not:
 ///
 /// ```php
 /// echo implode(',', array_diff(stream_get_wrappers(), ['zip'])), "\n", implode(',', stream_get_filters()), "\n";
@@ -4369,34 +4510,14 @@ fn startup_rank(name: &str) -> usize {
 /// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) {
-    let mut wrappers: Vec<(usize, crate::streams::Registered)> =
-        std::mem::take(&mut req.url_stream_wrappers)
-            .into_iter()
-            .map(|row| (0, row))
-            .collect();
-    let mut filters = Vec::new();
-    for extension in extensions {
+    for (at, extension) in extensions.iter().enumerate() {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        let rank = startup_rank(&extension.name) + 1;
+        req.activating = u32::try_from(at).ok().map(crate::api::request::ExtensionId);
         let _ = rinit(req);
-        for row in std::mem::take(&mut req.url_stream_wrappers) {
-            // A wrapper the engine keeps is placed by the extension that
-            // registers it, as `register_engine_wrapper` moves its row.
-            wrappers.retain(|(_, held)| held.scheme != row.scheme);
-            wrappers.push((rank, row));
-        }
-        filters.extend(
-            std::mem::take(&mut req.filters)
-                .into_iter()
-                .map(|row| (rank, row)),
-        );
     }
-    wrappers.sort_by_key(|(rank, _)| *rank);
-    filters.sort_by_key(|(rank, _)| *rank);
-    req.url_stream_wrappers = wrappers.into_iter().map(|(_, row)| row).collect();
-    req.filters = filters.into_iter().map(|(_, row)| row).collect();
+    req.activating = None;
 }
 
 #[cfg(test)]
@@ -4691,7 +4812,7 @@ mod tests {
     }
 
     /// Two extensions that intercept one native stack in bundle order,
-    /// as opcache's `file_exists` is saved over phar's: the later serves
+    /// each at its `MINIT`: the later serves
     /// first and passes through to the earlier, the earlier to the
     /// native, and each hands on the call's own arguments.
     #[test]

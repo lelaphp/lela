@@ -94,8 +94,8 @@ impl Binary {
         built(&self.cgi, &self.root, CGI)
     }
 
-    /// `snippet` served by the binary under the recipe, and `regime`'s ini
-    /// after it where the fence names one, as the oracle serves it; with
+    /// `snippet` served by the binary under the recipe, and `regime`'s
+    /// arguments and ini after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
     pub(crate) fn serve(

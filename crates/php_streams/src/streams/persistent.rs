@@ -16,11 +16,17 @@
 //!
 //! [`Pool`]: crate::api::abi::Pool
 
+use std::sync::Arc;
+
+use crate::api::abi::PersistentList;
+
 use super::sockets::Socket;
 use super::{PhpStream, Request, Stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, StreamOption};
 use crate::api::values::Resource;
+use crate::state::Layer;
+use crate::streams::StreamLayer;
 
 /// One entry of the persistent list as the request holds it, under its
 /// key: in the resource the request reaches it by, or idle, its resource
@@ -46,7 +52,15 @@ pub(crate) struct Entry {
     orig_path: Option<Box<[u8]>>,
 }
 
-impl Request {
+pub(crate) trait Persistent {
+    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Stream, Thrown>;
+    fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream);
+    fn drop_persistent(&mut self, res: Resource);
+    fn persistent_pool(&mut self) -> Arc<PersistentList>;
+}
+
+impl Persistent for Request {
     /// `php_stream_from_persistent_id` and the liveness check
     /// `php_stream_xport_create` makes of what it found (`transports.c:75-93`):
     /// the stream the request holds under `key`, its resource answered with
@@ -75,20 +89,28 @@ impl Request {
     /// string(17) "persistent stream"
     /// bool(true)
     /// ```
-    pub(crate) fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Stream>, Thrown> {
-        let stream = if let Some(at) = self.persistent.iter().position(|held| held.key == key) {
-            let Held { key, state } = self.persistent.remove(at);
+    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Stream>, Thrown> {
+        let stream = if let Some(at) = self
+            .streams()
+            .persistent
+            .iter()
+            .position(|held| held.key == key)
+        {
+            let Held { key, state } = self.streams().persistent.remove(at);
             match state {
                 State::InResource(res) => {
                     let state = State::InResource(res);
-                    self.persistent.insert(at, Held { key, state });
+                    self.streams().persistent.insert(at, Held { key, state });
                     self.addref(&res.as_value());
                     Stream::of(res)
                 }
                 State::Idle(entry) => self.lend(key, entry)?,
             }
         } else if let Some(entry) = self.persistent_pool().take(&key.to_vec()) {
-            self.lend(key.to_vec(), entry)?
+            let Ok(entry) = entry.downcast::<Entry>() else {
+                return Ok(None);
+            };
+            self.lend(key.to_vec(), *entry)?
         } else {
             return Ok(None);
         };
@@ -128,7 +150,8 @@ impl Request {
         stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
         stream.flags.no_seek = true;
         let stream = self.stream_alloc_as(stream, true)?;
-        self.persistent.push(Held {
+        self.persistent_pool();
+        self.streams().persistent.push(Held {
             key,
             state: State::InResource(stream.resource()),
         });
@@ -138,8 +161,9 @@ impl Request {
     /// A stream `php_stream_xport_create` has just opened under `key`,
     /// now held as the request's: its resource's type is `persistent
     /// stream`, which [`Request::stream_alloc_as`] gave it.
-    pub(crate) fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream) {
-        self.persistent.push(Held {
+    fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream) {
+        self.persistent_pool();
+        self.streams().persistent.push(Held {
             key,
             state: State::InResource(stream.resource()),
         });
@@ -148,24 +172,38 @@ impl Request {
     /// `_php_stream_free`'s `PHP_STREAM_FREE_PERSISTENT` arm, what
     /// `fclose` reaches for a persistent stream: the entry the resource
     /// held dropped, its socket closed already.
-    pub(crate) fn drop_persistent(&mut self, res: Resource) {
-        self.persistent
+    fn drop_persistent(&mut self, res: Resource) {
+        self.streams()
+            .persistent
             .retain(|held| !matches!(held.state, State::InResource(r) if r == res));
     }
 
-    /// `PHP_RSHUTDOWN_FUNCTION(streams)` and the request's end
-    /// (`forget_persistent_resource_id_numbers`, `streams.c:68-101`): every
-    /// entry the request still holds given back to the engine's pool,
-    /// its resource and its `stream->ctx` forgotten. Served after the
-    /// resources are closed, when every entry is idle.
-    pub(crate) fn return_persistent(&mut self) {
-        for held in std::mem::take(&mut self.persistent) {
-            if let State::Idle(mut entry) = held.state {
-                entry.socket.forget_request();
-                // An entry past the pool's bound is closed here, outside
-                // the lock.
-                drop(self.persistent_pool().give(held.key, entry));
-            }
+    /// The engine's pool, `EG(persistent_list)`, kept in the request's
+    /// state once asked for, so the entries held go back to it as the
+    /// request is dropped ([`give_back`]).
+    fn persistent_pool(&mut self) -> Arc<PersistentList> {
+        if let Some(pool) = &self.streams().pool {
+            return Arc::clone(pool);
+        }
+        let pool = self.persistent_list();
+        self.streams().pool = Some(Arc::clone(&pool));
+        pool
+    }
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(streams)` and the request's end
+/// (`forget_persistent_resource_id_numbers`, `streams.c:68-101`): every
+/// entry the request still holds given back to the engine's pool, its
+/// resource and its `stream->ctx` forgotten. Served as the request's
+/// stream state is dropped, after the resources are closed, when every
+/// entry is idle.
+pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
+    for held in held {
+        if let State::Idle(mut entry) = held.state {
+            entry.socket.forget_request();
+            // An entry past the pool's bound is closed here, outside the
+            // lock.
+            drop(pool.give_back(held.key, Box::new(entry)));
         }
     }
 }
@@ -175,8 +213,8 @@ impl Request {
 /// last owner let go, or which the request's shutdown closed, leaves its
 /// socket open and held idle under its key.
 pub(crate) fn dtor(req: &mut Request, r: Resource) {
-    let Some(mut stream) = req
-        .resource_native_mut::<Option<PhpStream>>(r.heap())
+    let Some(mut stream) = r
+        .native_mut::<Option<PhpStream>>(req)
         .and_then(Option::take)
     else {
         return;
@@ -190,6 +228,7 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
             .map(|path| path.into_persistent(req)),
     });
     let Some(at) = req
+        .streams()
         .persistent
         .iter()
         .position(|held| matches!(held.state, State::InResource(res) if res == r))
@@ -197,10 +236,10 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
         return;
     };
     match entry {
-        Some(entry) => req.persistent[at].state = State::Idle(entry),
+        Some(entry) => req.streams().persistent[at].state = State::Idle(entry),
         None => {
-            req.persistent.remove(at);
+            req.streams().persistent.remove(at);
         }
     }
-    req.pclose_ret = stream.release(req);
+    req.streams().pclose_ret = stream.release(req);
 }

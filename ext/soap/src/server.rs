@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::{Instance, ObjectHandlers, Std, This, Untyped, Variadic};
+use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, to_string, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
-use php_ext::request::{OutputOp, Request, StartHandler};
+use php_ext::request::{OutputOp, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
@@ -136,7 +136,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let service = object
             .native_mut::<Server>(req)
@@ -145,10 +152,6 @@ impl ObjectHandlers for Handlers {
             service.release(req);
         }
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
     }
 }
 

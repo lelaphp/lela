@@ -26,7 +26,7 @@ use crate::cli::{Format, Section};
 use crate::crosscheck;
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
-use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
+use crate::manifest::{Manifest, Measure, SCRIPTS, Seam, Week};
 use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
@@ -144,6 +144,7 @@ pub fn render(
         }
         Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
+        Section::Modules => return modules(manifest, &readings, format),
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
@@ -1290,6 +1291,80 @@ fn bundle(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
             )
         })
         .collect()
+}
+
+/// The `modules` section (#1795): each item lock's lines counted by the
+/// module that defines them, from the `groups` of the seam's latest
+/// api-check reading, a seam in the manifest's order and its modules the
+/// widest first, each with its share of the lock and the commit the
+/// reading was taken at, so a count cited before and after a move says
+/// which tree it is of. A seam whose reading keeps no groups, one taken
+/// before api-check counted them or a sectioned lock's, has no row.
+fn modules(manifest: &Manifest, readings: &[Reading], format: Table) -> Result<String> {
+    let latest: Vec<(&Seam, Reading)> = manifest
+        .seams
+        .iter()
+        .filter_map(|seam| {
+            Some((
+                seam,
+                latest_of(readings, api_check::INSTRUMENT, &seam.name)?,
+            ))
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for (seam, reading) in &latest {
+        let total: u64 = reading.groups.values().map(|n| every::whole(*n)).sum();
+        let first = rows.len();
+        for (module, n) in &reading.groups {
+            let items = every::whole(*n);
+            #[allow(clippy::cast_precision_loss)]
+            let share = items as f64 / total as f64;
+            rows.push(ModuleRow {
+                seam: &seam.name,
+                lock: &seam.lock,
+                module,
+                items,
+                share,
+                commit: &reading.commit,
+                at: reading.at.to_string(),
+            });
+        }
+        rows[first..].sort_by(|a, b| b.items.cmp(&a.items).then_with(|| a.module.cmp(b.module)));
+    }
+    Ok(match format {
+        Table::Json => serde_json::to_string_pretty(&rows)?,
+        Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
+        Table::Md => {
+            let mut out =
+                String::from("| seam | module | items | share | commit |\n|---|---|---|---|---|\n");
+            for row in &rows {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {:.1}% | {} |",
+                    cell(row.seam),
+                    cell(row.module),
+                    row.items,
+                    row.share * 100.0,
+                    short(row.commit),
+                );
+            }
+            out
+        }
+    })
+}
+
+/// One row of the `modules` section: a module's lines in one seam's lock,
+/// and the reading that counted them.
+#[derive(Debug, serde::Serialize)]
+struct ModuleRow<'a> {
+    seam: &'a str,
+    lock: &'a str,
+    module: &'a str,
+    items: u64,
+    /// Of the lock's lines, the fraction this module defines.
+    share: f64,
+    commit: &'a str,
+    at: String,
 }
 
 /// The paths of the working tree's status the `git` section prints below

@@ -60,12 +60,12 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg, This};
+use php_ext::abi::{Instance, OrFalse, Path as PathArg, Refusals, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Request, Resolve, Stream, Whence};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::request::{Request, Resolve, Stream, Streams, Whence};
+use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
 use crate::streamsfuncs::{NullContext, context_of};
@@ -193,7 +193,7 @@ pub(crate) mod constants {
 #[php_class(
     final,
     not_serializable,
-    handlers = DirectoryHandlers,
+    handlers = DIRECTORY,
     dynamic_properties = forbidden
 )]
 pub(crate) struct Directory;
@@ -242,34 +242,10 @@ impl Directory {
 /// `dir_class_object_handlers` (`Z/ext/standard/dir.c:88-96`):
 /// `std_object_handlers` with `get_constructor` refusing, `clone_obj`
 /// php's null slot, and `compare` `zend_objects_not_comparable`.
-struct DirectoryHandlers;
-
-impl ObjectHandlers for DirectoryHandlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<php_ext::call::Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct Directory, use dir() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        _req: &mut Request,
-        _left: &Value,
-        _right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        Ok(None)
-    }
-}
+const DIRECTORY: Refusals = Refusals::NONE
+    .construction(Some("dir()"))
+    .cloning()
+    .comparison();
 
 /// `dir(string $directory, $context = null): Directory|false`,
 /// `_php_do_opendir` with `createobject` (`Z/ext/standard/dir.c:105`):
@@ -418,6 +394,7 @@ fn chdir(req: &mut Request, directory: PathArg) -> Result<bool, Thrown> {
     match target {
         Ok(_) => {
             req.set_cwd(&guarded)?;
+            req.forget_relative_stats();
             Ok(true)
         }
         Err(error) => {

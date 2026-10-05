@@ -1,0 +1,12 @@
+[package]
+name = "php_ext_standard"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+php_ext_random = { path = "../random" }
+
+# A dev-dependency is linked into the crate's tests alone, so the bundle's
+# standard feature need not switch session on.
+[dev-dependencies]
+php_ext_session = { path = "../session" }

@@ -43,7 +43,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use ffi::{Raised, Route, sys};
 pub use mime_sniff::sniff_charset_from_stream;
 
-/// Request-scoped: built at request start, dropped after `rshutdown`,
+/// Request-scoped: built at request start, dropped after `post_deactivate`,
 /// private to this crate (ADR-0005); nothing in it is shared or
 /// synchronised. php's `zend_libxml_globals`.
 #[derive(Default)]
@@ -80,8 +80,6 @@ struct State {
 /// )
 /// ```
 pub fn extension() -> Extension {
-    ffi::Library::init();
-    ffi::Library::install_loader();
     ExtensionBuilder::default()
         .functions(vec![
             libxml_set_streams_context::declared(),
@@ -102,10 +100,29 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .register(image_svg::SVG)
+        .process_state(|| Ok(initialize()))
         .request_state::<State>()
         .rshutdown(rshutdown)
+        .post_deactivate(post_deactivate)
         .info(libxml_info)
         .build("libxml")
+}
+
+/// The process scope's proof that libxml2 is started (ADR-0010): built
+/// once per process, never ended, as php never calls `xmlCleanupParser`.
+struct Initialized;
+
+/// `php_libxml_initialize` (`Z/ext/libxml/libxml.c:934-958`), which
+/// php's `MINIT` runs once per process: `xmlInitParser` and, as php's
+/// threaded build does, the schema type tables, then php's external
+/// entity loader set over the library's default, for every parse of the
+/// process. Its table of exports is `ExtensionBuilder::register`'s. It
+/// cannot fail.
+fn initialize() -> Initialized {
+    ffi::Library::init();
+    ffi::Library::init_types();
+    ffi::Library::install_loader();
+    Initialized
 }
 
 /// `PHP_MINFO_FUNCTION(libxml)`.
@@ -131,21 +148,31 @@ fn libxml_info(req: &mut Request) {
     ]);
 }
 
-/// `PHP_RSHUTDOWN_FUNCTION(libxml)` and `php_libxml_post_deactivate`:
-/// the loader and the stream given up, the list dropped and the
-/// library's last error reset, so a thread's next request starts clean.
+/// `PHP_RSHUTDOWN_FUNCTION(libxml)` (`Z/ext/libxml/libxml.c:1039-1046`):
+/// the loader given up, and with it the value
+/// `libxml_set_streams_context()` kept, which php leaves to the resource
+/// list: both are values of the request's, given up while its heap
+/// still stands.
 fn rshutdown(req: &mut Request) {
     let state = req.state::<State>();
     let loader = state.entity_loader.take();
     let context = state.stream_context.take();
-    state.errors = None;
-    state.buffer.clear();
     if let Some((_, value)) = loader {
         req.release(value);
     }
     if let Some(value) = context {
         req.release(value);
     }
+}
+
+/// `php_libxml_post_deactivate` (`Z/ext/libxml/libxml.c:1061-1083`),
+/// after `shutdown_executor`: the error list and the message buffer
+/// dropped, and the library's last error, which is the thread's, reset,
+/// so the thread's next request starts clean.
+fn post_deactivate(req: &mut Request) {
+    let state = req.state::<State>();
+    state.errors = None;
+    state.buffer.clear();
     ffi::Raised::reset_last();
 }
 

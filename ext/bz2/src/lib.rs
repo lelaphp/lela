@@ -38,7 +38,7 @@ use std::collections::HashMap;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 
 use crate::ffi::Code;
 use crate::stream::FileId;

@@ -2,7 +2,7 @@
 //! wrap (design §7.2, revision 35; `unsafe.homes`' `ext/*/src/ffi/`), the
 //! one home of this crate's `unsafe`:
 //!
-//! - [`fork`] and [`install`], whose `nix` wrappers are `unsafe fn`;
+//! - [`install`], whose `nix` wrapper is an `unsafe fn`;
 //! - the `extern "C"` handler [`install`] hands `sigaction`, which
 //!   decodes the kernel's `siginfo_t` into the engine's record;
 //! - [`wait`] and [`waitid`], because php hands the program the status
@@ -21,24 +21,9 @@
 
 use nix::errno::Errno;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal};
-use nix::unistd::ForkResult;
 use std::ffi::{c_int, c_void};
 
 use php_ext::request::{SIGNAL_POST, Siginfo};
-
-/// `fork(2)`. The child is a copy of the process with the calling thread
-/// alone in it, as php's is: what the engine's other threads held (an
-/// execution timer's wait, a mutex another request took in the engine's
-/// shared tables) is gone or held for ever there, which is why the
-/// extension is built for the `php` binary and no server host.
-pub(crate) fn fork() -> nix::Result<ForkResult> {
-    // SAFETY: `nix::unistd::fork` is `unsafe` because the child of a
-    // process with several threads may call only async-signal-safe
-    // functions until it `exec`s. The binary this extension is built for
-    // serves its request on the one thread it has; the child goes on in
-    // that request's own state, which is its copy alone.
-    unsafe { nix::unistd::fork() }
-}
 
 /// What a signal's disposition becomes: php's `SIG_DFL`, `SIG_IGN`, or
 /// [`handler`], which records it in the engine's signal record for the
@@ -88,7 +73,7 @@ pub(crate) fn install(
 /// every request that asked for asynchronous delivery.
 ///
 /// What runs in the signal handler is this function, [`decode`] and the
-/// post and wake of `php_heap::post` that [`SIGNAL_POST`] is, and nothing
+/// post and wake of `php_process::post` that [`SIGNAL_POST`] is, and nothing
 /// of `php_engine`: the post claims a free slot by a compare-and-swap,
 /// the decoder copies integers out of the kernel's structure, and the
 /// wake stores to atomics, so nothing here allocates, locks or calls a

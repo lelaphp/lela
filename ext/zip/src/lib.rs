@@ -39,7 +39,7 @@ mod write;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::ResourceType;
 
 /// php's C casts of a `zend_long` into libzip's types, which wrap as C's

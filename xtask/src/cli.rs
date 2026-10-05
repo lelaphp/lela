@@ -727,6 +727,10 @@ pub enum Section {
     Git,
     /// The bundle's registration order against the crate graph.
     Bundle,
+    /// Each item lock's lines counted by the module that defines them,
+    /// the widest first: the groups of the seam's api-check reading, which
+    /// `locks` totals (#1795).
+    Modules,
     /// The pin as this machine has it: the tree's variable and the
     /// promise's, each by name and whether it is set, the pin's path, and
     /// which of the two places the tree was found at. CI reads the names

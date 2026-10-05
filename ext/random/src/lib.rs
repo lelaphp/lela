@@ -37,9 +37,7 @@ mod rng;
 use std::any::Any;
 use std::marker::PhantomData;
 
-use php_ext::abi::{
-    CloneObj, CloneObjWith, Extension, ExtensionBuilder, ObjectHandlers, Passed, Raw,
-};
+use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, Passed, Raw, Refusals};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{clone_with, instantiate, lookup_class};
 use php_ext::raising::{
@@ -543,19 +541,7 @@ pub(crate) static XOSHIRO: Copying<EngineXoshiro256StarStar> = Copying(PhantomDa
 
 /// The handlers of `Secure` and `Randomizer`, whose `clone_obj` php
 /// leaves null: an uncloneable object.
-pub(crate) struct Uncloneable;
-
-impl ObjectHandlers for Uncloneable {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        None
-    }
-}
-
-pub(crate) static UNCLONEABLE: Uncloneable = Uncloneable;
+pub(crate) const UNCLONEABLE: Refusals = Refusals::NONE.cloning();
 
 /// `MT_RAND_MT19937` and the deprecated `MT_RAND_PHP`, the two modes of
 /// `mt_srand` and `Mt19937`, which [`Mode`] is.

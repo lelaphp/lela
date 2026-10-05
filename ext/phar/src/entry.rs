@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Request, Stream, Streams as _};
 
 use crate::archive::{
     self, ArchiveId, Content, ENT_PERM_DEF_FILE, Entry, TAR_FILE, archives, lossy,

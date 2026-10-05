@@ -81,7 +81,7 @@ use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Cast, FdStream, Request, Stream};
+use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;

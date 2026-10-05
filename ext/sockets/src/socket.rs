@@ -5,12 +5,11 @@
 //! `ENSURE_SOCKET_VALID` and `PHP_SOCKET_ERROR`, which every native
 //! reads through.
 
-use std::cmp::Ordering;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers};
+use php_ext::abi::{Instance, ObjectHandlers, Refusals};
 use php_ext::attr::php_class;
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{PhpObject, Resource, Value};
@@ -139,7 +138,17 @@ pub(crate) struct Handlers;
 
 pub(crate) static SOCKET: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("socket_create()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `socket_free_obj`: the fd closed where the socket owns it,
     /// its owner of the stream let go where a stream does.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -151,36 +160,10 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct Socket, use socket_create() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(stream) = object.native::<Sock>(req).and_then(Sock::stream) {
             visit(Value::resource(stream));
         }
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

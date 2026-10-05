@@ -13,7 +13,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use php_ext::coerce::{float_to_long, numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Cast, FdStream, Request, Stream};
+use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};

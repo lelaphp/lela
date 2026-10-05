@@ -20,7 +20,7 @@ use crate::api::abi::class::Class;
 use crate::api::call::Function;
 use crate::api::coerce;
 use crate::api::raising::{Thrown, arg_type_error, arg_value_error, fatal};
-use crate::api::request::{Request, Stream};
+use crate::api::request::Request;
 use crate::api::values::{PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef};
 
 /// `MAY_BE_NULL`, `MAY_BE_FALSE` and the rest of `zend_type_info.h`'s
@@ -293,35 +293,6 @@ impl FromArgument for Resource {
             position,
             &format!("be of type resource, {name} given"),
         ))
-    }
-}
-
-/// No declared type, the stream `PHP_Z_PARAM_STREAM` holds: a resource,
-/// as [`Resource`] holds one, and then an open stream
-/// ([`Stream::from_value`]); a closed resource or one of another type is
-/// php's "must be an open stream resource".
-impl FromArgument for Stream {
-    const MASK: u32 = bits::RESOURCE;
-    fn declared() -> Option<Type> {
-        None
-    }
-    fn accepts(value: &Value) -> bool {
-        Resource::accepts(value)
-    }
-    fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
-        match Stream::from_value(req, &value) {
-            Some(stream) => Ok(stream),
-            None => mismatch(req, "open stream"),
-        }
-    }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(resource) = Resource::hold(req, position)? else {
-            return Ok(None);
-        };
-        match Stream::from_value(req, &resource.as_value()) {
-            Some(stream) => Ok(Some(stream)),
-            None => Err(arg_type_error(req, position, "be an open stream resource")),
-        }
     }
 }
 

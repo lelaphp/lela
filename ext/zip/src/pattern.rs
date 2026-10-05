@@ -6,7 +6,7 @@
 use php_ext::abi::OrFalse;
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::object::{Intern, basedir_refuses};

@@ -184,7 +184,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          \x20       .extensions(&extensions)\n\
          \x20       .configure(php_bundle::CONFIGURE)\n\
          \x20       .tier::<php_bundle::Tier>();\n\
-         \x20   let engine = php_sapi::start(builder, &[]);\n\
+         \x20   let engine = php_sapi::start(builder, &[], |entry| Streams.log(entry));\n\
          \x20   let description = RequestDescription {{\n\
          \x20       argv: vec![file.as_encoded_bytes().to_vec()],\n\
          \x20       cwd: std::env::current_dir().unwrap_or_default(),\n\

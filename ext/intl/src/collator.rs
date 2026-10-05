@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 
-use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Ref, This, True};
+use php_ext::abi::{Instance, OrFalse, Ref, Refusals, This, True};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{known_method, lookup_class, new_object};
 use php_ext::coerce;
@@ -36,16 +36,7 @@ impl Carrier for CollatorObject {
 
 /// `Collator_handlers`: no clone, `ucol_cloneBinary` having nowhere to
 /// keep its buffer.
-pub(crate) static HANDLERS: Handlers = Handlers;
-
-/// The handlers of `Collator`.
-pub(crate) struct Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
-    }
-}
+pub(crate) const HANDLERS: Refusals = Refusals::NONE.cloning();
 
 /// A `zend_long` handed to ICU's `int` or enum, C's truncation.
 fn c_int(n: i64) -> i32 {

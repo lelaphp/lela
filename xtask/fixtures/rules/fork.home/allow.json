@@ -1,0 +1,1 @@
+{"tool_name": "Write", "tool_input": {"file_path": "crates/php_process/src/fork.rs", "content": "/// `fork(2)`, the one home.\npub fn fork() -> i32 {\n    // SAFETY: as the home states it.\n    unsafe { libc::fork() }\n}\n"}}

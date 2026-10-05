@@ -27,16 +27,12 @@
 
 mod ffi;
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, StartupIni, True,
-};
+use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Refusals, Start, True};
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::Value;
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::ffi::Segment;
@@ -61,8 +57,9 @@ struct Config {
 impl Config {
     /// `PHP_MINIT(sysvshm)`: the entry's leading number, 10000 without
     /// one.
-    fn start(ini: &StartupIni) -> Config {
-        let init_mem = ini
+    fn start(start: &Start) -> Config {
+        let init_mem = start
+            .ini()
             .entries
             .iter()
             .find(|(name, _)| name.as_slice() == b"sysvshm.init_mem")
@@ -103,7 +100,7 @@ pub fn extension() -> Extension {
             shm_remove_var::declared(),
         ])
         .class::<SysvSharedMemory>()
-        .engine_state(Config::start)
+        .engine_state(|start| Ok(Config::start(start)))
         .info(sysvshm_info)
         .build("sysvshm")
 }
@@ -169,37 +166,10 @@ impl SysvSharedMemory {}
 /// `get_constructor` refusing, `clone_obj` php's null slot and `compare`
 /// `zend_objects_not_comparable`; `free_obj`'s `shmdt` is the payload's
 /// drop.
-pub(crate) struct Handlers;
-
-pub(crate) static SYSVSHM: Handlers = Handlers;
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct SysvSharedMemory, use shm_attach() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
-}
+const SYSVSHM: Refusals = Refusals::NONE
+    .construction(Some("shm_attach()"))
+    .cloning()
+    .comparison();
 
 /// A `size_t` of the segment as the `usize` it indexes with.
 fn at(word: u64) -> usize {

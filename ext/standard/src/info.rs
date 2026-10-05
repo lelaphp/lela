@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use php_ext::abi::{OrFalse, True};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
-use php_ext::request::{InfoRow, PHP_VERSION, Request};
+use php_ext::request::{InfoRow, PHP_VERSION, Request, Streams as _};
 use php_ext::values::{Key, PhpString};
 
 use crate::arg_value_error;

@@ -1172,7 +1172,8 @@ pub(crate) fn atol(bytes: &[u8]) -> i64 {
 /// `php_url_decode` with `plus`, where `+` is a space, and
 /// `php_raw_url_decode` without: `%` and two hex digits a byte, anything
 /// else as it is.
-pub(crate) fn url_decode(s: &[u8], plus: bool) -> Vec<u8> {
+#[must_use]
+pub fn url_decode(s: &[u8], plus: bool) -> Vec<u8> {
     let hex = |c: u8| (c as char).to_digit(16);
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;

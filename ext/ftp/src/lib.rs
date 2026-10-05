@@ -28,19 +28,17 @@
 
 mod ftp;
 
-use std::cmp::Ordering;
-
 use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, True,
+    Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, Refusals, True,
     Union, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
 };
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ftp::{Ftp, Kind, Progress, Verb, cstr};
@@ -189,10 +187,43 @@ pub(crate) struct Connection;
 impl Connection {}
 
 /// `ftp_object_handlers`: `get_constructor` refusing, `clone_obj` php's
-/// null slot, and `free_obj` closing the session.
+/// null slot, and `free_obj` closing the session. `compare` stays
+/// `std_object_handlers`' `zend_std_compare_objects`: two connections
+/// hold no properties, so they are equal, open or closed, and
+/// uncomparable with an object of another class.
+///
+/// ```php
+/// $s = stream_socket_server("tcp://127.0.0.1:0"); $p = (int) explode(":", stream_socket_get_name($s, false))[1];
+/// if (!pcntl_fork()) { foreach ([1, 2] as $_) { $c[] = $x = stream_socket_accept($s); fwrite($x, "220 hi\r\n"); } exit; }
+/// $a = ftp_connect("127.0.0.1", $p); $b = ftp_connect("127.0.0.1", $p);
+/// var_dump($a == $b, $a != $b, $a < $b, $a <=> $b, $a === $b, $a == $a, $a <=> $a, $a === $a);
+/// var_dump(in_array($b, [$a]), in_array($b, [$a], true), $a == new stdClass, $a <=> new stdClass);
+/// ftp_close($b); var_dump($a == $b, $a <=> $b);
+/// ```
+/// ```expect process
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// int(0)
+/// bool(false)
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// int(1)
+/// bool(true)
+/// int(0)
+/// ```
 pub(crate) struct Handlers;
 
 pub(crate) static FTP: Handlers = Handlers;
+
+/// What `ftp_object_handlers` refuses: construction and cloning.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("ftp_connect() or ftp_ssl_connect()"))
+    .cloning();
 
 impl ObjectHandlers for Handlers {
     /// `ftp_object_destroy`: `ftp_close` of a session still open.
@@ -205,20 +236,8 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct FTP\\Connection, use ftp_connect() or ftp_ssl_connect() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -229,16 +248,6 @@ impl ObjectHandlers for Handlers {
                 visit(stream);
             }
         }
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 

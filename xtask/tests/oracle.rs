@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Runner, TREE_VARIABLE, Verdict,
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, TREE_VARIABLE, Verdict,
 };
 use xtask::scratch::Tree;
 
@@ -165,6 +165,126 @@ fn a_regime_adds_its_ini_after_the_recipe() {
         err.contains("jit-fast") && err.contains("jit-off"),
         "an unknown regime is named beside the known ones: {err}"
     );
+}
+
+/// The row #1780 ruled a person writes, word for word: a regime of
+/// arguments alone, for what no ini setting reaches.
+const EXTENDED_INFO: &str = "
+[regime.extended-info]
+# php's -e (ZEND_COMPILE_EXTENDED_INFO), which no ini setting reaches (#1780)
+args = [\"-e\"]
+";
+
+/// A file standing where a binary would that writes each argument it was
+/// handed on a line of its own, and the tree that holds it.
+fn argv_echo() -> (Tree, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Tree::new("oracle-argv").unwrap();
+    let path = dir.join("argv");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (dir, path)
+}
+
+/// A regime may carry `args` (#1780, #1887): the pin reads a block of
+/// arguments alone, as the row a person writes has it, and a regime of ini
+/// alone carries none. A regime's arguments stand after the recipe's, as
+/// its ini stands after the recipe's, ahead of every `-d` and of the
+/// lane's flags and the program; a run under no regime, or under one of
+/// ini alone, is handed nothing it was not handed before. No php is asked:
+/// the binary is a file that says what it was given.
+#[test]
+fn a_regimes_args_stand_after_the_recipes_and_ahead_of_every_ini() {
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let pin = Pin::parse(&format!("{text}{EXTENDED_INFO}")).unwrap();
+    let extended = pin.regime("extended-info").unwrap();
+    assert_eq!(extended.args, ["-e"]);
+    assert!(extended.ini.is_empty(), "{extended:?}");
+    assert!(pin.regime("jit-off").unwrap().args.is_empty());
+
+    let (_dir, echo) = argv_echo();
+    let oracle = pin.oracle();
+    let lint = [String::from("-l")];
+    let argv = |regime: Option<&str>| -> Vec<String> {
+        let out = oracle
+            .run_under(&oracle::Invocation {
+                regime,
+                flags: &lint,
+                ..oracle::Invocation::new(&echo, Program::Snippet("echo 1;"))
+            })
+            .unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let recipe = pin.recipe.args.len();
+    let ini = 2 * pin.recipe.ini.len();
+
+    let plain = argv(None);
+    assert_eq!(plain[..recipe], pin.recipe.args[..], "{plain:?}");
+    assert_eq!(plain[recipe], "-d", "{plain:?}");
+    assert_eq!(plain[recipe + ini..], ["-l", "witness.php"], "{plain:?}");
+    assert!(!plain.contains(&"-e".to_owned()), "{plain:?}");
+
+    let under = argv(Some("extended-info"));
+    assert_eq!(under[..recipe], pin.recipe.args[..], "{under:?}");
+    assert_eq!(under[recipe], "-e", "{under:?}");
+    assert_eq!(under[recipe + 1..], plain[recipe..], "{under:?}");
+
+    let ini_alone = argv(Some("jit-off"));
+    assert_eq!(ini_alone[..recipe + ini], plain[..recipe + ini]);
+    assert!(!ini_alone.contains(&"-e".to_owned()), "{ini_alone:?}");
+}
+
+/// A regime's arguments reach php itself: `-e` compiles with extended
+/// info, which no ini setting reaches, so php's op-array dump under it
+/// carries the `EXT_STMT` oplines the dump without it does not (#1780,
+/// #1822).
+#[test]
+fn a_regimes_args_reach_php() {
+    let Some(mut pin) = pin() else { return };
+    let dump = pin.regime("dump").unwrap().ini.clone();
+    for (name, args) in [
+        ("dump-plain", vec![]),
+        ("dump-extended", vec!["-e".to_owned()]),
+    ] {
+        pin.regime.insert(
+            name.to_owned(),
+            Regime {
+                ini: dump.clone(),
+                args,
+            },
+        );
+    }
+    let oracle = pin.oracle();
+    oracle.asserted().unwrap();
+    let lint = [String::from("-l")];
+    let dumped = |regime: &str| -> String {
+        let out = oracle
+            .run_under(&oracle::Invocation {
+                regime: Some(regime),
+                flags: &lint,
+                ..oracle::Invocation::new(
+                    pin.oracle.path.as_path(),
+                    Program::Snippet("$a = 1;\necho $a;"),
+                )
+            })
+            .unwrap();
+        String::from_utf8(out.stderr).unwrap()
+    };
+    let plain = dumped("dump-plain");
+    let extended = dumped("dump-extended");
+    assert!(
+        plain.contains("ASSIGN") && !plain.contains("EXT_STMT"),
+        "{plain}"
+    );
+    assert!(extended.contains("EXT_STMT"), "{extended}");
 }
 
 /// The flag before the program (harness-design.md §4.3): `-l` compiles a

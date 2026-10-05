@@ -8,8 +8,9 @@
 //!
 //! - [`Chain`]: php's saved pointer, which each supplier overwrites and
 //!   keeps as the one beneath (`zend_interrupt_function`,
-//!   `zend_compile_file`, `zend_resolve_path`, `zend_post_startup_cb`,
-//!   `php_rfc1867_callback`);
+//!   `zend_compile_file`, `zend_compile_string`, `zend_resolve_path`,
+//!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
+//!   `zend_post_startup_cb`, `php_rfc1867_callback`);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
@@ -17,27 +18,74 @@
 //! - [`Keyed`]: rows under a key, each key's in supplier order (a
 //!   native's interception, `pdo_driver_hash`).
 //!
-//! Suppliers are taken in the order their extensions start, the host's
-//! own extension last, as php starts a host's `additional_module` after
-//! the bundle; [`Resolved::resolve`] is handed that order with each
-//! supplier's extension beside it, so a kind added later, or an order
-//! that also weighs when php installs a supplier, changes no read site.
+//! Suppliers are taken in the order php installs them ([`Phase`]):
+//! every extension's at its `MINIT`, in the order the extensions start,
+//! the host's own extension last among them, as php starts a host's
+//! `additional_module` after the bundle; then every Zend extension's,
+//! in that same order. [`Resolved::resolve`] is handed the start order
+//! with each supplier's extension and phase beside it, so the start
+//! order has one source, the caller's, and a kind added later changes
+//! no read site.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+use php_compile::CompileError;
+use php_unit::Unit;
 use php_unit::decl::Name;
 
 use crate::api::abi::{
-    AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, FatalLoggedHook,
-    InputFilterHook, InterruptHook, PostStartupHook, ResolvePathHook, Shell, TicksHook,
-    TreatDataHook, UploadHook,
+    AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
+    Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, PostStartupHook,
+    ResolvePathHook, Shell, StreamHooks, ThrownHook, TicksHook, TreatDataHook, UploadHook,
 };
+use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
+use crate::api::values::PhpString;
 
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
 pub(crate) type Registered = Arc<dyn Any + Send + Sync>;
+
+/// When php installs what an extension supplies, the phases in the
+/// order `php_module_startup` runs them (`Z/main/main.c:2353-2356`):
+/// every extension's `MINIT` in `zend_startup_modules`, then every Zend
+/// extension's startup in `zend_startup_extensions`.
+///
+/// A Zend extension's phase is the extension's, every kind it installs
+/// together, as opcache, the bundle's one Zend extension, installs
+/// nothing at its `MINIT`, which runs among the other extensions' and
+/// only registers its `zend_extension` (`start_accel_extension`,
+/// `Z/ext/opcache/ZendAccelerator.c:3168-3171`;
+/// `Z/ext/opcache/zend_accelerator_module.c:448-453`). It installs its
+/// `zend_post_startup_cb` link at `accel_startup` (`:3220-3221`) and the
+/// rest, `zend_compile_file`, `zend_resolve_path` and its three
+/// interceptions, at `accel_post_startup` (`:3403-3434`): two moments,
+/// both after every other extension's `MINIT`, which differ only to a
+/// Zend extension started after opcache, and the bundle has none. What
+/// an extension registers into another's table is registered at its
+/// `MINIT` by definition, so [`Resolved::resolve`] keeps those rows in
+/// start order whatever the phase.
+///
+/// Declared in the order php runs the phases, which the sort reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Phase {
+    /// An extension's `MINIT`.
+    Minit,
+    /// A Zend extension's startup, and its `zend_post_startup_cb` after.
+    ZendExtension,
+}
+
+impl Phase {
+    /// The phase `extension` installs what it supplies in.
+    pub(crate) fn of(extension: &Extension) -> Phase {
+        if extension.zend.is_some() {
+            Phase::ZendExtension
+        } else {
+            Phase::Minit
+        }
+    }
+}
 
 /// One extension's supplied behaviour as its builder took it, each
 /// slot what the builder method of its name was handed.
@@ -45,7 +93,12 @@ pub(crate) type Registered = Arc<dyn Any + Send + Sync>;
 pub(crate) struct Supplies {
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
+    pub(crate) compile_string: Option<CompileStringHook>,
+    pub(crate) error: Option<ErrorHook>,
+    pub(crate) gc_collect: Option<GcCollectHook>,
+    pub(crate) thrown: Option<ThrownHook>,
     pub(crate) resolve_path: Option<ResolvePathHook>,
+    pub(crate) stream_hooks: Option<StreamHooks>,
     pub(crate) post_startup: Option<PostStartupHook>,
     pub(crate) upload: Option<UploadHook>,
     pub(crate) ticks: Option<TicksHook>,
@@ -73,10 +126,43 @@ pub(crate) struct Resolved {
     /// phar's falls through to `phar_orig_compile_file` for a file it
     /// does not serve (`Z/ext/phar/phar.c:3248-3256`).
     pub(crate) compile_file: Chain<CompileFileHook>,
+    /// `zend_compile_string` (`Z/Zend/zend_compile.c:88`), from the top,
+    /// each link handed the ones beneath ([`StringBeneath`]): the tracers' and the profilers'
+    /// links do their work on both sides of the one they saved, as
+    /// dd-trace's `zai_interceptor_compile_string` notes the tables'
+    /// ends, compiles and resolves what the string declared.
+    pub(crate) compile_string: Chain<CompileStringHook>,
+    /// `zend_error_cb` (`Z/Zend/zend.c:90`), from the top, each link
+    /// handed the ones beneath ([`ErrorBeneath`]), php's own `php_error_cb` beneath every link:
+    /// most links serve before the one they saved, as New Relic's
+    /// `nr_php_error_cb` records and then calls it, but soap's
+    /// `soap_error_handler` serves a client's fatal itself, throwing its
+    /// fault, and wraps a server's in its own response
+    /// (`Z/ext/soap/soap.c:1885-1966`), so no walk from one end serves
+    /// every link.
+    pub(crate) error: Chain<ErrorHook>,
+    /// The `gc_collect_cycles` pointer (`Z/Zend/zend_gc.c:254`), from the
+    /// top, each link handed the ones beneath ([`GcBeneath`]): a link measures the collection it
+    /// serves, as xdebug's `xdebug_gc_collect_cycles` reads the status,
+    /// the time and the memory before the one it saved and records the
+    /// collection after it.
+    pub(crate) gc_collect: Chain<GcCollectHook>,
+    /// `zend_throw_exception_hook` (`Z/Zend/zend_exceptions.c:60`),
+    /// from the top, every link: nothing of php's stands beneath the
+    /// links, and each serves before the one it saved, as dd-trace's
+    /// `zai_interceptor_exception_hook` and the Datadog profiler's
+    /// `exception_profiling_throw_exception_hook` do; xdebug's installs
+    /// over whatever stood and saves none.
+    pub(crate) thrown: Chain<ThrownHook>,
     /// `zend_resolve_path`, from the top until a link answers, as
     /// phar's falls through to `phar_save_resolve_path`
     /// (`Z/ext/phar/phar.c:3239-3246`).
     pub(crate) resolve_path: Chain<ResolvePathHook>,
+    /// `zend_stream_open_function` and the `zend_resolve_path` beneath
+    /// every override, which `php_module_startup` points at main's
+    /// streams once (`Z/main/main.c`); the stream layer's, handed by the
+    /// extension that registers the plain files wrapper.
+    pub(crate) stream_hooks: Last<StreamHooks>,
     /// `zend_post_startup_cb`, from the bottom until a link does not
     /// serve, as opcache's calls the one it saved before its own work
     /// and fails where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`);
@@ -113,8 +199,8 @@ pub(crate) struct Resolved {
     /// overwrites them.
     pub(crate) encodings: Last<EncodingsHook>,
     /// Each native intercepted, by its name, each name's entries
-    /// stacked later over earlier, as opcache saves its handler over
-    /// phar's.
+    /// stacked later over earlier, as opcache saves its handler at
+    /// `accel_post_startup` over phar's of its `MINIT`.
     pub(crate) intercepts: Keyed<Name, Entry>,
     /// What each `MINIT` registered into another extension's table, by
     /// the value's type.
@@ -122,18 +208,31 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// The bundle's supplied behaviour from each supplier's own, in the
-    /// order php installs them, each beside the extension it is of: the
-    /// order is the caller's alone, so one that also weighs the phase
-    /// php installs a supplier in reorders this and names no other.
+    /// The bundle's supplied behaviour from each supplier's own, handed
+    /// in the order the extensions start, each beside the extension it
+    /// is of and the phase it installs in: installed phase by phase,
+    /// each phase's in start order ([`Phase`]), and what each `MINIT`
+    /// registered in start order alone.
     pub(crate) fn resolve(
-        suppliers: impl IntoIterator<Item = (ExtensionId, Supplies)>,
+        suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>,
     ) -> Resolved {
         let mut table = Resolved::default();
-        for (by, own) in suppliers {
+        let mut suppliers: Vec<_> = suppliers.into_iter().collect();
+        for (_, _, own) in &mut suppliers {
+            table
+                .registered
+                .install(std::mem::take(&mut own.registered));
+        }
+        suppliers.sort_by_key(|&(_, phase, _)| phase);
+        for (by, _, own) in suppliers {
             table.interrupt.install(own.interrupt);
             table.compile_file.install(own.compile_file);
+            table.compile_string.install(own.compile_string);
+            table.error.install(own.error);
+            table.gc_collect.install(own.gc_collect);
+            table.thrown.install(own.thrown);
             table.resolve_path.install(own.resolve_path);
+            table.stream_hooks.install(by, own.stream_hooks);
             table.post_startup.install(own.post_startup);
             table.upload.install(own.upload);
             table.ticks.install(own.ticks);
@@ -146,7 +245,6 @@ impl Resolved {
             table.treat_data.install(by, own.treat_data);
             table.encodings.install(by, own.encodings);
             table.intercepts.install(own.intercepts);
-            table.registered.install(own.registered);
         }
         table
     }
@@ -156,7 +254,10 @@ impl Resolved {
 /// keeps it as the one beneath. Which end a walk starts from is what
 /// php's links do with the one beneath: a link that serves before
 /// calling it is walked from the top, one that calls it first from the
-/// bottom.
+/// bottom, and a kind whose links do their work on both sides of it
+/// hands each link the ones beneath ([`Chain::links`]). php lets every
+/// link choose for itself; a kind here chooses once for all its links,
+/// by what the links php-src and the tools that override it install do.
 pub(crate) struct Chain<H>(Vec<H>);
 
 impl<H: Copy> Chain<H> {
@@ -173,6 +274,123 @@ impl<H: Copy> Chain<H> {
     /// before its own: the first supplier's first.
     pub(crate) fn bottom_up(&self) -> impl Iterator<Item = H> + '_ {
         self.0.iter().copied()
+    }
+
+    /// Every link, the first supplier's first, for a kind whose links
+    /// are each handed the ones beneath.
+    pub(crate) fn links(&self) -> &[H] {
+        &self.0
+    }
+}
+
+/// What a link of `gc_collect_cycles` holds of the pointer it saved:
+/// every link beneath it and, beneath them all, the heap's own
+/// collection, `zend_gc_collect_cycles` (design §5.12).
+#[derive(Clone, Copy)]
+pub struct GcBeneath<'a>(pub(crate) &'a [GcCollectHook]);
+
+impl GcBeneath<'_> {
+    /// The one beneath served: the next link down, or the heap's own
+    /// collection; the values the collection freed, as php 8.5 counts them.
+    pub fn collect(self, req: &mut Request) -> i64 {
+        match self.0.split_last() {
+            Some((link, beneath)) => link(req, GcBeneath(beneath)),
+            None => req.gc_collect_own(),
+        }
+    }
+}
+
+/// What a link of `zend_compile_string` holds of the pointer it saved:
+/// the string, the name it compiles under, and every link beneath it
+/// and, beneath them all, php's own `compile_string`.
+#[derive(Clone, Copy)]
+pub struct StringBeneath<'a> {
+    pub(crate) links: &'a [CompileStringHook],
+    pub(crate) source: &'a [u8],
+    pub(crate) name: &'a [u8],
+}
+
+/// What a string's compile answered: the unit, or the compiler's
+/// refusal, which the engine raises where the string was to compile. A
+/// link of `zend_compile_string` answers what the one beneath answered.
+pub struct Compiled(pub(crate) Result<Arc<Unit>, CompileError>);
+
+impl<'a> StringBeneath<'a> {
+    /// The string the link was handed.
+    #[must_use]
+    pub fn source(&self) -> &'a [u8] {
+        self.source
+    }
+
+    /// The name the string compiles under, `eval()'d code` after the
+    /// file and line of the `eval`, or the CLI's `Command line code`.
+    #[must_use]
+    pub fn name(&self) -> &'a [u8] {
+        self.name
+    }
+
+    /// The one beneath served over `source`, the string handed or one
+    /// the link made: the next link down, or php's own compile.
+    pub fn compile(self, req: &mut Request, source: &[u8]) -> Result<Compiled, Thrown> {
+        match self.links.split_last() {
+            Some((link, links)) => link(
+                req,
+                StringBeneath {
+                    links,
+                    source,
+                    ..self
+                },
+            ),
+            None => Ok(Compiled(req.compile_string_own(source, self.name))),
+        }
+    }
+}
+
+/// What a link of `zend_error_cb` holds of the pointer it saved: the
+/// diagnostic, and every link beneath it and, beneath them all, php's
+/// own `php_error_cb`.
+#[derive(Clone, Copy)]
+pub struct ErrorBeneath<'a> {
+    pub(crate) links: &'a [ErrorHook],
+    pub(crate) level: Level,
+    pub(crate) string: PhpString,
+    pub(crate) message: &'a str,
+    pub(crate) file: &'a [u8],
+    pub(crate) line: u32,
+}
+
+impl<'a> ErrorBeneath<'a> {
+    /// The level the diagnostic was raised at.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// The message, its bytes as raised.
+    #[must_use]
+    pub fn message(&self) -> &[u8] {
+        self.string.as_bytes()
+    }
+
+    /// The file the diagnostic names, `Unknown` where nothing executes.
+    #[must_use]
+    pub fn file(&self) -> &'a [u8] {
+        self.file
+    }
+
+    /// The line the diagnostic names.
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The one beneath served: the next link down, or php's own
+    /// `php_error_cb`, which stores, logs and displays the diagnostic.
+    pub fn serve(self, req: &mut Request) {
+        match self.links.split_last() {
+            Some((link, links)) => link(req, ErrorBeneath { links, ..self }),
+            None => req.php_error_cb(self.level, self.string, self.message, self.file, self.line),
+        }
     }
 }
 
@@ -469,5 +687,318 @@ mod tests {
         assert_eq!(drivers, [&Driver("earlier"), &Driver("later")]);
         let others: Vec<_> = req.registered::<Other>().collect();
         assert_eq!(others, [&Other(1)]);
+    }
+
+    /// `builder` built as a Zend extension too, opcache's shape.
+    fn zend(builder: ExtensionBuilder, name: &str) -> crate::api::abi::Extension {
+        builder
+            .zend_extension(crate::api::abi::ZendExtension {
+                name: name.to_owned(),
+                version: String::new(),
+                author: String::new(),
+                url: String::new(),
+                copyright: String::new(),
+            })
+            .build(name)
+    }
+
+    /// A Zend extension's interception stands over another extension's
+    /// whatever their bundle order, as opcache's `file_exists`,
+    /// installed at `accel_post_startup`
+    /// (`Z/ext/opcache/ZendAccelerator.c:3434`), is saved over phar's,
+    /// installed at phar's `MINIT`: the Zend extension serves first and
+    /// passes through to the other's.
+    #[test]
+    fn a_zend_extension_s_interception_stands_over_a_minit_s_in_either_order() {
+        let opcache: crate::api::abi::Entry = |req| {
+            req.write(b"opcache ");
+            crate::api::call::passthrough(req, None)
+        };
+        let phar: crate::api::abi::Entry = |req| {
+            req.write(b"phar ");
+            crate::api::call::passthrough(req, None)
+        };
+        let serve = |extensions: &[crate::api::abi::Extension]| {
+            let served = Engine::cli_builder()
+                .extensions(extensions)
+                .build()
+                .serve_capture(
+                    "<?php $f = 'strlen'; echo $f('abcd');",
+                    crate::test::Capture::default(),
+                );
+            String::from_utf8_lossy(&served.stdout).into_owned()
+        };
+        let mut extensions = [
+            zend(
+                ExtensionBuilder::default().intercept(b"strlen", opcache),
+                "opcache",
+            ),
+            ExtensionBuilder::default()
+                .intercept(b"strlen", phar)
+                .build("phar"),
+        ];
+        assert_eq!(serve(&extensions), "opcache phar 4");
+        extensions.reverse();
+        assert_eq!(serve(&extensions), "opcache phar 4");
+    }
+
+    /// What a Zend extension registers is its `MINIT`'s, which runs
+    /// among the other extensions', so its rows keep their start order
+    /// though what it installs moves after every other extension's.
+    #[test]
+    fn a_zend_extension_s_registrations_keep_their_start_order() {
+        #[derive(Debug, PartialEq)]
+        struct Driver(&'static str);
+        let extensions = [
+            zend(ExtensionBuilder::default().register(Driver("zend")), "zend"),
+            ExtensionBuilder::default()
+                .register(Driver("minit"))
+                .build("minit"),
+        ];
+        let engine = Engine::cli_builder().extensions(&extensions).build();
+        let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let drivers: Vec<_> = req.registered::<Driver>().collect();
+        assert_eq!(drivers, [&Driver("zend"), &Driver("minit")]);
+    }
+
+    /// A Zend extension installs its `zend_post_startup_cb` link after
+    /// every other extension's `MINIT`, as opcache's `accel_startup`
+    /// saves ffi's (`Z/ext/opcache/ZendAccelerator.c:3220-3221`), so an
+    /// extension's link is beneath it and asked first: a refusal there ends
+    /// startup and the Zend extension's preload is never asked for,
+    /// though it stands first in the bundle. ffi's own failure is its
+    /// engine start's refusal, which php never takes past `MINIT`.
+    #[test]
+    fn a_minit_s_post_startup_link_is_asked_before_a_zend_extension_s() {
+        let extensions = [
+            zend(
+                ExtensionBuilder::default().post_startup(|req| {
+                    req.write_stderr(b"preloading\n");
+                    crate::api::abi::PostStartup::Preload(b"/nowhere".to_vec())
+                }),
+                "opcache",
+            ),
+            ExtensionBuilder::default()
+                .post_startup(|req| {
+                    req.write_stderr(b"refused\n");
+                    crate::api::abi::PostStartup::Refuse { status: -2 }
+                })
+                .build("ffi"),
+        ];
+        let served = Engine::cli_builder()
+            .extensions(&extensions)
+            .build()
+            .serve_capture("<?php echo 1;", crate::test::Capture::default());
+        assert_eq!(
+            (
+                served.stdout.as_slice(),
+                served.stderr.as_slice(),
+                served.exit_code
+            ),
+            (&b""[..], &b"refused\n"[..], -2)
+        );
+    }
+
+    /// What `extensions` print serving `source` under the CLI.
+    fn printed(extensions: &[crate::api::abi::Extension], source: &str) -> String {
+        let served = Engine::cli_builder()
+            .extensions(extensions)
+            .build()
+            .serve_capture(source, crate::test::Capture::default());
+        String::from_utf8_lossy(&served.stdout).into_owned()
+    }
+
+    /// `zend_error_cb`, each link handed the ones beneath and php's own
+    /// `php_error_cb` beneath them all: the later extension's link is
+    /// served first, and one that serves the diagnostic itself, as
+    /// soap's serves a client's fatal (`Z/ext/soap/soap.c:1885-1905`),
+    /// leaves the earlier link and php's display unserved.
+    #[test]
+    fn an_error_link_serves_the_ones_beneath_where_it_will() {
+        use crate::api::abi::ErrorBeneath;
+        use crate::api::raising::Level;
+        use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, record};
+        fn notices_kept(req: &mut Request, beneath: ErrorBeneath<'_>) {
+            let message = String::from_utf8_lossy(beneath.message()).into_owned();
+            record(2, Phase::Error(message));
+            if beneath.level() != Level::UserNotice {
+                beneath.serve(req);
+            }
+        }
+        let recording = Recording::start();
+        let extensions = [
+            TestExt::<1>::extension(),
+            TestExt::<2>::builder()
+                .error(notices_kept)
+                .build("test_ext_2"),
+        ];
+        let out = printed(
+            &extensions,
+            "<?php echo $u; trigger_error('kept'); echo 'end'; throw new Exception('x');",
+        );
+        let shown = "\nWarning: Undefined variable $u in Standard input code on line 1\nend";
+        assert!(out.starts_with(&format!("{shown}\nFatal error: Uncaught Exception: x")));
+        let warning = || Phase::Error(String::from("Undefined variable $u"));
+        let mut handed = recording.events().only(&[warning()]).0;
+        let uncaught = handed.split_off(3);
+        assert_eq!(
+            handed,
+            [
+                Ext(2, warning()),
+                Ext(1, warning()),
+                Ext(2, Phase::Error("kept".into()))
+            ]
+        );
+        // `zend_exception_error`'s uncaught throwable, past the user
+        // handler, through the same links.
+        let uncaught: Vec<_> = uncaught
+            .iter()
+            .map(|e| match e {
+                Ext(n, Phase::Error(m)) => (*n, m.starts_with("Uncaught Exception: x")),
+                _ => (0, false),
+            })
+            .collect();
+        assert_eq!(uncaught, [(2, true), (1, true)]);
+    }
+
+    /// The `gc_collect_cycles` pointer, each link handed the ones
+    /// beneath: the later extension's link is served first and its work
+    /// stands around the earlier's, as xdebug's
+    /// `xdebug_gc_collect_cycles` measures around the one it saved; a
+    /// full root buffer's collection is served through it as
+    /// `gc_collect_cycles()`'s is (`Z/Zend/zend_gc.c:702`).
+    #[test]
+    fn a_collection_link_stands_around_the_ones_beneath() {
+        use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt};
+        let recording = Recording::start();
+        let extensions = [TestExt::<3>::extension(), TestExt::<4>::extension()];
+        let around = [Phase::Collect, Phase::Collected(0)];
+        let out = printed(
+            &extensions,
+            "<?php $a = new stdClass; $a->a = $a; unset($a); echo gc_collect_cycles();",
+        );
+        assert_eq!(out, "1");
+        assert_eq!(
+            recording.events().only(&around).0,
+            [
+                Ext(4, Phase::Collect),
+                Ext(3, Phase::Collect),
+                Ext(3, Phase::Collected(1)),
+                Ext(4, Phase::Collected(1)),
+            ]
+        );
+        recording.mark("full");
+        let out = printed(
+            &extensions,
+            "<?php for ($i = 0; $i < 10002; $i++) { $o = new stdClass; $o->o = $o; } $s = gc_status(); echo $s['runs'], ' ', $s['collected'];",
+        );
+        recording.mark("served");
+        assert_eq!(out, "1 10000");
+        assert_eq!(
+            recording.events().between("full", "served").only(&around).0,
+            [
+                Ext(4, Phase::Collect),
+                Ext(3, Phase::Collect),
+                Ext(3, Phase::Collected(10000)),
+                Ext(4, Phase::Collected(10000)),
+            ]
+        );
+    }
+
+    /// `zend_compile_string`, each link handed the ones beneath with
+    /// the source it compiles: the later extension's link is served
+    /// first and may hand the earlier a source of its own, as php's
+    /// links call the pointer they saved with a string; what a link
+    /// throws is raised where the `eval` stands.
+    #[test]
+    fn a_string_compile_link_hands_the_ones_beneath_its_source() {
+        use crate::api::abi::{Compiled, StringBeneath};
+        use crate::api::raising::Thrown;
+        use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, record};
+        fn rewritten(req: &mut Request, beneath: StringBeneath<'_>) -> Result<Compiled, Thrown> {
+            let source = String::from_utf8_lossy(beneath.source()).into_owned();
+            record(6, Phase::CompileString(source));
+            match beneath.source() {
+                b"refused;" => Err(crate::api::raising::throw(req, "Exception", "refused")),
+                _ => beneath.compile(req, b"echo 'b';"),
+            }
+        }
+        let recording = Recording::start();
+        let extensions = [
+            TestExt::<5>::extension(),
+            TestExt::<6>::builder()
+                .compile_string(rewritten)
+                .build("test_ext_6"),
+        ];
+        let out = printed(
+            &extensions,
+            "<?php eval(\"echo 'a';\"); try { eval('refused;'); } catch (Exception $e) { echo ' ', $e->getMessage(); }",
+        );
+        assert_eq!(out, "b refused");
+        let string = |s: &str| Phase::CompileString(s.into());
+        assert_eq!(
+            recording.events().only(&[string("")]).0,
+            [
+                Ext(6, string("echo 'a';")),
+                Ext(5, string("echo 'b';")),
+                Ext(6, string("refused;")),
+            ]
+        );
+    }
+
+    /// `zend_throw_exception_hook`, every link told from the top: each
+    /// throwable thrown once, by `throw`, by a native and by
+    /// `Generator::throw()`, where it is thrown and before the unwind
+    /// serves the `finally` it leaves through; and a throwable a fiber
+    /// carries across a switch told again where it lands, as
+    /// `zend_fiber_delegate_transfer_result` throws it again
+    /// (`Z/Zend/zend_fibers.c:641-646`).
+    #[test]
+    fn a_thrown_link_is_told_of_every_throw_before_the_unwind() {
+        use crate::api::values::PhpObject;
+        use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, message_of, record};
+        const TYPE: &str = "strlen(): Argument #1 ($string) must be of type string, array given";
+        fn shown(req: &mut Request, throwable: PhpObject) {
+            let message = message_of(req, throwable);
+            req.write(format!("[{message}]").as_bytes());
+            record(8, Phase::Thrown(message));
+        }
+        let recording = Recording::start();
+        let extensions = [
+            TestExt::<7>::extension(),
+            TestExt::<8>::builder().thrown(shown).build("test_ext_8"),
+        ];
+        let out = printed(
+            &extensions,
+            concat!(
+                "<?php function f() { try { throw new Exception('u'); } finally { echo 'finally '; } }\n",
+                "try { f(); } catch (Exception $e) { echo 'caught '; }\n",
+                "try { strlen([]); } catch (TypeError $e) { echo 'caught '; }\n",
+                "function g() { try { yield 1; } catch (Exception $e) { echo 'in g '; } }\n",
+                "$g = g(); $g->current(); $g->throw(new Exception('g'));\n",
+                "$f = new Fiber(function () { Fiber::suspend(); });\n",
+                "$f->start(); try { $f->throw(new Exception('f')); } catch (Exception $e) { echo 'out'; }",
+            ),
+        );
+        assert_eq!(
+            out,
+            "[u]finally caught [strlen(): Argument #1 ($string) must be of type string, array given]caught [g]in g [f][f]out"
+        );
+        let told = |n, m: &str| Ext(n, Phase::Thrown(m.into()));
+        assert_eq!(
+            recording.events().only(&[Phase::Thrown(String::new())]).0,
+            [
+                told(8, "u"),
+                told(7, "u"),
+                told(8, TYPE),
+                told(7, TYPE),
+                told(8, "g"),
+                told(7, "g"),
+                told(8, "f"),
+                told(7, "f"),
+                told(8, "f"),
+                told(7, "f"),
+            ]
+        );
     }
 }

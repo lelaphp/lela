@@ -20,6 +20,12 @@ split-debuginfo = "packed"
 debug = "line-tables-only"
 incremental = false  # rustc's incremental cache was ~70% of a checkout's target/; off, a worktree builds in ~12G, not ~39G (#1609)
 
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
 [workspace.package]
 edition = "2024"
 license = "MIT"

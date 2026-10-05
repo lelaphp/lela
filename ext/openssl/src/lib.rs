@@ -42,18 +42,14 @@ mod spki;
 mod x509;
 mod xp_ssl;
 
-use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
-use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, IniStage, ObjectHandlers, OrFalse, StartupIni,
-};
+use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Refusals};
 use php_ext::attr::{php_const, php_function};
-use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, throw_error};
-use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::raising::Thrown;
+use php_ext::request::{Request, Streams as _};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
@@ -160,33 +156,14 @@ pub(crate) mod constants {
     pub(crate) const OPENSSL_ENCODING_PEM: i64 = 2;
 }
 
-/// The object handlers of the three classes: `std_object_handlers` with
-/// `get_constructor` refusing in the class's words, `clone_obj` php's
-/// null slot and `compare` `zend_objects_not_comparable`.
-pub(crate) struct Handlers(pub(crate) &'static str);
-
-impl ObjectHandlers for Handlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(req, "Error", self.0))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
-    }
+/// What the three classes' handlers refuse: `get_constructor` in the
+/// words of the class's own init, `clone_obj` php's null slot and
+/// `compare` `zend_objects_not_comparable`.
+pub(crate) const fn refusals(instead: &'static str) -> Refusals {
+    Refusals::NONE
+        .construction(Some(instead))
+        .cloning()
+        .comparison()
 }
 
 /// `add_assoc_*`: a value under a string key, a numeric one taken as
@@ -435,7 +412,7 @@ pub fn extension() -> Extension {
             x509::openssl_get_cert_locations::declared(),
         ])
         .on_modify(b"openssl.libctx", on_update_libctx)
-        .engine_state(started)
+        .engine_state(|_| Ok(started()))
         .request_state::<State>()
         .rinit(rinit)
         .info(info)
@@ -478,8 +455,7 @@ fn on_update_libctx(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thr
 /// once as the engine is built: nothing is kept but the mark of the call.
 struct Started;
 
-fn started(ini: &StartupIni) -> Started {
-    let _ = ini;
+fn started() -> Started {
     ffi::start();
     Started
 }

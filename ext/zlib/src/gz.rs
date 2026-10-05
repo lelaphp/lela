@@ -13,7 +13,9 @@ use php_ext::abi::{OrFalse, Path, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref, warning};
-use php_ext::request::{Cast, Opening, Request, Stream, StreamOps, StreamWrapper, Whence};
+use php_ext::request::{
+    Cast, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+};
 use php_ext::values::{PhpArray, PhpString, Resource};
 
 /// `php_gz_stream_data_t`: the `gzFile` and the stream whose fd

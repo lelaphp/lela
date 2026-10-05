@@ -7,7 +7,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use php_ext::abi::Union;
 use php_ext::raising::{Thrown, throw};
-use php_ext::request::{Opening, Request, Resolve};
+use php_ext::request::{Opening, Request, Resolve, Streams as _};
 use php_ext::values::{PhpArray, PhpString};
 
 use crate::archive::{

@@ -32,6 +32,7 @@ mod shown;
 mod watch;
 
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::process::ExitCode;
 
@@ -143,6 +144,15 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
     line
 }
 
+/// `php_sapi_phpdbg_log_message` before phpdbg is booted, as it stands
+/// while php starts (`Z/sapi/phpdbg/phpdbg.c:767-768`): the entry and a
+/// newline on stdout.
+fn log_message(entry: &[u8]) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(entry);
+    let _ = stdout.write_all(b"\n");
+}
+
 /// The host's `main`.
 pub fn main() -> ExitCode {
     let argv: Vec<Vec<u8>> = std::env::args_os()
@@ -152,11 +162,12 @@ pub fn main() -> ExitCode {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &line.search, true))
+        .sapi_name(NAME)
         .extensions(&extensions)
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
         .skip_shebang();
-    let engine = php_sapi::start(builder, &line.ini);
+    let engine = php_sapi::start(builder, &line.ini, log_message);
 
     let mut session = Session::new();
     session.line_args.clone_from(&line.args);

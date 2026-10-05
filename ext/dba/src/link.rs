@@ -5,7 +5,7 @@
 use std::os::fd::OwnedFd;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{FdStream, Request, Stream};
+use php_ext::request::{FdStream, Request, Stream, Streams as _};
 
 use crate::cdb::{Maker, Reader};
 use crate::flatfile::Flatfile;
@@ -391,8 +391,32 @@ pub(crate) struct Kept {
     access: Access,
     handler: Handler,
     lock: Held,
-    lock_file: Option<OwnedFd>,
-    store: Store<OwnedFd>,
+    lock_file: Option<KeptFd>,
+    store: Store<KeptFd>,
+}
+
+/// A stream's fd between requests and the position the stream held,
+/// what php's persistent stream keeps in memory.
+pub(crate) struct KeptFd {
+    fd: OwnedFd,
+    position: i64,
+}
+
+impl KeptFd {
+    /// `stream`'s fd duplicated, written out first; `None` where none
+    /// could be had.
+    fn of(req: &mut Request, stream: Stream) -> Option<KeptFd> {
+        let position = stream.tell(req);
+        let fd = stream.dup_fd(req)?;
+        Some(KeptFd { fd, position })
+    }
+
+    /// The stream made again over the fd at the position it held, as php's
+    /// persistent stream is found again.
+    fn reopen(self, req: &mut Request, mode: &[u8]) -> Result<Stream, Thrown> {
+        let position = self.position;
+        req.stream_from_fd(self.fd, FdStream::Kept { mode, position })
+    }
 }
 
 impl Link {
@@ -401,8 +425,8 @@ impl Link {
     /// where a fd could not be had, the link closed.
     pub(crate) fn keep(self, req: &mut Request) -> Option<Kept> {
         let file = self.store.stream();
-        let file_fd = file.map(|file| file.dup_fd(req));
-        let lock_fd = self.lock_file.map(|lock| lock.dup_fd(req));
+        let file_fd = file.map(|file| KeptFd::of(req, file));
+        let lock_fd = self.lock_file.map(|lock| KeptFd::of(req, lock));
         if matches!(file_fd, Some(None)) || matches!(lock_fd, Some(None)) {
             self.close(req);
             return None;
@@ -424,8 +448,8 @@ impl Link {
 
 impl Kept {
     /// The link taken up by this request, its streams made over the fds
-    /// as `php_stream_fopen_from_fd` makes them. The `Err` is the memory
-    /// limit, met registering a stream.
+    /// as `php_stream_fopen_from_fd` makes them, each at the position it
+    /// held. The `Err` is the memory limit, met registering a stream.
     pub(crate) fn take_up(self, req: &mut Request) -> Result<Link, Thrown> {
         let mode = Mode {
             access: self.access,
@@ -433,11 +457,9 @@ impl Kept {
             test: false,
         }
         .file_mode();
-        let store = self
-            .store
-            .map(|fd| req.stream_from_fd(fd, FdStream::File { mode }))?;
+        let store = self.store.map(|fd| fd.reopen(req, mode))?;
         let lock_file = match self.lock_file {
-            Some(fd) => Some(req.stream_from_fd(fd, FdStream::File { mode: b"rb" })?),
+            Some(fd) => Some(fd.reopen(req, b"rb")?),
             None => None,
         };
         Ok(Link {

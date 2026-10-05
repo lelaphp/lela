@@ -25,6 +25,9 @@
 pub(crate) mod expect;
 pub(crate) mod hosts;
 pub(crate) mod linked;
+mod variant;
+
+pub use variant::{Build, Oracles, Platform, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -169,6 +172,11 @@ pub struct Pin {
     /// same keg (design §1, #1161); absent until a person writes the row.
     #[serde(default)]
     pub sapi: Hosts,
+    /// `[variant.<name>]`: the oracle's builds with flags of their own,
+    /// each pinned per platform, which a `[[crate]]` row names to run its
+    /// lanes under (#1782); absent until a person writes one.
+    #[serde(default)]
+    pub variant: BTreeMap<String, Variant>,
     /// How many times the digest was asserted through this pin; not a
     /// value of the file.
     #[serde(skip)]
@@ -240,22 +248,73 @@ pub struct Binary {
     pub version: String,
     pub path: PathBuf,
     pub md5: String,
+    /// The oracle variant this binary is, none for `[oracle]`'s own: set
+    /// by [`Pin::variant`], not a value of the file.
+    #[serde(skip)]
+    variant: Option<String>,
+    /// Why this machine has no build of the variant to run, its platform
+    /// pinning none: set by [`Pin::variant`], not a value of the file.
+    #[serde(skip)]
+    unpinned: Option<String>,
 }
 
 impl Binary {
     /// The pinned php on this machine: its path when a file is there, and
-    /// otherwise an error naming the path and the version. What a test
-    /// that spawns php asks through [`Promise::or_skip`].
+    /// otherwise an error naming the path and the version, and the variant
+    /// where it is one. What a test that spawns php asks through
+    /// [`Promise::or_skip`].
     pub fn file(&self) -> Result<&Path> {
+        if let Some(why) = &self.unpinned {
+            bail!("{why}");
+        }
         if self.path.is_file() {
             Ok(&self.path)
         } else {
             bail!(
-                "the pinned php {} is not at {}",
+                "the pinned php {}{} is not at {}",
                 self.version,
+                self.of(),
                 self.path.display()
             )
         }
+    }
+
+    /// Why no program can run under this binary on this machine, none where
+    /// one can: what a lane's skip says for want of the oracle, the path it
+    /// looked at, or the platform a variant pins no build for (#1890).
+    pub fn absent(&self) -> Option<String> {
+        if let Some(why) = &self.unpinned {
+            return Some(why.clone());
+        }
+        (!self.path.is_file()).then(|| {
+            format!(
+                "the pinned php{} is not at {}",
+                self.of(),
+                self.path.display()
+            )
+        })
+    }
+
+    /// The oracle variant this binary is, none for the main oracle.
+    pub fn variant(&self) -> Option<&str> {
+        self.variant.as_deref()
+    }
+
+    /// What a reading taken under this binary adds to its message: the
+    /// variant it was read under, nothing for the main oracle (#1890).
+    pub(crate) fn read_under(&self) -> Option<String> {
+        self.variant
+            .as_ref()
+            .map(|name| format!("read under the oracle variant {name}"))
+    }
+
+    /// The words that name the variant after `php`, none for the main
+    /// oracle's.
+    fn of(&self) -> String {
+        self.variant
+            .as_ref()
+            .map(|name| format!(" of the oracle variant {name}"))
+            .unwrap_or_default()
     }
 }
 
@@ -424,12 +483,36 @@ pub struct Normalise {
     pub extension_number_token: Option<String>,
 }
 
-/// `[regime.<name>]`: the compiled tier's regimes, `-d` overrides added
-/// after the recipe's ini.
+/// `[regime.<name>]`: what a run under the regime is handed beyond the
+/// recipe, each after the recipe's own: `ini`, as `-d` after the recipe's
+/// ini, and `args`, after the recipe's args, for what no ini setting
+/// reaches, as php's `-e` reaches `ZEND_COMPILE_EXTENDED_INFO` (#1780). A
+/// regime names either or both, and one that names neither is the recipe.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Regime {
+    #[serde(default)]
     pub ini: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Regime {
+    /// The regime as an adapter with no command line takes it, the engine
+    /// linked into the harness: its ini, laid over the engine's defaults
+    /// as a host's `-d` lays it. A regime that carries `args` is refused,
+    /// since an argument reaches a binary's command line and nothing
+    /// else, and dropping it from one side of a comparison alone is the
+    /// flag swallowed silently #1780 rejects. The caller names the regime.
+    pub(crate) fn linked_ini(&self) -> Result<&[String]> {
+        if !self.args.is_empty() {
+            bail!(
+                "carries the arguments {:?}, which reach a binary's command line and no linked engine",
+                self.args
+            );
+        }
+        Ok(&self.ini)
+    }
 }
 
 impl Pin {
@@ -438,7 +521,12 @@ impl Pin {
     pub fn load(path: &Path) -> Result<Pin> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading the oracle pin {}", path.display()))?;
-        let pin = Pin::parse(&text).with_context(|| format!("{}", path.display()))?;
+        let mut pin = Pin::parse(&text).with_context(|| format!("{}", path.display()))?;
+        if let Some(dir) = path.parent() {
+            for variant in pin.variant.values_mut() {
+                variant.placed(dir);
+            }
+        }
         // An empty value is unset, as `getenv` reads it in run-tests.php.
         let named = std::env::var_os(TREE_VARIABLE)
             .filter(|value| !value.is_empty())
@@ -450,6 +538,9 @@ impl Pin {
     /// file says it, blind to this machine; `load` consults the machine.
     pub fn parse(text: &str) -> Result<Pin> {
         let mut pin: Pin = toml::from_str(text)?;
+        for (name, variant) in &pin.variant {
+            variant.held(name)?;
+        }
         pin.digest =
             crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());
         Ok(pin)
@@ -497,6 +588,70 @@ impl Pin {
         })
     }
 
+    /// The pin a crate's lanes run under where its row names the oracle
+    /// variant `name` (#1782): this pin with the variant's build for this
+    /// machine's [`Platform`] standing in for `[oracle]`'s binary, so every
+    /// lane, adapter and digest assertion reads it as it reads the main
+    /// oracle. The recipe is the main oracle's, as the variant's configure
+    /// line is the main oracle's plus its flags; an environment entry that
+    /// names the main oracle's binary names the variant's, as run-tests.php
+    /// exports the binary under test; and no host of `[sapi]` is the
+    /// variant's, so none is pinned beside it. The digest is the file's,
+    /// which covers every variant. Where the variant pins no build for this
+    /// machine the binary says so through [`Binary::absent`], the skip a
+    /// lane writes for an absent oracle; a name the pin does not carry is
+    /// refused beside the names it does.
+    pub fn variant(&self, name: &str) -> Result<Pin> {
+        let Some(variant) = self.variant.get(name) else {
+            return Err(self.unknown(name));
+        };
+        let platform = Platform::this();
+        let build = platform.and_then(|platform| variant.build(platform));
+        let unpinned = match (platform, build) {
+            (_, Some(_)) => None,
+            (Some(platform), None) => Some(format!(
+                "the oracle variant {name} pins no build for {}",
+                platform.key()
+            )),
+            (None, None) => Some(format!(
+                "the oracle variant {name} pins no build for this machine ({}-{}), which is none of the platforms a build is pinned for",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )),
+        };
+        let mut pin = self.clone();
+        pin.asserted = Asserted::default();
+        pin.sapi = Hosts::default();
+        pin.oracle = Binary {
+            version: self.oracle.version.clone(),
+            path: build.map(|b| b.path.clone()).unwrap_or_default(),
+            md5: build.map(|b| b.md5.clone()).unwrap_or_default(),
+            variant: Some(name.to_owned()),
+            unpinned,
+        };
+        let main = &self.oracle.path;
+        for value in pin.recipe.env.values_mut() {
+            if !main.as_os_str().is_empty() && Path::new(value.as_str()) == main {
+                *value = pin.oracle.path.display().to_string();
+            }
+        }
+        Ok(pin)
+    }
+
+    /// The refusal of a variant name the pin does not carry, naming it
+    /// beside the names it does.
+    fn unknown(&self, name: &str) -> anyhow::Error {
+        let names: Vec<&str> = self.variant.keys().map(String::as_str).collect();
+        anyhow::anyhow!(
+            "no oracle variant {name:?} in the pin; the variants are {}",
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                crate::reading::listed(&names)
+            }
+        )
+    }
+
     /// The pin as one run holds it: the digest is asserted before the
     /// first program runs through the value and never again, so a lane of
     /// any length hashes the binary once. Nothing runs under the pin
@@ -518,16 +673,20 @@ impl Pin {
     /// The binary's digest against the pin's; a mismatch refuses the run.
     fn assert_digest(&self) -> Result<()> {
         self.asserted.0.fetch_add(1, Ordering::Relaxed);
+        if let Some(why) = &self.oracle.unpinned {
+            bail!("{why}");
+        }
         let path = &self.oracle.path;
         let bytes = fs::read(path)
             .with_context(|| format!("reading the pinned php at {}", path.display()))?;
         let actual = format!("{:x}", md5::compute(bytes));
         if actual != self.oracle.md5 {
             bail!(
-                "{} has md5 {actual}; the pin says {} for php {}. Report the drift; the pin moves only by a person's hand",
+                "{} has md5 {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
                 path.display(),
                 self.oracle.md5,
-                self.oracle.version
+                self.oracle.version,
+                self.oracle.of()
             );
         }
         Ok(())
@@ -604,7 +763,8 @@ pub struct Invocation<'a> {
     /// lane, so that both run under one recipe.
     pub binary: &'a Path,
     pub program: Program<'a>,
-    /// A `[regime.<name>]` of the pin, its ini after the recipe's.
+    /// A `[regime.<name>]` of the pin, its args after the recipe's and
+    /// its ini after the recipe's.
     pub regime: Option<&'a str>,
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
     pub ini: &'a [String],
@@ -955,7 +1115,7 @@ impl<'a> Oracle<'a> {
     }
 
     /// Run `program` under the pinned binary and the recipe, with
-    /// `regime`'s ini after it when one is named, and return what
+    /// `regime`'s args and ini after it when one is named, and return what
     /// it wrote, normalised. The digest is asserted before the first run
     /// through this value; the process runs with the recipe's environment
     /// alone, in the program's directory, under the recipe's timeout.
@@ -986,7 +1146,8 @@ impl<'a> Oracle<'a> {
             }
             None => Command::new(call.binary),
         };
-        cmd.args(&recipe.args);
+        cmd.args(&recipe.args)
+            .args(regime.into_iter().flat_map(|r| &r.args));
         for ini in recipe
             .ini
             .iter()

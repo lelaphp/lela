@@ -772,7 +772,10 @@ pub fn main() -> ExitCode {
         )
     };
     let status = match &options.ask {
+        // `main` starts php before its second pass answers the usage
+        // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
+            let _ = engine(&options.ini, Origin::Shell);
             let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
             let _ = std::io::stdout()
                 .lock()
@@ -808,7 +811,7 @@ fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, origin: Origin) -> Engine
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
     let builder = natives::declare(builder, origin).skip_shebang_while("cgi.check_shebang_line");
-    php_sapi::start(builder, ini)
+    php_sapi::start(builder, ini, |entry| Process.log(entry))
 }
 
 #[cfg(test)]

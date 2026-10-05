@@ -15,7 +15,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
-use php_ext::request::{Request, ScannerFile};
+use php_ext::request::{Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
 use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
 

@@ -4,11 +4,11 @@
 //! `set_soap_fault` and `add_soap_fault`, which every fault is made by.
 
 use php_ext::abi::ConstValue;
-use php_ext::abi::{ObjectHandlers, Passed, Std, This, Union};
+use php_ext::abi::{ObjectHandlers, Passed, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_class, read_prop};
 use php_ext::coerce::{to_long, to_string};
-use php_ext::raising::{Thrown, arg_value_error, argument_error, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -588,52 +588,32 @@ pub(crate) struct SdlPayload {
     pub(crate) sdl: Option<std::sync::Arc<crate::model::Sdl>>,
 }
 
-/// The handlers `Soap\Url` and `Soap\Sdl` share: no constructor, no clone,
-/// never comparable; `Soap\Url` casts to `int` as its object number, as php's
-/// typo leaves `Soap\Sdl` with the standard cast.
-pub(crate) struct OpaqueHandlers {
-    url: bool,
-}
+/// What `Soap\Url`'s and `Soap\Sdl`'s handlers refuse: construction in
+/// php's bare words, cloning and comparison. `Soap\Sdl` has nothing else
+/// to override, php's typo leaving it the standard cast.
+const OPAQUE: Refusals = Refusals::NONE.construction(None).cloning().comparison();
 
-pub(crate) static URL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: true };
-pub(crate) static SDL_HANDLERS: OpaqueHandlers = OpaqueHandlers { url: false };
+/// `soap_url_object_handlers`: [`OPAQUE`]'s refusals, and a cast to `int`
+/// as the object's number.
+pub(crate) struct UrlHandlers;
 
-impl ObjectHandlers for OpaqueHandlers {
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> R<Option<php_ext::call::Function>> {
-        let name = if self.url { "Soap\\Url" } else { "Soap\\Sdl" };
-        Err(throw_error(
-            req,
-            "Error",
-            &format!("Cannot directly construct {name}"),
-        ))
-    }
+pub(crate) static URL_HANDLERS: UrlHandlers = UrlHandlers;
 
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
+impl ObjectHandlers for UrlHandlers {
+    fn refusals(&self) -> Refusals {
+        OPAQUE
     }
 
     fn cast_object(&self, req: &mut Request, object: PhpObject, to: TypeTag) -> R<Option<Value>> {
-        if self.url && to == TypeTag::Int {
+        if to == TypeTag::Int {
             return Ok(Some(Value::int(i64::from(object.index()))));
         }
         Std.cast_object(req, object, to)
     }
-
-    fn compare(
-        &self,
-        _req: &mut Request,
-        _left: &Value,
-        _right: &Value,
-    ) -> R<Option<std::cmp::Ordering>> {
-        Ok(None)
-    }
 }
 
-/// `Soap\Url`: final, opaque, not serializable.
+/// `Soap\Url`: final, opaque, not serializable, no dynamic property
+/// (`@strict-properties`).
 ///
 /// ```php
 /// try { new Soap\Url; } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -649,14 +629,80 @@ impl ObjectHandlers for OpaqueHandlers {
 /// bool(false)
 /// Class Soap\Url is an internal class marked as final that cannot be instantiated without invoking its constructor
 /// ```
-#[php_class(namespace(Soap), final, not_serializable, payload = UrlPayload, handlers = URL_HANDLERS)]
+///
+/// The one a request kept, read off a client whose server never answered:
+///
+/// ```php
+/// $srv = stream_socket_server('tcp://127.0.0.1:0');
+/// ini_set('default_socket_timeout', 0);
+/// $c = new SoapClient(null, ['location' => 'http://' . stream_socket_get_name($srv, false) . '/', 'uri' => 'urn:t', 'connection_timeout' => 5, 'exceptions' => false]);
+/// echo $c->f()->getMessage(), "\n";
+/// $u = (new ReflectionProperty($c, 'httpurl'))->getValue($c);
+/// echo get_class($u), "\n";
+/// try { $u->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($u->x), $u->y);
+/// try { clone $u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { serialize($u); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error Fetching http headers
+/// Soap\Url
+/// Cannot create dynamic property Soap\Url::$x
+///
+/// Warning: Undefined property: Soap\Url::$y in %s on line 9
+/// bool(false)
+/// NULL
+/// Trying to clone an uncloneable object of class Soap\Url
+/// Serialization of 'Soap\Url' is not allowed
+/// ```
+#[php_class(
+    namespace(Soap),
+    final,
+    not_serializable,
+    payload = UrlPayload,
+    handlers = URL_HANDLERS,
+    dynamic_properties = forbidden
+)]
 pub(crate) struct Url;
 
 #[php_class]
 impl Url {}
 
-/// `Soap\Sdl`: final, opaque, not serializable.
-#[php_class(namespace(Soap), final, not_serializable, payload = SdlPayload, handlers = SDL_HANDLERS)]
+/// `Soap\Sdl`: final, opaque, not serializable, no dynamic property
+/// (`@strict-properties`).
+///
+/// ```php
+/// $w = "<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' xmlns:soap='http://schemas.xmlsoap.org/wsdl/soap/' targetNamespace='urn:t'><portType name='P'/><binding name='B' type='P'><soap:binding transport='http://schemas.xmlsoap.org/soap/http'/></binding><service name='S'><port name='Q' binding='B'><soap:address location='http://localhost/'/></port></service></definitions>";
+/// $c = new SoapClient('data://text/plain,' . urlencode($w), ['cache_wsdl' => WSDL_CACHE_NONE]);
+/// $s = (new ReflectionProperty($c, 'sdl'))->getValue($c);
+/// echo get_class($s), "\n";
+/// try { $s->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($s->x), $s->y);
+/// try { clone $s; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { serialize($s); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// $r = new ReflectionClass($s);
+/// var_dump($r->isFinal(), $r->isCloneable());
+/// ```
+/// ```expect
+/// Soap\Sdl
+/// Cannot create dynamic property Soap\Sdl::$x
+///
+/// Warning: Undefined property: Soap\Sdl::$y in %s on line 7
+/// bool(false)
+/// NULL
+/// Trying to clone an uncloneable object of class Soap\Sdl
+/// Serialization of 'Soap\Sdl' is not allowed
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_class(
+    namespace(Soap),
+    final,
+    not_serializable,
+    payload = SdlPayload,
+    handlers = OPAQUE,
+    dynamic_properties = forbidden
+)]
 pub(crate) struct Sdl;
 
 #[php_class]

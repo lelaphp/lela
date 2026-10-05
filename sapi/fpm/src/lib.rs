@@ -193,7 +193,18 @@ fn parse(argv: &[Vec<u8>], search: &mut Search) -> (Vec<Define>, Ask) {
 /// `php_module_startup` for php-fpm: the bundle's enabled set, its tier,
 /// and `cgi-fcgi` after them, over the `files` found and `-d`'s entries.
 fn engine(ini: &[Define], files: &IniFiles) -> Engine {
-    php_sapi::start(builder(files), ini)
+    php_sapi::start(builder(files), ini, log_message)
+}
+
+/// `sapi_cgi_log_message` (`Z/sapi/fpm/fpm/fpm_main.c:629-632`): the entry
+/// as a notice of the process's log, after `PHP message: `.
+fn log_message(entry: &[u8]) {
+    crate::zlog::msg(
+        crate::zlog::Level::Notice,
+        crate::zlog::Site::at("sapi_cgi_log_message", 631),
+        b"PHP message: ",
+        entry,
+    );
 }
 
 /// php-fpm's engine before its entries: its name, the php.ini `files` the
@@ -299,9 +310,14 @@ fn run(ini: &[Define], files: &IniFiles, args: Args) -> u8 {
         let _ = nix::unistd::write(&pipe, &1i32.to_ne_bytes());
     }
     let started = engine.startup_errors().to_owned();
-    drop(engine);
+    fpm.engine = Some(engine);
     match fpm.run() {
         Err(Became::Child(pool, slot)) => {
+            // The master's engine, which the fork copied: a child serves
+            // on an engine of its own, built for its pool, and ends that
+            // one, so the copy is let go of without ending it, which
+            // would end the master's engine once more in every child.
+            std::mem::forget(fpm.engine.take());
             let worker = worker::init(&mut fpm, pool, slot, (ini, files), &started);
             drop(fpm);
             worker.run()

@@ -166,7 +166,7 @@ use serde::{Deserialize, Serialize};
 use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::{Oracle, Pin, Runner, Source};
+use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::Tree;
 use crate::sources;
@@ -641,13 +641,6 @@ pub(crate) struct Under<'a> {
     pub locks: &'a Path,
 }
 
-impl<'a> Under<'a> {
-    /// The same run, with the server that answered for one subset.
-    fn serving(self, served: Option<&'a str>) -> Under<'a> {
-        Under { served, ..self }
-    }
-}
-
 /// The subset's reading: the counts in `numbers`, the failures named in
 /// the message, and the status the ladder allows.
 pub(crate) fn reading(
@@ -963,48 +956,41 @@ pub fn run(
     // an absent tree refuses the run naming both places it looked.
     let source = manifest.pin.source.tree()?;
     let subsets = asked(root, manifest, &source, ask)?;
-    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
+    // The main oracle, and one per variant a row names, whose crate's subset
+    // runs under it (#1782); each digest asserted once a run (harness §4.3).
+    let variants = manifest.variants();
+    let oracles = Oracles::new(&manifest.pin, &variants);
+    let runners = Runners::resolve(root, &manifest.pin, &variants, ask.engine.as_deref())?;
+    let runner = &runners.main;
     // Nothing to run, or a binary the tree has moved past: either way the
     // lane says so before the subsets rather than at the reading alone.
-    if let Runner::Absent(why) | Runner::Stale(why) = &runner {
+    if let Runner::Absent(why) | Runner::Stale(why) = runner {
         println!("phpt: {why}");
     }
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
-    let subsets = unkept(ask, &runner, (manifest, &runs), subsets)?;
-    if subsets.is_empty() {
-        return Ok(Vec::new());
-    }
-    // One oracle for the run: the digest is asserted before the first
-    // program and never per test, subset or section (harness §4.3). A
-    // pinned php that is not on this machine is no refusal, as it is none
-    // for `witness` and `crosscheck`: nothing runs, and each reading says
-    // why.
-    let oracle = manifest.pin.oracle();
-    let pinned = &manifest.pin.oracle.path;
-    let oracle_absent = if pinned.is_file() {
-        None
-    } else {
-        Some(format!("the pinned php is not at {}", pinned.display()))
-    };
-    if let Some(why) = &oracle_absent
+    let sides: Vec<Result<Side>> = subsets
+        .iter()
+        .map(|subset| runners.side(manifest, &oracles, subset))
+        .collect();
+    let todo = unkept(ask, (manifest, &runs), &subsets, &sides)?;
+    if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
+        && !sides.iter().flatten().any(Side::runs)
     {
         println!("phpt: nothing runs; {why}");
     }
     let locks = ask.locks.clone().unwrap_or_else(across::machine);
-    let under = Under {
-        runner: &runner,
-        lane: ask.lane,
-        oracle_absent: oracle_absent.as_deref(),
-        jobs: ask.jobs.unwrap_or_else(tally::cores),
-        served: None,
-        locks: &locks,
-    };
+    let jobs = ask.jobs.unwrap_or_else(tally::cores);
     // The run's own copy of the pinned tree, which every subset runs in and
     // which goes when the run does; none where no test will run.
-    let copy = match (runner.binary(), &oracle_absent) {
-        (Some(_), None) => Some(copy_of(&source, under.jobs)?),
-        _ => None,
+    let copy = if todo
+        .iter()
+        .filter_map(|(_, side)| side.as_ref().ok())
+        .any(Side::runs)
+    {
+        Some(copy_of(&source, jobs)?)
+    } else {
+        None
     };
     let mut readings = Vec::new();
     // The lane's census, folded over the subsets as each is run, so the
@@ -1016,32 +1002,40 @@ pub fn run(
     // any other cause, is that subset's failing reading, and the lane goes
     // on, so one missing service never takes the readings the subsets
     // before and after it wrote with it (#1612).
-    let mut taken = |subset: &Subset, held_as: &Scope| -> Result<Vec<Reading>> {
+    let mut taken = |subset: &Subset, side: &Side, held_as: &Scope| -> Result<Vec<Reading>> {
         let scope = &held_as.to_string();
-        let own = Own::of(&oracle, subset, scope, copy.is_some())?;
-        let beside = own.pin.as_ref().map(|pin| oracle.beside(pin));
-        let oracle = beside.as_ref().unwrap_or(&oracle);
-        let under = under.serving(own.served.as_deref());
-        let ((tally, waited), removed) = swept_around(oracle, scope, copy.is_some(), || {
-            let within = copy.as_ref().map(|copy| subset.rooted(copy));
+        let running = copy.is_some() && side.runs();
+        let runner = side.runner;
+        let own = Own::of(side.oracle, subset, scope, running)?;
+        let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
+        let oracle = beside.as_ref().unwrap_or(side.oracle);
+        let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
+        let ((tally, waited), removed) = swept_around(oracle, scope, running, || {
+            let within = copy
+                .as_ref()
+                .filter(|_| running)
+                .map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
-        around(&mut reading, &runner, removed, waited)?;
-        let (target, kept) =
-            runs.target_of(&manifest.pin, &subset.scope, (&tally, &runner), ask.lane)?;
+        around(&mut reading, runner, removed, waited)?;
+        let pin = side.oracle.pin();
+        let (target, kept) = runs.target_of(pin, &subset.scope, (&tally, runner), ask.lane)?;
         let against = (target.as_ref(), kept);
         held_to(
             &mut reading,
             (&tally, &subset.scope),
             against,
             registry,
-            (&runner, &manifest.pin),
+            (runner, pin),
         )?;
+        if let Some(under) = pin.oracle.read_under() {
+            told(&mut reading, runner, &under);
+        }
         let held = runs.after(
             manifest,
             held_as,
-            (&tally, &runner),
+            (&tally, runner),
             &reading,
             target.as_ref(),
         )?;
@@ -1059,9 +1053,14 @@ pub fn run(
         }
         Ok(std::iter::once(reading).chain(held).collect())
     };
-    for subset in &subsets {
-        let scope = subset.scope(&runner, ask.lane);
-        match taken(subset, &scope) {
+    // A subset whose row names an oracle variant the pin does not carry is
+    // refused as any other subset the lane could not run, naming it.
+    for (subset, side) in todo {
+        let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
+        let side = side
+            .as_ref()
+            .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
+        match side.and_then(|side| taken(subset, side, &scope)) {
             Ok(taken) => readings.extend(taken),
             Err(why) => readings.push(refused(root, manifest, &scope.to_string(), &why)?),
         }
@@ -1074,32 +1073,54 @@ pub fn run(
     Ok(readings)
 }
 
-/// The subsets a run under `ask` runs: all of them, or under `--unkept`
-/// those whose kept target does not stand, each of the others said and set
+/// The subsets a run under `ask` runs, each beside its side: all of them,
+/// or under `--unkept` all but each whose kept target stands under its own
+/// oracle's pin, as
+/// its [`Side`] resolves it (#1830, #1782), and each the named binary is no
+/// control of, a variant's subset under the main php; each said, and set
 /// aside before anything is copied, so a lane whose every target stands
-/// copies no tree and runs nothing (#1830). Only the control keeps a
-/// target, and only outside a tier's lane (`Runs::target_of`), so
-/// `--unkept` is refused of any other run.
-fn unkept(
+/// copies no tree and runs nothing. Only the control keeps a target, and
+/// only outside a tier's lane (`Runs::target_of`), so `--unkept` is
+/// refused where the binary is no subset's control or a lane is named.
+fn unkept<'a, 'r, 'o>(
     ask: &Ask,
-    runner: &Runner,
     (manifest, runs): (&Manifest, &against::Runs),
-    subsets: Vec<Subset>,
-) -> Result<Vec<Subset>> {
+    subsets: &'a [Subset],
+    sides: &'a [Result<Side<'r, 'o>>],
+) -> Result<Vec<(&'a Subset, &'a Result<Side<'r, 'o>>)>> {
+    let pairs = subsets.iter().zip(sides);
     if !ask.unkept {
-        return Ok(subsets);
+        return Ok(pairs.collect());
     }
-    if !matches!(runner, Runner::Control(_)) || ask.lane.is_some() {
+    let control = |side: &Side| matches!(side.runner, Runner::Control(_));
+    if ask.lane.is_some() || !sides.iter().flatten().any(control) {
         bail!(
-            "--unkept keeps the targets of the runner's control: name the pinned php, {}, with \
-             --engine, and no --jit",
+            "--unkept keeps the targets of the runner's control: name the pinned php, {}, or a \
+             variant's, with --engine, and no --jit",
             manifest.pin.oracle.path.display()
         );
     }
-    let pin = &manifest.pin;
-    Ok(subsets
-        .into_iter()
-        .filter(|subset| {
+    Ok(pairs
+        .filter(|(subset, side)| {
+            let Ok(side) = side else {
+                // A variant the pin does not carry: the run refuses it
+                // with its reading, as any run does.
+                return true;
+            };
+            let pin = side.oracle.pin();
+            if !control(side) {
+                println!(
+                    "phpt: {}: the named binary is not its control, the php{} at {}, so \
+                     --unkept leaves it",
+                    subset.scope,
+                    pin.oracle
+                        .variant()
+                        .map(|v| format!(" of the oracle variant {v}"))
+                        .unwrap_or_default(),
+                    pin.oracle.path.display()
+                );
+                return false;
+            }
             let standing = stands(runs, pin, subset);
             if standing {
                 println!(
@@ -1114,13 +1135,98 @@ fn unkept(
         .collect())
 }
 
-/// Whether the target kept for `subset` under the pin stands for it as it
+/// Whether the target kept for `subset` under `pin` stands for it as it
 /// is now ([`Target::stands_for`]); a target or a subset that cannot be
 /// read is one that does not, so the control runs the subset again.
 fn stands(runs: &against::Runs, pin: &Pin, subset: &Subset) -> bool {
     match (runs.kept_target(pin, &subset.scope), subset.tests()) {
         (Ok(Some(target)), Ok(tests)) => target.stands_for(subset, &tests),
         _ => false,
+    }
+}
+
+/// What one subset runs under: the oracle its crate's row names, the main
+/// one or a variant (#1782), the binary resolved against that oracle's pin,
+/// and why that oracle cannot run on this machine, where it cannot.
+struct Side<'r, 'o> {
+    oracle: &'r Oracle<'o>,
+    runner: &'r Runner,
+    absent: Option<String>,
+}
+
+impl Side<'_, '_> {
+    /// Whether a test of the subset will run: a binary to run it and its
+    /// oracle on this machine.
+    fn runs(&self) -> bool {
+        self.runner.binary().is_some() && self.absent.is_none()
+    }
+
+    /// The subset's run under this side: its runner and its oracle's
+    /// absence, with what the run gives every subset and the server that
+    /// answered for this one.
+    fn under<'u>(
+        &'u self,
+        lane: Option<Lane>,
+        jobs: NonZeroUsize,
+        served: Option<&'u str>,
+        locks: &'u Path,
+    ) -> Under<'u> {
+        Under {
+            runner: self.runner,
+            lane,
+            oracle_absent: self.absent.as_deref(),
+            jobs,
+            served,
+            locks,
+        }
+    }
+}
+
+/// The binary under test as each oracle of the run resolves it: a binary
+/// named for the run is the control under the oracle whose digest it has,
+/// so each variant resolves it under its own pin (#1782).
+struct Runners<'v> {
+    main: Runner,
+    variants: BTreeMap<&'v str, Runner>,
+}
+
+impl<'v> Runners<'v> {
+    fn resolve(
+        root: &Path,
+        main: &Pin,
+        variants: &'v BTreeMap<String, Pin>,
+        engine: Option<&Path>,
+    ) -> Result<Runners<'v>> {
+        let mut resolved = BTreeMap::new();
+        for (name, pin) in variants {
+            resolved.insert(name.as_str(), Runner::resolve(root, pin, engine)?);
+        }
+        Ok(Runners {
+            main: Runner::resolve(root, main, engine)?,
+            variants: resolved,
+        })
+    }
+
+    /// What `subset` runs under: the oracle its crate's row names, the
+    /// binary as that oracle resolves it, and why that oracle cannot run
+    /// on this machine, where it cannot. A pinned php that is not here is
+    /// no refusal, as it is none for `witness` and `crosscheck`: nothing
+    /// runs, and the reading says why.
+    fn side<'r, 'o>(
+        &'r self,
+        manifest: &Manifest,
+        oracles: &'r Oracles<'o>,
+        subset: &Subset,
+    ) -> Result<Side<'r, 'o>> {
+        let variant = manifest.variant_of(&subset.scope);
+        let oracle = oracles.of(variant)?;
+        Ok(Side {
+            oracle,
+            runner: variant
+                .and_then(|v| self.variants.get(v))
+                .unwrap_or(&self.main),
+            absent: oracle.pin().oracle.absent(),
+        })
     }
 }
 

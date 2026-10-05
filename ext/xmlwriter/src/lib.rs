@@ -26,8 +26,8 @@
 mod natives;
 
 use php_ext::abi::{
-    CloneObj, Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, ObjectHandlers,
-    Path, Static, Std, This, Union,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, ObjectHandlers, Path,
+    Refusals, Static, Std, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, lookup_class, new_object};
@@ -128,13 +128,13 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
         destroy(req, object);
         Std.dtor_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 }
 

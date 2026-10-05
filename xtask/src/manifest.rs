@@ -249,6 +249,13 @@ pub struct Crate {
     /// person's act, is the port's completion certificate.
     #[serde(default)]
     pub porting: bool,
+    /// The oracle variant the crate is read under (#1782): `crosscheck`,
+    /// `witness` and `phpt` run it under the pin's `[variant.<name>]` for
+    /// the platform they run on, verified by its md5, and every crate
+    /// without the key under the main oracle. A name the pin does not
+    /// carry fails the crate's readings in those lanes, naming it.
+    #[serde(default)]
+    pub oracle: Option<String>,
 }
 
 impl Crate {
@@ -266,7 +273,15 @@ impl Crate {
             targets: Vec::new(),
             phpt: Vec::new(),
             porting: false,
+            oracle: None,
         }
+    }
+
+    /// The row read under the oracle variant `variant`.
+    #[must_use]
+    pub fn with_oracle(mut self, variant: &str) -> Crate {
+        self.oracle = Some(variant.to_owned());
+        self
     }
 
     /// The row with these `phpt` subsets, relative to the pinned tree.
@@ -515,13 +530,19 @@ impl Where {
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
-/// its subcommand (`"git add"`); each is refused beside any other
-/// predicate.
+/// its subcommand (`"git add"`); `deny_macros` qualifies `deny_types`; each
+/// is refused beside any other predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Predicates {
     pub deny_types: Option<Vec<String>>,
+    /// The macros denied beside the types, each by its full path
+    /// (`std::thread_local`), a wildcard refused: what a type ban cannot
+    /// see, since a macro declares the state it hides (#1781). It renders to clippy's
+    /// `disallowed-macros` beside `deny_types`' `disallowed-types`, and
+    /// `permit` reads an invocation of one as it reads a mention of a type.
+    pub deny_macros: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
@@ -628,7 +649,8 @@ impl Predicates {
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without
-    /// `deny_pattern`, `with` without `deny_argv` or `require_argv`.
+    /// `deny_pattern`, `with` without `deny_argv` or `require_argv`,
+    /// `deny_macros` without `deny_types`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
@@ -636,6 +658,8 @@ impl Predicates {
             Some("unless_pattern")
         } else if !self.with.is_empty() && self.deny_argv.is_none() && self.require_argv.is_none() {
             Some("with")
+        } else if self.deny_macros.is_some() && self.deny_types.is_none() {
+            Some("deny_macros")
         } else {
             None
         }
@@ -857,6 +881,28 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// Every oracle variant a `[[crate]]` row names and the pin carries,
+    /// by name, each as the pin its crates run under on this machine
+    /// ([`Pin::variant`]): what a lane makes its
+    /// [`crate::oracle::Oracles`] from, so each variant's digest is
+    /// asserted once per run. A name the pin does not carry is left out,
+    /// and [`crate::oracle::Oracles::of`] refuses it for the crate whose
+    /// row names it, a failing reading of that crate and no other.
+    pub fn variants(&self) -> BTreeMap<String, Pin> {
+        self.crates
+            .iter()
+            .filter_map(|k| k.oracle.as_deref())
+            .filter_map(|name| Some((name.to_owned(), self.pin.variant(name).ok()?)))
+            .collect()
+    }
+
+    /// The oracle variant the row of crate `name` names; none where the
+    /// row names none or there is no such row, which run under the main
+    /// oracle.
+    pub fn variant_of(&self, name: &str) -> Option<&str> {
+        self.crate_named(name).and_then(|k| k.oracle.as_deref())
+    }
+
     /// Parse the manifest text alone and hold it to the grammar. The pin is
     /// left empty; `load` fills it.
     pub fn parse(text: &str) -> Result<Manifest> {
@@ -935,9 +981,21 @@ impl Manifest {
                     named[0]
                 );
             }
+            if let Some(wildcard) = rule
+                .predicate
+                .deny_macros
+                .iter()
+                .flatten()
+                .find(|m| m.ends_with("::*"))
+            {
+                bail!(
+                    "rule \"{}\" denies the macros {wildcard}; a macro is denied by its full path, since clippy matches paths and no table of a module's macros expands a wildcard",
+                    rule.id
+                );
+            }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern and `with` qualifies deny_argv or require_argv",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` and `unless_pattern` qualify deny_pattern, `with` qualifies deny_argv or require_argv and `deny_macros` qualifies deny_types",
                     rule.id,
                     named[0]
                 );

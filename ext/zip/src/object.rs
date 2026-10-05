@@ -4,14 +4,14 @@
 use std::path::PathBuf;
 
 use php_ext::abi::{
-    Callable, CloneObj, DebugInfo, ObjectHandlers, OrFalse, Path, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Ref, Std, This, Union, Untyped,
+    Callable, DebugInfo, ObjectHandlers, OrFalse, Path, PropertiesFor, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Ref, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::archive::{self as za, Archive, Source};
@@ -177,7 +177,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `php_zip_object_free_storage`: an open archive closed, its changes
     /// written, and php's warning where that fails.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -205,10 +212,6 @@ impl ObjectHandlers for Handlers {
             }
         }
         Std.free_obj(req, object);
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn read_property(

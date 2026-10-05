@@ -42,6 +42,14 @@ pub trait HeapHooks {
     /// The heap the operation is on, asked for again after every call
     /// up; the request's own, and the recorder's under Miri.
     fn heap(&mut self) -> &mut Heap;
+    /// php's `gc_collect_cycles` pointer (`Z/Zend/zend_gc.c:254`), which
+    /// a full root buffer calls (`:702`): the count the collection freed where
+    /// something stands over the heap's own collection, `None` where
+    /// [`Heap::gc_collect_cycles`], php's `zend_gc_collect_cycles`, is
+    /// the pointer, as it is for a heap whose host overrides nothing.
+    fn gc_collect_cycles(&mut self) -> Option<i64> {
+        None
+    }
     /// The object's `__destruct`, served before its storage is freed.
     /// The object is handed as php hands `dtor_obj` its pointer, still
     /// in the store and held at one owner.

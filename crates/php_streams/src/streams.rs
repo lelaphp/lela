@@ -32,21 +32,25 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
-use php_heap::{Block, ResourceType};
+use crate::api::values::{Emalloc, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notifier,
-    OptionAnswer, Request, Stream, StreamOption, Whence,
+    OptionAnswer, Request, Standard, Stream, StreamOption, TemporaryGuard, Whence,
 };
 use crate::api::values::{ClassId, FreshString, Key, PhpArray, PhpString, Resource, Value};
-use crate::wrapper::TemporaryCheck;
 
-mod filters;
+pub(crate) mod filters;
 pub(crate) mod persistent;
 mod rfc2397;
-mod sockets;
+pub(crate) mod sockets;
+use crate::api::request::Streams;
+use crate::state::Layer;
+use crate::wrapper::PlainFiles;
 pub(crate) use filters::FilterCall;
+use persistent::Persistent;
+use sockets::Transports;
 pub(crate) mod userspace;
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
@@ -508,15 +512,14 @@ impl Mode {
 /// one the persistent list keeps across requests, as `pestrdup`'s
 /// `persistent` argument picks.
 enum OrigPath {
-    Request(Block),
+    Request(Emalloc),
     Persistent(Box<[u8]>),
 }
 
 impl OrigPath {
     /// `estrdup(path)`; the `Err` is the memory limit's fatal.
     fn request(req: &mut Request, path: &[u8]) -> Result<OrigPath, Thrown> {
-        let block = req.heap_mut().block(path.len() + 1);
-        let mut block = req.fatal_of(block)?;
+        let mut block = Emalloc::new(req, path.len() + 1)?;
         block.bytes_mut()[..path.len()].copy_from_slice(path);
         Ok(OrigPath::Request(block))
     }
@@ -532,7 +535,7 @@ impl OrigPath {
     /// `pefree(stream->orig_path)`.
     fn free(self, req: &mut Request) {
         if let OrigPath::Request(block) = self {
-            req.heap_mut().free_block(block);
+            block.free(req);
         }
     }
 
@@ -542,7 +545,7 @@ impl OrigPath {
         match self {
             OrigPath::Request(block) => {
                 let path = Box::from(block.bytes().split_last().map_or(&[][..], |(_, path)| path));
-                req.heap_mut().free_block(block);
+                block.free(req);
                 path
             }
             OrigPath::Persistent(path) => path,
@@ -558,7 +561,7 @@ impl OrigPath {
 enum ReadBuf {
     #[default]
     None,
-    Request(Block),
+    Request(Emalloc),
     Persistent(Box<[u8]>),
 }
 
@@ -599,17 +602,17 @@ impl ReadBuf {
                 *self = ReadBuf::Persistent(vec![0; len].into_boxed_slice());
                 return Ok(());
             }
-            ReadBuf::Request(block) => req.heap_mut().block_resize(block, len),
-            ReadBuf::None => req.heap_mut().block(len),
+            ReadBuf::Request(block) => block.resize(req, len),
+            ReadBuf::None => Emalloc::new(req, len),
         };
-        *self = ReadBuf::Request(req.fatal_of(grown)?);
+        *self = ReadBuf::Request(grown?);
         Ok(())
     }
 
     /// `pefree(stream->readbuf)`.
     fn free(&mut self, req: &mut Request) {
         if let ReadBuf::Request(block) = std::mem::take(self) {
-            req.heap_mut().free_block(block);
+            block.free(req);
         }
     }
 }
@@ -929,7 +932,7 @@ impl PhpStream {
             return Some(0);
         }
         if !self.ops.writable() {
-            let text = format!("{}(): Stream is not writable", req.active_native());
+            let text = format!("{}(): Stream is not writable", req.active_function_name());
             raise(req, Level::Notice, &text);
             return None;
         }
@@ -1062,7 +1065,10 @@ impl PhpStream {
             self.fatal_error = false;
             return true;
         }
-        let text = format!("{}(): Stream does not support seeking", req.active_native());
+        let text = format!(
+            "{}(): Stream does not support seeking",
+            req.active_function_name()
+        );
         warning(req, &text);
         false
     }
@@ -1448,6 +1454,33 @@ impl PhpStream {
         self.cast_as(req, cast, Ret::Given, warn)
     }
 
+    /// A kind that seeks sought to the stream's position and the read
+    /// buffer dropped, as `_php_stream_cast` does before it hands a fd
+    /// (`Z/main/streams/cast.c:200-208`).
+    fn seek_to_position(&mut self, req: &mut Request) {
+        if self.ops.seekable() && !self.flags.no_seek {
+            let Self { ops, position, .. } = self;
+            let mut dummy = 0;
+            let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
+            self.readpos = 0;
+            self.writepos = 0;
+        }
+    }
+
+    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
+    /// to its position with the read buffer dropped only where the buffer
+    /// holds bytes, the guard `_php_stream_write_buffer` puts before a
+    /// write (`Z/main/streams/streams.c:1197`), taken here once since the
+    /// buffer does not outlive the stream; the kind's fd as a cast with
+    /// no `ret` answers it.
+    fn keep_fd(&mut self, req: &mut Request) -> Option<RawFd> {
+        self.flush(req);
+        if self.readpos != self.writepos {
+            self.seek_to_position(req);
+        }
+        self.cast_as(req, Cast::Fd, Ret::Null, false)
+    }
+
     /// `php_stream_can_cast`, `_php_stream_cast` with no `ret` and no
     /// `show_err`: whether the kind would answer the cast, asked of it
     /// without flushing, seeking or converting the stream.
@@ -1467,13 +1500,7 @@ impl PhpStream {
     fn cast_as(&mut self, req: &mut Request, cast: Cast, ret: Ret, warn: bool) -> Option<RawFd> {
         if ret == Ret::Given && cast != Cast::Select {
             self.flush(req);
-            if self.ops.seekable() && !self.flags.no_seek {
-                let Self { ops, position, .. } = self;
-                let mut dummy = 0;
-                let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
-                self.readpos = 0;
-                self.writepos = 0;
-            }
+            self.seek_to_position(req);
         }
         // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
         // the crypto layer holds decrypted moved into the empty read
@@ -1492,7 +1519,7 @@ impl PhpStream {
             if warn {
                 let text = format!(
                     "{}(): Cannot cast a filtered stream on this system",
-                    req.active_native()
+                    req.active_function_name()
                 );
                 warning(req, &text);
             }
@@ -1519,7 +1546,7 @@ impl PhpStream {
                 };
                 let text = format!(
                     "{}(): Cannot represent a stream of type {} as a {target}",
-                    req.active_native(),
+                    req.active_function_name(),
                     self.ops.label()
                 );
                 warning(req, &text);
@@ -1530,7 +1557,7 @@ impl PhpStream {
         if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
-                req.active_native()
+                req.active_function_name()
             );
             warning(req, &text);
         }
@@ -1626,12 +1653,12 @@ impl PhpStream {
     pub(crate) fn close_open(req: &mut Request, stream: Stream) {
         let res = stream.resource();
         req.stream_op(stream, |req, s| s.flush_owed(req));
-        let taken = req
-            .resource_native_mut::<Option<PhpStream>>(res.heap())
+        let taken = res
+            .native_mut::<Option<PhpStream>>(req)
             .and_then(Option::take);
         res.close(req);
         if let Some(taken) = taken {
-            req.pclose_ret = taken.release(req);
+            req.streams().pclose_ret = taken.release(req);
         }
         // `PHP_STREAM_FREE_CLOSE_PERSISTENT`: a persistent stream closed
         // is gone from the list for every holder.
@@ -1710,7 +1737,7 @@ struct Memory {
     /// bytes on the request's heap from [`Ops::lay_down`] to the close;
     /// none for `php://input` and a host's standard input, which php
     /// reads through kinds of their own.
-    own: Option<Block>,
+    own: Option<Emalloc>,
 }
 
 /// `sizeof(php_stream_memory_data)` on the pinned 64-bit build: `data`,
@@ -1724,7 +1751,7 @@ enum MemBytes {
     /// A string of the request's as long as the bytes,
     /// `zend_string_realloc`ed by a write past its end and
     /// `zend_string_truncate`d by a shorter `ftruncate`.
-    Own(php_heap::FreshStr),
+    Own(crate::api::values::FreshString),
     /// What the host handed the request, `php://input`'s body and a
     /// host's standard input, which php keeps in streams of their own
     /// and never in a memory stream's data.
@@ -1760,23 +1787,23 @@ impl MemBytes {
     fn resize(&mut self, req: &mut Request, len: usize) -> Result<(), Thrown> {
         let resized = match std::mem::replace(self, MemBytes::Empty) {
             MemBytes::Empty if len == 0 => return Ok(()),
-            MemBytes::Empty => req.heap_mut().string_fresh(len),
-            MemBytes::Own(s) if len >= s.len() => req.heap_mut().string_extend(s, len),
-            MemBytes::Own(s) => req.heap_mut().string_truncate(s, len),
+            MemBytes::Empty => FreshString::new(req, len),
+            MemBytes::Own(s) if len >= s.len() => s.extend(req, len),
+            MemBytes::Own(s) => s.truncate(req, len),
             MemBytes::Host(mut bytes) => {
                 bytes.resize(len, 0);
                 *self = MemBytes::Host(bytes);
                 return Ok(());
             }
         };
-        *self = MemBytes::Own(req.fatal_of(resized)?);
+        *self = MemBytes::Own(resized?);
         Ok(())
     }
 
     /// `zend_string_release(ms->data)`.
     fn release(&mut self, req: &mut Request) {
         if let MemBytes::Own(s) = std::mem::replace(self, MemBytes::Empty) {
-            req.heap_mut().release_string(s.finish());
+            s.free(req);
         }
     }
 }
@@ -1806,8 +1833,7 @@ impl Ops for Memory {
         if matches!(self.data, MemBytes::Host(_)) {
             return Ok(());
         }
-        let own = req.heap_mut().block(MEMORY_DATA_SIZE);
-        self.own = Some(req.fatal_of(own)?);
+        self.own = Some(Emalloc::new(req, MEMORY_DATA_SIZE)?);
         Ok(())
     }
 
@@ -1826,8 +1852,8 @@ impl Ops for Memory {
         if self.fpos + buf.len() > self.data.len()
             && let Err(thrown) = self.data.resize(req, self.fpos + buf.len())
         {
-            if req.stream_thrown.is_none() {
-                req.stream_thrown = Some(thrown);
+            if req.stream_thrown().is_none() {
+                *req.stream_thrown() = Some(thrown);
             }
             return None;
         }
@@ -1858,7 +1884,7 @@ impl Ops for Memory {
             self.data = MemBytes::Empty;
         }
         if let Some(own) = self.own.take() {
-            req.heap_mut().free_block(own);
+            own.free(req);
         }
         0
     }
@@ -1926,8 +1952,8 @@ impl Ops for Memory {
             return Some(false);
         }
         if let Err(thrown) = self.data.resize(req, size) {
-            if req.stream_thrown.is_none() {
-                req.stream_thrown = Some(thrown);
+            if req.stream_thrown().is_none() {
+                *req.stream_thrown() = Some(thrown);
             }
             return Some(false);
         }
@@ -2039,7 +2065,7 @@ struct Temp {
     inner: Option<Stream>,
     /// The `php_stream_temp_data` php `ecalloc`s, [`TEMP_DATA_SIZE`]
     /// bytes on the request's heap from [`Ops::lay_down`] to the close.
-    own: Option<Block>,
+    own: Option<Emalloc>,
     smax: usize,
     /// `stream->ops->label`: `TEMP`, or `RFC2397` for what the `data:`
     /// wrapper opened, which swaps in `php_stream_rfc2397_ops`.
@@ -2089,7 +2115,7 @@ impl Temp {
         let Some(file) = temporary_file(req, None, b"php")? else {
             let text = format!(
                 "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
-                req.active_native()
+                req.active_function_name()
             );
             warning(req, &text);
             return Ok(false);
@@ -2126,8 +2152,7 @@ impl Ops for Temp {
     /// 192
     /// ```
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        let own = req.heap_mut().block(TEMP_DATA_SIZE);
-        self.own = Some(req.fatal_of(own)?);
+        self.own = Some(Emalloc::new(req, TEMP_DATA_SIZE)?);
         Ok(())
     }
 
@@ -2163,7 +2188,7 @@ impl Ops for Temp {
             inner.free(req);
         }
         if let Some(own) = self.own.take() {
-            req.heap_mut().free_block(own);
+            own.free(req);
         }
         0
     }
@@ -2283,7 +2308,7 @@ pub(crate) fn temporary_file(
     dir: Option<&[u8]>,
     prefix: &[u8],
 ) -> Result<Option<Stream>, Thrown> {
-    let Some((file, path)) = req.open_temporary_fd(dir, prefix, TemporaryCheck::Never) else {
+    let Some((file, path)) = req.open_temporary_fd(dir, prefix, TemporaryGuard::Never) else {
         return Ok(None);
     };
     let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
@@ -2323,7 +2348,7 @@ struct Stdio {
     /// The `php_stdio_stream_data` php `pemalloc`s, [`STDIO_DATA_SIZE`]
     /// bytes on the request's heap from [`Ops::lay_down`] to the close,
     /// standing for the struct whose fields are these.
-    data: Option<Block>,
+    data: Option<Emalloc>,
     file: Option<std::fs::File>,
     is_seekable: bool,
     temp_name: Option<std::path::PathBuf>,
@@ -2390,8 +2415,7 @@ impl Ops for Stdio {
 
     /// `_php_stream_fopen_from_fd_int`'s `self = pemalloc(sizeof(*self))`.
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        let data = req.heap_mut().block(STDIO_DATA_SIZE);
-        self.data = Some(req.fatal_of(data)?);
+        self.data = Some(Emalloc::new(req, STDIO_DATA_SIZE)?);
         Ok(())
     }
 
@@ -2410,7 +2434,7 @@ impl Ops for Stdio {
             Err(error) => {
                 let text = format!(
                     "{}(): Write of {} bytes failed with {}",
-                    req.active_native(),
+                    req.active_function_name(),
                     buf.len(),
                     errno(&error)
                 );
@@ -2441,7 +2465,7 @@ impl Ops for Stdio {
                 if !self.suppress_errors {
                     let text = format!(
                         "{}(): Read of {} bytes failed with {}",
-                        req.active_native(),
+                        req.active_function_name(),
                         buf.len(),
                         errno(&error)
                     );
@@ -2472,7 +2496,7 @@ impl Ops for Stdio {
         drop(self.file.take());
         // `pefree(data)`, the struct given back as the close ends.
         if let Some(data) = self.data.take() {
-            req.heap_mut().free_block(data);
+            data.free(req);
         }
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
@@ -2517,7 +2541,10 @@ impl Ops for Stdio {
         position: &mut i64,
     ) -> Option<bool> {
         if !self.is_seekable {
-            let text = format!("{}(): Cannot seek on this stream", req.active_native());
+            let text = format!(
+                "{}(): Cannot seek on this stream",
+                req.active_function_name()
+            );
             warning(req, &text);
             return Some(false);
         }
@@ -2603,14 +2630,14 @@ impl Ops for Stdio {
                 let Some(file) = self.file.as_ref() else {
                     return OptionAnswer::Err;
                 };
-                if php_heap::set_fd_blocking(file.as_fd(), blocking).is_err() {
+                if crate::api::net::set_fd_blocking(file.as_fd(), blocking).is_err() {
                     return OptionAnswer::Err;
                 }
                 self.blocking = blocking;
                 OptionAnswer::Ok
             }
             StreamOption::Sync { data_only } => match self.file.as_ref() {
-                Some(file) if php_heap::sync_fd(file.as_fd(), data_only).is_ok() => {
+                Some(file) if crate::api::net::sync_fd(file.as_fd(), data_only).is_ok() => {
                     OptionAnswer::Ok
                 }
                 _ => OptionAnswer::Err,
@@ -2763,15 +2790,6 @@ fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStre
 
 // --------------------------------------------------------- php://
 
-/// Which of the host's three standard streams a `php://` path names,
-/// fd 0, 1 or 2 under php's CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Standard {
-    Stdin = 0,
-    Stdout = 1,
-    Stderr = 2,
-}
-
 /// The host's standard streams as `php://stdin`, `php://stdout` and
 /// `php://stderr` reach them, php's `STDIO` kind over fds 0, 1 and 2.
 /// What is read and written is the host's sink and body, not the fds:
@@ -2854,7 +2872,7 @@ impl Ops for HostFd {
         }
         let text = format!(
             "{}(): Read of {} bytes failed with errno={EBADF} Bad file descriptor",
-            req.active_native(),
+            req.active_function_name(),
             buf.len()
         );
         raise(req, Level::Notice, &text);
@@ -2900,7 +2918,7 @@ impl Ops for HostFd {
             return OptionAnswer::NotImplemented;
         };
         match req.host_fd(self.standard()) {
-            Some(fd) if php_heap::sync_fd(fd, data_only).is_ok() => OptionAnswer::Ok,
+            Some(fd) if crate::api::net::sync_fd(fd, data_only).is_ok() => OptionAnswer::Ok,
             _ => OptionAnswer::Err,
         }
     }
@@ -2930,83 +2948,43 @@ impl Ops for HostFd {
     }
 }
 
-impl Request {
-    /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
-    /// `php_request_startup` as whether `cli_set_process_title` can set
-    /// the title, for a host that registers it
-    /// ([`crate::engine::ProcessTitle`]), then
-    /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
-    /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`,
-    /// and the three constants on them, each holding its stream's one
-    /// owner. Where one of the three does not open, php closes the others
-    /// and registers none, which no host here reaches. A no-op for a host
-    /// that asked for no handles ([`crate::engine::FileHandles`]).
-    ///
-    /// ```php
-    /// var_dump(is_resource(STDIN), get_resource_type(STDOUT), defined('PHP_CLI_PROCESS_TITLE'));
-    /// var_dump(STDIN, STDOUT, STDERR, fwrite(STDERR, "x"));
-    /// var_dump(array_slice(array_keys(get_defined_constants(true)['Core']), -5));
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// string(6) "stream"
-    /// bool(true)
-    /// resource(1) of type (stream)
-    /// resource(2) of type (stream)
-    /// resource(3) of type (stream)
-    /// int(1)
-    /// array(5) {
-    ///   [0]=>
-    ///   string(10) "PHP_BINARY"
-    ///   [1]=>
-    ///   string(21) "PHP_CLI_PROCESS_TITLE"
-    ///   [2]=>
-    ///   string(5) "STDIN"
-    ///   [3]=>
-    ///   string(6) "STDOUT"
-    ///   [4]=>
-    ///   string(6) "STDERR"
-    /// }
-    /// ```
-    /// ```stderr
-    /// x
-    /// ```
-    pub(crate) fn register_file_handles(&mut self) -> Result<(), Thrown> {
-        if !self.registers_file_handles() {
-            return Ok(());
-        }
-        let titled = match self.process_title() {
-            crate::engine::ProcessTitle::Unregistered => None,
-            crate::engine::ProcessTitle::Unsaved => Some(false),
-            crate::engine::ProcessTitle::Saved => Some(true),
-        };
-        if let Some(titled) = titled {
-            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(titled));
-        }
-        let mut opened = Vec::with_capacity(3);
-        for (path, mode) in [
-            (&b"php://stdin"[..], &b"rb"[..]),
-            (b"php://stdout", b"wb"),
-            (b"php://stderr", b"wb"),
-        ] {
-            opened.push(self.open_stream(path, mode, false)?);
-        }
-        let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
-            for stream in opened.into_iter().flatten() {
-                stream.free(self);
-            }
-            return Ok(());
-        };
-        self.standard_streams = [
-            Some(stdin.resource()),
-            Some(stdout.resource()),
-            Some(stderr.resource()),
-        ];
-        self.register_host_constant(b"STDIN", stdin.as_value());
-        self.register_host_constant(b"STDOUT", stdout.as_value());
-        self.register_host_constant(b"STDERR", stderr.as_value());
-        Ok(())
+/// [`StreamHooks::standard_handles`](crate::api::abi::StreamHooks::standard_handles):
+/// `cli_register_file_handles`' three opens, `php://stdin` `rb`,
+/// `php://stdout` and `php://stderr` `wb`, each stream's one owner
+/// handed to the constant the engine registers; the others freed where
+/// one does not open. `stdin_replaced` forgets that `STDIN` was closed,
+/// since the host's fd 0 under it is new.
+pub(crate) fn standard_handles(
+    req: &mut Request,
+    stdin_replaced: bool,
+) -> Result<Option<[Value; 3]>, Thrown> {
+    if stdin_replaced {
+        req.streams().standard_closed[0] = false;
     }
+    let mut opened = Vec::with_capacity(3);
+    for (path, mode) in [
+        (&b"php://stdin"[..], &b"rb"[..]),
+        (b"php://stdout", b"wb"),
+        (b"php://stderr", b"wb"),
+    ] {
+        opened.push(req.open_stream(path, mode, false)?);
+    }
+    let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
+        for stream in opened.into_iter().flatten() {
+            stream.free(req);
+        }
+        return Ok(None);
+    };
+    req.streams().standard_streams = [
+        Some(stdin.resource()),
+        Some(stdout.resource()),
+        Some(stderr.resource()),
+    ];
+    Ok(Some([
+        stdin.as_value(),
+        stdout.as_value(),
+        stderr.as_value(),
+    ]))
 }
 
 /// `php_stream_output_ops` (`Z/ext/standard/php_fopen_wrapper.c:52`),
@@ -3159,7 +3137,7 @@ fn php_open(
         if refused && options.report {
             let text = format!(
                 "{}(): URL file-access is disabled in the server configuration",
-                req.active_native()
+                req.active_function_name()
             );
             warning(req, &text);
         }
@@ -3219,7 +3197,7 @@ fn php_open(
                 if options.report {
                     let text = format!(
                         "{}(): Direct access to file descriptors is only available from command-line PHP",
-                        req.active_native()
+                        req.active_function_name()
                     );
                     warning(req, &text);
                 }
@@ -3231,7 +3209,10 @@ fn php_open(
             return fd_open(req, &path[3..], mode);
         }
         _ => {
-            let text = format!("{}(): Invalid php:// URL specified", req.active_native());
+            let text = format!(
+                "{}(): Invalid php:// URL specified",
+                req.active_function_name()
+            );
             warning(req, &text);
             return Ok(Err(String::from("operation failed")));
         }
@@ -3341,7 +3322,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
         return Ok(Err(form()));
     }
     let fildes = strtol(digits);
-    let dtablesize = php_heap::fd_table_size();
+    let dtablesize = crate::api::net::fd_table_size();
     if fildes < 0 || fildes >= i64::from(dtablesize) {
         return Ok(Err(format!(
             "The file descriptors must be non-negative numbers smaller than {dtablesize}"
@@ -3355,7 +3336,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
     };
     let duped = match standard.and_then(|s| req.host_fd(s)) {
         Some(fd) => fd.try_clone_to_owned(),
-        None => php_heap::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
+        None => crate::api::net::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
     };
     let fd = match duped {
         Ok(fd) => fd,
@@ -3376,7 +3357,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
 fn fd_stream(req: &mut Request, fd: OwnedFd, mode: &[u8]) -> Result<Stream, Thrown> {
     match fd_kind(&fd, mode) {
         FdStream::Socket => req.php_socket_stream(fd),
-        kind => req.stream_from_fd(fd, kind),
+        kind => StreamLayer::stream_from_fd(req, fd, kind),
     }
 }
 
@@ -3569,7 +3550,10 @@ impl Located {
         match self {
             Located::Data => true,
             Located::Space(user) => user.is_url,
-            Located::Ext(at) => req.wrappers.get(*at).is_some_and(|w| w.is_url),
+            Located::Ext(at) => req
+                .streams_ref()
+                .and_then(|state| state.wrappers.get(*at))
+                .is_some_and(|w| w.is_url),
             Located::Plain | Located::Php | Located::Nothing => false,
         }
     }
@@ -3587,33 +3571,138 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
     }
 }
 
-impl Request {
+pub(crate) trait StreamLayer {
+    fn global_wrappers(&self) -> Vec<Registered>;
+    fn add_url_wrapper(&mut self, row: Registered) -> bool;
+    fn wrapper_table(&self) -> Vec<Registered>;
+    fn wrapper_row(table: &[Registered], scheme: &[u8]) -> Option<Located>;
+    fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>);
+    fn locate_for(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>);
+    fn locate(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>);
+    fn own_wrappers(&mut self) -> &mut Vec<Registered>;
+    fn open_stream_wrapper(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        use_include_path: bool,
+    ) -> Result<Option<Stream>, Thrown>;
+    fn open_wrapper_with(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        opening: crate::api::request::Opening,
+    ) -> Result<Option<Stream>, Thrown>;
+    fn open_url_wrapper(&mut self, path: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn open_wrapper_ex(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<Stream>, Thrown>;
+    fn open_wrapper_named(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown>;
+    fn open_located(
+        &mut self,
+        to_open: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+        resolved: bool,
+    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown>;
+    fn plain_opener(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        options: OpenOptions,
+    ) -> Result<PhpStream, String>;
+    fn open_ext(
+        &mut self,
+        at: usize,
+        path: &[u8],
+        mode: &[u8],
+        use_path: bool,
+        options: OpenOptions,
+    ) -> Result<(&'static str, Result<Stream, String>), Thrown>;
+    fn learn_append_position(&mut self, stream: Stream);
+    fn make_seekable(
+        &mut self,
+        stream: Stream,
+        path: &[u8],
+        options: OpenOptions,
+    ) -> Result<Option<Stream>, Thrown>;
+    fn copy_all(&mut self, from: Stream, to: Stream) -> bool;
+    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown>;
+    fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>);
+    fn stream_context(&self, stream: Stream) -> Option<Resource>;
+    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown>;
+    fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>>;
+    fn wrapper_errors_text(&self, logged: &[String]) -> String;
+    fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str);
+    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown>;
+    fn stream_alloc_as(&mut self, stream: PhpStream, persistent: bool) -> Result<Stream, Thrown>;
+    fn stream_op<R>(
+        &mut self,
+        stream: Stream,
+        f: impl FnOnce(&mut Request, &mut PhpStream) -> R,
+    ) -> Option<R>;
+    fn stream_ref(&self, stream: Stream) -> Option<&PhpStream>;
+    fn stream_of(&self, value: &Value) -> Option<Stream>;
+    fn stream_read_to_str(
+        &mut self,
+        stream: Stream,
+        len: usize,
+    ) -> Result<Option<PhpString>, Thrown>;
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown>;
+    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
+    fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool;
+    fn wrapper_restore(&mut self, protocol: &[u8]) -> bool;
+}
+
+impl StreamLayer for Request {
     /// `url_stream_wrappers_hash`, the wrappers every request starts
     /// with, in the order they were registered: the engine's own where
     /// `standard` places them, among the extensions' (#920).
-    pub(crate) fn global_wrappers(&self) -> Vec<Registered> {
-        self.url_stream_wrappers.clone()
+    fn global_wrappers(&self) -> Vec<Registered> {
+        let rows = |table: &[(crate::state::Rank, Registered)]| {
+            table.iter().map(|(_, row)| row.clone()).collect()
+        };
+        match self.streams_ref() {
+            Some(state) => rows(&state.url_stream_wrappers),
+            None => rows(&crate::state::layer_wrappers()),
+        }
     }
 
-    /// `php_register_url_stream_wrapper`'s insert: the row at the end of
-    /// the global table, `false` where its scheme is taken.
-    pub(crate) fn add_url_wrapper(&mut self, row: Registered) -> bool {
-        if self
-            .url_stream_wrappers
+    /// `php_register_url_stream_wrapper`'s insert: the row placed by the
+    /// extension starting ([`crate::state::place`]), or at the end of the
+    /// global table once the program runs; `false` where its scheme is
+    /// taken, while the extensions start by the one starting alone,
+    /// whose registration places a row an earlier one registered.
+    fn add_url_wrapper(&mut self, row: Registered) -> bool {
+        let rank = self.rank();
+        let starting = rank != crate::state::RUNNING;
+        let rows = &mut self.streams().url_stream_wrappers;
+        let taken = rows
             .iter()
-            .any(|r| r.scheme == row.scheme)
-        {
+            .any(|(placed, held)| (!starting || *placed == rank) && held.scheme == row.scheme);
+        if taken {
             return false;
         }
-        self.url_stream_wrappers.push(row);
+        if starting {
+            rows.retain(|(_, held)| held.scheme != row.scheme);
+        }
+        crate::state::place(rows, rank, row);
         true
     }
 
     /// `php_stream_get_url_stream_wrappers_hash`: the request's own table
     /// once a program changed it, the global one before.
-    pub(crate) fn wrapper_table(&self) -> Vec<Registered> {
-        self.url_wrappers
-            .clone()
+    fn wrapper_table(&self) -> Vec<Registered> {
+        self.streams_ref()
+            .and_then(|state| state.url_wrappers.clone())
             .unwrap_or_else(|| self.global_wrappers())
     }
 
@@ -3639,13 +3728,13 @@ impl Request {
     /// under `allow_url_fopen=0`, and under `allow_url_include=0` for an
     /// include. Under `REPORT_ERRORS` alone is a refusal a warning; the
     /// wrapper nobody registered is warned of always.
-    pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
+    fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
         self.locate(path, OpenOptions::REPORT)
     }
 
     /// [`Request::locate_wrapper`] under `options`, as `php_resolve_path`
     /// asks it with `STREAM_OPEN_FOR_INCLUDE` and no `REPORT_ERRORS`.
-    pub(crate) fn locate_for(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>) {
+    fn locate_for(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>) {
         self.locate(path, options)
     }
 
@@ -3666,7 +3755,7 @@ impl Request {
             if wrapper.is_none() {
                 let text = format!(
                     "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
-                    self.active_native(),
+                    self.active_function_name(),
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
                 if options.report {
@@ -3687,7 +3776,7 @@ impl Request {
                     if options.report {
                         let text = format!(
                             "{}(): Remote host file access not supported, {}",
-                            self.active_native(),
+                            self.active_function_name(),
                             String::from_utf8_lossy(path)
                         );
                         warning(self, &text);
@@ -3703,14 +3792,14 @@ impl Request {
                 }
                 local = path[at..].to_vec();
             }
-            if self.url_wrappers.is_some() {
+            if self.streams().url_wrappers.is_some() {
                 if let Some(found) = wrapper.or_else(|| Request::wrapper_row(&table, b"file")) {
                     return (found, local);
                 }
                 if options.report {
                     let text = format!(
                         "{}(): file:// wrapper is disabled in the server configuration",
-                        self.active_native()
+                        self.active_function_name()
                     );
                     warning(self, &text);
                 }
@@ -3726,7 +3815,7 @@ impl Request {
         if found.is_url(self) {
             let refused = if !allowed(self, b"allow_url_fopen") {
                 Some("allow_url_fopen")
-            } else if (options.for_include || self.in_user_include)
+            } else if (options.for_include || self.streams().in_user_include)
                 && !allowed(self, b"allow_url_include")
             {
                 Some("allow_url_include")
@@ -3737,7 +3826,7 @@ impl Request {
                 if options.report {
                     let text = format!(
                         "{}(): {}:// wrapper is disabled in the server configuration by {entry}=0",
-                        self.active_native(),
+                        self.active_function_name(),
                         String::from_utf8_lossy(&path[..n])
                     );
                     warning(self, &text);
@@ -3752,94 +3841,10 @@ impl Request {
     /// checks: a scheme of alphanumerics, `+`, `-` and `.`; the table
     /// the request's own from the first change on.
     fn own_wrappers(&mut self) -> &mut Vec<Registered> {
-        if self.url_wrappers.is_none() {
-            self.url_wrappers = Some(self.global_wrappers());
+        if self.streams().url_wrappers.is_none() {
+            self.streams().url_wrappers = Some(self.global_wrappers());
         }
-        self.url_wrappers.get_or_insert_with(Vec::new)
-    }
-
-    /// `stream_wrapper_register()` (`Z/main/streams/userspace.c:437`) past
-    /// its parameters: `class` registered under `protocol` for the rest of
-    /// the request, a URL wrapper where `flags` holds `STREAM_IS_URL`;
-    /// php's `Protocol %s:// is already defined.` where the scheme is
-    /// taken and `Invalid protocol scheme specified` where it is not one.
-    pub fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
-        let valid = protocol
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
-        let taken = self.wrapper_table().iter().any(|r| r.scheme == protocol);
-        if valid && !taken {
-            let wrapper = Located::Space(userspace::UserWrapper::new(
-                class,
-                flags & 1 != 0,
-                protocol.to_vec(),
-            ));
-            self.own_wrappers().push(Registered {
-                scheme: protocol.to_vec(),
-                wrapper,
-            });
-            return true;
-        }
-        let shown = String::from_utf8_lossy(protocol);
-        let text = if taken {
-            format!("Protocol {shown}:// is already defined.")
-        } else {
-            let name = self.class_name(class);
-            format!(
-                "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
-            )
-        };
-        crate::api::raising::docref(self, Level::Warning, &text);
-        false
-    }
-
-    /// `stream_wrapper_unregister()` (`Z/main/streams/userspace.c:473`):
-    /// the scheme taken out of the request's table, a built-in one
-    /// among them, and php's `Unable to unregister protocol %s://` where
-    /// it is not there.
-    pub fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool {
-        let table = self.own_wrappers();
-        let Some(at) = table.iter().position(|r| r.scheme == protocol) else {
-            let text = format!(
-                "Unable to unregister protocol {}://",
-                String::from_utf8_lossy(protocol)
-            );
-            crate::api::raising::docref(self, Level::Warning, &text);
-            return false;
-        };
-        table.remove(at);
-        true
-    }
-
-    /// `stream_wrapper_restore()` (`Z/main/streams/userspace.c:499`): the
-    /// built-in wrapper put back under its scheme; php's `%s:// never
-    /// existed, nothing to restore` for a scheme no built-in has, and its
-    /// notice `%s:// was never changed, nothing to restore`, `true`, where
-    /// the table has the built-in one already.
-    pub fn wrapper_restore(&mut self, protocol: &[u8]) -> bool {
-        let shown = String::from_utf8_lossy(protocol).into_owned();
-        let Some(original) = Request::wrapper_row(&self.global_wrappers(), protocol) else {
-            let text = format!("{shown}:// never existed, nothing to restore");
-            crate::api::raising::docref(self, Level::Warning, &text);
-            return false;
-        };
-        let unchanged = match &self.url_wrappers {
-            None => true,
-            Some(table) => Request::wrapper_row(table, protocol)
-                .is_some_and(|current| same_wrapper(&current, &original)),
-        };
-        if unchanged {
-            let text = format!("{shown}:// was never changed, nothing to restore");
-            crate::api::raising::docref(self, Level::Notice, &text);
-            return true;
-        }
-        let table = self.own_wrappers();
-        table.retain(|r| r.scheme != protocol);
-        table.push(Registered {
-            scheme: protocol.to_vec(),
-            wrapper: original,
-        });
-        true
+        self.streams().url_wrappers.get_or_insert_with(Vec::new)
     }
 
     /// `_php_stream_open_wrapper_ex` (`Z/main/streams/streams.c:2233`)
@@ -3849,7 +3854,7 @@ impl Request {
     /// its position from the kind; and a stream not opened is
     /// `php_stream_display_wrapper_errors`'s warning, `Failed to open
     /// stream: ` and the message, at the path as written.
-    pub(crate) fn open_stream_wrapper(
+    fn open_stream_wrapper(
         &mut self,
         path: &[u8],
         mode: &[u8],
@@ -3863,7 +3868,7 @@ impl Request {
     }
 
     /// `_php_stream_open_wrapper_ex` under an extension's [`Opening`].
-    pub(crate) fn open_wrapper_with(
+    fn open_wrapper_with(
         &mut self,
         path: &[u8],
         mode: &[u8],
@@ -3899,11 +3904,7 @@ impl Request {
     /// bool(false)
     /// int(0)
     /// ```
-    pub(crate) fn open_url_wrapper(
-        &mut self,
-        path: &[u8],
-        mode: &[u8],
-    ) -> Result<Option<Stream>, Thrown> {
+    fn open_url_wrapper(&mut self, path: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
         let options = OpenOptions {
             use_url: true,
             only_get_headers: true,
@@ -3915,7 +3916,7 @@ impl Request {
     /// `_php_stream_open_wrapper_ex` under `options`; the opener is asked
     /// without `REPORT_ERRORS`, as php's is, so a wrapper that opens
     /// another, `php://filter`, reports nothing of the inner open.
-    pub(crate) fn open_wrapper_ex(
+    fn open_wrapper_ex(
         &mut self,
         path: &[u8],
         mode: &[u8],
@@ -3934,7 +3935,7 @@ impl Request {
     /// path is `zend_resolve_path`'s string of the request's, held while
     /// the wrapper opens and freed after unless handed out so, which an
     /// open's peak stands on.
-    pub(crate) fn open_wrapper_named(
+    fn open_wrapper_named(
         &mut self,
         path: &[u8],
         mode: &[u8],
@@ -3947,7 +3948,9 @@ impl Request {
         if options.use_path {
             match self.resolve_path(path) {
                 Ok(found) => {
-                    resolved = Some(self.string_with(found.len(), |b| b.copy_from_slice(&found))?);
+                    resolved = Some(PhpString::filled(self, found.len(), |b| {
+                        b.copy_from_slice(&found);
+                    })?);
                 }
                 Err(crate::api::request::Unresolved::Threw(thrown)) => return Err(thrown),
                 Err(crate::api::request::Unresolved::Missing(_)) => {}
@@ -3983,12 +3986,14 @@ impl Request {
         if options.use_url && !wrapper.is_url(self) {
             let text = format!(
                 "{}(): This function may only be used against URLs",
-                self.active_native()
+                self.active_function_name()
             );
             warning(self, &text);
             return Ok(None);
         }
-        let outer = options.for_zend_stream.then(|| self.opened_path.take());
+        let outer = options
+            .for_zend_stream
+            .then(|| self.streams().opened_path.take());
         let (label, opened) = match wrapper {
             Located::Plain => (
                 PLAIN_FILES,
@@ -4004,7 +4009,7 @@ impl Request {
                             } else {
                                 self.expand_filepath(&path_to_open)
                             };
-                            self.opened_path = real;
+                            self.streams().opened_path = real;
                         }
                         Ok(stream)
                     }
@@ -4032,13 +4037,13 @@ impl Request {
         // The name the opener set, `*opened_path`, as the string php's
         // opener allocates; only the open that asks for one keeps it.
         let named = match outer {
-            Some(outer) => std::mem::replace(&mut self.opened_path, outer),
+            Some(outer) => std::mem::replace(&mut self.streams().opened_path, outer),
             None => None,
         };
         let named = match (&opened, named) {
-            (Ok(_), Some(name)) => {
-                Some(self.string_with(name.len(), |b| b.copy_from_slice(&name))?)
-            }
+            (Ok(_), Some(name)) => Some(PhpString::filled(self, name.len(), |b| {
+                b.copy_from_slice(&name);
+            })?),
             _ => None,
         };
         match opened {
@@ -4100,7 +4105,7 @@ impl Request {
         use_path: bool,
         options: OpenOptions,
     ) -> Result<(&'static str, Result<Stream, String>), Thrown> {
-        let wrapper = &self.wrappers[at];
+        let wrapper = &self.streams().wrappers[at];
         let (label, open, stream_stat) = (wrapper.label, wrapper.open, wrapper.stream_stat);
         let Some(open) = open else {
             return Ok((
@@ -4117,9 +4122,9 @@ impl Request {
             disable_open_basedir: options.disable_open_basedir,
             only_get_headers: options.only_get_headers,
         };
-        let outer = std::mem::take(&mut self.wrapper_errors);
+        let outer = std::mem::take(&mut self.streams().wrapper_errors);
         let opened = open(self, path, mode, opening);
-        let logged = std::mem::replace(&mut self.wrapper_errors, outer);
+        let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
         let opened = opened?;
         if let Some(stream) = opened {
             self.stream_op(stream, |_, s| s.set_wrapper_stat(stream_stat));
@@ -4207,7 +4212,7 @@ impl Request {
         if options.report {
             let text = format!(
                 "{}({}): could not make seekable - {}",
-                self.active_native(),
+                self.active_function_name(),
                 String::from_utf8_lossy(path),
                 String::from_utf8_lossy(path)
             );
@@ -4249,7 +4254,7 @@ impl Request {
     /// and one not opened is `php_stream_display_wrapper_errors`'s
     /// warning, `Failed to open directory: ` and the message, at the path
     /// as written.
-    pub(crate) fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
         if path.is_empty() {
             return Ok(None);
         }
@@ -4280,11 +4285,11 @@ impl Request {
             Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
             Located::Data => ("RFC2397", Err(String::from("not implemented"))),
             Located::Ext(at) => {
-                let wrapper = &self.wrappers[at];
+                let wrapper = &self.streams().wrappers[at];
                 let (label, open_dir) = (wrapper.label, wrapper.open_dir);
-                let outer = std::mem::take(&mut self.wrapper_errors);
+                let outer = std::mem::take(&mut self.streams().wrapper_errors);
                 let opened = open_dir.map(|open_dir| open_dir(self, &path_to_open));
-                let logged = std::mem::replace(&mut self.wrapper_errors, outer);
+                let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
                 match opened {
                     Some(opened) => match opened? {
                         Some(listed) => {
@@ -4326,7 +4331,7 @@ impl Request {
     /// `timed_out`, `blocked` and `eof`; then `wrapper_type` where a
     /// wrapper opened it, `stream_type`, `mode`, `unread_bytes`,
     /// `seekable` and, where it was opened by path, `uri`.
-    pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
+    fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
         let mut out = PhpArray::new(self)?;
         let crypto = self.crypto_meta(stream)?;
         let head = if let Some(mut head) = self.kind_meta_data(stream) {
@@ -4397,7 +4402,7 @@ impl Request {
     /// stream keeps `context`, one owner more, in place of the one it
     /// kept, which gives its owner up; a socket's crypto layer reads it
     /// from then.
-    pub(crate) fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>) {
+    fn set_stream_context(&mut self, stream: Stream, context: Option<Resource>) {
         if let Some(context) = context {
             self.addref(&context.as_value());
         }
@@ -4418,7 +4423,7 @@ impl Request {
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`.
-    pub(crate) fn stream_context(&self, stream: Stream) -> Option<Resource> {
+    fn stream_context(&self, stream: Stream) -> Option<Resource> {
         self.stream_ref(stream)?.wrapped.as_ref()?.context
     }
 
@@ -4484,31 +4489,18 @@ impl Request {
     /// ```expect
     /// Attempt to assign property "value" on null
     /// ```
-    pub(crate) fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str) {
+    fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str) {
         if self.is_pending() {
             return;
         }
-        let function = self.active_native();
+        let function = self.active_function_name();
         self.wrapper_warning(&function, path, &format!("{caption}: {message}"));
-    }
-
-    /// The warning `php_stream_display_wrapper_errors` raises with
-    /// `php_error_docref1`, the path its `estrdup` (`php_strip_url_passwd`)
-    /// standing across the raise as the parameter `function` names.
-    pub(crate) fn wrapper_warning(&mut self, function: &str, path: &[u8], text: &str) {
-        let copy = self.heap_mut().block(path.len() + 1);
-        let Ok(copy) = self.fatal_of(copy) else {
-            return;
-        };
-        let origin = crate::api::raising::Origin::Function(function);
-        crate::api::raising::verror(self, Level::Warning, origin, path, text.as_bytes());
-        self.heap_mut().free_block(copy);
     }
 
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
         self.stream_alloc_as(stream, false)
     }
 
@@ -4516,7 +4508,7 @@ impl Request {
     /// says, `_php_stream_alloc` handed a `persistent_id`: the resource's
     /// type is `persistent stream`, whose regular-list destructor leaves
     /// the socket open ([`persistent::dtor`]).
-    pub(crate) fn stream_alloc_as(
+    fn stream_alloc_as(
         &mut self,
         mut stream: PhpStream,
         persistent: bool,
@@ -4529,26 +4521,24 @@ impl Request {
         {
             stream.flags.eol = Eol::Detect;
         }
+        let types = self.types();
         let kind = if persistent {
-            self.pstream_type()
+            types.pstream
         } else {
-            self.stream_type()
+            types.stream
         };
         // The kind's own data first, then the `php_stream` and its
         // resource, `_php_stream_fopen_from_fd_int`'s order; a
         // persistent stream's is `pemalloc`'d persistent, off the
         // request's count.
         stream.flags.persistent = persistent;
-        let allocated = if persistent {
-            self.heap_mut()
-                .resource_persistent(kind, Some(stream), PHP_STREAM_SIZE)
+        let res = if persistent {
+            Resource::persistent(self, kind, Some(stream), PHP_STREAM_SIZE)?
         } else {
             stream.ops.lay_down(self)?;
-            self.heap_mut()
-                .resource_sized(kind, Some(stream), PHP_STREAM_SIZE)
+            Resource::sized(self, kind, Some(stream), PHP_STREAM_SIZE)?
         };
-        let res = self.fatal_of(allocated).map(Resource::of)?;
-        if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
+        if let Some(Some(stream)) = res.native_mut::<Option<PhpStream>>(self) {
             stream.res = Some(res);
             stream.ops.adopt(Stream::of(res));
         }
@@ -4561,18 +4551,18 @@ impl Request {
     /// is inside a call already, which is php's `in_free` guard. A
     /// stream whose resource was closed while it was out is freed here,
     /// since the destructor found the slot empty.
-    pub(crate) fn stream_op<R>(
+    fn stream_op<R>(
         &mut self,
         stream: Stream,
         f: impl FnOnce(&mut Request, &mut PhpStream) -> R,
     ) -> Option<R> {
-        let res = stream.resource().heap();
-        let mut taken = self.resource_native_mut::<Option<PhpStream>>(res)?.take()?;
+        let res = stream.resource();
+        let mut taken = res.native_mut::<Option<PhpStream>>(self)?.take()?;
         let out = f(self, &mut taken);
-        match self.resource_native_mut::<Option<PhpStream>>(res) {
+        match res.native_mut::<Option<PhpStream>>(self) {
             Some(slot) => *slot = Some(taken),
             None => {
-                self.pclose_ret = taken.free(self);
+                self.streams().pclose_ret = taken.free(self);
             }
         }
         Some(out)
@@ -4580,18 +4570,22 @@ impl Request {
 
     /// The stream a resource holds, read: `None` where it is closed, is
     /// not a stream, or is inside a call.
-    pub(crate) fn stream_ref(&self, stream: Stream) -> Option<&PhpStream> {
-        self.resource_native::<Option<PhpStream>>(stream.resource().heap())?
+    fn stream_ref(&self, stream: Stream) -> Option<&PhpStream> {
+        stream
+            .resource()
+            .native::<Option<PhpStream>>(self)?
             .as_ref()
     }
 
     /// `php_stream_from_zval_no_verify_no_error`: the stream a value
     /// names, which is an open resource of the `stream` type or the
     /// `persistent stream` type.
-    pub(crate) fn stream_of(&self, value: &Value) -> Option<Stream> {
+    fn stream_of(&self, value: &Value) -> Option<Stream> {
+        // Only the `stream` and `persistent stream` types carry a stream,
+        // so the payload says what `le_stream` and `le_pstream` would.
         let r = value.as_resource()?;
-        let kind = r.kind()?;
-        (kind == self.stream_type() || kind == self.pstream_type()).then(|| Stream::of(*r))
+        r.kind()?;
+        r.native::<Option<PhpStream>>(self).map(|_| Stream::of(*r))
     }
 
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
@@ -4612,7 +4606,7 @@ impl Request {
     /// 110592 110624 70000
     /// string(0) ""
     /// ```
-    pub(crate) fn stream_read_to_str(
+    fn stream_read_to_str(
         &mut self,
         stream: Stream,
         len: usize,
@@ -4628,32 +4622,12 @@ impl Request {
         }
         Ok(Some(out.finish()))
     }
-}
 
-impl Request {
-    /// `_php_stream_fopen_from_fd` (`Z/main/streams/plain_wrapper.c:303`)
-    /// and `_php_stream_fopen_from_pipe` (`:350`): an open host fd as a
-    /// stream of the plain files kind, `STDIO`, with no wrapper and no
-    /// path, `mode` as `stream->mode`. A fd of a pipe, a fifo or a
-    /// character device cannot seek (`detect_is_seekable`) and has no
-    /// position; any other has the one `lseek(SEEK_CUR)` answers. A
-    /// process pipe never seeks, tells the zero it opened at, and its
-    /// close waits for the child.
-    ///
-    /// ```php
-    /// $p = popen('true', 'r');
-    /// var_dump(ftell($p), pclose($p));
-    /// ```
-    /// ```expect
-    /// int(0)
-    /// int(0)
-    /// ```
-    ///
-    /// The `Err` is the memory limit, met registering the resource.
-    pub fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
-        let (mode, process) = match kind {
-            FdStream::File { mode } => (mode, None),
-            FdStream::Process { mode, child } => (mode, Some(child)),
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
+        let (mode, process, kept) = match kind {
+            FdStream::File { mode } => (mode, None, None),
+            FdStream::Kept { mode, position } => (mode, None, Some(position)),
+            FdStream::Process { mode, child } => (mode, Some(child), None),
             FdStream::Socket => return self.socket_stream(fd),
             FdStream::Xport { name, blocking } => return self.xport_stream(fd, name, blocking),
         };
@@ -4667,7 +4641,9 @@ impl Request {
         // A process pipe keeps the zero `php_stream_alloc` gives it
         // (`_php_stream_fopen_from_pipe`); only `_php_stream_fopen_from_fd`
         // marks a descriptor that cannot seek with no position.
-        let position = if is_seekable {
+        let position = if let Some(position) = kept.filter(|_| is_seekable) {
+            position
+        } else if is_seekable {
             file.stream_position()
                 .map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX))
         } else if process.is_some() {
@@ -4691,6 +4667,76 @@ impl Request {
         stream.position = position;
         self.stream_alloc(stream)
     }
+
+    fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
+        let valid = protocol
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        let taken = self.wrapper_table().iter().any(|r| r.scheme == protocol);
+        if valid && !taken {
+            let wrapper = Located::Space(userspace::UserWrapper::new(
+                class,
+                flags & 1 != 0,
+                protocol.to_vec(),
+            ));
+            self.own_wrappers().push(Registered {
+                scheme: protocol.to_vec(),
+                wrapper,
+            });
+            return true;
+        }
+        let shown = String::from_utf8_lossy(protocol);
+        let text = if taken {
+            format!("Protocol {shown}:// is already defined.")
+        } else {
+            let name = self.class_name(class);
+            format!(
+                "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
+            )
+        };
+        crate::api::raising::docref(self, Level::Warning, &text);
+        false
+    }
+
+    fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool {
+        let table = self.own_wrappers();
+        let Some(at) = table.iter().position(|r| r.scheme == protocol) else {
+            let text = format!(
+                "Unable to unregister protocol {}://",
+                String::from_utf8_lossy(protocol)
+            );
+            crate::api::raising::docref(self, Level::Warning, &text);
+            return false;
+        };
+        table.remove(at);
+        true
+    }
+
+    fn wrapper_restore(&mut self, protocol: &[u8]) -> bool {
+        let shown = String::from_utf8_lossy(protocol).into_owned();
+        let Some(original) = Request::wrapper_row(&self.global_wrappers(), protocol) else {
+            let text = format!("{shown}:// never existed, nothing to restore");
+            crate::api::raising::docref(self, Level::Warning, &text);
+            return false;
+        };
+        let unchanged = match &self.streams().url_wrappers {
+            None => true,
+            Some(table) => Request::wrapper_row(table, protocol)
+                .is_some_and(|current| same_wrapper(&current, &original)),
+        };
+        if unchanged {
+            let text = format!("{shown}:// was never changed, nothing to restore");
+            crate::api::raising::docref(self, Level::Notice, &text);
+            return true;
+        }
+        let table = self.own_wrappers();
+        table.retain(|r| r.scheme != protocol);
+        table.push(Registered {
+            scheme: protocol.to_vec(),
+            wrapper: original,
+        });
+        true
+    }
 }
 
 impl Stream {
@@ -4700,9 +4746,9 @@ impl Stream {
     /// answered: a process pipe's exit status, `0` for any other kind,
     /// and `-1` where the child could not be waited for.
     pub fn pclose(self, req: &mut Request) -> i64 {
-        req.pclose_ret = 0;
+        req.streams().pclose_ret = 0;
         self.resource().close(req);
-        i64::from(req.pclose_ret)
+        i64::from(req.streams().pclose_ret)
     }
 
     /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
@@ -4719,14 +4765,23 @@ impl Stream {
             .flatten()
     }
 
-    /// `dup(2)` of the fd a [`Cast::Fd`] answers, the copy the caller's:
-    /// the open file, its offset and a `flock(2)` taken on it outlive the
-    /// stream, as php's persistent list keeps a `dba_popen` link's streams
-    /// past the request, to be made a stream again with
-    /// [`Request::stream_from_fd`]. `None` for a kind with no fd.
+    /// `dup(2)` of the stream's fd, the copy the caller's: the open file,
+    /// its offset and a `flock(2)` taken on it outlive the stream, as
+    /// php's persistent list keeps a `dba_popen` link's streams past the
+    /// request, to be made a stream again with [`Request::stream_from_fd`]
+    /// as [`FdStream::Kept`] at the position [`tell`](Stream::tell)
+    /// answered. The write chain is flushed; the fd is sought to the
+    /// position only where the read buffer holds bytes, which are dropped
+    /// for the next stream to read again from the file; otherwise its
+    /// offset is left where it stands, so where a forked process sharing
+    /// the open file moved it, the next write lands there, as on php's
+    /// persistent stream, which nothing touches between requests. `None`
+    /// for a kind with no fd.
     pub fn dup_fd(self, req: &mut Request) -> Option<OwnedFd> {
-        let fd = self.cast(req, Cast::Fd, false)?;
-        php_heap::dup_fd(fd).ok()
+        let fd = req
+            .stream_op(self, |req, stream| stream.keep_fd(req))
+            .flatten()?;
+        crate::api::net::dup_fd(fd).ok()
     }
 
     /// `php_stream_can_cast` (`Z/main/php_streams.h:567`), `_php_stream_cast`
@@ -5045,13 +5100,13 @@ impl Ops for Listing {
 /// PHP_STREAM_FREE_RSRC_DTOR`, with the resource already closed, and
 /// what the kind's close answered kept as `FG(pclose_ret)`.
 pub(crate) fn dtor(req: &mut Request, r: Resource) {
-    let Some(stream) = req
-        .resource_native_mut::<Option<PhpStream>>(r.heap())
+    let Some(stream) = r
+        .native_mut::<Option<PhpStream>>(req)
         .and_then(Option::take)
     else {
         return;
     };
-    req.pclose_ret = stream.free(req);
+    req.streams().pclose_ret = stream.free(req);
 }
 
 /// The `stream` resource type, `le_stream`, and the `persistent stream`
