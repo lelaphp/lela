@@ -313,11 +313,23 @@ pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Box<[LiveRan
             }
         }
     }
-    // The walk left the table in reverse; php reverts it, then sorts
-    // only where a start is still out of order. Equal starts keep the
-    // order the reversal gave them, as php's insertion sort keeps it.
+    // The walk left the table in reverse; php reverts it, then, from the
+    // first range whose start is after the next one's, sorts the rest
+    // with `zend_sort` by start alone. Its networks for a handful of
+    // ranges are not stable, so ranges of equal starts stand in the
+    // order php's sort leaves them, which a stable sort would not: the
+    // `rope` of a constructor's argument before the `new` that holds the
+    // object, where a third range after them is what set the sort off.
     ranges.table.reverse();
-    ranges.table.sort_by_key(|range| range.start);
+    let unsorted = ranges
+        .table
+        .windows(2)
+        .position(|pair| matches!(pair, [a, b] if a.start > b.start));
+    if let Some(first) = unsorted
+        && let Some(rest) = ranges.table.get_mut(first..)
+    {
+        php_heap::zend_sort(rest, &mut |a, b| a.start.cmp(&b.start));
+    }
     ranges.table.into_boxed_slice()
 }
 

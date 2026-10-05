@@ -23,27 +23,32 @@
 //! calls `zend_execute_internal` after `ZEND_OBSERVER_FCALL_BEGIN`, and
 //! whether or not the observer is enabled, as php sets the pointer.
 //!
-//! What a tag carries that the engine does not hand an observer yet is
-//! not written: the opcode a frame stands at, `show_opcode` and
-//! `show_opcode_in_user_handler` (#1824), whose tags stand where the
-//! comments below say.
+//! `zend_test.observer.show_opcode` writes the opcode a frame stands
+//! at, read through [`FrameView::opcode`], where the init, the begin and
+//! the end are written; `show_opcode_in_user_handler` names the opcodes
+//! the extension observes (design §7.1, #1824), declared as the engine
+//! starts, each written as it is told of one before its handler runs.
 
 use std::fmt::Write as _;
 
 use php_ext::abi::{
-    ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Refusal,
-    Start,
+    ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Opcodes,
+    Refusal, Start,
 };
 use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{FrameView, Raised, Request};
+use php_ext::request::{ChainFrame, FrameView, Raised, Request};
 use php_ext::values::{ClassId, Value};
 use php_ext_standard::php_var_export_ex;
 
 /// `zend_test.observer.enabled`.
 const ENABLED: &[u8] = b"zend_test.observer.enabled";
+
+/// `zend_test.observer.show_opcode_in_user_handler`: the opcodes
+/// observed, by php's names, separated by spaces or commas.
+const SHOW_OPCODE_IN_USER_HANDLER: &[u8] = b"zend_test.observer.show_opcode_in_user_handler";
 
 /// `zend_test.observer.observe_function_names`, `PHP_INI_ALL`: the
 /// functions observed by name, comma-separated.
@@ -64,11 +69,7 @@ pub(crate) const ENTRIES: [(&[u8], &[u8], bool); 18] = [
     (b"zend_test.observer.show_return_value", b"0", false),
     (b"zend_test.observer.show_init_backtrace", b"0", false),
     (b"zend_test.observer.show_opcode", b"0", false),
-    (
-        b"zend_test.observer.show_opcode_in_user_handler",
-        b"",
-        false,
-    ),
+    (SHOW_OPCODE_IN_USER_HANDLER, b"", false),
     (b"zend_test.observer.set_vm_interrupt_on_begin", b"0", false),
     (b"zend_test.observer.fiber_init", b"0", false),
     (b"zend_test.observer.fiber_switch", b"0", false),
@@ -80,7 +81,8 @@ pub(crate) const ENTRIES: [(&[u8], &[u8], bool); 18] = [
 /// The observer as `zend_test_observer_init` registers it at `MINIT`:
 /// the ini table, the switches read once as the engine starts, the
 /// request state `RINIT` zeroes, the call observer and the one standing
-/// for `zend_execute_internal`, and the fiber observers. Every switch is
+/// for `zend_execute_internal`, the opcodes observed, and the fiber
+/// observers. Every switch is
 /// `PHP_INI_SYSTEM` but `observe_function_names`, which a request may
 /// set only while the observer is enabled.
 ///
@@ -101,6 +103,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .engine_state(Switches::start)
         .observer(fcall_init)
         .observer(execute_internal_init)
+        .opcodes(observed_opcodes, show_opcode_in_user_handler)
         .fiber_init(fiber_init)
         .fiber_switch(fiber_switch)
         .fiber_destroy(fiber_destroy)
@@ -139,6 +142,7 @@ struct Switches {
     show_return_type: bool,
     show_return_value: bool,
     show_init_backtrace: bool,
+    show_opcode: bool,
     set_vm_interrupt_on_begin: bool,
     fiber_init: bool,
     fiber_switch: bool,
@@ -154,20 +158,7 @@ impl Switches {
         reason = "the engine start's shape, which a start that refuses needs"
     )]
     fn start(start: &Start) -> Result<Switches, Refusal> {
-        let on = |name: &[u8]| {
-            let set = start
-                .ini()
-                .entries
-                .iter()
-                .rev()
-                .find(|(entry, _)| entry.as_slice() == name)
-                .map(|(_, value)| value.as_deref().unwrap_or_default());
-            let default = ENTRIES
-                .iter()
-                .find(|entry| entry.0 == name)
-                .map_or(&b""[..], |entry| entry.1);
-            Request::ini_parse_bool(set.unwrap_or(default))
-        };
+        let on = |name: &[u8]| Request::ini_parse_bool(startup_value(start, name));
         let switch = |suffix: &str| on(format!("zend_test.observer.{suffix}").as_bytes());
         Ok(Switches {
             enabled: on(ENABLED),
@@ -179,6 +170,7 @@ impl Switches {
             show_return_type: switch("show_return_type"),
             show_return_value: switch("show_return_value"),
             show_init_backtrace: switch("show_init_backtrace"),
+            show_opcode: switch("show_opcode"),
             set_vm_interrupt_on_begin: switch("set_vm_interrupt_on_begin"),
             fiber_init: switch("fiber_init"),
             fiber_switch: switch("fiber_switch"),
@@ -191,6 +183,75 @@ impl Switches {
     fn of(req: &Request) -> Switches {
         req.engine::<Switches>().copied().unwrap_or_default()
     }
+}
+
+/// An entry's value in the startup ini, its default where the host set
+/// none.
+fn startup_value<'a>(start: &'a Start, name: &[u8]) -> &'a [u8] {
+    let set = start
+        .ini()
+        .entries
+        .iter()
+        .rev()
+        .find(|(entry, _)| entry.as_slice() == name)
+        .map(|(_, value)| value.as_deref().unwrap_or_default());
+    let default = ENTRIES
+        .iter()
+        .find(|entry| entry.0 == name)
+        .map_or(&b""[..], |entry| entry.1);
+    set.unwrap_or(default)
+}
+
+/// `observer_set_user_opcode_handler` as `zend_test_observer_init`
+/// calls it at `MINIT`: under `enabled`, each opcode
+/// `show_opcode_in_user_handler` names, the names separated by spaces or
+/// commas, found as php's `zend_get_opcode_id` finds one. A name no
+/// opcode's opens with is passed over; php warns `Invalid opcode name`
+/// there, and an engine start has no warning to raise that does not
+/// refuse the start.
+fn observed_opcodes(start: &Start) -> Opcodes {
+    let mut opcodes = Opcodes::default();
+    if !Request::ini_parse_bool(startup_value(start, ENABLED)) {
+        return opcodes;
+    }
+    let names = startup_value(start, SHOW_OPCODE_IN_USER_HANDLER);
+    for name in names.split(|&b| b == b' ' || b == b',') {
+        if !name.is_empty() {
+            opcodes.insert(name);
+        }
+    }
+    opcodes
+}
+
+/// `observer_show_opcode_in_user_handler`: under `show_output`,
+/// `<!-- opcode: 'ZEND_ECHO' in user handler -->` at the depth the
+/// frames stand, then the opcode's handler, which always runs.
+fn show_opcode_in_user_handler(observed: &mut Observed<'_>, opcode: &'static str) {
+    if !Switches::of(observed).show_output {
+        return;
+    }
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
+    line.extend_from_slice(b"<!-- opcode: '");
+    line.extend_from_slice(opcode.as_bytes());
+    line.extend_from_slice(b"' in user handler -->\n");
+    observed.write(&line);
+}
+
+/// `observer_show_opcode`: under `show_opcode`, the opcode a user
+/// frame stands at, `<!-- opcode: 'ZEND_ECHO' -->`, at the depth the
+/// frames stand; nothing for a native's call.
+fn show_opcode(observed: &mut Observed<'_>) {
+    if !Switches::of(observed).show_opcode {
+        return;
+    }
+    let Some(opcode) = observed.frame().map(|frame| frame.opcode()) else {
+        return;
+    };
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
+    line.extend_from_slice(b"<!-- opcode: '");
+    line.extend_from_slice(opcode.as_bytes());
+    line.extend_from_slice(b"' -->\n");
+    observed.write(&line);
 }
 
 /// The observer's request state: `ZT_G(observer_nesting_depth)`, which
@@ -324,7 +385,7 @@ impl Serves {
             (None, Some(function)) => {
                 Serves::function_of(observed, function, observed.function_scope())
             }
-            (None, None) => Serves::File(b"[no active file]".to_vec()),
+            (None, None) => Serves::File(NO_ACTIVE_FILE.to_vec()),
         }
     }
 
@@ -333,6 +394,16 @@ impl Serves {
         match frame.function() {
             Some(function) => Serves::function_of(req, function, frame.function_scope()),
             None => Serves::File(frame.filename().to_vec()),
+        }
+    }
+
+    /// A frame of php's `prev_execute_data` chain: one that names no
+    /// function by its file, and a fiber's bottom frame, which names no
+    /// file either, as php writes a NULL `op_array.filename`.
+    fn chain(req: &Request, frame: &ChainFrame<'_>) -> Serves {
+        match frame.function() {
+            Some(function) => Serves::function_of(req, function, frame.function_scope()),
+            None => Serves::File(frame.filename().unwrap_or(NO_ACTIVE_FILE).to_vec()),
         }
     }
 
@@ -358,6 +429,10 @@ impl Serves {
     }
 }
 
+/// What `observer_show_init` and `observer_show_init_backtrace` write
+/// for a frame with no file.
+const NO_ACTIVE_FILE: &[u8] = b"[no active file]";
+
 /// `%*s` with php's width: two spaces a level.
 fn indent(depth: usize) -> Vec<u8> {
     vec![b' '; depth.saturating_mul(2)]
@@ -377,9 +452,9 @@ fn fcall_init(observed: &mut Observed<'_>) -> ObserverHandlers {
     if switches.show_output {
         show_init(observed, &serves);
         if switches.show_init_backtrace {
-            show_init_backtrace(observed, &serves);
+            show_init_backtrace(observed);
         }
-        // observer_show_opcode (#1824).
+        show_opcode(observed);
     }
     let both = ObserverHandlers {
         begin: Some(begin),
@@ -446,32 +521,26 @@ fn show_init(req: &mut Request, serves: &Serves) {
 }
 
 /// `observer_show_init_backtrace`: the frame observed and every frame
-/// below it, `f()`, `C::m()` or `{main} file`, four spaces in from the
-/// tag. The frames below are the user frames [`FrameView::caller`]
-/// walks; php's `prev_execute_data` passes natives' frames too.
-fn show_init_backtrace(observed: &mut Observed<'_>, serves: &Serves) {
+/// below it on php's `prev_execute_data` chain ([`Observed::walk`]),
+/// natives' calls and a fiber's bottom frame among them, `f()`,
+/// `C::m()` or `{main} file`, four spaces in from the tag.
+fn show_init_backtrace(observed: &mut Observed<'_>) {
     let depth = observed.state::<crate::State>().observer.depth;
-    let row = |out: &mut Vec<u8>, serves: &Serves| {
+    let mut out = indent(depth);
+    out.extend_from_slice(b"<!--\n");
+    for frame in observed.walk() {
         out.extend(indent(depth + 2));
-        match serves {
+        match Serves::chain(observed, &frame) {
             Serves::Function { scope, name } => {
-                out.extend(Serves::function(scope.as_deref(), name));
+                out.extend(Serves::function(scope.as_deref(), &name));
                 out.extend_from_slice(b"()\n");
             }
             Serves::File(file) => {
                 out.extend_from_slice(b"{main} ");
-                out.extend_from_slice(file);
+                out.extend_from_slice(&file);
                 out.push(b'\n');
             }
         }
-    };
-    let mut out = indent(depth);
-    out.extend_from_slice(b"<!--\n");
-    row(&mut out, serves);
-    let mut below = observed.caller();
-    while let Some(frame) = below {
-        row(&mut out, &Serves::frame(observed, &frame));
-        below = frame.caller();
     }
     out.extend(indent(depth));
     out.extend_from_slice(b"-->\n");
@@ -504,7 +573,7 @@ fn begin(observed: &mut Observed<'_>) {
     }
     line.extend_from_slice(b">\n");
     observed.write(&line);
-    // observer_show_opcode (#1824).
+    show_opcode(observed);
 }
 
 /// `observer_end`: under `show_output`, the throwable standing where one
@@ -529,7 +598,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
         line.extend_from_slice(b" -->\n");
         observed.write(&line);
     }
-    // observer_show_opcode (#1824).
+    show_opcode(observed);
     let depth = depth.saturating_sub(1);
     observed.state::<crate::State>().observer.depth = depth;
     let mut line = indent(depth);

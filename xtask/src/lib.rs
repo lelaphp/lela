@@ -384,6 +384,7 @@ fn identity_command(
         file: ask.file,
         corpus: ask.corpus,
         engine: ask.engine,
+        regime: ask.regime,
     };
     record(
         store,

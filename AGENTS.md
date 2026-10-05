@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=f16feba7c4b54883e4293d55d9c913b298d3bfdf7c69bb0cf421e1850e39713b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=06c4c52722a00cf981d21658f92668540f878a8ab691eef99f9d3c89a7b6b476 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -110,12 +110,12 @@ third-engine-design.md
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 111 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1213 | 1500 | pass |
+| api | api.lock | 1255 | 1500 | pass |
 | sapi | sapi.lock | 34 |  | pass |
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=c72dd5a063a5c86bd9de45a7e82928c7e9abaee48c113f5b0d63f040697ee653 out=39ae36672ad7e98323404556595823b3fb327491ef1edfd37ee2d09294ace68e -->
+<!-- /computed in=c6474a42297cca02c71d2b1821ae47123cf78e02812575efcf26ee906995a223 out=dd783585f04883dcccc495f1d51cfa6da373e1f19a9be993323d4c8b97e87a16 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -185,7 +185,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=ae1586a11662977165de8e61d160099118e26eb2a61f03205fe2e217b2883ad0 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=02ee40af44bed4616abd1764e4706e504c6103e9f05af59411ec6dac7796b97a out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -515,10 +515,9 @@ fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
 }
 
 /// The bundle's `enabled()` gains `php_ext_<name>::extension` behind
-/// `#[cfg(feature = "<name>")]`, appended last: with no `ext/*` edge
-/// declared, last is a topological order by construction, and when a
-/// person later declares one, `api-check` names both crates until the
-/// line is moved by hand. The tier's alias is never touched. The edit is
+/// `#[cfg(feature = "<name>")]`, appended last, where the witness on
+/// `enabled()` names it until a person moves the line to its place in
+/// php's registration order (#1778). The tier's alias is never touched. The edit is
 /// textual, so the comments stay; nothing is written here.
 fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("src/lib.rs");

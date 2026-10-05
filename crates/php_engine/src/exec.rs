@@ -1761,16 +1761,31 @@ pub(crate) fn opline_at(code: &OpArray, at: u32) -> Option<&Opline> {
     code.oplines.get(at as usize)
 }
 
+/// `i_init_func_execute_data`'s skip (`Z/Zend/zend_execute.c:4426-4437`)
+/// and `zend_copy_extra_args`' (`:4363-4369`): where a frame just pushed
+/// stands before the observer's begin, as php's `ZEND_DO_UCALL` lays the
+/// frame down before `ZEND_OBSERVER_FCALL_BEGIN`, so a begin handler reads
+/// the opline php's reads. A function that declares no type skips the
+/// `RECV*` of each argument passed, `opline += num_args`, and of every
+/// declared parameter where more were passed, `opline += first_extra_arg`,
+/// so a parameter the call left out still reaches its `RECV` and its
+/// `ArgumentCountError`, and a variadic its `RECV_VARIADIC`; never past
+/// the entry safepoint. One that declares a type keeps every one of
+/// them, since `ZEND_ACC_HAS_TYPE_HINTS` makes each a check: `None`.
+pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32) -> Option<u32> {
+    (!typed).then(|| passed.min(parameters).min(entry))
+}
+
 /// `i_init_func_execute_data`'s parameter prologue over a frame just
-/// pushed (`Z/Zend/zend_execute.c:4426-4437`): the `RECV*` oplines up to
-/// the entry safepoint, each placing a parameter and each running the
-/// type check the declaration carries, with the ones php skips skipped.
-/// php skips the `RECV*` of the arguments a call passed, and only where
-/// the function declares no type: `ZEND_ACC_HAS_TYPE_HINTS` keeps every
-/// one of them, since each is a check. The design's entry safepoint
-/// stands after the last of them either way (§5.6, the accepted
-/// `trace:entry-counter-typed-recv` row), which is why this runs before
-/// the loop is asked for the frame's activation.
+/// pushed (`Z/Zend/zend_execute.c:4426-4437`): the `RECV*` oplines from
+/// where the push left the frame, past the ones php skips
+/// ([`skipped_recv`]), up to the entry safepoint, each placing a
+/// parameter and each running the type check the declaration carries.
+/// The design's entry safepoint stands after the last of them either
+/// way (§5.6, the accepted `trace:entry-counter-typed-recv` row), which
+/// is why this runs before the loop is asked for the frame's activation.
+/// php dispatches each through its VM, so an extension observing `RECV`
+/// is told of each one served here (design §7.1).
 ///
 /// `Some` is the frame a `RECV` raised on, whose throwable is pending;
 /// the caller decides what a raise before the activation means to it.
@@ -1793,29 +1808,13 @@ pub(crate) fn parameter_prologue(
     req: &mut Request,
     callee: FrameRef,
     body: &OpArray,
-    function: Function,
-    passed: usize,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
     let entry = body.safepoints.first().map_or(0, |at| at.0);
-    let (parameters, typed) = req.function_decl(function).map_or((0, false), |decl| {
-        (
-            u32::try_from(decl.parameters.iter().filter(|p| !p.variadic).count())
-                .unwrap_or(u32::MAX),
-            decl.parameters.iter().any(|p| p.ty.is_some()),
-        )
-    });
-    let passed = u32::try_from(passed).unwrap_or(u32::MAX);
-    if passed <= parameters && !typed {
-        // `opline += num_args`: the `RECV*` of each argument the call
-        // passed is skipped and the ones after it still run, so a
-        // parameter the call left out still reaches its `RECV` and its
-        // `ArgumentCountError`.
-        req.vm_mut().jump(callee, passed.min(entry));
-    }
     while req.vm().opline(callee) < entry {
         let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
             break;
         };
+        crate::observer::tell_before(req, callee, prologue.opcode);
         let stepped = match prologue.opcode {
             php_unit::Opcode::Recv => {
                 crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?

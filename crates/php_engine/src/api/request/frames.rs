@@ -348,22 +348,27 @@ impl Request {
     /// `zend_leave_helper`'s arm for a nested code frame
     /// (`Z/Zend/zend_vm_def.h:3030`): the frame's CVs detached into the
     /// table it shares with its includer, the frame popped, and the
-    /// includer attached to the table again, so what the included file
-    /// wrote to a variable of the includer's is in the includer's CV
-    /// when the loop goes on there. A function frame is popped alone,
-    /// as `zend_leave_helper`'s other arms pop one.
+    /// includer, `EX(prev_execute_data)`, attached to the table again, so
+    /// what the included file wrote to a variable of the includer's is in
+    /// the includer's CV when the loop goes on there. The includer is the
+    /// frame below for an include; for code evaluated in a frame further
+    /// down, as a debugger evaluates in a paused frame
+    /// ([`Request::eval_in_frame`]), it is that frame, and the frames
+    /// above it are not attached. A function frame is popped alone, as
+    /// `zend_leave_helper`'s other arms pop one.
     pub(crate) fn leave_frame(&mut self, frame: FrameRef) {
         let code_frame = self
             .vm
             .at(frame)
-            .is_some_and(|state| state.function.is_none());
-        if code_frame {
+            .filter(|state| state.function.is_none())
+            .map(|state| state.caller.frame());
+        if code_frame.is_some() {
             self.detach_symbol_table(frame);
         }
         self.pop_frame();
-        if code_frame {
-            let caller = self.stack.current();
-            self.attach_symbol_table(caller);
+        if let Some(includer) = code_frame {
+            let includer = includer.unwrap_or_else(|| self.stack.current());
+            self.attach_symbol_table(includer);
         }
     }
 
@@ -422,9 +427,13 @@ impl Request {
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it on the stack for
         // `RECV_VARIADIC` to collect.
-        let parameters = self.function_decl(function).map_or(0, |decl| {
-            decl.parameters.iter().filter(|p| !p.variadic).count()
+        let (parameters, typed) = self.function_decl(function).map_or((0, false), |decl| {
+            (
+                decl.parameters.iter().filter(|p| !p.variadic).count(),
+                decl.parameters.iter().any(|p| p.ty.is_some()),
+            )
         });
+        let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
         let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
@@ -460,6 +469,10 @@ impl Request {
         }
         for coerced in call.coerced {
             self.release(coerced);
+        }
+        let declared = u32::try_from(parameters).unwrap_or(u32::MAX);
+        if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
+            self.vm.jump(frame, at);
         }
         crate::observer::call(self, frame);
         Ok(frame)

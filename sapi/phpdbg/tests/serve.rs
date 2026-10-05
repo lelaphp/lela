@@ -9,6 +9,11 @@ use std::process::{Command, Stdio};
 /// What the binary wrote for `commands` over a program of `source`, and
 /// the program's path as the binary names it.
 fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
+    debugged_with(name, &[], source, commands)
+}
+
+/// [`debugged`] with `flags` on the line after `-qIb -n`.
+fn debugged_with(name: &str, flags: &[&str], source: &str, commands: &str) -> (String, String) {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join("t.php");
@@ -16,6 +21,7 @@ fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
     let file = std::fs::canonicalize(&file).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
         .args(["-qIb", "-n"])
+        .args(flags)
         .arg(&file)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -55,6 +61,28 @@ fn ran(name: &str, flags: &[&str], source: &str) -> (String, String, Option<i32>
         String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code(),
     )
+}
+
+/// `-e` compiles with extended info (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`): the
+/// main op array of `f(1)`'s echo is eight oplines with its `EXT_STMT`,
+/// `EXT_FCALL_BEGIN` and `EXT_FCALL_END`, and five without (the pinned
+/// phpdbg's `print exec` context line under `phpdbg -qIb -n -e`, #1822;
+/// the listing itself goes to the second stream, as php's does).
+#[test]
+fn extended_info_compiles_php_s_oplines_into_the_listing() {
+    let source = "<?php\nfunction f($a) { return $a; }\necho f(1);\n";
+    let context = |out: &str, file: &str, ops: u32| {
+        assert_eq!(
+            out,
+            format!(
+                "[Successful compilation of {file}]\nprompt> [Context {file} ({ops} ops)]\nprompt> "
+            )
+        );
+    };
+    let (out, file) = debugged_with("extended", &["-e"], source, "print exec\nq\n");
+    context(&out, &file, 8);
+    let (out, file) = debugged("plain", source, "print exec\nq\n");
+    context(&out, &file, 5);
 }
 
 /// `-rr` runs the file and quits with php's quitting flag set, so a run

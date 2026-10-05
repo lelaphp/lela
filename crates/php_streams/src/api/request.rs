@@ -1663,10 +1663,9 @@ impl Streams for Request {
 
     fn register_engine_wrapper(&mut self, which: EngineWrapper) {
         let row = crate::streams::Registered::engine(which);
-        let rank = self.rank();
         let rows = &mut self.streams().url_stream_wrappers;
-        rows.retain(|(_, held)| held.scheme != row.scheme);
-        crate::state::place(rows, rank, row);
+        rows.retain(|held| held.scheme != row.scheme);
+        rows.push(row);
     }
 
     fn stream_wrappers(&self) -> Vec<String> {
@@ -1677,29 +1676,17 @@ impl Streams for Request {
     }
 
     fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
-        let rank = self.rank();
         let rows = &mut self.streams().filters;
-        // While the extensions start, a name is refused only where the
-        // extension starting took it; each one's are its own table until
-        // it has started (`zend_activate_modules`).
-        let starting = rank != crate::state::RUNNING;
-        let taken = rows
-            .iter()
-            .any(|(placed, (n, _))| (!starting || *placed == rank) && n.as_slice() == name);
-        if taken {
+        if rows.iter().any(|(n, _)| n.as_slice() == name) {
             return false;
         }
-        crate::state::place(rows, rank, (name.to_vec(), factory));
+        rows.push((name.to_vec(), factory));
         true
     }
 
     fn stream_filters(&self) -> Vec<Vec<u8>> {
         self.streams_ref().map_or_else(Vec::new, |state| {
-            state
-                .filters
-                .iter()
-                .map(|(_, (name, _))| name.clone())
-                .collect()
+            state.filters.iter().map(|(name, _)| name.clone()).collect()
         })
     }
 

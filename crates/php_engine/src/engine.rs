@@ -652,6 +652,9 @@ pub(crate) struct Shared {
     /// The hooks the bound tier replaces ([`Tier::HOOKED`]), every unit
     /// compiled under them (design §4.3, revision 58).
     hooked: php_compile::Hooked,
+    /// Whether every unit is compiled with extended info, which the
+    /// host's `-e` asked for ([`EngineBuilder::extended_info`]).
+    extended_info: bool,
     /// What the bundle supplies beyond its declarations, each kind
     /// resolved by php's rule ([`crate::supplied`]); the shell only
     /// where the host carries php's table of shell callbacks
@@ -692,6 +695,11 @@ pub(crate) struct Shared {
     /// at the engine's build and read at every call and return home
     /// ([`crate::observer`]); zero while none is declared.
     pub(crate) observers: u32,
+    /// The opcodes the bundle observes (design §7.1, #1780), declared as
+    /// the engine starts and fixed after it, which a serving reads once
+    /// as its loop is entered ([`crate::observer::Declared`]); empty
+    /// while none is declared.
+    pub(crate) opcodes: crate::observer::ObservedOpcodes,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
     /// destructor's or a callback's frame through, bound to the same
@@ -1059,6 +1067,7 @@ pub(crate) struct Declared<'a> {
     pub(crate) functions: &'a [FunctionDecl],
     pub(crate) classes: &'a [ClassDecl],
     pub(crate) hooked: php_compile::Hooked,
+    pub(crate) extended_info: bool,
 }
 
 impl Shared {
@@ -1069,6 +1078,7 @@ impl Shared {
             functions: &self.functions,
             classes: &self.classes,
             hooked: self.hooked,
+            extended_info: self.extended_info,
         }
     }
 
@@ -1144,6 +1154,10 @@ impl Shared {
         let cwd = req.cwd();
         let keys_before = req.keys_made;
         let stack = req.stack_limit();
+        let declared = Declared {
+            extended_info: self.extended_info && !req.compiling_host_string,
+            ..self.declared()
+        };
         let unit = req.compiling(|heap, request_classes| {
             let origin = Origin {
                 filename,
@@ -1157,7 +1171,7 @@ impl Shared {
                 source,
                 origin,
                 ini,
-                self.declared(),
+                declared,
                 stack,
                 heap,
                 &self.map_ptr_last,
@@ -2275,7 +2289,11 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// `CG(function_table)`'s natives once every `MINIT` has registered its
 /// own and `php_module_startup` has called `zend_disable_functions` over
 /// the startup ini's `disable_functions` (`Z/main/main.c:2370`): the engine's own
-/// and then each extension's in bundle order, the host's `additional`
+/// and then each extension's in the order it was registered,
+/// `registered`, its places in start order as [`sort_modules`] answers
+/// them, since `zend_register_module_ex` registers an extension's functions
+/// as it is handed the extension and `zend_startup_modules` sorts
+/// `module_registry` after; the host's `additional`
 /// after them under `standard`, less what the list names
 /// ([`disabled_functions`]), each beside the extension that declared it.
 /// The natives the engine declares for `standard` ([`crate::natives::standard`])
@@ -2286,6 +2304,7 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 fn function_table(
     core: &Extension,
     extensions: &[Extension],
+    registered: &[usize],
     additional: Vec<(FunctionDecl, Entry)>,
     ini: &[(Vec<u8>, Option<Vec<u8>>)],
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
@@ -2317,7 +2336,13 @@ fn function_table(
                 .map(|(_, native)| (None, native)),
         );
     }
-    for (e, at) in extensions.iter().zip(1u32..) {
+    // Each extension in registration order, beside its number in
+    // `module_registry` once sorted: its place in start order plus one.
+    let by_registration = registered.iter().filter_map(|&place| {
+        let number = u32::try_from(place + 1).ok()?;
+        Some((extensions.get(place)?, number))
+    });
+    for (e, at) in by_registration {
         let id = Some(ExtensionId(at));
         let own = e.functions.iter().cloned();
         match engine_standard.take_if(|_| Some(ExtensionId(at)) == standard) {
@@ -2407,6 +2432,7 @@ pub struct EngineBuilder {
     resume: Loop,
     tier_extension: Option<Extension>,
     hooked: php_compile::Hooked,
+    extended_info: bool,
     sapi_name: &'static str,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
@@ -2576,6 +2602,22 @@ impl EngineBuilder {
         self
     }
 
+    /// Compile every unit with extended info, as php's `-e` sets
+    /// `ZEND_COMPILE_EXTENDED_INFO` in `CG(compiler_options)` before the
+    /// first file compiles (`Z/sapi/cli/php_cli.c:1366`): an `EXT_STMT`
+    /// before each statement and an `EXT_FCALL_BEGIN` and
+    /// `EXT_FCALL_END` around each call, an `include` and an `eval`
+    /// ([`php_compile::Options::extended_info`]). It is the engine's,
+    /// beside the tier's hooks: every request compiles under it, what a
+    /// host evaluates as a string of its own excepted, and the file
+    /// cache keeps such units apart from a plain engine's. `on` is what
+    /// the host's line said; off is php's default.
+    #[must_use]
+    pub fn extended_info(mut self, on: bool) -> EngineBuilder {
+        self.extended_info = on;
+        self
+    }
+
     /// Bind the tier: `execute::<T>` becomes the loop, and the tier's
     /// state is declared under seam 3 (design §4.3 seam 8).
     #[must_use]
@@ -2613,7 +2655,7 @@ impl EngineBuilder {
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
-        sort_modules(&mut extensions);
+        let registered = sort_modules(&mut extensions);
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
@@ -2687,7 +2729,7 @@ impl EngineBuilder {
             _ => self.shebang,
         };
         let (function_modules, natives): (_, Vec<(FunctionDecl, Entry)>) =
-            function_table(&core, &extensions, additional, &ini);
+            function_table(&core, &extensions, &registered, additional, &ini);
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
         let replaced = intercept(&functions, &mut entries, &supplied.intercepts);
         let function_flags = functions
@@ -2725,7 +2767,13 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(MAX_ACCELERATED_FILES, self.hooked, &functions, &classes);
+        let units = UnitCache::new(
+            MAX_ACCELERATED_FILES,
+            self.hooked,
+            self.extended_info,
+            &functions,
+            &classes,
+        );
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -2752,7 +2800,9 @@ impl EngineBuilder {
                 build_defs: BuildDefs::of(self.configure),
                 shebang,
                 hooked: self.hooked,
+                extended_info: self.extended_info,
                 observers: supplied.observers.count(),
+                opcodes: crate::observer::ObservedOpcodes::default(),
                 supplied,
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
@@ -3022,7 +3072,7 @@ fn host_ini(
 /// `MINIT`: walking from the first, an extension that names a required
 /// or optional dependency standing after it trades places with that one,
 /// and the walk stays where it is until the extension there names none
-/// that stands later. The order the engine starts, registers and lists
+/// that stands later. The order the engine starts, activates and lists
 /// its extensions in is the bundle's as this leaves it, so `standard`,
 /// which names `session` optional (`standard_deps`), starts after it
 /// whatever the crates depend on:
@@ -3036,9 +3086,15 @@ fn host_ini(
 /// bool(true)
 /// ```
 ///
+/// What it answers is the order the modules were registered in, each
+/// extension's place in start order listed in the order it was handed:
+/// the order `zend_register_module_ex` filled the function table in,
+/// before the sort ([`function_table`]).
+///
 /// php loops for ever over a cycle of dependencies; the walk here stops
 /// after as many trades as a list of its length can need without one.
-fn sort_modules(modules: &mut [Extension]) {
+fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
+    let mut handed: Vec<usize> = (0..modules.len()).collect();
     let mut trades = modules.len() * modules.len();
     let mut at = 0;
     while at < modules.len() {
@@ -3053,11 +3109,17 @@ fn sort_modules(modules: &mut [Extension]) {
         match later {
             Some(other) if trades > 0 => {
                 modules.swap(at, other);
+                handed.swap(at, other);
                 trades -= 1;
             }
             _ => at += 1,
         }
     }
+    // `handed[place]` is where the extension now at `place` was handed;
+    // ordering the places by it lists them in registration order.
+    let mut registered: Vec<usize> = (0..modules.len()).collect();
+    registered.sort_by_key(|&place| handed[place]);
+    registered
 }
 
 /// One extension's `MINIT` (ADR-0010): its process start, called once
@@ -3186,6 +3248,7 @@ impl Engine {
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
             hooked: Nop::HOOKED,
+            extended_info: false,
             sapi_name: "",
             additional_extension: None,
             additional_functions: Vec::new(),
@@ -3350,6 +3413,10 @@ impl Engine {
             let failed = format!("Unable to start {} module", extension.name);
             shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
             break;
+        }
+        if shared.refused.is_none() {
+            shared.opcodes =
+                crate::observer::ObservedOpcodes::start(&shared.supplied.opcodes, &start);
         }
         shared.startup_raised = raised;
     }
@@ -4329,6 +4396,7 @@ fn compile(
         keys_before: origin.keys_before,
         multibyte: origin.multibyte,
         hooked: declared.hooked,
+        extended_info: declared.extended_info,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -4605,10 +4673,10 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 }
 
 /// Each extension's `rinit` in startup order, `zend_activate_modules`,
-/// with the extension being activated named to what it registers
-/// ([`Request::activating`](crate::api::request::Request::activating)),
-/// so the stream layer places the wrappers and filters each registers in
-/// php's startup order; the first that raises ends the walk, as the
+/// so the wrappers and filters each registers stand in the stream
+/// layer's tables in the order php's `MINIT`s registered them, the
+/// bundle started in php's order ([`sort_modules`]); the first that
+/// raises ends the walk, as the
 /// `zend_bailout` of php's fatal inside `RINIT` leaves
 /// `zend_activate_modules` (#1775), and what it raised is handed back.
 /// The pinned build has `zip`, which the bundle has not:
@@ -4622,17 +4690,15 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Thrown> {
     let mut served = Ok(());
-    for (at, extension) in extensions.iter().enumerate() {
+    for extension in extensions {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        req.activating = u32::try_from(at).ok().map(crate::api::request::ExtensionId);
         served = rinit(req);
         if served.is_err() {
             break;
         }
     }
-    req.activating = None;
     served
 }
 
@@ -6507,7 +6573,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::ExtNop,
+                    opcode: php_unit::Opcode::UserOpcode,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -6519,7 +6585,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_EXT_NOP has no handler in this engine yet"
+                "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
             )))
         );
     }

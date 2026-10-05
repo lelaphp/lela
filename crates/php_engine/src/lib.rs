@@ -49,6 +49,7 @@ mod probe;
 mod process_scope;
 mod rfc1867;
 mod signal;
+mod statement;
 mod supplied;
 #[cfg(test)]
 mod tests;

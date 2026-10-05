@@ -119,7 +119,7 @@ fn leaves(opcode: Opcode) -> bool {
 /// `Stepper<false>` is the debugger, which hands the entry frame's
 /// leaving back to the loop as phpdbg does; `Stepper<true>` a recorder,
 /// which steps it, so `step` itself ends the serving.
-struct Stepper<const STEPS_LEAVING: bool>;
+pub(super) struct Stepper<const STEPS_LEAVING: bool>;
 
 impl<const STEPS_LEAVING: bool> Tier for Stepper<STEPS_LEAVING> {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {

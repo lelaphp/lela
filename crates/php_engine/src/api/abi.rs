@@ -31,9 +31,11 @@ mod marshal;
 
 pub use crate::observer::{
     BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
-    ObservedFiber, ObserverHandlers, ObserverInit, Removed,
+    ObservedFiber, ObserverHandlers, ObserverInit, OpcodeHandler, Opcodes, OpcodesDeclared,
+    Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
+pub use crate::statement::{Statement, StatementHandler};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
@@ -453,14 +455,18 @@ impl<K: PartialEq, V> Lent<K, V> {
 /// opcache's `zend_extension_entry` stands beside its
 /// `opcache_module_entry`: what `php -m` lists under `[Zend Modules]`,
 /// `get_loaded_extensions(true)` answers and `ReflectionZendExtension`
-/// reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// reads, and the handlers php's struct carries beside them.
+#[derive(Debug, Clone)]
 pub struct ZendExtension {
     pub name: String,
     pub version: String,
     pub author: String,
     pub url: String,
     pub copyright: String,
+    /// `statement_handler`: told at each statement of a unit compiled
+    /// with extended info, before it runs ([`Statement`]); every Zend
+    /// extension's in the order they start.
+    pub statement_handler: Option<StatementHandler>,
 }
 
 pub(crate) use crate::api::__private::Entry;
@@ -1384,6 +1390,31 @@ impl ExtensionBuilder {
         self
     }
 
+    /// Observation of a declared set of opcodes (design §7.1, as #1780
+    /// ruled), php's `zend_set_user_opcode_handler` with a handler that
+    /// answers `ZEND_USER_OPCODE_DISPATCH`: `declared` is asked once, as
+    /// the engine starts, which opcodes the extension observes, handed
+    /// what its `MINIT` is; `handler` is told of each opline of one of
+    /// them the loop dispatches, before the opcode's handler runs, handed
+    /// the frame standing at it and the opcode's name. The opcode's
+    /// handler always runs after it: no extension replaces one. Two
+    /// extensions that declare one opcode are each told, the later
+    /// first: php keeps one handler per opcode, the later set over the
+    /// earlier, and tells the earlier only where the later saved it and
+    /// calls it after its own work, as xdebug's does; here every
+    /// declaration is told, as if each saved the one beneath. A second
+    /// declaration of one extension stands over its first. With none declared, a serving reads one word as
+    /// its loop is entered and each opline pays a test of it.
+    #[must_use]
+    pub fn opcodes(
+        mut self,
+        declared: OpcodesDeclared,
+        handler: OpcodeHandler,
+    ) -> ExtensionBuilder {
+        self.supplies.opcodes = Some(crate::observer::OpcodeObserver { declared, handler });
+        self
+    }
+
     /// Told of each fiber's creation, `zend_observer_fiber_init_register`
     /// at `MINIT` (design §4.3 seam 9): `Fiber::start` has laid the
     /// fiber's stack down and has not yet switched into it. The bundle's
@@ -1732,8 +1763,11 @@ impl ExtensionBuilder {
             deactivate: self.deactivate,
             post_deactivate: self.post_deactivate,
             engine_end: self.engine_end,
+            supplies: Supplies {
+                statement_handler: self.zend.as_ref().and_then(|row| row.statement_handler),
+                ..self.supplies
+            },
             zend: self.zend,
-            supplies: self.supplies,
             info: self.info,
             constants_link: self.constants_link,
             class_constants: self.class_constants,
