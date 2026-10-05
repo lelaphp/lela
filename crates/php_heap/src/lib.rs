@@ -50,6 +50,7 @@ pub mod process;
 mod property_table;
 mod reference;
 mod resource;
+#[cfg(debug_assertions)]
 mod sensed;
 mod sort;
 mod stack;
@@ -389,11 +390,11 @@ impl Heap {
         unsafe { self.mm.free(s.address()) };
     }
 
-    /// What a debug build's sensors found since the engine last asked,
-    /// as the `InternalError` fatal that ends the request: a refcount
-    /// operation refused because the block it named was one this heap
-    /// had freed, naming the block, the operation and the line that
-    /// asked for it. The first only, and taken, so it is raised once;
+    /// What a debug build's sensors found in this heap since the
+    /// engine last asked, as the `InternalError` fatal that ends the
+    /// request: a refcount operation refused because the block it named
+    /// was one this heap had freed, naming the block, the operation and
+    /// the line that asked for it. The first only, and taken, so it is raised once;
     /// the refused operation itself did nothing, so the free list the
     /// block's first word links stands. The engine asks after every
     /// handler and once more at the request's end, so a refusal made
@@ -401,7 +402,14 @@ impl Heap {
     /// tables are freed, is raised too. A release build senses nothing
     /// and answers `None`.
     pub fn take_sensed(&mut self) -> Option<Fatal> {
-        sensed::take()
+        #[cfg(debug_assertions)]
+        {
+            self.mm.take_sensed()
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
     }
 
     /// One more owner of `z`: a refcount increment for a refcounted
@@ -480,7 +488,7 @@ impl Heap {
         // asked first here, and a refused release does nothing at all.
         #[cfg(debug_assertions)]
         if let Some(at) = z.counted()
-            && gc::refuses(at, sensed::RefOp::Release, std::panic::Location::caller())
+            && gc::refuses_freed(at, sensed::RefOp::Release, std::panic::Location::caller())
         {
             return GivenUp::Freed;
         }
