@@ -80,8 +80,6 @@ struct State {
 /// )
 /// ```
 pub fn extension() -> Extension {
-    ffi::Library::init();
-    ffi::Library::install_loader();
     ExtensionBuilder::default()
         .functions(vec![
             libxml_set_streams_context::declared(),
@@ -102,11 +100,26 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .register(image_svg::SVG)
+        .process_state(|| Ok(initialize()))
         .request_state::<State>()
         .rshutdown(rshutdown)
         .post_deactivate(post_deactivate)
         .info(libxml_info)
         .build("libxml")
+}
+
+/// The process scope's proof that libxml2 is started (ADR-0010): built
+/// once per process, never ended, as php never calls `xmlCleanupParser`.
+struct Initialized;
+
+/// `php_libxml_initialize` (`Z/ext/libxml/libxml.c:934-958`), which
+/// php's `MINIT` runs once per process: `xmlInitParser`, then php's
+/// external entity loader set over the library's default, for every
+/// parse of the process. It cannot fail.
+fn initialize() -> Initialized {
+    ffi::Library::init();
+    ffi::Library::install_loader();
+    Initialized
 }
 
 /// `PHP_MINFO_FUNCTION(libxml)`.
