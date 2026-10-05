@@ -738,6 +738,7 @@ dependencies = [
  "php_ext_xmlreader",
  "php_ext_xmlwriter",
  "php_ext_xsl",
+ "php_ext_zend_test",
  "php_ext_zip",
  "php_ext_zlib",
 ]
@@ -1275,6 +1276,14 @@ dependencies = [
  "php_ext_dom",
  "php_ext_libxml",
  "pkg-config",
+]
+
+[[package]]
+name = "php_ext_zend_test"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_standard",
 ]
 
 [[package]]

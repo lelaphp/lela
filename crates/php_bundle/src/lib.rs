@@ -144,6 +144,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_ffi::extension,
         #[cfg(feature = "intl")]
         php_ext_intl::extension,
+        #[cfg(feature = "zend_test")]
+        php_ext_zend_test::extension,
     ]
 }
 
@@ -248,6 +250,8 @@ pub const CONFIGURE: &[&str] = &[
     "--disable-xmlwriter",
     #[cfg(feature = "xsl")]
     "--with-xsl",
+    #[cfg(feature = "zend_test")]
+    "--enable-zend-test",
     #[cfg(feature = "zip")]
     "--with-zip",
     #[cfg(feature = "zlib")]
