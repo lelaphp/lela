@@ -99,7 +99,6 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .ini(ini())
         .on_modify(OBSERVE_FUNCTION_NAMES, on_update_function_names)
         .engine_state(Switches::start)
-        .request_state::<Observing>()
         .observer(fcall_init)
         .observer(execute_internal_init)
         .fiber_init(fiber_init)
@@ -199,7 +198,7 @@ impl Switches {
 /// below it, php's `fiber->caller` links, which a switch handler reads to
 /// tell a resumption from a suspension.
 #[derive(Debug, Default)]
-struct Observing {
+pub(crate) struct Observing {
     depth: usize,
     /// The fibers standing above the request's own stack, the running
     /// one last, each by its object's number.
@@ -299,7 +298,7 @@ fn show_declared(req: &mut Request, what: &str, name: &[u8]) {
     if !(switches.enabled && switches.observe_declaring) {
         return;
     }
-    let mut line = indent(req.state::<Observing>().depth);
+    let mut line = indent(req.state::<crate::State>().observer.depth);
     line.extend_from_slice(format!("<!-- declared {what} '").as_bytes());
     line.extend_from_slice(name);
     line.extend_from_slice(b"' -->\n");
@@ -418,7 +417,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
     let Serves::Function { scope, name } = Serves::of(observed) else {
         return;
     };
-    let mut line = indent(observed.state::<Observing>().depth);
+    let mut line = indent(observed.state::<crate::State>().observer.depth);
     line.extend_from_slice(b"<!-- internal enter ");
     line.extend(Serves::function(scope.as_deref(), &name));
     line.extend_from_slice(b"() -->\n");
@@ -428,7 +427,7 @@ fn internal_enter(observed: &mut Observed<'_>) {
 /// `observer_show_init`: `<!-- init f() -->`, `<!-- init C::m() -->`
 /// or `<!-- init 'file' -->`.
 fn show_init(req: &mut Request, serves: &Serves) {
-    let depth = req.state::<Observing>().depth;
+    let depth = req.state::<crate::State>().observer.depth;
     let mut line = indent(depth);
     line.extend_from_slice(b"<!-- init ");
     match serves {
@@ -451,7 +450,7 @@ fn show_init(req: &mut Request, serves: &Serves) {
 /// tag. The frames below are the user frames [`FrameView::caller`]
 /// walks; php's `prev_execute_data` passes natives' frames too.
 fn show_init_backtrace(observed: &mut Observed<'_>, serves: &Serves) {
-    let depth = observed.state::<Observing>().depth;
+    let depth = observed.state::<crate::State>().observer.depth;
     let row = |out: &mut Vec<u8>, serves: &Serves| {
         out.extend(indent(depth + 2));
         match serves {
@@ -491,7 +490,7 @@ fn begin(observed: &mut Observed<'_>) {
         return;
     }
     let serves = Serves::of(observed);
-    let state = observed.state::<Observing>();
+    let state = &mut observed.state::<crate::State>().observer;
     let mut line = indent(state.depth);
     state.depth += 1;
     line.push(b'<');
@@ -517,7 +516,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     if !switches.show_output {
         return;
     }
-    let depth = observed.state::<Observing>().depth;
+    let depth = observed.state::<crate::State>().observer.depth;
     if let Some(raised) = observed.raised() {
         let class = match raised {
             Raised::Throwable(throwable) => observed.class_name(throwable.class()),
@@ -532,7 +531,7 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     }
     // observer_show_opcode (#1824).
     let depth = depth.saturating_sub(1);
-    observed.state::<Observing>().depth = depth;
+    observed.state::<crate::State>().observer.depth = depth;
     let mut line = indent(depth);
     match Serves::of(observed) {
         Serves::Function { scope, name } => {
@@ -624,7 +623,10 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
         return;
     }
     let key = |fiber: ObservedFiber| fiber.fiber().map(|object| object.index());
-    let resumes = req.state::<Observing>().switched(key(from), key(to));
+    let resumes = req
+        .state::<crate::State>()
+        .observer
+        .switched(key(from), key(to));
     if !switches.fiber_switch {
         return;
     }

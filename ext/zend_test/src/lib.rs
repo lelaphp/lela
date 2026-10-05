@@ -14,9 +14,9 @@
 //! ceiling. Two more parts land here as their engine sides are built:
 //! the observed opcodes, `zend_test.observer.show_opcode` and
 //! `show_opcode_in_user_handler` (#1824), whose entries are declared
-//! already and whose tags [`observer`] leaves a place for, and the
-//! allocator hooks of `zend_mm_custom_handlers.c` (#1825), a file of
-//! their own beside [`observer`].
+//! already and whose tags [`observer`] leaves a place for. The allocator
+//! hooks of `zend_mm_custom_handlers.c` are ported by observation
+//! (#2024, [`mm_custom_handlers`]).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -30,6 +30,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod mm_custom_handlers;
 mod observer;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -51,14 +52,26 @@ use php_ext::request::Request;
 /// string(0) ""
 /// ```
 pub fn extension() -> Extension {
-    observer::declared(ExtensionBuilder::default())
+    let builder = observer::declared(ExtensionBuilder::default());
+    mm_custom_handlers::declared(builder)
+        .request_state::<State>()
         .info(info)
         .build("zend_test")
+}
+
+/// The extension's request state (ADR-0005), the part of php's
+/// `zend_test` request state this crate carries: the observer's, and
+/// where the allocation observer stands.
+#[derive(Debug, Default)]
+struct State {
+    observer: observer::Observing,
+    allocations: mm_custom_handlers::ObservedHeap,
 }
 
 /// `PHP_MINFO_FUNCTION(zend_test)`: the one row, then the ini entries.
 fn info(req: &mut Request) {
     req.info_table(&[&["zend_test extension", "enabled"]]);
-    let names: Vec<&[u8]> = observer::ENTRIES.iter().map(|entry| entry.0).collect();
+    let mut names: Vec<&[u8]> = observer::ENTRIES.iter().map(|entry| entry.0).collect();
+    names.push(mm_custom_handlers::ENABLED);
     req.info_ini_entries(&names);
 }
