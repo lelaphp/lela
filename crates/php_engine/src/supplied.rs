@@ -9,8 +9,8 @@
 //! - [`Chain`]: php's saved pointer, which each supplier overwrites and
 //!   keeps as the one beneath (`zend_interrupt_function`,
 //!   `zend_compile_file`, `zend_compile_string`, `zend_resolve_path`,
-//!   `zend_error_cb`, `gc_collect_cycles`, `zend_post_startup_cb`,
-//!   `php_rfc1867_callback`);
+//!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
+//!   `zend_post_startup_cb`, `php_rfc1867_callback`);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
@@ -37,7 +37,7 @@ use php_unit::decl::Name;
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
     Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, PostStartupHook,
-    ResolvePathHook, Shell, TicksHook, TreatDataHook, UploadHook,
+    ResolvePathHook, Shell, ThrownHook, TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
@@ -96,6 +96,7 @@ pub(crate) struct Supplies {
     pub(crate) compile_string: Option<CompileStringHook>,
     pub(crate) error: Option<ErrorHook>,
     pub(crate) gc_collect: Option<GcCollectHook>,
+    pub(crate) thrown: Option<ThrownHook>,
     pub(crate) resolve_path: Option<ResolvePathHook>,
     pub(crate) post_startup: Option<PostStartupHook>,
     pub(crate) upload: Option<UploadHook>,
@@ -145,6 +146,13 @@ pub(crate) struct Resolved {
     /// the time and the memory before the one it saved and records the
     /// collection after it.
     pub(crate) gc_collect: Chain<GcCollectHook>,
+    /// `zend_throw_exception_hook` (`Z/Zend/zend_exceptions.c:60`),
+    /// from the top, every link: nothing of php's stands beneath the
+    /// links, and each serves before the one it saved, as dd-trace's
+    /// `zai_interceptor_exception_hook` and the Datadog profiler's
+    /// `exception_profiling_throw_exception_hook` do; xdebug's installs
+    /// over whatever stood and saves none.
+    pub(crate) thrown: Chain<ThrownHook>,
     /// `zend_resolve_path`, from the top until a link answers, as
     /// phar's falls through to `phar_save_resolve_path`
     /// (`Z/ext/phar/phar.c:3239-3246`).
@@ -216,6 +224,7 @@ impl Resolved {
             table.compile_string.install(own.compile_string);
             table.error.install(own.error);
             table.gc_collect.install(own.gc_collect);
+            table.thrown.install(own.thrown);
             table.resolve_path.install(own.resolve_path);
             table.post_startup.install(own.post_startup);
             table.upload.install(own.upload);
@@ -925,6 +934,62 @@ mod tests {
                 Ext(6, string("echo 'a';")),
                 Ext(5, string("echo 'b';")),
                 Ext(6, string("refused;")),
+            ]
+        );
+    }
+
+    /// `zend_throw_exception_hook`, every link told from the top: each
+    /// throwable thrown once, by `throw`, by a native and by
+    /// `Generator::throw()`, where it is thrown and before the unwind
+    /// serves the `finally` it leaves through; and a throwable a fiber
+    /// carries across a switch told again where it lands, as
+    /// `zend_fiber_delegate_transfer_result` throws it again
+    /// (`Z/Zend/zend_fibers.c:641-646`).
+    #[test]
+    fn a_thrown_link_is_told_of_every_throw_before_the_unwind() {
+        use crate::api::values::PhpObject;
+        use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, message_of, record};
+        const TYPE: &str = "strlen(): Argument #1 ($string) must be of type string, array given";
+        fn told(req: &mut Request, throwable: PhpObject) {
+            let message = message_of(req, throwable);
+            req.write(format!("[{message}]").as_bytes());
+            record(8, Phase::Thrown(message));
+        }
+        let recording = Recording::start();
+        let extensions = [
+            TestExt::<7>::extension(),
+            TestExt::<8>::builder().thrown(told).build("test_ext_8"),
+        ];
+        let out = printed(
+            &extensions,
+            concat!(
+                "<?php function f() { try { throw new Exception('u'); } finally { echo 'finally '; } }\n",
+                "try { f(); } catch (Exception $e) { echo 'caught '; }\n",
+                "try { strlen([]); } catch (TypeError $e) { echo 'caught '; }\n",
+                "function g() { try { yield 1; } catch (Exception $e) { echo 'in g '; } }\n",
+                "$g = g(); $g->current(); $g->throw(new Exception('g'));\n",
+                "$f = new Fiber(function () { Fiber::suspend(); });\n",
+                "$f->start(); try { $f->throw(new Exception('f')); } catch (Exception $e) { echo 'out'; }",
+            ),
+        );
+        assert_eq!(
+            out,
+            "[u]finally caught [strlen(): Argument #1 ($string) must be of type string, array given]caught [g]in g [f][f]out"
+        );
+        let told = |n, m: &str| Ext(n, Phase::Thrown(m.into()));
+        assert_eq!(
+            recording.events().only(&[Phase::Thrown(String::new())]).0,
+            [
+                told(8, "u"),
+                told(7, "u"),
+                told(8, TYPE),
+                told(7, TYPE),
+                told(8, "g"),
+                told(7, "g"),
+                told(8, "f"),
+                told(7, "f"),
+                told(8, "f"),
+                told(7, "f"),
             ]
         );
     }

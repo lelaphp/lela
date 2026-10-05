@@ -1923,7 +1923,7 @@ impl Generator {
             return Err(thrown);
         }
         if !has_frame(req, this) {
-            return Err(Thrown::of(Some(throwable)));
+            return Err(crate::api::raising::throw_object(req, throwable));
         }
         let root = current(req, this);
         if is_running(req, root) {
@@ -1934,7 +1934,8 @@ impl Generator {
                 "Cannot resume an already running generator",
             ));
         }
-        req.leave_pending(&Thrown::of(Some(throwable)));
+        let thrown = crate::api::raising::throw_object(req, throwable);
+        req.leave_pending(&thrown);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))
     }

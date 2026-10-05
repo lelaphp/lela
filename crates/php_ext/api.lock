@@ -98,6 +98,7 @@ abi::ExtensionBuilder::resolve_path
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
 abi::ExtensionBuilder::shell
+abi::ExtensionBuilder::thrown
 abi::ExtensionBuilder::ticks
 abi::ExtensionBuilder::trampolines
 abi::ExtensionBuilder::treat_data

@@ -754,7 +754,7 @@ pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
 /// without the extension.
 pub fn throw_at(req: &mut Request, class: &str, message: &str, file: &[u8], line: u32) -> Thrown {
     match throwable_at(req, class, message, file, line) {
-        Ok(object) => Thrown::of(Some(object)),
+        Ok(object) => throw_object(req, object),
         Err(fatal) => fatal,
     }
 }
@@ -799,12 +799,14 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
     };
     match new_throwable(req, class, message) {
         Ok(throwable) => {
-            if let Some(object) = throwable.as_object().copied() {
-                req.set_previous(object, earlier);
-            }
-            let thrown = throw_value(req, &throwable);
-            req.release(throwable);
-            thrown
+            let Some(object) = throwable.as_object().copied() else {
+                req.release(throwable);
+                return Thrown::of(Some(earlier));
+            };
+            req.set_previous(object, earlier);
+            // Thrown over one pending, which the hooks are not told of
+            // (`Z/Zend/zend_exceptions.c:203-206`).
+            Thrown::of(Some(object))
         }
         Err(refused) => {
             req.release(earlier.as_value());
@@ -841,13 +843,42 @@ pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) 
 pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
     if let Some(object) = throwable.as_object() {
         req.addref(throwable);
-        return Thrown::of(Some(*object));
+        return throw_object(req, *object);
     }
     throw_error(
         req,
         "Error",
         "Cannot throw objects that do not implement Throwable",
     )
+}
+
+/// `zend_throw_exception_internal` (`Z/Zend/zend_exceptions.c:183-238`),
+/// the one home of a throw: `object` thrown, the `Thrown` its one owner,
+/// and every link of `zend_throw_exception_hook` the bundle supplied
+/// ([`ExtensionBuilder::thrown`]) told of it first, from the top, with
+/// it standing in php's slot as php's hook reads `EG(exception)`, and
+/// before the unwind leaves the frame: what a frame the throwable
+/// leaves owes its observers is the unwind's, in `unwind_from`'s
+/// uncaught arm as php's `zend_observer_fcall_end(execute_data, NULL)`
+/// stands in `zend_dispatch_try_catch_finally_helper`
+/// (`Z/Zend/zend_vm_def.h:8157-8161`), never here. As php's, the hooks
+/// are told nothing where a throwable stands pending already, which
+/// php chains the new one over and returns before the hook, nor where
+/// nothing executes, which php renders without it.
+///
+/// [`ExtensionBuilder::thrown`]: crate::api::abi::ExtensionBuilder::thrown
+pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
+    let thrown = Thrown::of(Some(object));
+    if req.is_pending() || !req.executing() {
+        return thrown;
+    }
+    let shared = std::sync::Arc::clone(&req.shared);
+    req.while_pending(&thrown, |req| {
+        for hook in shared.supplied.thrown.top_down() {
+            hook(req, object);
+        }
+    });
+    thrown
 }
 
 /// A new instance of the throwable class `class` with `message`, not yet

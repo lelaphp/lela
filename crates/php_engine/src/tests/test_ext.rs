@@ -33,7 +33,7 @@ use super::api::abi::{
 };
 use super::api::raising::Thrown;
 use super::api::request::Request;
-use super::api::values::Resource;
+use super::api::values::{PhpObject, Resource};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +84,9 @@ pub(crate) enum Phase {
     /// Its `zend_compile_string` link was handed a string, before it
     /// served the one beneath with it.
     CompileString(String),
+    /// Its `zend_throw_exception_hook` link was told of a throwable
+    /// thrown, its message.
+    Thrown(String),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -205,6 +208,16 @@ impl Events {
     }
 }
 
+/// A throwable's `message`, as its link records it.
+pub(crate) fn message_of(req: &Request, throwable: PhpObject) -> String {
+    let message = throwable.prop(req, b"message");
+    let bytes = message
+        .as_ref()
+        .and_then(|m| m.as_str_bytes())
+        .unwrap_or_default();
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// Extension `N`'s request state: recorded where it is built and where
 /// it is dropped, and nothing else.
 pub(crate) struct RequestSlot<const N: u8>;
@@ -254,6 +267,7 @@ impl<const N: u8> TestExt<N> {
             .error(Self::error)
             .gc_collect(Self::gc_collect)
             .compile_string(Self::compile_string)
+            .thrown(Self::thrown)
     }
 
     fn engine_state(_: &StartupIni) -> EngineSlot<N> {
@@ -302,6 +316,10 @@ impl<const N: u8> TestExt<N> {
         let collected = beneath.collect(req);
         record(N, Phase::Collected(collected));
         collected
+    }
+
+    fn thrown(req: &mut Request, throwable: PhpObject) {
+        record(N, Phase::Thrown(message_of(req, throwable)));
     }
 
     fn compile_string(req: &mut Request, beneath: StringBeneath<'_>) -> Result<Compiled, Thrown> {

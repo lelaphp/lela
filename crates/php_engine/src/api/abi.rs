@@ -356,6 +356,9 @@ pub(crate) type CompileStringHook = fn(&mut Request, StringBeneath<'_>) -> Resul
 /// The error hook, php's `zend_error_cb` as an extension overrides it:
 /// [`ExtensionBuilder::error`].
 pub(crate) type ErrorHook = fn(&mut Request, ErrorBeneath<'_>);
+/// The throw hook, php's `zend_throw_exception_hook`:
+/// [`ExtensionBuilder::thrown`].
+pub(crate) type ThrownHook = fn(&mut Request, PhpObject);
 /// The cycle collection hook, php's `gc_collect_cycles` pointer as an
 /// extension overrides it: [`ExtensionBuilder::gc_collect`].
 pub(crate) type GcCollectHook = fn(&mut Request, GcBeneath<'_>) -> i64;
@@ -1011,6 +1014,23 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn error(mut self, hook: ErrorHook) -> ExtensionBuilder {
         self.supplies.error = Some(hook);
+        self
+    }
+
+    /// `zend_throw_exception_hook` set, as the tracers and profilers set
+    /// it to see every throwable: `hook` is told of each throwable
+    /// thrown, once, where it is thrown and before the unwind leaves the
+    /// frame, with it standing pending: by `throw`, by a native, by
+    /// `Generator::throw()`, and as a fiber hands one across a switch,
+    /// in either direction, which php throws again
+    /// (`zend_fiber_delegate_transfer_result`). As php's, it is told
+    /// nothing of a throwable raised while another is pending, which is
+    /// chained under it, nor of one raised where nothing executes. Two
+    /// extensions' hooks are each told, the later first, as each of
+    /// php's links serves before the one it saved.
+    #[must_use]
+    pub fn thrown(mut self, hook: ThrownHook) -> ExtensionBuilder {
+        self.supplies.thrown = Some(hook);
         self
     }
 
