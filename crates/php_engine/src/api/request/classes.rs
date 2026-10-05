@@ -338,6 +338,9 @@ impl Request {
         key: &[u8],
     ) -> Result<(), Thrown> {
         self.bind_class(unit, key)?;
+        if !crate::observer::classes_linked_observed(self) {
+            return Ok(());
+        }
         let at = unit
             .runtime_keys
             .iter()
@@ -1174,6 +1177,7 @@ impl Request {
             let message = format!("Cannot redeclare function {name}(){site}");
             return Err(crate::api::raising::fatal(self, &message));
         }
+        let declared = self.user_function_id(self.user_functions.len());
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
@@ -1182,7 +1186,7 @@ impl Request {
         });
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
-        if let Some(declared) = self.user_function_id(self.user_functions.len() - 1) {
+        if let Some(declared) = declared {
             crate::observer::function_declared(self, declared, lowered);
         }
         Ok(())
@@ -1545,10 +1549,10 @@ impl Request {
             return false;
         }
         let place = self.buckets.take();
-        let lowered = alias.to_ascii_lowercase();
-        self.aliases.push((place, lowered.clone(), class));
-        if !self.native_class(class) {
-            crate::observer::class_linked(self, class, &lowered);
+        self.aliases
+            .push((place, alias.to_ascii_lowercase(), class));
+        if crate::observer::classes_linked_observed(self) && !self.native_class(class) {
+            crate::observer::class_linked(self, class, &alias.to_ascii_lowercase());
         }
         true
     }

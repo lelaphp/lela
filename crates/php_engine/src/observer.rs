@@ -182,7 +182,7 @@ impl Slot {
     /// next into its place, which the walk then passes over, and php
     /// hands the remover that next handler to call itself
     /// ([`Removed::next`]).
-    fn begin_at(&self, at: usize) -> Option<BeginHandler> {
+    pub(crate) fn begin_at(&self, at: usize) -> Option<BeginHandler> {
         match self {
             Slot::Installed(handlers) => handlers.begin.get(at).copied(),
             Slot::Unresolved | Slot::Declined => None,
@@ -190,7 +190,7 @@ impl Slot {
     }
 
     /// The end handler at `at`, read as [`Slot::begin_at`] reads.
-    fn end_at(&self, at: usize) -> Option<EndHandler> {
+    pub(crate) fn end_at(&self, at: usize) -> Option<EndHandler> {
         match self {
             Slot::Installed(handlers) => handlers.end.get(at).copied(),
             Slot::Unresolved | Slot::Declined => None,
@@ -356,7 +356,7 @@ fn begin(req: &mut Request, frame: FrameRef) {
         req.open_observed(frame);
     }
     let mut at = 0;
-    while let Some(begin) = req.observer_slot(frame).begin_at(at) {
+    while let Some(begin) = req.observer_begin_at(frame, at) {
         begin(&mut Observed { req, frame });
         at += 1;
     }
@@ -402,7 +402,7 @@ fn end(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
 /// order it holds them and read afresh for each, as [`Slot::begin_at`].
 fn call_end_handlers(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
     let mut at = 0;
-    while let Some(end) = req.observer_slot(frame).end_at(at) {
+    while let Some(end) = req.observer_end_at(frame, at) {
         end(&mut Observed { req, frame }, value);
         at += 1;
     }
@@ -500,7 +500,7 @@ fn notify_error(req: &mut Request, level: Level, file: &[u8], line: u32, message
 /// where a file's top-level function is declared as the file loads
 /// ([`declared_at_load`]).
 pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: &[u8]) {
-    if req.shared.supplied.functions_declared.is_empty() {
+    if !functions_declared_observed(req) {
         return;
     }
     let shared = Arc::clone(&req.shared);
@@ -518,13 +518,32 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
 /// linked as it loads ([`declared_at_load`]); an anonymous class's
 /// `DECLARE_ANON_CLASS` tells none.
 pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
-    if req.shared.supplied.classes_linked.is_empty() {
+    if !classes_linked_observed(req) {
         return;
     }
     let shared = Arc::clone(&req.shared);
     for observer in shared.supplied.classes_linked.iter() {
         observer(req, class, lowered);
     }
+}
+
+/// `zend_observer_function_declared_observed`: whether an observer of
+/// declared functions is declared, which a site asks before it does any
+/// work for the notice.
+pub(crate) fn functions_declared_observed(req: &Request) -> bool {
+    !req.shared.supplied.functions_declared.is_empty()
+}
+
+/// `zend_observer_class_linked_observed`, as
+/// [`functions_declared_observed`].
+pub(crate) fn classes_linked_observed(req: &Request) -> bool {
+    !req.shared.supplied.classes_linked.is_empty()
+}
+
+/// One notice of a unit's load, by the lowered name it is told under.
+enum LoadNotice {
+    Declared(Vec<u8>),
+    Linked(Vec<u8>),
 }
 
 /// What a unit's load bound before its main op array runs, for the
@@ -555,8 +574,7 @@ pub(crate) struct LinkedAtLoad {
 /// unit served again from the engine's cache is told again, as each
 /// request's compile or load tells php's observers again.
 pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &LinkedAtLoad) {
-    let shared = &req.shared.supplied;
-    if shared.functions_declared.is_empty() && shared.classes_linked.is_empty() {
+    if !functions_declared_observed(req) && !classes_linked_observed(req) {
         return;
     }
     let functions: Vec<(u32, Vec<u8>)> = unit
@@ -575,10 +593,18 @@ pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &Lin
         .filter_map(|&at| unit.classes.get(usize::try_from(at).ok()?))
         .map(|decl| (decl.end_line, decl.name.0.to_ascii_lowercase()))
         .collect();
-    let mut told: Vec<(bool, Vec<u8>)> = Vec::with_capacity(functions.len() + classes.len());
+    let mut told: Vec<LoadNotice> = Vec::with_capacity(functions.len() + classes.len());
     if linked.accelerated {
-        told.extend(functions.into_iter().map(|(_, name)| (true, name)));
-        told.extend(classes.into_iter().map(|(_, name)| (false, name)));
+        told.extend(
+            functions
+                .into_iter()
+                .map(|(_, name)| LoadNotice::Declared(name)),
+        );
+        told.extend(
+            classes
+                .into_iter()
+                .map(|(_, name)| LoadNotice::Linked(name)),
+        );
     } else {
         let mut functions = functions.into_iter().peekable();
         let mut classes = classes.into_iter().peekable();
@@ -590,20 +616,25 @@ pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &Lin
                 (None, None) => break,
             };
             let next = if function_first {
-                functions.next().map(|(_, name)| (true, name))
+                functions.next().map(|(_, name)| LoadNotice::Declared(name))
             } else {
-                classes.next().map(|(_, name)| (false, name))
+                classes.next().map(|(_, name)| LoadNotice::Linked(name))
             };
             told.extend(next);
         }
     }
-    for (function, name) in told {
-        if function {
-            if let Some(declared) = req.function_named(&name) {
-                function_declared(req, declared, &name);
+    for notice in told {
+        match notice {
+            LoadNotice::Declared(name) => {
+                if let Some(declared) = req.function_named(&name) {
+                    function_declared(req, declared, &name);
+                }
             }
-        } else if let Some(class) = req.class_named(&name) {
-            class_linked(req, class, &name);
+            LoadNotice::Linked(name) => {
+                if let Some(class) = req.class_named(&name) {
+                    class_linked(req, class, &name);
+                }
+            }
         }
     }
 }

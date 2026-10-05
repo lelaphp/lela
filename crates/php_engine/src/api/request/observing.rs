@@ -28,6 +28,17 @@ impl Request {
         self.vm.observer_slot(&self.map, frame)
     }
 
+    /// The begin handler at `at` of that slot as it stands now, read
+    /// where it stands ([`Slot::begin_at`]).
+    pub(crate) fn observer_begin_at(&self, frame: FrameRef, at: usize) -> Option<BeginHandler> {
+        self.vm.observer_slot_held(&self.map, frame)?.begin_at(at)
+    }
+
+    /// The end handler at `at` of that slot as it stands now.
+    pub(crate) fn observer_end_at(&self, frame: FrameRef, at: usize) -> Option<EndHandler> {
+        self.vm.observer_slot_held(&self.map, frame)?.end_at(at)
+    }
+
     /// That slot resolved to `slot` (`zend_observer_fcall_install`).
     pub(crate) fn set_observer_slot(&mut self, frame: FrameRef, slot: Slot) {
         self.vm.set_observer_slot(&mut self.map, frame, slot);

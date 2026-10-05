@@ -1038,10 +1038,21 @@ impl Vm {
     /// `frame` serves, in the request's map table; unresolved for a frame
     /// that stands nowhere.
     pub(crate) fn observer_slot(&self, map: &MapTable, frame: FrameRef) -> crate::observer::Slot {
+        self.observer_slot_held(map, frame)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// [`Vm::observer_slot`] borrowed where it stands, for the walks that
+    /// read one handler of it at a time.
+    pub(crate) fn observer_slot_held<'map>(
+        &self,
+        map: &'map MapTable,
+        frame: FrameRef,
+    ) -> Option<&'map crate::observer::Slot> {
         self.at(frame)
             .and_then(|state| map.get(state.runtime_cache))
-            .map(|cache| cache.observer.clone())
-            .unwrap_or_default()
+            .map(|cache| &cache.observer)
     }
 
     /// The observer slot of the op array `frame` serves, resolved to
