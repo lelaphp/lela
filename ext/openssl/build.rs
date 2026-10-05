@@ -68,9 +68,8 @@ fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
     for path in read {
         println!("cargo::rerun-if-changed={path}");
     }
-    expanded
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("php_openssl_header"))
+    after_marker(&expanded, "php_openssl_header")
+        .as_deref()
         .and_then(quoted)
         .ok_or_else(|| "<openssl/opensslv.h> defines no string OPENSSL_VERSION_TEXT".to_owned())
 }
@@ -89,4 +88,18 @@ fn quoted(tokens: &str) -> Option<String> {
         rest = after.trim_start();
     }
     (rest.is_empty() && !out.is_empty()).then_some(out)
+}
+
+/// The tokens the preprocessor wrote after `marker`, the line markers
+/// dropped and the rest joined: GCC breaks a line where a macro from a
+/// system header expands, writing `# 2 "file" 3 4` before the expansion,
+/// where clang keeps it on the marker's line.
+fn after_marker(expanded: &str, marker: &str) -> Option<String> {
+    let joined = expanded
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = joined.rfind(marker)?;
+    Some(joined[at + marker.len()..].trim().to_owned())
 }
