@@ -12,16 +12,20 @@ use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
 use Event::Ext;
-use Phase::{Begin, End, Error, ObserverInit};
+use Phase::{Begin, End, Error, FiberDestroy, FiberInit, FiberSwitch, ObserverInit};
 
-/// The observer's events alone, and the diagnostics `zend_error_cb`
-/// was handed among them, in the order recorded.
+/// The observer's events alone, the fiber notices among them, and the
+/// diagnostics `zend_error_cb` was handed among them, in the order
+/// recorded.
 fn observed(events: &Events) -> Vec<Event> {
     events
         .only(&[
             ObserverInit(String::new()),
             Begin(String::new()),
             End(String::new(), None),
+            FiberInit(String::new()),
+            FiberSwitch(String::new(), String::new()),
+            FiberDestroy(String::new()),
             Error(String::new()),
         ])
         .0
@@ -426,6 +430,51 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
     );
 }
 
+/// The fibers' names as the creation notices render them, without
+/// their status, and the closures' as the observer was asked of them,
+/// each in the order they came: the names a test's expectation is
+/// written over.
+fn named_in(events: &[Event]) -> (Vec<String>, Vec<String>) {
+    let fibers = events
+        .iter()
+        .filter_map(|e| match e {
+            Ext(_, FiberInit(name)) => name.strip_suffix(" init").map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    let closures = events
+        .iter()
+        .filter_map(|e| match e {
+            Ext(_, ObserverInit(name)) if name.starts_with("{closure") => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    (fibers, closures)
+}
+
+/// The one fiber and the one closure [`named_in`] finds, held to be
+/// one each.
+fn one_named_in(events: &[Event]) -> (String, String) {
+    let (fibers, closures) = named_in(events);
+    assert!(
+        fibers.len() == 1 && closures.len() == 1 && fibers.iter().all(|f| f.starts_with('#')),
+        "one fiber and one closure: {events:?}"
+    );
+    (fibers.concat(), closures.concat())
+}
+
+fn fiber_init(n: u8, context: &str) -> Event {
+    Ext(n, FiberInit(context.to_owned()))
+}
+
+fn switch(n: u8, from: &str, to: &str) -> Event {
+    Ext(n, FiberSwitch(from.to_owned(), to.to_owned()))
+}
+
+fn destroy(n: u8, context: &str) -> Event {
+    Ext(n, FiberDestroy(context.to_owned()))
+}
+
 /// A generator's frame is begun at each resumption and ended at each
 /// suspension with what it yielded, and not at its call
 /// (`observer_generator_01.phpt` to `_03`): the frame's slot is
@@ -556,6 +605,274 @@ fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
             end(0, "foo", None),
             end(0, "run", None),
             end(0, file, None),
+        ]
+    );
+}
+
+/// php's fiber notices (`observer_fiber_01.phpt`,
+/// `observer_fiber_functions_01.phpt`): the creation as the start lays
+/// the stack down, each switch handed the fiber left, running or dead,
+/// and the fiber entered, new or suspended, and the destruction once
+/// the dead fiber's resumer is served again; and a frame begun inside
+/// the fiber is ended inside it, after the switch back into it.
+#[test]
+fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { return Fiber::suspend() . 'i'; }\n\
+         $fiber = new Fiber(function () { return inner(); });\n\
+         $fiber->start();\n$fiber->resume('r');\necho $fiber->getReturn();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "ri");
+    let events = observed(&rec.events().between("built", "served"));
+    let (fiber, closure) = one_named_in(&events);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    let file = "file 'main.php'";
+    assert_eq!(
+        events,
+        [
+            init(0, file),
+            begin(0, file),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            switch(0, &fiber("running"), "main suspended"),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "inner", Some("'ri'")),
+            end(0, closure, Some("'ri'")),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// Each stack's open frames are its own (#1809's note on #1811): a
+/// fiber suspended inside `inner`, its frame open at the same height on
+/// the fiber's stack as `declined`'s on the request's, which the
+/// observer declined and never begins, so `declined`'s return ends
+/// nothing; `inner` is ended inside the fiber with what it returned.
+/// A fiber inside a fiber switches with its resumer, not with the
+/// request's own stack, and each is destroyed once its resumer is served
+/// again (`observer_fiber_03.phpt`).
+#[test]
+fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_chain");
+    rec.mark("same_height");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { Fiber::suspend(); return 'i'; }\nfunction declined() { return 'd'; }\n\
+         $fiber = new Fiber(function () { return inner(); });\n\
+         $fiber->start();\necho declined();\n$fiber->resume();\necho $fiber->getReturn();\n",
+    );
+    rec.mark("nested");
+    let nested = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction in2() { Fiber::suspend(); return 2; }\n\
+         function in1() { $f = new Fiber(function () { return in2(); }); $f->start(); Fiber::suspend(); $f->resume(); return 1; }\n\
+         $fiber = new Fiber(function () { return in1(); });\n\
+         $fiber->start();\necho 'm';\n$fiber->resume();\necho $fiber->getReturn();\n",
+    );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "di");
+    assert_eq!(String::from_utf8_lossy(&nested.stdout), "m1");
+    let file = "file 'main.php'";
+    let events = rec.events();
+
+    let same_height = observed(&events.between("same_height", "nested"));
+    let (fiber, closure) = one_named_in(&same_height);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    assert_eq!(
+        same_height,
+        [
+            init(0, file),
+            begin(0, file),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            switch(0, &fiber("running"), "main suspended"),
+            init(0, "declined"),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "inner", Some("'i'")),
+            end(0, closure, Some("'i'")),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
+            end(0, file, Some("1")),
+        ]
+    );
+
+    let nested = observed(&events.between("nested", "end"));
+    let (fibers, closures) = named_in(&nested);
+    assert!(
+        fibers.len() == 2 && closures.len() == 2,
+        "two fibers, two closures: {nested:?}"
+    );
+    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let (outer, inner) = (at(&fibers, 0), at(&fibers, 1));
+    let (outer_closure, inner_closure) = (at(&closures, 0), at(&closures, 1));
+    let (outer_closure, inner_closure) = (outer_closure.as_str(), inner_closure.as_str());
+    let outer = |status: &str| format!("{outer} {status}");
+    let inner = |status: &str| format!("{inner} {status}");
+    assert_eq!(
+        nested,
+        [
+            init(0, file),
+            begin(0, file),
+            fiber_init(0, &outer("init")),
+            switch(0, "main running", &outer("init")),
+            init(0, outer_closure),
+            begin(0, outer_closure),
+            init(0, "in1"),
+            begin(0, "in1"),
+            fiber_init(0, &inner("init")),
+            switch(0, &outer("running"), &inner("init")),
+            init(0, inner_closure),
+            begin(0, inner_closure),
+            init(0, "in2"),
+            begin(0, "in2"),
+            switch(0, &inner("running"), &outer("suspended")),
+            switch(0, &outer("running"), "main suspended"),
+            switch(0, "main running", &outer("suspended")),
+            switch(0, &outer("running"), &inner("suspended")),
+            end(0, "in2", Some("2")),
+            end(0, inner_closure, Some("2")),
+            switch(0, &inner("dead"), &outer("suspended")),
+            destroy(0, &inner("dead")),
+            end(0, "in1", Some("1")),
+            end(0, outer_closure, Some("1")),
+            switch(0, &outer("dead"), "main suspended"),
+            destroy(0, &outer("dead")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A fatal inside a fiber (`observer_fiber_functions_03.phpt`) ends the
+/// fiber's open frames after it is rendered, the innermost first; the
+/// switch out of the dead fiber and its destruction are noticed; then
+/// the resumer's open frames are ended, as php's `zend_bailout()` raised
+/// again on the resumer leaves them to `zend_observer_fcall_end_all`. A
+/// fiber suspended meanwhile keeps its frames open, never ended, as php
+/// leaves a suspended fiber's at a fatal.
+#[test]
+fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_fatal");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction held() { Fiber::suspend(); }\n\
+         $kept = new Fiber(function () { held(); });\n$kept->start();\n\
+         function deep() { $s = '.'; while (true) { $s .= $s; } }\n\
+         function resumer($f) { $f->resume(); }\n\
+         $fiber = new Fiber(function () { Fiber::suspend(); deep(); });\n$fiber->start();\n\
+         ini_set('memory_limit', '2M');\nresumer($fiber);\n",
+    );
+    rec.mark("served");
+    let events = observed(&rec.events().between("built", "served"));
+    let fatal = events
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Allowed memory size")));
+    assert!(fatal.is_some(), "the fatal is rendered: {events:?}");
+    let (fibers, closures) = named_in(&events);
+    assert!(
+        fibers.len() == 2 && closures.len() == 2,
+        "two fibers, two closures: {events:?}"
+    );
+    let at = |names: &[String], i: usize| names.get(i).cloned().unwrap_or_default();
+    let (fiber, kept_closure, closure) = (at(&fibers, 1), at(&closures, 0), at(&closures, 1));
+    assert_eq!(
+        events[fatal.unwrap_or_default() + 1..],
+        [
+            end(0, "deep", None),
+            end(0, &closure, None),
+            switch(0, &format!("{fiber} dead"), "main suspended"),
+            destroy(0, &format!("{fiber} dead")),
+            end(0, "resumer", None),
+            end(0, "file 'main.php'", None),
+        ],
+        "{events:?}"
+    );
+    for name in ["held", kept_closure.as_str()] {
+        assert!(
+            events.contains(&begin(0, name))
+                && !events
+                    .iter()
+                    .any(|e| matches!(e, Ext(_, End(n, _)) if n == name)),
+            "{name} is begun and never ended: {events:?}"
+        );
+    }
+}
+
+/// A fiber still suspended as the request ends
+/// (`observer_fiber_functions_02.phpt`): the main file has ended, the
+/// fiber is destroyed by switching into it, every frame it left open is
+/// ended with nothing as the graceful exit unwinds it, and the switch
+/// out of it and its destruction are noticed.
+#[test]
+fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("fiber_destroyed");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { Fiber::suspend(); }\n\
+         $fiber = new Fiber(function () { inner(); });\n$fiber->start();\n",
+    );
+    rec.mark("served");
+    let events = observed(&rec.events().between("built", "served"));
+    let (fiber, closure) = one_named_in(&events);
+    let fiber = |status: &str| format!("{fiber} {status}");
+    let closure = closure.as_str();
+    let file = "file 'main.php'";
+    assert_eq!(
+        events,
+        [
+            init(0, file),
+            begin(0, file),
+            fiber_init(0, &fiber("init")),
+            switch(0, "main running", &fiber("init")),
+            init(0, closure),
+            begin(0, closure),
+            init(0, "inner"),
+            begin(0, "inner"),
+            switch(0, &fiber("running"), "main suspended"),
+            end(0, file, Some("1")),
+            switch(0, "main running", &fiber("suspended")),
+            end(0, "inner", None),
+            end(0, closure, None),
+            switch(0, &fiber("dead"), "main suspended"),
+            destroy(0, &fiber("dead")),
         ]
     );
 }

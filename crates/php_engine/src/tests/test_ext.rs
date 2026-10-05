@@ -31,8 +31,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Observed, ObserverHandlers,
-    Refusal, Start, StringBeneath,
+    Compiled, ErrorBeneath, Extension, ExtensionBuilder, FiberStatus, GcBeneath, Observed,
+    ObservedFiber, ObserverHandlers, Refusal, Start, StringBeneath,
 };
 use super::api::raising::{Level, Thrown};
 use super::api::request::Request;
@@ -122,6 +122,14 @@ pub(crate) enum Phase {
     /// what it returned as [`returned_name`] renders it: `None` where
     /// it returned nothing, on an unwind or at a fatal.
     End(String, Option<String>),
+    /// Its fiber observer was told of a fiber's creation, the fiber as
+    /// [`fiber_name`] renders it.
+    FiberInit(String),
+    /// Its fiber observer was told of a switch, the fiber left and the
+    /// fiber entered.
+    FiberSwitch(String, String),
+    /// Its fiber observer was told of a fiber given back.
+    FiberDestroy(String),
 }
 
 /// The process's one log, and the mutex that gives it to one test at a
@@ -285,6 +293,22 @@ pub(crate) fn returned_name(returned: &Value) -> String {
     String::from(returned.type_name())
 }
 
+/// A fiber as a fiber observer is handed it: `main` for the request's
+/// own stack, and `#n` for a `Fiber`, `n` its object's number as
+/// `spl_object_id()` reads it; then its status.
+pub(crate) fn fiber_name(fiber: ObservedFiber) -> String {
+    let status = match fiber.status() {
+        FiberStatus::Init => "init",
+        FiberStatus::Running => "running",
+        FiberStatus::Suspended => "suspended",
+        FiberStatus::Dead => "dead",
+    };
+    match fiber.fiber() {
+        Some(object) => format!("#{} {status}", object.index()),
+        None => format!("main {status}"),
+    }
+}
+
 /// Extension `N`'s request state: recorded where it is built and where
 /// it is dropped, and nothing else.
 pub(crate) struct RequestSlot<const N: u8>;
@@ -354,14 +378,30 @@ impl<const N: u8> TestExt<N> {
     /// 9): asked of each function on its first call and of each file's
     /// frame, it declines a function named `declined`, and observes the
     /// rest with a begin and an end handler that record what they are
-    /// handed. The observer is not in [`TestExt::builder`], since every
+    /// handed; and the three fiber notices, each recording the fibers
+    /// it is handed. The observer is not in [`TestExt::builder`], since every
     /// frame a request serves would then show in each sequence a test of
     /// the lifecycle spells out whole, and a bundle with no observer
     /// declared is the one the plain test is measured on.
     pub(crate) fn observing() -> Extension {
         Self::builder()
             .observer(Self::observer_init)
+            .fiber_init(Self::fiber_init)
+            .fiber_switch(Self::fiber_switch)
+            .fiber_destroy(Self::fiber_destroy)
             .build(&format!("test_ext_{N}"))
+    }
+
+    fn fiber_init(_: &mut Request, fiber: ObservedFiber) {
+        record(N, Phase::FiberInit(fiber_name(fiber)));
+    }
+
+    fn fiber_switch(_: &mut Request, from: ObservedFiber, to: ObservedFiber) {
+        record(N, Phase::FiberSwitch(fiber_name(from), fiber_name(to)));
+    }
+
+    fn fiber_destroy(_: &mut Request, fiber: ObservedFiber) {
+        record(N, Phase::FiberDestroy(fiber_name(fiber)));
     }
 
     fn observer_init(observed: &mut Observed<'_>) -> ObserverHandlers {

@@ -198,7 +198,8 @@ impl Request {
     /// names no active file but its own and traces to `{main}`, and is
     /// pushed above their room on the same page as php pushes it on its
     /// one VM stack. What a frame set aside was lent is its own while
-    /// it is off the chain, as a fiber's switch leaves it
+    /// it is off the chain, and the chain of its open observed frames is
+    /// set aside with it, as a fiber's switch leaves both
     /// ([`Request::switch_execution`]). The global table's names that
     /// stand in a frame's CV are taken back into the table first, as
     /// `zend_detach_symbol_table` takes them, since a name binds a CV by
@@ -209,7 +210,10 @@ impl Request {
         self.own_lent_receivers();
         let frames = self.stack.set_aside();
         let vm = std::mem::take(&mut self.vm);
+        let mut observing = crate::api::request::Observing::default();
+        self.swap_observing(&mut observing);
         let served = f(self);
+        self.swap_observing(&mut observing);
         self.vm = vm;
         self.stack.put_back(&mut self.heap, frames);
         for frame in bound {

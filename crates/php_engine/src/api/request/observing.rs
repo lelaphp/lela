@@ -4,6 +4,15 @@
 //! [`Observing`]'s and whose field no file but this one reads; and the
 //! observer slot of the op array a frame serves, which stands in the
 //! request's map table beside the runtime cache's other slots.
+//!
+//! The chain is the stack's the request is served on: a fiber's switch
+//! swaps it with the rest of the execution state
+//! ([`Request::switch_execution`]), as php saves it into the
+//! `zend_fiber_context` it leaves (`top_observed_frame`), and a serving
+//! with nothing executing sets it aside with the frames,
+//! so its frames are always of the one stack whose frames are pushed
+//! and popped beside it, and a frame is never ended in place of another
+//! stack's at the same height.
 
 use php_heap::FrameRef;
 
@@ -11,10 +20,11 @@ use crate::observer::Slot;
 
 use super::Request;
 
-/// The open observed frames, the innermost last: php's
-/// `EG(current_observed_frame)` and each frame's `prev_observed_frame`.
+/// The open observed frames of one stack, the innermost last: php's
+/// `EG(current_observed_frame)` and each frame's `prev_observed_frame`,
+/// and a suspended fiber's `top_observed_frame`.
 #[derive(Debug, Default)]
-pub(super) struct Observing(Vec<FrameRef>);
+pub(crate) struct Observing(Vec<FrameRef>);
 
 impl Request {
     /// `ZEND_OBSERVER_DATA(EX(func))`: the observer slot of the op array
@@ -41,6 +51,14 @@ impl Request {
         }
         self.observing.0.pop();
         true
+    }
+
+    /// The chain the request runs on and `other` change places, as a
+    /// switch changes stacks: `zend_observer_fiber_switch_notify`'s
+    /// `from->top_observed_frame = EG(current_observed_frame);
+    /// EG(current_observed_frame) = to->top_observed_frame;`.
+    pub(crate) fn swap_observing(&mut self, other: &mut Observing) {
+        std::mem::swap(&mut self.observing, other);
     }
 
     /// Every open frame, the innermost first, the chain left empty:

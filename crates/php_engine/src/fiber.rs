@@ -50,6 +50,7 @@ use crate::api::request::{Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
 use crate::exec::{self, Vm};
+use crate::observer::{FiberStatus, ObservedFiber};
 
 /// `sizeof(zend_fiber_stack)` on a 64-bit build without Valgrind or
 /// sanitizers: the pointer and the size `zend_fiber_stack_allocate`
@@ -91,11 +92,16 @@ pub enum Transfer {
 
 /// `zend_fiber_vm_state` under this engine's names: what a switch
 /// swaps, the stack the request runs on with the frames' engine half,
-/// the error-reporting level and the call-stack limit.
+/// the error-reporting level and the call-stack limit; and the chain of
+/// the stack's open observed frames, which php keeps on the
+/// `zend_fiber_context` as `top_observed_frame` and swaps at the
+/// switch's notice
+/// ([`crate::observer`]).
 #[derive(Default)]
 pub(crate) struct Execution {
     pub(crate) stack: php_heap::VmStack,
     pub(crate) vm: Vm,
+    pub(crate) observing: crate::api::request::Observing,
     pub(crate) error_reporting: i64,
     pub(crate) stack_limit: StackLimit,
 }
@@ -1166,11 +1172,24 @@ fn switch_into(
             "InternalError: a fiber resumed with no stack of its own",
         ));
     };
+    let entered = if fiber.status == Status::Init {
+        FiberStatus::Init
+    } else {
+        FiberStatus::Suspended
+    };
     fiber.status = Status::Running;
     let by = match transfer {
         Transfer::GracefulExit => Resumer::Destroy,
         Transfer::Value(_) | Transfer::Throw(_) | Transfer::Fatal => Resumer::Native,
     };
+    // `EG(current_fiber_context)`: the fiber running now, or the
+    // request's own context, which the switch leaves and comes back to.
+    let resumer = req.fibers().active();
+    crate::observer::fiber_switched(
+        req,
+        ObservedFiber::of(resumer, FiberStatus::Running),
+        ObservedFiber::of(Some(object), entered),
+    );
     let mut execution = *execution;
     req.switch_execution(&mut execution);
     req.fibers_mut().running.push(Running {
@@ -1179,11 +1198,26 @@ fn switch_into(
         by,
     });
     let switched = stack.resume(req, transfer);
+    // The switch back is noticed on the fiber's side, its frames the
+    // ones standing, as php notices it before the jump.
+    let left = if matches!(switched, Ok(Switched::Suspended(_))) {
+        FiberStatus::Running
+    } else {
+        FiberStatus::Dead
+    };
+    crate::observer::fiber_switched(
+        req,
+        ObservedFiber::of(Some(object), left),
+        ObservedFiber::of(resumer, FiberStatus::Suspended),
+    );
     let mut execution = match req.fibers_mut().running.pop() {
         Some(running) => running.below,
         None => Execution::default(),
     };
     req.switch_execution(&mut execution);
+    if left == FiberStatus::Dead {
+        crate::observer::fiber_destroyed(req, object);
+    }
     let fiber = payload(req, object)?;
     match switched {
         Ok(Switched::Suspended(back)) => {
@@ -1199,6 +1233,13 @@ fn switch_into(
                 req.heap_mut().free_block(block);
             }
             execution.stack.close(req.heap_mut());
+            if matches!(back, Transfer::Fatal) {
+                // `zend_fiber_switch_to` raises the fiber's bailout again
+                // on the resumer, which leaves its own open frames to
+                // `zend_observer_fcall_end_all`; the fatal is rendered,
+                // and the frames still stand.
+                crate::observer::end_all(req);
+            }
             Ok(back)
         }
         Err(fatal) => {
@@ -1457,6 +1498,7 @@ fn start(
     let execution = Execution {
         stack: php_heap::VmStack::fiber(),
         vm: Vm::default(),
+        observing: crate::api::request::Observing::default(),
         error_reporting: req.ini_error_reporting(),
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
     };
@@ -1466,6 +1508,9 @@ fn start(
     fiber.blocks.push(record);
     fiber.stack = Some(stack);
     fiber.execution = Some(Box::new(execution));
+    // `zend_fiber_init_context` ends in the observers' notice, its
+    // stack laid down and no switch made yet.
+    crate::observer::fiber_initialized(req, this);
     switch_into(req, this, Transfer::Value(Value::null()))
 }
 
