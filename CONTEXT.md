@@ -59,6 +59,17 @@ _Avoid_: soft type, ReturnTypeWillChange as the name of the type (it is the attr
 The whole interface a native may touch, published by the engine as a small number of facets. Nothing outside the facets is reachable from an extension.
 _Avoid_: request context (the implementation behind the face), runtime API
 
+**Owner**:
+One counted claim on a refcounted value. Whoever holds an owner hands it to a sink or gives it up; a native gives up exactly the owners it took and did not hand on. Not php's reference (`&`), which is a value with owners of its own.
+_Avoid_: strong reference
+
+**View**:
+A handle to a refcounted value that carries no owner. It stays valid only while an owner elsewhere keeps the value alive, so it is never handed to a sink as it stands and never kept across user code.
+
+**Sink**:
+A call on the native face that takes an owner from its caller: from the call on, the value or key is the sink's.
+_Avoid_: consumer
+
 **Facet**:
 One named group of the native face with a short interface and a deep implementation: diagnostics, symbols, callbacks, output, ini, streams and resources, request environment. Zend builtins that need frames use a privileged facet inside the engine.
 _Avoid_: port (a URL's is php's and lexbor's word, ext/lexbor's `ffi::url::Url::port`, `ffi::url::Url::set_port`, `ffi::url::ErrorKind::PortOutOfRange` and `ffi::url::ErrorKind::PortInvalid`), capability, service

@@ -2,8 +2,8 @@
 //! `fork.home`), and nothing around it. Whether a fork may happen, which
 //! of the engine's own threads are joined first, what the child restores
 //! (php's `php_child_init`) and what the parent re-arms are `php_engine`'s
-//! (#1807); the `process` seam makes the engine this crate's one consumer,
-//! so pcntl reaches a fork through the request and a host through
+//! (#1807); the `process` seam makes the engine the one crate that imports
+//! this one, so pcntl reaches a fork through the request and a host through
 //! `php_sapi`, never here.
 
 use std::io;
@@ -59,7 +59,7 @@ pub fn fork() -> io::Result<Forked> {
     // POSIX's async-signal-safe rule for the child of a process with
     // other threads is not one this function can see or enforce: no type
     // here witnesses that the process has one thread, so it rests on the
-    // engine, the one consumer the `process` seam admits, whose one home
+    // engine, the one importer the `process` seam admits, whose one home
     // for fork (#1807) calls this only while it holds the type that says
     // every thread it started is joined and no other request is in
     // flight; a host's own threads are the host's to keep out of a
