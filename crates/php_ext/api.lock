@@ -515,6 +515,7 @@ request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
 request::Periodic
+request::Persisted
 request::Pid
 request::Pid::as_raw
 request::PreloadStatistics
@@ -782,6 +783,7 @@ request::Stream::glob_count
 request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
+request::Stream::keep
 request::Stream::meta_data
 request::Stream::no_fclose
 request::Stream::orig_path
@@ -843,6 +845,7 @@ request::Streams::stdin
 request::Streams::stream_ctx
 request::Streams::stream_filters
 request::Streams::stream_from_fd
+request::Streams::stream_lend
 request::Streams::stream_wrappers
 request::Streams::temporary_name
 request::Streams::tmpfile
