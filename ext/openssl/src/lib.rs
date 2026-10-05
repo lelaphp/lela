@@ -42,6 +42,15 @@ mod spki;
 mod x509;
 mod xp_ssl;
 
+/// The values php compiles in from `<openssl/opensslv.h>`, read by
+/// `build.rs` off the headers openssl-sys found, as php's `@cvalue` reads
+/// the macro at its build (#1974): after the library is upgraded without
+/// a rebuild, these keep the headers' version as php's do.
+#[allow(clippy::unreadable_literal)] // `0x30600040`, the layout `0xMNN00PP0L` names
+mod header {
+    include!(concat!(env!("OUT_DIR"), "/header.rs"));
+}
+
 use std::ffi::{c_int, c_ulong};
 
 use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Refusals};
@@ -53,12 +62,14 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
-/// `SSLV23_PADDING`). The two version constants are the linked
-/// library's.
+/// `SSLV23_PADDING`). The two version constants are the headers' (see
+/// [`header`]), which agree with each other whatever libcrypto is loaded.
 ///
 /// ```php
 /// var_dump(OPENSSL_ALGO_SHA1, OPENSSL_ALGO_SHA256, OPENSSL_ALGO_SHA512, OPENSSL_ALGO_RMD160, OPENSSL_KEYTYPE_RSA, OPENSSL_KEYTYPE_EC, OPENSSL_PKCS1_PSS_PADDING, OPENSSL_CMS_NOSIGS, PKCS7_NO_DUAL_CONTENT, OPENSSL_ENCODING_PEM);
 /// var_dump(defined('OPENSSL_ALGO_MD2'), is_string(OPENSSL_VERSION_TEXT), OPENSSL_VERSION_NUMBER >= 0x30000000);
+/// $n = OPENSSL_VERSION_NUMBER;
+/// var_dump(str_starts_with(OPENSSL_VERSION_TEXT, sprintf('OpenSSL %d.%d.%d ', $n >> 28, ($n >> 20) & 0xff, ($n >> 4) & 0xff)));
 /// ```
 /// ```expect
 /// int(1)
@@ -74,18 +85,18 @@ use php_ext::values::{Key, PhpArray, PhpString, Value};
 /// bool(false)
 /// bool(true)
 /// bool(true)
+/// bool(true)
 /// ```
 #[php_const]
 #[allow(non_snake_case)]
 pub(crate) mod constants {
-    /// `OPENSSL_VERSION_TEXT`, the linked library's version line.
-    pub(crate) fn OPENSSL_VERSION_TEXT() -> String {
-        String::from_utf8_lossy(&super::ffi::version_text()).into_owned()
-    }
-    /// `OPENSSL_VERSION_NUMBER`, the linked library's.
-    pub(crate) fn OPENSSL_VERSION_NUMBER() -> i64 {
-        super::ffi::version_number()
-    }
+    /// `OPENSSL_VERSION_TEXT`, `@cvalue` of the header macro: the
+    /// version line of the headers this build compiled against, not the
+    /// libcrypto it loads (`OpenSSL_version`, `--ri`'s "Library Version").
+    pub(crate) const OPENSSL_VERSION_TEXT: &str = super::header::OPENSSL_VERSION_TEXT;
+    /// `OPENSSL_VERSION_NUMBER`, `@cvalue` of the header macro, of the same
+    /// headers.
+    pub(crate) const OPENSSL_VERSION_NUMBER: i64 = super::header::OPENSSL_VERSION_NUMBER;
     pub(crate) const X509_PURPOSE_SSL_CLIENT: i64 = 1;
     pub(crate) const X509_PURPOSE_SSL_SERVER: i64 = 2;
     pub(crate) const X509_PURPOSE_NS_SSL_SERVER: i64 = 3;
@@ -489,14 +500,18 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `PHP_MINFO_FUNCTION(openssl)`: the table, then `DISPLAY_INI_ENTRIES`.
-/// The header's version is the library's: the crate is built against the
-/// headers of the library it links.
+/// "Library Version" is the libcrypto loaded, `OpenSSL_version`; "Header
+/// Version" is `OPENSSL_VERSION_TEXT`, the headers this build compiled
+/// against ([`header`]).
 ///
 /// ```php
 /// $e = new ReflectionExtension('openssl'); ob_start(); $e->info(); $out = ob_get_clean();
+/// var_dump(str_contains($out, "OpenSSL Header Version => " . OPENSSL_VERSION_TEXT . "\n"));
 /// echo preg_replace(['/Version => .*/', '/config => .*/'], ['Version => V', 'config => C'], $out);
 /// ```
 /// ```expect
+/// bool(true)
+///
 /// openssl
 ///
 /// OpenSSL support => enabled
@@ -515,7 +530,7 @@ fn info(req: &mut Request) {
     req.info_table(&[
         &["OpenSSL support", "enabled"],
         &["OpenSSL Library Version", &version],
-        &["OpenSSL Header Version", &version],
+        &["OpenSSL Header Version", header::OPENSSL_VERSION_TEXT],
         &["Openssl default config", &conf],
     ]);
     req.info_ini_entries(&[b"openssl.cafile", b"openssl.capath", b"openssl.libctx"]);

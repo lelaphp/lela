@@ -23,6 +23,11 @@ php_ext_standard = { path = "../standard" }
 # alone (`unsafe.homes`; design §7.2).
 openssl-sys = { workspace = true }
 
+# `build.rs` reads `OPENSSL_VERSION_TEXT` off the headers openssl-sys
+# found, through the C preprocessor, as php's build compiles it (#1974).
+[build-dependencies]
+cc = { workspace = true }
+
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }

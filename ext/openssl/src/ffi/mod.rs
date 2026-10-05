@@ -232,19 +232,14 @@ pub(in crate::ffi) fn two_calls(
     Some(out)
 }
 
-/// `OpenSSL_version(OPENSSL_VERSION)`: `OpenSSL 3.6.4 25 Aug 2026`.
+/// `OpenSSL_version(OPENSSL_VERSION)`: the loaded libcrypto's version
+/// line, `OpenSSL 3.6.4 25 Aug 2026`, which `--ri` prints as "Library
+/// Version"; the header's is `OPENSSL_VERSION_TEXT`.
 pub(crate) fn version_text() -> Vec<u8> {
     // SAFETY: OpenSSL_version answers a pointer into a static string.
     let text = unsafe { sys::OpenSSL_version(sys::OPENSSL_VERSION) };
     // SAFETY: the static string is NUL-terminated and never freed.
     unsafe { copied(text) }.unwrap_or_default()
-}
-
-/// `OpenSSL_version_num()`: `0xMNN00PP0L` of the linked library.
-pub(crate) fn version_number() -> i64 {
-    // SAFETY: OpenSSL_version_num takes nothing and answers a number.
-    let number = unsafe { sys::OpenSSL_version_num() };
-    i64::try_from(number).unwrap_or(i64::MAX)
 }
 
 /// The directories and variables the library was built to look in, as
