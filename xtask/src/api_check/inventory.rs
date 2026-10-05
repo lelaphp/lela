@@ -23,10 +23,18 @@
 //! and `super::` paths are followed, so two types of one name in one crate
 //! each list their own methods alone.
 //!
+//! Each line is also known by the module that defines it
+//! ([`Inventory::defining_modules`], #1795): an item's by the module it is
+//! written in, after every `pub use` is followed; an inherent impl's item
+//! by the module the impl block is written in, which need not be the
+//! type's; a trait's item by the trait's; a re-export from outside the
+//! workspace by the module whose `pub use` writes it. A type whose
+//! methods are spread over one file per area is counted per file.
+//!
 //! Known limits: `#[path]` on a `mod` is not read; `cfg` is not evaluated,
 //! so a `pub` item behind a feature is always listed.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -73,8 +81,13 @@ impl ModId {
 }
 
 /// The inherent-impl surface of one crate: the `pub` associated items
-/// under the module and name of the type each impl resolves to.
-type AssocTable = HashMap<(ModId, String), BTreeSet<String>>;
+/// under the module and name of the type each impl resolves to, each with
+/// the module its impl block is written in.
+type AssocTable = HashMap<(ModId, String), BTreeMap<String, ModId>>;
+
+/// Lock lines, each with the module that defines it; the first path that
+/// reaches a line names its module.
+type Lines = BTreeMap<String, ModId>;
 
 /// A module's items, and where a `mod x;` inside it is looked for.
 struct Module {
@@ -115,10 +128,38 @@ impl<'a> Inventory<'a> {
     /// The public items of `krate`, as lock lines. A crate without
     /// `src/lib.rs` has none.
     pub fn public_items(&mut self, krate: &Present) -> Result<BTreeSet<String>> {
-        let mut out = BTreeSet::new();
+        Ok(self.lines(krate)?.into_keys().collect())
+    }
+
+    /// The public items of `krate`, as lock lines, each with the module
+    /// that defines it as a path from its crate's name:
+    /// `php_engine::api::request::hooks` for a method of `Request` written
+    /// in that file (#1795).
+    pub fn defining_modules(&mut self, krate: &Present) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .lines(krate)?
+            .into_iter()
+            .map(|(line, module)| (line, self.shown(&module)))
+            .collect())
+    }
+
+    fn lines(&mut self, krate: &Present) -> Result<Lines> {
+        let mut out = Lines::new();
         let mut seen = HashSet::new();
         self.collect(&ModId::root(&krate.name), "", &mut out, &mut seen)?;
         Ok(out)
+    }
+
+    /// A module as a path from its crate's name as code spells it.
+    fn shown(&self, id: &ModId) -> String {
+        let krate = self
+            .crates
+            .named(&id.krate)
+            .map_or_else(|| id.krate.clone(), Present::ident);
+        std::iter::once(krate)
+            .chain(id.path.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Whether every item of `krate` is a `pub use` or a module of them:
@@ -152,7 +193,7 @@ impl<'a> Inventory<'a> {
         &mut self,
         id: &ModId,
         prefix: &str,
-        out: &mut BTreeSet<String>,
+        out: &mut Lines,
         seen: &mut HashSet<(ModId, String)>,
     ) -> Result<()> {
         if !seen.insert((id.clone(), prefix.to_owned())) {
@@ -174,7 +215,7 @@ impl<'a> Inventory<'a> {
                 }
                 Item::Macro(m) if m.attrs.iter().any(|a| a.path().is_ident("macro_export")) => {
                     if let Some(ident) = &m.ident {
-                        out.insert(join(prefix, &ident.to_string()));
+                        list_first(out, join(prefix, &ident.to_string()), id);
                     }
                 }
                 other => {
@@ -182,10 +223,10 @@ impl<'a> Inventory<'a> {
                         && is_pub(vis)
                     {
                         let line = join(prefix, &name);
-                        for suffix in self.surface(id, &name)? {
-                            out.insert(format!("{line}::{suffix}"));
+                        for (suffix, at) in self.surface(id, &name)? {
+                            list_first(out, format!("{line}::{suffix}"), &at);
                         }
-                        out.insert(line);
+                        list_first(out, line, id);
                     }
                 }
             }
@@ -198,55 +239,57 @@ impl<'a> Inventory<'a> {
         from: &ModId,
         prefix: &str,
         path: &UsePath,
-        out: &mut BTreeSet<String>,
+        out: &mut Lines,
         seen: &mut HashSet<(ModId, String)>,
     ) -> Result<()> {
         let target = self.resolve(from, &path.segs, 0)?;
         match (&path.leaf, target) {
             (Leaf::Glob, Target::Module(m)) => self.collect(&m, prefix, out, seen)?,
             (Leaf::Glob, Target::Item { .. }) => {}
-            (Leaf::Glob, Target::Opaque) => {
-                out.insert(join(prefix, "*"));
-            }
+            (Leaf::Glob, Target::Opaque) => list_first(out, join(prefix, "*"), from),
             (Leaf::Name(alias), Target::Module(m)) => {
                 self.collect(&m, &join(prefix, alias), out, seen)?;
             }
             (Leaf::Name(alias), Target::Item { module, name }) => {
                 let line = join(prefix, alias);
-                for suffix in self.surface(&module, &name)? {
-                    out.insert(format!("{line}::{suffix}"));
+                for (suffix, at) in self.surface(&module, &name)? {
+                    list_first(out, format!("{line}::{suffix}"), &at);
                 }
-                out.insert(line);
+                list_first(out, line, &module);
             }
-            (Leaf::Name(alias), Target::Opaque) => {
-                out.insert(join(prefix, alias));
-            }
+            (Leaf::Name(alias), Target::Opaque) => list_first(out, join(prefix, alias), from),
         }
         Ok(())
     }
 
     /// The associated items of the item `name` defined in `module`: a
     /// trait's items, and the `pub` items of the inherent impls that
-    /// resolve to that type.
-    fn surface(&mut self, module: &ModId, name: &str) -> Result<Vec<String>> {
+    /// resolve to that type; each with the module that defines it, the
+    /// trait's or the impl block's.
+    fn surface(&mut self, module: &ModId, name: &str) -> Result<Vec<(String, ModId)>> {
         let mut out = Vec::new();
         if let Some(m) = self.module(module)? {
             for item in &m.items {
                 if let Item::Trait(t) = item
                     && t.ident == name
                 {
-                    out.extend(t.items.iter().filter_map(|i| match i {
-                        TraitItem::Const(c) => Some(c.ident.to_string()),
-                        TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
-                        TraitItem::Type(t) => Some(t.ident.to_string()),
-                        _ => None,
-                    }));
+                    out.extend(
+                        t.items
+                            .iter()
+                            .filter_map(|i| match i {
+                                TraitItem::Const(c) => Some(c.ident.to_string()),
+                                TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                                TraitItem::Type(t) => Some(t.ident.to_string()),
+                                _ => None,
+                            })
+                            .map(|item| (item, module.clone())),
+                    );
                 }
             }
         }
         let key = (module.clone(), name.to_owned());
         if let Some(items) = self.assoc(&module.krate)?.get(&key) {
-            out.extend(items.iter().cloned());
+            out.extend(items.iter().map(|(item, at)| (item.clone(), at.clone())));
         }
         Ok(out)
     }
@@ -277,18 +320,13 @@ impl<'a> Inventory<'a> {
                         let key = self.self_type(&id, &module, &segs)?;
                         let entry = table.entry(key).or_default();
                         for assoc in &i.items {
-                            match assoc {
-                                ImplItem::Const(c) if is_pub(&c.vis) => {
-                                    entry.insert(c.ident.to_string());
-                                }
-                                ImplItem::Fn(f) if is_pub(&f.vis) => {
-                                    entry.insert(f.sig.ident.to_string());
-                                }
-                                ImplItem::Type(t) if is_pub(&t.vis) => {
-                                    entry.insert(t.ident.to_string());
-                                }
-                                _ => {}
-                            }
+                            let name = match assoc {
+                                ImplItem::Const(c) if is_pub(&c.vis) => &c.ident,
+                                ImplItem::Fn(f) if is_pub(&f.vis) => &f.sig.ident,
+                                ImplItem::Type(t) if is_pub(&t.vis) => &t.ident,
+                                _ => continue,
+                            };
+                            entry.entry(name.to_string()).or_insert_with(|| id.clone());
                         }
                     }
                     _ => {}
@@ -524,6 +562,12 @@ impl<'a> Inventory<'a> {
     }
 }
 
+/// List `line` as defined in `module`, unless a path read before listed
+/// it.
+fn list_first(out: &mut Lines, line: String, module: &ModId) {
+    out.entry(line).or_insert_with(|| module.clone());
+}
+
 fn parse(file: &Path) -> Result<Vec<Item>> {
     let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
@@ -743,5 +787,28 @@ mod tests {
                 "work::Outcome::worked",
             ]
         );
+    }
+
+    /// Each line is defined where its item is written: a method by the
+    /// module its impl block is in, which for `reading::Outcome` is three
+    /// modules, and a type by its own (#1795). Every line has one module,
+    /// so the per-module counts sum to the lock's.
+    #[test]
+    fn a_method_is_defined_by_the_module_its_impl_block_is_written_in() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/same-name");
+        let manifest = Manifest::named("php_heap");
+        let crates = Crates::scan(&manifest, &root).unwrap();
+        let mut inventory = Inventory::new(&crates);
+        let krate = crates.named("php_heap").unwrap();
+        let modules = inventory.defining_modules(krate).unwrap();
+        let of = |line: &str| modules[line].as_str();
+        assert_eq!(of("reading::Outcome"), "php_heap::reading");
+        assert_eq!(of("reading::Outcome::render"), "php_heap::reading");
+        assert_eq!(of("reading::Outcome::globbed"), "php_heap::glob");
+        assert_eq!(of("reading::Outcome::of"), "php_heap::work");
+        assert_eq!(of("work::Outcome::above"), "php_heap::glob");
+        assert_eq!(of("work::Outcome::worked"), "php_heap::work");
+        let lines: BTreeSet<String> = modules.keys().cloned().collect();
+        assert_eq!(lines, inventory.public_items(krate).unwrap());
     }
 }

@@ -69,12 +69,12 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
-- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
+- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and `php_process` the process-wide mechanisms (`fork`, the signal pool, `LC_CTYPE`), the engine's only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
 - `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 
 ## Taste
 
-- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in four homes, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
+- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in seven homes, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
 - Copy php's algorithm where the behaviour is observable; drop the cleverness where it is not. The floor is php's interpreter by construction; the ceiling comes from threads and whole-program LTO, not a smarter IR. If a rule here fights the task in front of you, say so loudly and get a person's sign-off before breaking it.
 
 ## The facts, computed
@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=19390bc73556b163f31127dc5276e5df9b60b5dc8c98ad8afcf5dd031bcd5e3d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2cbc82c248ab0e6a8826c6b297eb41a31fcadc9e47d2d9963e75d4cd00db4774 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -101,7 +101,7 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 
-<!-- /computed in=3e0e525902a4ccf204d464e5b1f087a41ed1c332bc0da0cf009709ba79089600 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
+<!-- /computed in=f9deb336fc124976c7c6603cb750f2b6e33ca81070f9b82e3786fdaf2dbe2090 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -114,7 +114,7 @@ third-engine-design.md
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 348 |  | pass |
 
-<!-- /computed in=f7644d4fa57d039f36c66c9510a435bff00824f02a18e429afde65598339aa01 out=f053431cf9b42c23592ec44817d9fd48716dec9588f61f743dfacb7bc66e24f0 -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -122,6 +122,7 @@ third-engine-design.md
 | ext.no-locks | ADR-0005 | deny_types | no reading |
 | unsafe.homes | ADR-0006 | allow | pass |
 | unsafe.one-op |  | deny_lints | no reading |
+| fork.home |  | deny_pattern | no reading |
 | lints.no-panic |  | deny_lints | no reading |
 | engine.reentry-signature |  | check | no reading |
 | api.no-hot |  | deny_pattern | no reading |
@@ -130,7 +131,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
@@ -142,10 +143,10 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | no reading |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=b272df389fb2298ac4fd95a5a8bdfda86834405667c6aee3bf9dab201ba038b7 out=d5f81f7d69969798d6ed2ed9df663f8b5f04ae17c3a7a419ac05ba3e8c8ccc26 -->
+<!-- /computed in=df4ef8d1861d951d1693c3890a8eae75afbeb6c582590247b5f7d6e18f7c5f5e out=8e25202209972437eed62063a6e2dcedbb48075f7878c7883894d5d06826d344 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -183,7 +184,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=a7c1749e2850d01cdb1ad44922e22c782d784a51edc63329eb7577f73a8f6e15 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=fa50922c9a2c92f8bd149c2fb2c0eb0edab3b85ca38fa7a5e2b220a1bf8110da out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
@@ -193,12 +194,13 @@ Options:
 ├── php_ext
 ├── php_heap
 ├── php_macros
+├── php_process
 ├── php_proto
 ├── php_sapi
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=05dc4b683adea2b1120d270298d33fe48777aab9e12d3445f17df73ab7b701dd out=6ec60b32a5cbec77b584126a718b74bc14d8ba4d5e87c9c43ecaab34f8efe9ba -->
+<!-- /computed in=68226964e2930c664a6a367ae93a01fd3dcceecbfc908618c63e60f5850bfac1 out=07b5311d18dfeb52445eafa9e5387e861d0f0d4d85589aae15289fafe1320e32 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

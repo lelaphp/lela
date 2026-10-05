@@ -40,13 +40,11 @@ mod fiber;
 mod gc;
 mod hooks;
 mod iterators;
-mod locale;
 mod map;
 mod mm;
 mod numeric;
 mod object;
 mod payload;
-pub mod post;
 pub mod process;
 mod property_table;
 mod reference;
@@ -68,7 +66,6 @@ pub use fd::{
 };
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
-pub use locale::reset_lc_ctype_locale;
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
