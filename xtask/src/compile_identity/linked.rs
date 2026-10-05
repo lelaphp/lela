@@ -13,8 +13,10 @@
 //! once and every file of the corpus is compiled through it; the
 //! fresh-engine-per-program isolation the witness lane wants is a
 //! property of serving, not of compiling. The ini is the pin's recipe and
-//! its `dump` regime, laid over the engine's defaults as a host's `-d`
-//! lays it, so one recipe stands behind both dumps; an entry the engine
+//! its `dump` regime, and the regime asked for after it, laid over the
+//! engine's defaults as a host's `-d` lays it, and a regime's `-e` builds
+//! the engine with extended info, so one recipe stands behind both dumps;
+//! an entry the engine
 //! has no name for is carried and read by nobody, which is what php does
 //! with `opcache.*` where opcache is not loaded.
 //!
@@ -33,12 +35,13 @@ use super::dump::Dumped;
 use crate::oracle::{self, Normalise};
 
 /// A fresh engine of the bundle's enabled set under the CLI's layer and
-/// `ini`, each entry as the recipe writes it, `name=value`.
-pub(super) fn engine(ini: &[String]) -> Engine {
+/// `ini`, each entry as the recipe writes it, `name=value`, compiling
+/// with extended info where a regime's `-e` asked for it.
+pub(super) fn engine(ini: &[String], extended_info: bool) -> Engine {
     let entries: Vec<(&str, &str)> = crate::oracle::linked::cli_layer()
         .chain(ini.iter().filter_map(|entry| entry.split_once('=')))
         .collect();
-    php_bundle::test::engine(&entries)
+    php_bundle::test::engine(&entries, extended_info)
 }
 
 /// What the linked compiler dumps for one program: the unit's op arrays
