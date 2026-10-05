@@ -29,11 +29,11 @@
 mod ftp;
 
 use php_ext::abi::{
-    CloneObj, Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, True,
+    Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, Refusals, True,
     Union, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{Function, lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
@@ -220,6 +220,11 @@ pub(crate) struct Handlers;
 
 pub(crate) static FTP: Handlers = Handlers;
 
+/// What `ftp_object_handlers` refuses: construction and cloning.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("ftp_connect() or ftp_ssl_connect()"))
+    .cloning();
+
 impl ObjectHandlers for Handlers {
     /// `ftp_object_destroy`: `ftp_close` of a session still open.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -231,20 +236,8 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_constructor(
-        &self,
-        req: &mut Request,
-        _object: PhpObject,
-    ) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot directly construct FTP\\Connection, use ftp_connect() or ftp_ssl_connect() instead",
-        ))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        REFUSALS
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {

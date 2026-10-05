@@ -4,8 +4,7 @@
 //! the error state where php does, in php's order.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Static, Std,
-    This, Variadic,
+    Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
@@ -226,7 +225,9 @@ fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) ->
 /// after every extension's `RSHUTDOWN`, so a session save handler's
 /// `write` still has them: every persistent connection the request holds
 /// given back to the engine's pool, nothing of the request's left on it;
-/// one past the pool's bound is closed.
+/// one past the pool's bound is closed with this request, the
+/// connector's `closer` as `dbh_free` calls it (ADR-0010's amendment of
+/// ADR-0005).
 ///
 /// php frees each `PDO` there, and `pdo_dbh_free_storage` rolls back the
 /// transaction it left open before the connection waits in
@@ -245,8 +246,14 @@ pub(crate) fn deactivate(req: &mut Request) {
         if let Conn::Open(conn) = &mut dbh.conn {
             conn.give_back(req);
         }
-        if let Some(Pooled(pool)) = req.engine::<Pooled>() {
-            drop(pool.give(key, dbh));
+        let past = match req.engine::<Pooled>() {
+            Some(Pooled(pool)) => pool.give_back(key, dbh),
+            None => Some(dbh),
+        };
+        if let Some(mut dbh) = past
+            && let Conn::Open(conn) = &mut dbh.conn
+        {
+            conn.close(req);
         }
     }
 }
@@ -256,7 +263,14 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        REFUSALS
+    }
+
     /// `pdo_dbh_new` past the allocation: the property table built at
     /// once, `zend_std_get_properties_ex(&dbh->std)`.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -328,25 +342,6 @@ impl ObjectHandlers for Handlers {
                 conn.gc(visit);
             }
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        None
-    }
-
-    /// `zend_objects_not_comparable`.
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 
     /// `dbh_method_get`: the class's own method, else one the connection's

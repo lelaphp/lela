@@ -15,8 +15,8 @@
 //! compiled once, by ext/pcre, whichever extension asked.
 
 use php_ext::abi::{
-    Callable, Class, ClassIterator, CloneObj, ExtensionBuilder, False, FromArgument, Instance,
-    Never, ObjectHandlers, OrFalse, Raw, Std, This, Union, Untyped,
+    Callable, Class, ClassIterator, ExtensionBuilder, False, FromArgument, Instance, Never,
+    ObjectHandlers, OrFalse, Raw, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -2714,7 +2714,14 @@ fn construct_regex<C: Class>(
     })
 }
 
+/// What the table refuses: cloning.
+const DUAL_REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for DualHandlers {
+    fn refusals(&self) -> Refusals {
+        DUAL_REFUSALS
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let held = object.native_mut::<DualIt>(req).map(|it| {
             (
@@ -2780,10 +2787,6 @@ impl ObjectHandlers for DualHandlers {
                 visit(Value::array(cache));
             }
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `spl_dual_it_get_method`: the inner iterator.
@@ -3481,7 +3484,14 @@ fn rec_valid(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
     Ok(false)
 }
 
+/// What the table refuses: cloning.
+const REC_REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for RecHandlers {
+    fn refusals(&self) -> Refusals {
+        REC_REFUSALS
+    }
+
     /// `spl_RecursiveIteratorIterator_free_storage`: what the
     /// destructor left, the deepest level first.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -3533,10 +3543,6 @@ impl ObjectHandlers for RecHandlers {
                 visit(level.sub.as_value());
             }
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     /// `spl_recursive_it_get_iterator`: the walk the methods make,

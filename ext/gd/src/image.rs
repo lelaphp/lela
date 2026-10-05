@@ -2,14 +2,12 @@
 //! that make them, and what every native reaches an image through: the
 //! `gdImagePtr` an object holds and the reports libgd made during a call.
 
-use std::cmp::Ordering;
-
-use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Union};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{Emalloc, PhpObject, Value};
+use php_ext::values::{Emalloc, PhpObject};
 
 use crate::ffi::{self, Font, Glyphs, Im, Image, Reported};
 
@@ -74,27 +72,20 @@ pub(crate) struct ImageHandlers;
 
 pub(crate) static IMAGE: ImageHandlers = ImageHandlers;
 
+/// What the table refuses: cloning and comparison.
+const IMAGE_REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for ImageHandlers {
+    fn refusals(&self) -> Refusals {
+        IMAGE_REFUSALS
+    }
+
     fn get_constructor(
         &self,
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
         Err(refuse(req, "GdImage"))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 }
 
@@ -104,17 +95,20 @@ pub(crate) struct FontHandlers;
 
 pub(crate) static FONT: FontHandlers = FontHandlers;
 
+/// What the table refuses: cloning.
+const FONT_REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for FontHandlers {
+    fn refusals(&self) -> Refusals {
+        FONT_REFUSALS
+    }
+
     fn get_constructor(
         &self,
         req: &mut Request,
         _object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
         Err(refuse(req, "GdFont"))
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

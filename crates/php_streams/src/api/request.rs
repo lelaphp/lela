@@ -123,6 +123,11 @@ pub enum FdStream<'a> {
     /// it is a pipe or a character device; what `proc_open` hands back
     /// for a `pipe`.
     File { mode: &'a [u8] },
+    /// The same over a fd [`Stream::dup_fd`] kept past its stream, at the
+    /// `position` the stream held, which php's persistent stream keeps in
+    /// memory between requests: the fd's own offset is not asked, where
+    /// a forked process sharing the open file may have moved it.
+    Kept { mode: &'a [u8], position: i64 },
     /// `php_stream_fopen_from_pipe` over what `popen(3)` opened: the
     /// same kind, never seeking, whose close waits for `child`, the
     /// process at the pipe's other end, and answers its exit status.
