@@ -1033,18 +1033,18 @@ impl Emit<'_> {
             properties: Vec::new(),
             constants: Vec::new(),
             methods: Vec::new(),
-            statements: Vec::new(),
+            statement_lines: Vec::new(),
             line,
             end_line: self.end_line(range),
         };
         let members = self.parsed.tree[body].class_members.clone();
         for member in &members {
-            if let ClassMember::PropertyDecl(id) = member {
-                class.statements.push(self.parsed.tree[*id].line());
-            }
-            if let ClassMember::EnumCaseDecl(id) = member {
-                class.statements.push(self.parsed.tree[*id].line());
-            }
+            let line = match member {
+                ClassMember::PropertyDecl(id) => Some(self.parsed.tree[*id].line()),
+                ClassMember::EnumCaseDecl(id) => Some(self.parsed.tree[*id].line()),
+                _ => None,
+            };
+            class.statement_lines.extend(line);
             self.walk_member(&mut class, *member)?;
         }
         Ok(class)
@@ -1471,8 +1471,9 @@ pub(super) struct Class {
     /// The line of each member `zend_compile_stmt` compiles as a
     /// statement of the op array the class is declared in, in written
     /// order: a property group and an enum case, the members
-    /// `zend_is_unticked_stmt` does not name ([`super::extended`]).
-    pub(super) statements: Vec<u32>,
+    /// `zend_is_unticked_stmt` does not name
+    /// ([`Emit::member_statements`]).
+    pub(super) statement_lines: Vec<u32>,
     /// The line the name is on, `ce->info.user.line_start`, which is
     /// where php raises what `zend_compile_attributes` refuses and not
     /// where the attribute itself was written.

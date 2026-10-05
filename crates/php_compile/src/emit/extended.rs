@@ -58,22 +58,6 @@ impl Emit<'_> {
         });
     }
 
-    /// `zend_do_extended_stmt(NULL)` from `zend_compile_stmt` over a
-    /// class member the class is declared beside, a property group or
-    /// an enum case, at the member's own line: one per member, in the op
-    /// array the declaration stands in, before the declaration's opline.
-    pub(super) fn ext_stmts_at(&mut self, lines: &[u32]) {
-        if !self.extended_info {
-            return;
-        }
-        let line = self.line;
-        for member in lines {
-            self.line = *member;
-            self.ext_stmt();
-        }
-        self.line = line;
-    }
-
     /// `zend_do_extended_fcall_begin` or `zend_do_extended_fcall_end`.
     pub(super) fn ext_fcall(&mut self, opcode: Opcode) {
         if !self.extended_info {
@@ -187,6 +171,30 @@ mod tests {
                 assert_eq!(pair[0].lineno, pair[1].lineno, "{pair:?}");
             }
         }
+    }
+
+    /// A property group is a statement of `zend_compile_stmt`'s in the op
+    /// array the class is declared in: its `EXT_STMT` and its `TICKS`
+    /// stand before the declaration, each `TICKS` kept where an `EXT_STMT`
+    /// parts it from the one before, and swallowed by it where none does,
+    /// as the oracle dumps the program under `declare(ticks=1)` with and
+    /// without `-e`.
+    #[test]
+    fn a_class_member_is_ticked_where_php_ticks_it() {
+        use Opcode::{
+            Assign, DeclareAnonClass, DoFcall, ExtFcallBegin, ExtFcallEnd, ExtStmt, New, Nop,
+            Return, Ticks,
+        };
+        let source =
+            b"<?php\ndeclare(ticks=1);\n$o = new class { public $p; public $q; };\n".as_slice();
+        #[rustfmt::skip]
+        let extended = [
+            ExtStmt, Ticks, Nop, ExtStmt, Ticks, ExtStmt, Ticks,
+            DeclareAnonClass, New, ExtFcallBegin, DoFcall, ExtFcallEnd, Assign, Ticks, Return,
+        ];
+        assert_eq!(opcodes(&compiled(source, true).0), extended);
+        let plain = [Ticks, DeclareAnonClass, New, DoFcall, Assign, Ticks, Return];
+        assert_eq!(opcodes(&compiled(source, false).0), plain);
     }
 
     /// Without extended info nothing of it is emitted, and the plain

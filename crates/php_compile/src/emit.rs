@@ -5088,9 +5088,7 @@ impl Emit<'_> {
         self.active_constants.clear();
         self.active_class = None;
         self.active_parent = None;
-        // `zend_compile_stmt(stmt_ast)` over the body put these in the
-        // enclosing op array before the declaration's opline.
-        self.ext_stmts_at(&class.statements);
+        self.member_statements(&class.statement_lines);
         self.line = line;
         if is_enum {
             self.verify_enum(at, &name)?;
@@ -8147,7 +8145,7 @@ impl Emit<'_> {
     /// `declare(ticks)` scope stands, each where the statement is none of
     /// `zend_is_unticked_stmt`'s, a block or a label here (the class
     /// members it also names are no statements of this walk, and
-    /// [`Self::class_entry`] stands their `EXT_STMT`s). `echo`, `unset`,
+    /// [`Self::member_statements`] stands for them). `echo`, `unset`,
     /// `global` and `static` are php's `ZEND_AST_STMT_LIST` of one
     /// statement per element, so each element is preceded and ticked
     /// where [`Self::statement`] compiles it, and the list is neither.
@@ -8168,6 +8166,25 @@ impl Emit<'_> {
             self.tick();
         }
         Ok(())
+    }
+
+    /// `zend_compile_stmt` over the members of a class body it does not
+    /// leave unticked, a property group and an enum case, one per line
+    /// in `lines`: each one's `EXT_STMT` and `ZEND_TICKS` land in the op
+    /// array the class is declared in, before the declaration's opline,
+    /// since what the member itself compiles to stands elsewhere
+    /// (`zend_compile_class_decl` compiles the body before it emits the
+    /// declaration). A `ZEND_TICKS` right after another is not emitted, so
+    /// where no `EXT_STMT` stands between them a member's is the one
+    /// before it.
+    pub(super) fn member_statements(&mut self, lines: &[u32]) {
+        let line = self.line;
+        for member in lines {
+            self.line = *member;
+            self.ext_stmt();
+            self.tick();
+        }
+        self.line = line;
     }
 
     /// `zend_emit_tick`: `ZEND_TICKS` with the count in
@@ -19027,7 +19044,7 @@ mod tests {
             properties: Vec::new(),
             constants: Vec::new(),
             methods: Vec::new(),
-            statements: Vec::new(),
+            statement_lines: Vec::new(),
             line: 1,
             end_line: 1,
         };
