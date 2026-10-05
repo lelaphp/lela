@@ -1,14 +1,17 @@
 //! One connection of the built-in server, `php_cli_server_client`, as a
-//! state machine ([`Connection`]): the request read and parsed as
+//! state machine ([`Connection`]) the event loop drives: the request
+//! read as its bytes arrive and parsed as
 //! `php_cli_server_client_read_request` parses it, its path translated
 //! against the document root, then dispatched as
 //! `php_cli_server_dispatch` dispatches it, through the engine where a
-//! router or a PHP file serves it, or as a static file or an error page
-//! the server writes itself, and the connection closed.
+//! router or a PHP file serves it, on the loop's thread before it waits
+//! again, or as a static file or an error page the server writes itself
+//! as the socket takes it, and the connection closed.
 
 use std::fmt::Write as _;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use php_proto::http::{self, Credentials, Events, Parser};
@@ -18,43 +21,78 @@ use php_sapi::{
 
 use super::Site;
 use super::log::Type;
+use crate::ffi::{Interest, Polled};
 
 /// Where one connection stands.
-enum Connection {
-    /// `php_cli_server_client_read_request`: read and parsed until the
-    /// request is whole.
+pub(super) enum Connection {
+    /// `php_cli_server_client_read_request`: read and parsed as its bytes
+    /// arrive, until the request is whole.
     Reading(Client),
-    /// The request read whole, to dispatch.
-    Read(Client),
     /// A response the server writes itself, a static file or an error
-    /// page, `content_sender`.
-    Sending(Client, Vec<u8>, Option<std::fs::File>),
+    /// page, `content_sender`: sent as the socket takes it.
+    Sending(Client, Pending),
     /// Closed, and `%s Closing` logged.
     Closed,
 }
 
-/// Serve the connection `stream`, its peer named `name` in the log, to
-/// its end.
-pub(super) fn serve(site: &Arc<Site>, stream: TcpStream, name: String) {
-    let mut connection = Connection::Reading(Client {
-        stream,
-        name,
-        parser: Parser::new(),
-        building: Building::default(),
-    });
-    loop {
-        connection = match connection {
+impl Connection {
+    /// `php_cli_server_client_ctor`: the connection `stream` accepted,
+    /// its peer named `name` in the log, its request yet to read.
+    pub(super) fn accepted(stream: TcpStream, name: String) -> Connection {
+        Connection::Reading(Client {
+            stream,
+            name,
+            parser: Parser::new(),
+            building: Building::default(),
+        })
+    }
+
+    /// The socket as the loop waits on it, for a read while the request
+    /// is read and for a write while a response is sent
+    /// (`php_cli_server_poller_add`); `None` once it is closed.
+    pub(super) fn polled(&self) -> Option<Polled> {
+        match self {
+            Connection::Reading(client) => {
+                Some(Polled::new(client.stream.as_raw_fd(), Interest::Read))
+            }
+            Connection::Sending(client, _) => {
+                Some(Polled::new(client.stream.as_raw_fd(), Interest::Write))
+            }
+            Connection::Closed => None,
+        }
+    }
+
+    /// Whether the connection is still open, and so kept by the loop.
+    pub(super) fn is_open(&self) -> bool {
+        !matches!(self, Connection::Closed)
+    }
+
+    /// The socket ready for what [`Connection::polled`] waited on it for:
+    /// `php_cli_server_recv_event_read_request`
+    /// (`Z/sapi/cli/php_cli_server.c:2636`) for a request being read,
+    /// which serves the request once it is whole, and
+    /// `php_cli_server_send_event` for a response being sent.
+    pub(super) fn ready(self, site: &Arc<Site>) -> Connection {
+        match self {
             Connection::Reading(client) => read(site, client),
-            Connection::Read(client) => dispatch(site, client),
-            Connection::Sending(client, head, file) => send(site, client, &head, file),
-            Connection::Closed => return,
-        };
+            Connection::Sending(client, pending) => send(site, client, pending),
+            Connection::Closed => Connection::Closed,
+        }
+    }
+
+    /// `php_cli_server_client_dtor_wrapper`
+    /// (`Z/sapi/cli/php_cli_server.c:2415`) as `php_cli_server_dtor`
+    /// destroys the clients: the socket shut, nothing logged.
+    pub(super) fn drop_unlogged(self) {
+        if let Connection::Reading(client) | Connection::Sending(client, _) = self {
+            let _ = client.stream.shutdown(Shutdown::Both);
+        }
     }
 }
 
 /// A connection's own: the socket, the peer's name, the parser, and the
 /// request it is building.
-struct Client {
+pub(super) struct Client {
     stream: TcpStream,
     name: String,
     parser: Parser,
@@ -296,13 +334,16 @@ fn os(bytes: &[u8]) -> &std::path::Path {
 }
 
 /// `php_cli_server_recv_event_read_request`: one `recv` of up to 16383
-/// bytes fed to the parser; a request read whole is dispatched, a read
-/// that failed or found the end first and a request php refuses close
-/// the connection with php's line.
-fn read(site: &Site, mut client: Client) -> Connection {
+/// bytes fed to the parser, nothing where none has arrived yet; a
+/// request read whole is dispatched, a read that failed or found the end
+/// first and a request php refuses close the connection with php's line.
+fn read(site: &Arc<Site>, mut client: Client) -> Connection {
     let mut buf = [0u8; 16383];
     let why = match client.stream.read(&mut buf) {
         Ok(0) => "Unexpected EOF".to_owned(),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            return Connection::Reading(client);
+        }
         Err(error) => super::strerror(&error),
         Ok(read) => {
             client.building.root.clone_from(&site.document_root);
@@ -314,7 +355,7 @@ fn read(site: &Site, mut client: Client) -> Connection {
                 if client.building.request.method() == http::Method::NOT_IMPLEMENTED {
                     return error_page(site, client, 501);
                 }
-                return Connection::Read(client);
+                return dispatch(site, client);
             }
             if buf[0] & 0x80 != 0 || buf[0] == 0x16 {
                 "Unsupported SSL request".to_owned()
@@ -543,20 +584,38 @@ impl Wire {
         out
     }
 
-    /// `php_cli_server_client_send_through`: every byte, or as many as
-    /// the peer took before it went away; whether all of them went, which
-    /// a peer that is gone refuses.
-    fn send(&mut self, bytes: &[u8]) -> bool {
+    /// `php_cli_server_client_send_through`
+    /// (`Z/sapi/cli/php_cli_server.c:1898`): every byte, waiting up to ten
+    /// seconds each time the socket takes no more, or as many as the peer
+    /// took before it went away or the wait ran out; whether all of them
+    /// went, which a peer that is gone refuses.
+    fn send(&mut self, mut bytes: &[u8]) -> bool {
         let Some(stream) = &mut self.stream else {
             return false;
         };
-        if stream.write_all(bytes).is_err() {
-            self.stream = None;
-            return false;
+        while !bytes.is_empty() {
+            match stream.write(bytes) {
+                Ok(0) => {
+                    self.stream = None;
+                    return false;
+                }
+                Ok(sent) => bytes = bytes.get(sent..).unwrap_or_default(),
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock
+                        && crate::ffi::writable_within(stream.as_raw_fd(), SEND_WAIT) => {}
+                Err(_) => {
+                    self.stream = None;
+                    return false;
+                }
+            }
         }
         true
     }
 }
+
+/// How long a PHP request's write waits for a socket that takes no more,
+/// in milliseconds: `send_through`'s `tv` of ten seconds.
+const SEND_WAIT: i32 = 10_000;
 
 /// The sink a PHP request holds, `sapi_cli_server_ub_write` and
 /// `sapi_cli_server_send_headers`: the body and the head onto the
@@ -706,7 +765,7 @@ fn send_static(site: &Site, client: Client) -> Connection {
     head.extend_from_slice(format!("Content-Length: {}\r\n\r\n", request.size).as_bytes());
     let file = (request.method() != http::Method::HEAD).then_some(file);
     log_response(site, &client, 200, None, None);
-    Connection::Sending(client, head, file)
+    Connection::Sending(client, Pending::new(head, file))
 }
 
 /// `php_cli_server_send_error_page` (`Z/sapi/cli/php_cli_server.c:2014`):
@@ -748,7 +807,7 @@ fn error_page(site: &Site, client: Client, status: i64) -> Connection {
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&body);
     log_response(site, &client, status, Some(&errno), None);
-    Connection::Sending(client, head, None)
+    Connection::Sending(client, Pending::new(head, None))
 }
 
 /// `php_cli_server_css`, copied from `ext/standard/info.c`.
@@ -846,23 +905,60 @@ fn log_response(
     site.log.write(Type::Message, &line);
 }
 
-/// `php_cli_server_send_event`: the head and then the file, and the
-/// connection closed once all of it is written or the peer went away.
-fn send(site: &Site, mut client: Client, head: &[u8], file: Option<std::fs::File>) -> Connection {
-    if client.stream.write_all(head).is_ok()
-        && let Some(mut file) = file
+/// What the server still has to send of a response it writes itself,
+/// `php_cli_server_content_sender`: the bytes not yet taken, and the
+/// file the rest is read from where one is still open.
+pub(super) struct Pending {
+    bytes: Vec<u8>,
+    sent: usize,
+    file: Option<std::fs::File>,
+}
+
+impl Pending {
+    fn new(head: Vec<u8>, file: Option<std::fs::File>) -> Pending {
+        Pending {
+            bytes: head,
+            sent: 0,
+            file,
+        }
+    }
+}
+
+/// `php_cli_server_send_event` (`Z/sapi/cli/php_cli_server.c:2668`): the
+/// next 131072 bytes of the file read where everything before them went
+/// (`php_cli_server_content_sender_pull`, `Z/sapi/cli/php_cli_server.c:1137`),
+/// as much as the socket takes
+/// sent, and the connection closed once all of it is written, the peer
+/// went away or the file could not be read.
+fn send(site: &Site, mut client: Client, mut pending: Pending) -> Connection {
+    if pending.sent == pending.bytes.len()
+        && let Some(file) = &mut pending.file
     {
-        let mut chunk = vec![0u8; 131_072];
-        loop {
-            match file.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    if client.stream.write_all(&chunk[..read]).is_err() {
-                        break;
-                    }
+        pending.bytes.resize(131_072, 0);
+        pending.sent = 0;
+        match file.read(&mut pending.bytes) {
+            Ok(read) => {
+                pending.bytes.truncate(read);
+                if read == 0 {
+                    pending.file = None;
                 }
+            }
+            Err(error) => {
+                site.log.write(Type::Error, &super::strerror(&error));
+                return close(site, &client);
             }
         }
     }
-    close(site, &client)
+    while pending.sent < pending.bytes.len() {
+        match client.stream.write(&pending.bytes[pending.sent..]) {
+            Ok(0) => return close(site, &client),
+            Ok(sent) => pending.sent += sent,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(_) => return close(site, &client),
+        }
+    }
+    if pending.sent == pending.bytes.len() && pending.file.is_none() {
+        return close(site, &client);
+    }
+    Connection::Sending(client, pending)
 }
