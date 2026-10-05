@@ -21282,6 +21282,7 @@ pub(crate) fn r#yield<T: Tier>(
         slot
     });
     crate::generator::yielded(req, generator, value, key, send_target);
+    crate::observer::generator_yielded(req, frame, generator);
     crate::generator::suspend(req, generator)?;
     Ok(Stepped::Done)
 }
@@ -21427,6 +21428,7 @@ pub(crate) fn yield_from<T: Tier>(
                 let previous = req.set_slot(frame, slot, Value::null());
                 req.release(previous);
             }
+            crate::observer::generator_yielded(req, frame, generator);
             crate::generator::suspend(req, generator)?;
             Ok(Stepped::Done)
         }
@@ -21459,6 +21461,9 @@ pub(crate) fn generator_return<T: Tier>(
 ) -> Edge {
     let generator = crate::generator::running(req, frame)?;
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    // `ZEND_OBSERVER_FCALL_END(generator->execute_data, &generator->retval)`
+    // before the generator is closed (`Z/Zend/zend_vm_def.h:4766`).
+    crate::observer::returned(req, frame, Some(&value));
     crate::generator::returned(req, generator, value);
     Ok(Stepped::Done)
 }

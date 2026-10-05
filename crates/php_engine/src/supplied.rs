@@ -12,7 +12,8 @@
 //!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
 //!   `zend_post_startup_cb`, `php_rfc1867_callback`);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`,
-//!   `zend_observers_fcall_list` and the observer's three notice lists);
+//!   `zend_observers_fcall_list`, the observer's three notice lists and
+//!   its three fiber lists);
 //! - [`Last`]: a slot the last supplier writes (`sapi_module`'s
 //!   `treat_data`, `input_filter` and `log_message`, the multibyte
 //!   functions, the CLI's shell callbacks);
@@ -37,9 +38,9 @@ use php_unit::decl::Name;
 
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
-    Extension, FatalLoggedHook, GcCollectHook, InputFilterHook, InterruptHook, ObserverInit,
-    PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook, TicksHook, TreatDataHook,
-    UploadHook,
+    Extension, FatalLoggedHook, FiberHandler, FiberSwitchHandler, GcCollectHook, InputFilterHook,
+    InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook,
+    TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
@@ -119,6 +120,9 @@ pub(crate) struct Supplies {
     pub(crate) error_observers: Vec<ErrorObserver>,
     pub(crate) functions_declared: Vec<FunctionDeclared>,
     pub(crate) classes_linked: Vec<ClassLinked>,
+    pub(crate) fiber_init: Vec<FiberHandler>,
+    pub(crate) fiber_switch: Vec<FiberSwitchHandler>,
+    pub(crate) fiber_destroy: Vec<FiberHandler>,
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -203,6 +207,13 @@ pub(crate) struct Resolved {
     /// `zend_observer_class_linked_register` (`:349`) appends to it
     /// ([`crate::observer::class_linked`]).
     pub(crate) classes_linked: Listed<ClassLinked>,
+    /// `zend_observer_fiber_init`, `zend_observer_fiber_switch` and
+    /// `zend_observer_fiber_destroy` (`Z/Zend/zend_observer.c:33-35`),
+    /// each walked in the order its handlers were registered
+    /// ([`crate::observer::fiber_switched`]).
+    pub(crate) fiber_init: Listed<FiberHandler>,
+    pub(crate) fiber_switch: Listed<FiberSwitchHandler>,
+    pub(crate) fiber_destroy: Listed<FiberHandler>,
     /// Served once the primary program has ended.
     pub(crate) program_ended: Listed<fn(&mut Request)>,
     /// The unit cache's one question, which opcache's
@@ -266,6 +277,9 @@ impl Resolved {
             table.error_observers.install_all(own.error_observers);
             table.functions_declared.install_all(own.functions_declared);
             table.classes_linked.install_all(own.classes_linked);
+            table.fiber_init.install_all(own.fiber_init);
+            table.fiber_switch.install_all(own.fiber_switch);
+            table.fiber_destroy.install_all(own.fiber_destroy);
             table.program_ended.install(own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);

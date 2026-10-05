@@ -30,7 +30,8 @@ mod class;
 mod marshal;
 
 pub use crate::observer::{
-    BeginHandler, EndHandler, ErrorNotice, Observed, ObserverHandlers, ObserverInit, Removed,
+    BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
+    ObservedFiber, ObserverHandlers, ObserverInit, Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
@@ -1325,9 +1326,10 @@ impl ExtensionBuilder {
     /// The bundle's observers are asked in the order the extensions
     /// start, and an extension may declare more than one; begin handlers
     /// are called in that order and end handlers in its reverse. A
-    /// generator's frame is not begun at its call. With none declared, a
-    /// call pays one load and one branch at the push and one at the
-    /// return.
+    /// generator's frame is not begun at its call: it is begun at each
+    /// resumption and ended at each suspension with what it yielded, and
+    /// at its `return` with what it returned. With none declared, a call
+    /// pays one load and one branch at the push and one at the return.
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
         self.supplies.observers.push(init);
@@ -1379,6 +1381,39 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn class_linked_observer(mut self, observer: ClassLinked) -> ExtensionBuilder {
         self.supplies.classes_linked.push(observer);
+        self
+    }
+
+    /// Told of each fiber's creation, `zend_observer_fiber_init_register`
+    /// at `MINIT` (design §4.3 seam 9): `Fiber::start` has laid the
+    /// fiber's stack down and has not yet switched into it. The bundle's
+    /// handlers are called in the order the extensions start, an
+    /// extension's in the order it declared them.
+    #[must_use]
+    pub fn fiber_init(mut self, handler: FiberHandler) -> ExtensionBuilder {
+        self.supplies.fiber_init.push(handler);
+        self
+    }
+
+    /// Told of each switch between fibers, the request's own stack
+    /// among them, `zend_observer_fiber_switch_register`: handed the
+    /// fiber left and the fiber entered, while the one left is still the
+    /// one served. Every frame a fiber that ended in a fatal left open
+    /// has been ended by then; each fiber's open frames are its own, so
+    /// what is begun in a fiber is ended in it.
+    #[must_use]
+    pub fn fiber_switch(mut self, handler: FiberSwitchHandler) -> ExtensionBuilder {
+        self.supplies.fiber_switch.push(handler);
+        self
+    }
+
+    /// Told of each fiber given back once it is dead and its resumer is
+    /// served again, `zend_observer_fiber_destroy_register`. A fiber
+    /// never started was never created, and one still suspended when the
+    /// request ends in a fatal is never told of.
+    #[must_use]
+    pub fn fiber_destroy(mut self, handler: FiberHandler) -> ExtensionBuilder {
+        self.supplies.fiber_destroy.push(handler);
         self
     }
 

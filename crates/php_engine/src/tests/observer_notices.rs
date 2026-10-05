@@ -582,3 +582,66 @@ fn a_native_takes_a_handler_added_and_removed_for_one_request() {
         ]
     );
 }
+
+fn declared_in_fiber(
+    _: &mut crate::api::request::Request,
+    _: crate::api::call::Function,
+    name: &[u8],
+) {
+    record(0, Declared(String::from_utf8_lossy(name).into_owned()));
+}
+
+fn linked_in_fiber(
+    _: &mut crate::api::request::Request,
+    _: crate::api::values::ClassId,
+    name: &[u8],
+) {
+    record(0, Linked(String::from_utf8_lossy(name).into_owned()));
+}
+
+/// A fiber runs on a stack of its own and its chain of open frames is
+/// its own (#1811), but a function's slot is the function's: a begin
+/// handler added inside a fiber begins the function's calls on the
+/// request's own stack and in the fiber alike, and a file the fiber
+/// includes is told as any load is.
+#[test]
+fn a_handler_added_in_a_fiber_and_a_load_in_one_are_the_requests() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .observer(acting_init)
+            .function_declared_observer(declared_in_fiber)
+            .class_linked_observer(linked_in_fiber)
+            .build("test_ext_0")])
+        .build();
+    let dir = scratch("fiber");
+    let _ = std::fs::write(dir.join("inc.php"), "<?php\nfunction g() {}\nclass K {}\n");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction target() { return 1; }\nfunction add() {}\ntarget();\n\
+         $f = new Fiber(function () { add(); Fiber::suspend(); target(); include __DIR__ . '/inc.php'; });\n\
+         $f->start();\ntarget();\n$f->resume();\n",
+    );
+    rec.mark("served");
+    assert_eq!(
+        only(
+            &rec.events().between("built", "served"),
+            &[
+                Begin(String::new()),
+                Declared(String::new()),
+                Linked(String::new())
+            ]
+        ),
+        [
+            Ext(0, Declared("target".to_owned())),
+            Ext(0, Declared("add".to_owned())),
+            Ext(0, Begin("add true untouched false".to_owned())),
+            Ext(0, Begin("extra target".to_owned())),
+            Ext(0, Begin("extra target".to_owned())),
+            Ext(0, Declared("g".to_owned())),
+            Ext(0, Linked("k".to_owned())),
+        ]
+    );
+}

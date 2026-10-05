@@ -5,10 +5,24 @@
 //! internal runtime cache; and the number the next native's call
 //! begun takes. All three are [`Observing`]'s, whose fields no file but
 //! this one reads. An op array's observer slot stands in the request's
-//! map table beside the runtime cache's other slots. And the handlers
-//! added to and removed from one function's slot while the request is
-//! served, php's `zend_observer_add_begin_handler` and its kin, which
-//! write the request's slot and never the published unit.
+//! map table beside the runtime cache's other slots.
+//!
+//! The chain, [`ObservedChain`], is the stack's the request is served
+//! on: a fiber's switch swaps it with the rest of the execution state
+//! ([`Request::switch_execution`]), as php saves it into the
+//! `zend_fiber_context` it leaves (`top_observed_frame`), and a serving
+//! with nothing executing sets it aside with the frames, so its frames
+//! are always of the one stack whose frames are pushed and popped beside
+//! it, and a frame is never ended in place of another stack's at the
+//! same height. A native's call on it is one of that stack's too: the
+//! `Fiber::suspend` a fiber is suspended in is ended in the fiber, and
+//! the `Fiber::start` that switched into it on its resumer's stack. The
+//! natives' slots and the count of their calls are the request's.
+//!
+//! The handlers added to and removed from one function's slot while the
+//! request is served, php's `zend_observer_add_begin_handler` and its
+//! kin, write the request's slot and never the published unit; the slot
+//! is the function's and not a stack's, so a fiber's switch leaves it.
 
 use crate::api::call::Function;
 use crate::exec;
@@ -16,13 +30,17 @@ use crate::observer::{BeginHandler, EndHandler, Observable, Removed, Slot};
 
 use super::Request;
 
+/// The open observed calls of one stack, the innermost last: php's
+/// `EG(current_observed_frame)` and each frame's `prev_observed_frame`,
+/// and a suspended fiber's `top_observed_frame`.
+#[derive(Debug, Default)]
+pub(crate) struct ObservedChain(Vec<Observable>);
+
 /// The observer's request state.
 #[derive(Debug, Default)]
 pub(super) struct Observing {
-    /// The open observed calls, the innermost last: php's
-    /// `EG(current_observed_frame)` and each frame's
-    /// `prev_observed_frame`.
-    open: Vec<Observable>,
+    /// The open observed calls of the stack the request is served on.
+    open: ObservedChain,
     /// Each native's observer slot at its place among the natives
     /// ([`Request::native_place`]), php's internal runtime cache,
     /// which `zend_reset_internal_run_time_cache` empties as each request
@@ -109,23 +127,31 @@ impl Request {
 
     /// `at` begun with an end handler: the innermost open call now.
     pub(crate) fn open_observed(&mut self, at: Observable) {
-        self.observing.open.push(at);
+        self.observing.open.0.push(at);
     }
 
     /// `at` taken off the chain where it is the innermost open call, and
     /// whether it was: php's `execute_data == EG(current_observed_frame)`.
     pub(crate) fn close_observed(&mut self, at: Observable) -> bool {
-        if self.observing.open.last() != Some(&at) {
+        if self.observing.open.0.last() != Some(&at) {
             return false;
         }
-        self.observing.open.pop();
+        self.observing.open.0.pop();
         true
+    }
+
+    /// The chain the request is served on and `other` change places, as
+    /// a switch changes stacks: `zend_observer_fiber_switch_notify`'s
+    /// `from->top_observed_frame = EG(current_observed_frame);
+    /// EG(current_observed_frame) = to->top_observed_frame;`.
+    pub(crate) fn swap_observing(&mut self, other: &mut ObservedChain) {
+        std::mem::swap(&mut self.observing.open, other);
     }
 
     /// Every open call, the innermost first, the chain left empty:
     /// `zend_observer_fcall_end_all`'s walk.
     pub(crate) fn take_observed(&mut self) -> Vec<Observable> {
-        let mut open = std::mem::take(&mut self.observing.open);
+        let mut open = std::mem::take(&mut self.observing.open.0);
         open.reverse();
         open
     }

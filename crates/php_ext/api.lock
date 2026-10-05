@@ -93,6 +93,9 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::error
 abi::ExtensionBuilder::error_observer
 abi::ExtensionBuilder::fatal_logged
+abi::ExtensionBuilder::fiber_destroy
+abi::ExtensionBuilder::fiber_init
+abi::ExtensionBuilder::fiber_switch
 abi::ExtensionBuilder::function_declared_observer
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
@@ -122,6 +125,9 @@ abi::ExtensionBuilder::upload
 abi::ExtensionBuilder::version
 abi::ExtensionBuilder::zend_extension
 abi::False
+abi::FiberHandler
+abi::FiberStatus
+abi::FiberSwitchHandler
 abi::FileCache
 abi::FromArgument
 abi::FromArgument::BY_REF
@@ -216,6 +222,11 @@ abi::Observed::filename
 abi::Observed::frame
 abi::Observed::function
 abi::Observed::function_scope
+abi::ObservedFiber
+abi::ObservedFiber::destroyed
+abi::ObservedFiber::fiber
+abi::ObservedFiber::status
+abi::ObservedFiber::threw
 abi::ObserverHandlers
 abi::ObserverInit
 abi::OnModify
