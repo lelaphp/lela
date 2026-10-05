@@ -533,6 +533,20 @@ pub(crate) fn runtime_cache_of(code: &OpArray) -> MapPtr<RuntimeCache> {
     MapPtr::new(code.runtime_cache)
 }
 
+/// `ZEND_OBSERVER_DATA(function)` reached through the function rather
+/// than a frame, as `zend_observer_add_begin_handler` and its kin reach
+/// it: the observer slot of `code`'s runtime cache in the request's map
+/// table, none where the cache was never laid down, php's
+/// `RUN_TIME_CACHE` still `NULL`.
+pub(crate) fn observer_slot_of<'map>(
+    map: &'map mut MapTable,
+    code: &OpArray,
+) -> Option<&'map mut crate::observer::Slot> {
+    let ptr = runtime_cache_of(code);
+    map.get(ptr)?.slots.as_ref()?;
+    Some(&mut map.map(ptr).observer)
+}
+
 /// The runtime cache laid down for an activation of `body`, before its
 /// frame runs. For a function's or a method's body it is
 /// `zend_init_func_run_time_cache` (`Z/Zend/zend_execute.c:4497`): laid
@@ -1033,10 +1047,21 @@ impl Vm {
     /// `frame` serves, in the request's map table; unresolved for a frame
     /// that stands nowhere.
     pub(crate) fn observer_slot(&self, map: &MapTable, frame: FrameRef) -> crate::observer::Slot {
+        self.observer_slot_held(map, frame)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// [`Vm::observer_slot`] borrowed where it stands, for the walks that
+    /// read one handler of it at a time.
+    pub(crate) fn observer_slot_held<'map>(
+        &self,
+        map: &'map MapTable,
+        frame: FrameRef,
+    ) -> Option<&'map crate::observer::Slot> {
         self.at(frame)
             .and_then(|state| map.get(state.runtime_cache))
-            .map(|cache| cache.observer.clone())
-            .unwrap_or_default()
+            .map(|cache| &cache.observer)
     }
 
     /// The observer slot of the op array `frame` serves, resolved to

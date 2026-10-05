@@ -30,9 +30,10 @@ mod class;
 mod marshal;
 
 pub use crate::observer::{
-    BeginHandler, EndHandler, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
-    ObservedFiber, ObserverHandlers, ObserverInit,
+    BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
+    ObservedFiber, ObserverHandlers, ObserverInit, Removed,
 };
+use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
@@ -1332,6 +1333,54 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
         self.supplies.observers.push(init);
+        self
+    }
+
+    /// An observer of diagnostics, `zend_observer_error_register` at
+    /// `MINIT` (design §4.3 seam 9): `observer` is told of every
+    /// diagnostic `zend_error` raises, its level, file, line and
+    /// message, before the user's error handler or the `zend_error_cb`
+    /// chain ([`ExtensionBuilder::error`]) is handed it and whatever
+    /// `error_reporting` says, and of every uncaught throwable rendered,
+    /// as the `E_ERROR` it becomes; a diagnostic a compile records is told
+    /// when it is raised after. It changes nothing of how the diagnostic
+    /// is served: that is the `zend_error_cb` chain's. The bundle's are
+    /// told in the order the extensions start, and an extension may
+    /// declare more than one.
+    #[must_use]
+    pub fn error_observer(mut self, observer: ErrorObserver) -> ExtensionBuilder {
+        self.supplies.error_observers.push(observer);
+        self
+    }
+
+    /// An observer of declared functions,
+    /// `zend_observer_function_declared_register` at `MINIT`: `observer`
+    /// is told of each function a request declares, with the lowered name
+    /// it is declared under, as a file's top-level functions are declared
+    /// when it loads, before its first line runs, and as a
+    /// `DECLARE_FUNCTION` declares one written inside a block. A file
+    /// served from the engine's cache is told again on every load, as
+    /// opcache tells php's observers on every hit.
+    #[must_use]
+    pub fn function_declared_observer(mut self, observer: FunctionDeclared) -> ExtensionBuilder {
+        self.supplies.functions_declared.push(observer);
+        self
+    }
+
+    /// An observer of linked classes,
+    /// `zend_observer_class_linked_register` at `MINIT`: `observer` is
+    /// told of each class a request links into its table, with the
+    /// lowered name it stands under, as a file's classes bound early are
+    /// linked when it loads, as a `DECLARE_CLASS` links one, and as
+    /// `class_alias()` gives a class of the program another name. An
+    /// anonymous class's declaration tells none, as php's
+    /// `DECLARE_ANON_CLASS` does not, save one opcache's load linked,
+    /// which it tells with the file's others; nor does an alias of an
+    /// extension's class. A file served from the engine's cache is told
+    /// again on every load.
+    #[must_use]
+    pub fn class_linked_observer(mut self, observer: ClassLinked) -> ExtensionBuilder {
+        self.supplies.classes_linked.push(observer);
         self
     }
 
