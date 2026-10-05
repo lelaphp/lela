@@ -1174,7 +1174,12 @@ impl Request {
     /// copy of its function, whose scope is the one the closure was
     /// made or bound in, which `Closure::bind` and `Closure::call` move.
     pub(crate) fn frame_scope(&self, frame: FrameRef) -> Option<ClassId> {
-        let state = self.vm.at(frame)?;
+        self.scope_of(self.vm.at(frame)?)
+    }
+
+    /// [`Request::frame_scope`] of a frame's state, on whichever stack
+    /// it stands.
+    pub(crate) fn scope_of(&self, state: &exec::FrameState) -> Option<ClassId> {
         if state.closure.is_some() {
             return self.closure_scope(state.closure);
         }

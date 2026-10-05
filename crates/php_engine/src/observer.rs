@@ -46,8 +46,9 @@
 //! chain (#1811; a generator's frame is never begun at its call, as
 //! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
 //! notices and adding and removing handlers while a request is served
-//! (#1812), the stepping function's events (#1813), and a frame
-//! reference a handler may keep (#1827).
+//! (#1812), and the stepping function's events (#1813). A handler reads
+//! its frame through [`Observed::frame`] and keeps one as a
+//! [`FrameId`](crate::api::request::FrameId) (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
@@ -58,7 +59,7 @@ use std::sync::Arc;
 use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
-use crate::api::request::Request;
+use crate::api::request::{FrameView, Request};
 use crate::api::values::{ClassId, Value};
 
 /// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once of each function, on its first
@@ -85,8 +86,10 @@ pub struct ObserverHandlers {
 
 /// The frame an observer is handed, borrowed for the handler's span
 /// alone (design §4.3 row 9): the request through `Deref`, and reads of
-/// the one frame observed, which no reference outlives. A frame reference that
-/// can be kept is #1827's.
+/// the one frame observed through [`Observed::frame`], which no borrow
+/// outlives. A frame kept past the handler is its
+/// [`FrameId`](crate::api::request::FrameId), checked each time it is
+/// read again.
 pub struct Observed<'a> {
     req: &'a mut Request,
     frame: FrameRef,
@@ -106,26 +109,34 @@ impl DerefMut for Observed<'_> {
 }
 
 impl Observed<'_> {
+    /// The frame observed, `execute_data`, read for as long as the
+    /// handler does not write through the request: what it serves, where
+    /// it stands, the frames below it, and its identity to keep.
+    #[must_use]
+    pub fn frame(&self) -> FrameView<'_> {
+        self.req.frame_view(self.frame)
+    }
+
     /// `EX(func)` where the frame serves a function or a method; `None`
     /// for an included, evaluated or main file's op array, which php
     /// names by its `filename` alone.
     #[must_use]
     pub fn function(&self) -> Option<Function> {
-        self.req.frame_function(self.frame)
+        self.frame().function()
     }
 
     /// `EX(func)->common.scope`: the class a method is declared in, the
     /// one a closure is bound to, and the includer's for a file's frame.
     #[must_use]
     pub fn function_scope(&self) -> Option<ClassId> {
-        self.req.frame_scope(self.frame)
+        self.frame().function_scope()
     }
 
     /// `EX(func)->op_array.filename`: the file the op array was compiled
     /// from, `… : eval()'d code` for an evaluated string's.
     #[must_use]
     pub fn filename(&self) -> &[u8] {
-        self.req.frame_filename(self.frame).unwrap_or_default()
+        self.frame().filename()
     }
 }
 

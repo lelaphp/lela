@@ -14,6 +14,8 @@
 //! `ZVAL_COPY_VALUE` and `FREE_OP` as [`take_operand`], [`operand`] and
 //! [`free_operand`].
 
+use std::cell::Cell;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use php_heap::{FrameRef, MapPtr, MapTable, Zval};
@@ -461,6 +463,13 @@ pub(crate) struct FrameState {
     /// function called twice reads on its second call what its first
     /// primed.
     runtime_cache: MapPtr<RuntimeCache>,
+    /// The frame's identity, given the first time an extension keeps it
+    /// ([`crate::api::request::FrameId`]) and never given again in the
+    /// request; none until then. It moves with the state, so a
+    /// generator's frame keeps it across its resumptions as php's
+    /// `execute_data` is one, and a frame pushed later where this one
+    /// stood has none or another.
+    pub(crate) identity: Cell<Option<NonZeroU64>>,
 }
 
 /// One op array's runtime cache for one request, what
@@ -898,6 +907,7 @@ impl Vm {
             fast_calls: Vec::new(),
             op_array: None,
             runtime_cache,
+            identity: Cell::new(None),
         });
     }
 
