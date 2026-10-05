@@ -177,6 +177,7 @@ abi::ObjectHandlers::own_iterator
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
+abi::ObjectHandlers::refusals
 abi::ObjectHandlers::unserialize
 abi::ObjectHandlers::unset_dimension
 abi::ObjectHandlers::unset_property
@@ -212,6 +213,11 @@ abi::Ref::is_given
 abi::Ref::reference
 abi::Ref::separated
 abi::Ref::set
+abi::Refusals
+abi::Refusals::NONE
+abi::Refusals::cloning
+abi::Refusals::comparison
+abi::Refusals::construction
 abi::Shell
 abi::StandardHandlesHook
 abi::StartupIni
