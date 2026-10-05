@@ -1621,9 +1621,9 @@ impl Request {
         // them again after, whatever a write threw; `EG(fake_scope) =
         // scope` for the writes and put back after them.
         Self::mark_reinitable(new, true);
-        let saved = std::mem::replace(&mut self.fake_scope, scope);
+        let saved = self.replace_fake_scope(scope);
         let written = self.clone_with_writes(new, table, properties);
-        self.fake_scope = saved;
+        self.replace_fake_scope(saved);
         Self::mark_reinitable(new, false);
         if let Err(thrown) = written {
             self.release(new.as_value());

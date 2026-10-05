@@ -280,7 +280,7 @@ impl Request {
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
-        let fake = self.fake_scope.take();
+        let fake = self.replace_fake_scope(None);
         let served = self.serve_call_body(
             function,
             this,
@@ -289,7 +289,7 @@ impl Request {
             arguments,
             extra_named,
         );
-        self.fake_scope = fake;
+        self.replace_fake_scope(fake);
         served
     }
 
