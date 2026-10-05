@@ -261,9 +261,12 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `php_sqlite3_object_free_storage`: the authorizer and every

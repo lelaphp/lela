@@ -60,9 +60,12 @@ fn handled<P: Props>(name: &[u8]) -> Option<&'static str> {
     P::NAMES.iter().copied().find(|n| n.as_bytes() == name)
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl<P: Props> ObjectHandlers for Handlers<P> {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

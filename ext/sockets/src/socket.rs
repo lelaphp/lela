@@ -138,12 +138,15 @@ pub(crate) struct Handlers;
 
 pub(crate) static SOCKET: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("socket_create()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE
-            .construction(Some("socket_create()"))
-            .cloning()
-            .comparison()
+        REFUSALS
     }
 
     /// `socket_free_obj`: the fd closed where the socket owns it,

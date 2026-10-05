@@ -255,9 +255,12 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning().comparison()
+        REFUSALS
     }
 
     /// `pdo_dbh_new` past the allocation: the property table built at

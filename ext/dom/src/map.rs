@@ -555,9 +555,12 @@ pub(crate) struct MapHandlers;
 
 pub(crate) static HANDLERS: MapHandlers = MapHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for MapHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `php_dom_iterator`: the iterator, `curobj`, `index` and the cache tag.

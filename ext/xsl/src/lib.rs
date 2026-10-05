@@ -164,9 +164,12 @@ fn read_int(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<i64, Th
     Ok(n)
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `xsl_objects_new`: the default preferences, and the two limits at

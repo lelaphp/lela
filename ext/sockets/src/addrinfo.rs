@@ -94,12 +94,15 @@ pub(crate) struct Handlers;
 
 pub(crate) static ADDRESS_INFO: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("socket_addrinfo_lookup()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE
-            .construction(Some("socket_addrinfo_lookup()"))
-            .cloning()
-            .comparison()
+        REFUSALS
     }
 
     /// `address_info_free_obj`: `ai_canonname` and `ai_addr` given back.

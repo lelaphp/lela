@@ -626,9 +626,12 @@ pub(crate) struct TokenListHandlers;
 
 pub(crate) static HANDLERS: TokenListHandlers = TokenListHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for TokenListHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `dom_token_list_free_obj`: the set's table and strings and the

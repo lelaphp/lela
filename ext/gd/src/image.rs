@@ -72,9 +72,12 @@ pub(crate) struct ImageHandlers;
 
 pub(crate) static IMAGE: ImageHandlers = ImageHandlers;
 
+/// What the table refuses: cloning and comparison.
+const IMAGE_REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for ImageHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning().comparison()
+        IMAGE_REFUSALS
     }
 
     fn get_constructor(
@@ -92,9 +95,12 @@ pub(crate) struct FontHandlers;
 
 pub(crate) static FONT: FontHandlers = FontHandlers;
 
+/// What the table refuses: cloning.
+const FONT_REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for FontHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        FONT_REFUSALS
     }
 
     fn get_constructor(

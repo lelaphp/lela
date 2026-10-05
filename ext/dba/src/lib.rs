@@ -296,12 +296,15 @@ pub(crate) struct Handlers;
 
 pub(crate) static CONNECTION: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("dba_open() or dba_popen()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE
-            .construction(Some("dba_open() or dba_popen()"))
-            .cloning()
-            .comparison()
+        REFUSALS
     }
 
     /// `dba_connection_cast_object`: `(int)` is the object's id, as it

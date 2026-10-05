@@ -331,12 +331,15 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
+/// What the table refuses: construction, cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE
+    .construction(Some("xml_parser_create() or xml_parser_create_ns()"))
+    .cloning()
+    .comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE
-            .construction(Some("xml_parser_create() or xml_parser_create_ns()"))
-            .cloning()
-            .comparison()
+        REFUSALS
     }
 
     /// `xml_parser_get_gc`: the object, each callable's owner and the two

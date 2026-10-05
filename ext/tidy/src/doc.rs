@@ -46,9 +46,12 @@ pub(crate) struct Handlers {
 pub(crate) static DOC: Handlers = Handlers { node: false };
 pub(crate) static NODE: Handlers = Handlers { node: true };
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `tidy_object_new` for a `tidy`: a document, its error buffer, the

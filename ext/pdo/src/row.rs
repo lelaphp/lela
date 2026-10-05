@@ -140,9 +140,12 @@ fn by_key(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Valu
     }
 }
 
+/// What the table refuses: cloning and comparison.
+const REFUSALS: Refusals = Refusals::NONE.cloning().comparison();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning().comparison()
+        REFUSALS
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

@@ -4511,9 +4511,12 @@ pub(crate) struct ReflectorHandlers;
 /// The handlers every reflector with a [`Reflected`] payload carries.
 pub(crate) static HANDLERS: ReflectorHandlers = ReflectorHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for ReflectorHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

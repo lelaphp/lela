@@ -257,9 +257,12 @@ pub(crate) struct SodiumException;
 /// the trace `zend_default_exception_new` has written.
 pub(crate) struct SodiumHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for SodiumHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

@@ -1199,9 +1199,12 @@ fn bad_array_access(req: &mut Request) -> Thrown {
     throw_error(req, "Error", "Cannot use object of type FFI as array")
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `zend_fake_get_constructor`.

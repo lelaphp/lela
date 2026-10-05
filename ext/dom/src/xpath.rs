@@ -1036,9 +1036,12 @@ pub(crate) struct XPathHandlers;
 
 pub(crate) static HANDLERS: XPathHandlers = XPathHandlers;
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl php_ext::abi::ObjectHandlers for XPathHandlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     fn read_property(

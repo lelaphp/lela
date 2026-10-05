@@ -309,9 +309,12 @@ impl Walk for Strings {
     }
 }
 
+/// What the table refuses: cloning.
+const REFUSALS: Refusals = Refusals::NONE.cloning();
+
 impl ObjectHandlers for Handlers {
     fn refusals(&self) -> Refusals {
-        Refusals::NONE.cloning()
+        REFUSALS
     }
 
     /// `IntlIterator_objects_dtor`, `destroy_it` on the cursor.
