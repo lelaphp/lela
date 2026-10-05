@@ -70,6 +70,24 @@ fn a_failed_start_ends_php_cgi_before_the_program() {
     assert_eq!(others, 1, "no session file is written after the failure");
 }
 
+/// `-q` and `-l` set `no_headers` only once `php_request_startup`
+/// returned (`Z/sapi/cgi/cgi_main.c:2468-2471`), so the failure's output
+/// commits the head under them too; `-l` writes no verdict.
+#[test]
+fn the_head_is_committed_under_q_and_l_since_the_start_never_returned() {
+    for flag in ["-q", "-l"] {
+        let dir = tree(&flag[1..]);
+        let out = served(&dir, &[flag]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{HEAD}{FAILED}"),
+            "{flag}"
+        );
+        assert_eq!(out.status.code(), Some(255), "{flag}");
+    }
+}
+
 /// What a buffer `output_buffering` started still holds is never flushed,
 /// since no `php_request_shutdown` ends the buffers: nothing at all is
 /// written, not even the head.
