@@ -446,10 +446,60 @@ pub(crate) fn end_all(req: &mut Request) {
 }
 
 /// `zend_observer_error_cb` (`Z/Zend/zend_observer.h:152`): told of a
-/// diagnostic, its level, file, line and message, as php's
-/// `zend_error_impl` tells every one registered before it hands the
-/// diagnostic to the user's handler or to `zend_error_cb`.
-pub(crate) type ErrorObserver = fn(&mut Request, Level, &[u8], u32, &[u8]);
+/// diagnostic ([`ErrorNotice`]), as php's `zend_error_impl` tells every
+/// one registered before it hands the diagnostic to the user's handler
+/// or to `zend_error_cb`.
+pub(crate) type ErrorObserver = fn(&mut Request, &ErrorNotice<'_>);
+
+/// What an error observer is told of one diagnostic, the four values
+/// `zend_observer_error_cb` is handed: the level, the file, the line and
+/// the message, and whether php's `type` carried `E_DONT_BAIL`.
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorNotice<'a> {
+    level: Level,
+    file: &'a [u8],
+    line: u32,
+    message: &'a [u8],
+    uncaught: bool,
+}
+
+impl<'a> ErrorNotice<'a> {
+    /// The level the diagnostic was raised at, `type & E_ALL`.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// The file the diagnostic names, `Unknown` where nothing executes.
+    #[must_use]
+    pub fn file(&self) -> &'a [u8] {
+        self.file
+    }
+
+    /// The line the diagnostic names.
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The message, its bytes as raised.
+    #[must_use]
+    pub fn message(&self) -> &'a [u8] {
+        self.message
+    }
+
+    /// Whether this is an uncaught throwable rendered as the request
+    /// ends, `zend_exception_error`'s `E_ERROR`, or a `ParseError`'s or a
+    /// `CompileError`'s own level, which php tells with `E_DONT_BAIL` set
+    /// in `type` (`Z/Zend/zend_exceptions.c:926`, `:951-953`), so a tool
+    /// tells it from a fatal `zend_error` raised. A pending throwable
+    /// reported as a warning before a fatal is told as the warning
+    /// alone.
+    #[must_use]
+    pub fn uncaught(&self) -> bool {
+        self.uncaught
+    }
+}
 
 /// `zend_observer_function_declared_cb` (`Z/Zend/zend_observer.h:131`):
 /// told of a function declared, and the lowered name it is declared
@@ -480,15 +530,43 @@ pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, mes
     if req.shared.supplied.error_observers.is_empty() {
         return;
     }
-    notify_error(req, level, file, line, message);
+    notify_error(
+        req,
+        ErrorNotice {
+            level,
+            file,
+            line,
+            message,
+            uncaught: false,
+        },
+    );
+}
+
+/// [`error`] for an uncaught throwable `zend_exception_error` renders,
+/// told with php's `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
+#[inline]
+pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+    if req.shared.supplied.error_observers.is_empty() {
+        return;
+    }
+    notify_error(
+        req,
+        ErrorNotice {
+            level,
+            file,
+            line,
+            message,
+            uncaught: true,
+        },
+    );
 }
 
 #[cold]
 #[inline(never)]
-fn notify_error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
     let shared = Arc::clone(&req.shared);
     for observer in shared.supplied.error_observers.iter() {
-        observer(req, level, file, line, message);
+        observer(req, &notice);
     }
 }
 

@@ -242,7 +242,8 @@ fn an_alias_of_a_program_class_is_linked_and_an_anonymous_class_is_not() {
 /// `zend_error_cb` chain is handed it, of one the user's handler takes,
 /// which no link is handed, and of one `@` hides, which the chain is
 /// handed and `php_error_cb` masks; and of an uncaught throwable as the
-/// `E_ERROR` `zend_exception_error` renders.
+/// `E_ERROR` `zend_exception_error` renders, marked uncaught as php's
+/// `E_DONT_BAIL` marks it, where a fatal `zend_error` raises is not.
 #[test]
 fn the_error_observer_is_told_of_every_diagnostic_before_it_is_served() {
     let rec = Recording::start();
@@ -261,7 +262,7 @@ fn the_error_observer_is_told_of_every_diagnostic_before_it_is_served() {
     let events = only(
         &rec.events().between("built", "served"),
         &[
-            ErrorObserved(Level::Error, String::new()),
+            ErrorObserved(Level::Error, String::new(), false),
             Error(String::new()),
         ],
     );
@@ -269,15 +270,15 @@ fn the_error_observer_is_told_of_every_diagnostic_before_it_is_served() {
     assert_eq!(
         events.get(..3).unwrap_or_default(),
         [
-            Ext(0, ErrorObserved(Level::Warning, undefined("a"))),
-            Ext(0, ErrorObserved(Level::Warning, undefined("b"))),
+            Ext(0, ErrorObserved(Level::Warning, undefined("a"), false)),
+            Ext(0, ErrorObserved(Level::Warning, undefined("b"), false)),
             Ext(0, Error(undefined("b"))),
         ]
     );
     assert!(
         matches!(
             events.get(3..),
-            Some([Ext(0, ErrorObserved(Level::Error, told)), Ext(0, Error(served))])
+            Some([Ext(0, ErrorObserved(Level::Error, told, true)), Ext(0, Error(served))])
                 if told.starts_with("Uncaught Exception: x") && told == served
         ),
         "the uncaught throwable is told and then served: {events:?}"
@@ -303,14 +304,17 @@ fn a_fatal_is_told_before_it_is_rendered_and_the_frames_ended() {
     let events = only(
         &rec.events().between("built", "served"),
         &[
-            ErrorObserved(Level::Error, String::new()),
+            ErrorObserved(Level::Error, String::new(), false),
             Error(String::new()),
             End(String::new(), None),
         ],
     );
-    let fatal = events
-        .iter()
-        .position(|e| *e == Ext(0, ErrorObserved(Level::UserError, "Foo error".to_owned())));
+    let fatal = events.iter().position(|e| {
+        *e == Ext(
+            0,
+            ErrorObserved(Level::UserError, "Foo error".to_owned(), false),
+        )
+    });
     assert!(
         fatal.is_some_and(|at| {
             events.get(at + 1..)

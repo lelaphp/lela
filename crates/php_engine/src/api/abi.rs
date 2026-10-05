@@ -30,7 +30,7 @@ mod class;
 mod marshal;
 
 pub use crate::observer::{
-    BeginHandler, EndHandler, Observed, ObserverHandlers, ObserverInit, Removed,
+    BeginHandler, EndHandler, ErrorNotice, Observed, ObserverHandlers, ObserverInit, Removed,
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};

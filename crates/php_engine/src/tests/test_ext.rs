@@ -31,8 +31,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Compiled, ErrorBeneath, Extension, ExtensionBuilder, GcBeneath, Observed, ObserverHandlers,
-    Refusal, Start, StringBeneath,
+    Compiled, ErrorBeneath, ErrorNotice, Extension, ExtensionBuilder, GcBeneath, Observed,
+    ObserverHandlers, Refusal, Start, StringBeneath,
 };
 use super::api::call::Function;
 use super::api::raising::{Level, Thrown};
@@ -123,9 +123,9 @@ pub(crate) enum Phase {
     /// what it returned as [`returned_name`] renders it: `None` where
     /// it returned nothing, on an unwind or at a fatal.
     End(String, Option<String>),
-    /// Its error observer was told of a diagnostic, its level and
-    /// message ([`TestExt::observing`]).
-    ErrorObserved(Level, String),
+    /// Its error observer was told of a diagnostic, its level, message
+    /// and whether it was an uncaught throwable's ([`TestExt::observing`]).
+    ErrorObserved(Level, String, bool),
     /// Its observer of declared functions was told of one, the lowered
     /// name it was declared under.
     Declared(String),
@@ -386,9 +386,10 @@ impl<const N: u8> TestExt<N> {
             .class_linked_observer(Self::linked)
     }
 
-    fn error_observed(_: &mut Request, level: Level, _: &[u8], _: u32, message: &[u8]) {
-        let message = String::from_utf8_lossy(message).into_owned();
-        record(N, Phase::ErrorObserved(level, message));
+    fn error_observed(_: &mut Request, notice: &ErrorNotice<'_>) {
+        let message = String::from_utf8_lossy(notice.message()).into_owned();
+        let level = notice.level();
+        record(N, Phase::ErrorObserved(level, message, notice.uncaught()));
     }
 
     fn declared(_: &mut Request, _: Function, lowered: &[u8]) {

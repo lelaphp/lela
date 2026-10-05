@@ -149,7 +149,7 @@ impl Request {
         if let Ok(string) = PhpString::new(self, message.as_bytes()) {
             // `zend_exception_error`'s `zend_observer_error_notify`
             // before `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`).
-            crate::observer::error(self, level, file, line, string.as_bytes());
+            crate::observer::uncaught(self, level, file, line, string.as_bytes());
             self.zend_error_cb(level, string, message, file, line);
             self.release(Value::string(string));
         }

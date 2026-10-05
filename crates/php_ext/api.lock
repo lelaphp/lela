@@ -64,6 +64,12 @@ abi::ErrorBeneath::level
 abi::ErrorBeneath::line
 abi::ErrorBeneath::message
 abi::ErrorBeneath::serve
+abi::ErrorNotice
+abi::ErrorNotice::file
+abi::ErrorNotice::level
+abi::ErrorNotice::line
+abi::ErrorNotice::message
+abi::ErrorNotice::uncaught
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
