@@ -93,7 +93,7 @@ mod paths;
 pub(crate) use paths::is_wrapper_url;
 pub use paths::{RealpathEntry, scheme_length};
 mod pending;
-pub(crate) use pending::Raised;
+pub use pending::Raised;
 mod post;
 mod preload;
 mod properties;
