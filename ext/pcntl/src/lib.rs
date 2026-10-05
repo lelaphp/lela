@@ -22,8 +22,8 @@
 //! thread alone, as php's does, through the engine's one home for fork
 //! ([`Request::fork`], #1807): the engine joins every thread of its own
 //! first, the request's timer among them, and forks only while this
-//! request is the one inside the engine, so nothing another thread held
-//! is left held in the child. The child goes on in its request's own
+//! request is the one inside the engine, so nothing a thread of the
+//! engine's held is left held in the child. The child goes on in its request's own
 //! state, which is its copy: its values, frames, buffered bytes, the
 //! handler table here, and no timer, as a child inherits no interval
 //! timer. A host that serves on threads has requests on other threads,

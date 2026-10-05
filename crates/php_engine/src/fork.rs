@@ -15,7 +15,10 @@
 //! the caller's own. A thread started any other way than [`spawn`] is
 //! one no fork waits for, and a thread started through it that a fork
 //! does not join first leaves the fork refused rather than a child that
-//! hangs.
+//! hangs. What the engine cannot see is a host's own thread that holds
+//! no request, such as today's `php -S` accept loop; no host that forks
+//! or carries pcntl may keep one, which is why `php -S` becomes php's
+//! one-threaded event loop (#1884).
 //!
 //! Two ways in, as the ruling has them. pcntl asks through the request,
 //! [`Request::fork`](crate::api::request::Request::fork): the request's
@@ -131,13 +134,22 @@ impl Thread {
 #[derive(Debug)]
 pub(crate) struct Alone(());
 
+/// Who asks for a fork, and so what may stand inside the engine beside
+/// it: the request it is, once its own threads are joined, or nothing at
+/// all for a host.
+#[derive(Debug, Clone, Copy)]
+enum Asker {
+    Host = 0,
+    Request = 1,
+}
+
 impl Alone {
-    /// Held, where what runs inside the engine is `own` alone: the asking
-    /// request, whose own threads it has joined, or nothing at all for a
-    /// host. Refused with `EBUSY` where anything else runs, a request
-    /// another thread serves or a thread the engine started; a second
-    /// fork under way is waited out.
-    fn hold(own: usize) -> io::Result<Alone> {
+    /// Held, where what stands inside the engine is the asker alone.
+    /// Refused with `EBUSY` where anything else does, a request another
+    /// thread serves or a thread the engine started; a second fork under
+    /// way is waited out.
+    fn hold(asker: Asker) -> io::Result<Alone> {
+        let own = asker as usize;
         loop {
             match INSIDE.compare_exchange_weak(
                 own,
@@ -171,7 +183,7 @@ impl Drop for Alone {
 /// once the request's own threads are joined, so what runs inside the
 /// engine is that request alone.
 pub(crate) fn fork_request() -> io::Result<Forked> {
-    Alone::hold(1)?.fork()
+    Alone::hold(Asker::Request)?.fork()
 }
 
 /// `fork(2)` for a host (#1807): the process copied with no request in
@@ -188,7 +200,7 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// forks does; otherwise the OS error `fork(2)` failed with, and no
 /// process was made.
 pub fn fork() -> io::Result<Forked> {
-    Alone::hold(0)?.fork()
+    Alone::hold(Asker::Host)?.fork()
 }
 
 #[cfg(test)]
@@ -196,10 +208,11 @@ mod tests {
     use super::{EBUSY, FORKING, INSIDE, Inside, fork, spawn};
     use std::sync::atomic::Ordering;
 
-    /// A thread started through the home is inside the engine from before
-    /// it runs to after it is joined.
+    /// A thread started through the home is inside the engine while it
+    /// waits; the harness's other tests move the number too, so what is
+    /// read is a floor.
     #[test]
-    fn a_thread_is_inside_until_it_is_joined() {
+    fn a_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let Some(thread) = spawn("php-test", move || {
             let _ = rx.recv();

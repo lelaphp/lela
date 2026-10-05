@@ -470,7 +470,8 @@ fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
 /// library's thread table could not start. A forked process of php-fpm's
 /// child that ends its request goes back to the child's loop, as php's
 /// does, so the children and the workers leave by `exec` rather than by
-/// `exit`; a child not gone within five seconds is hung, and killed. The
+/// `exit`, so a child's own request end is the CLI's fence to hold, not
+/// this one; a child not gone within five seconds is hung, and killed. The
 /// request itself is untimed, as the CLI's is, since php-fpm's
 /// `max_execution_time` of thirty seconds would count the waits.
 #[test]

@@ -1,7 +1,8 @@
 //! What php-fpm asks of the C library that neither Rust's standard library
 //! nor `nix` answers safely, the host's one `unsafe` home (ADR-0008): the
-//! signal handlers of the master and of a child, the anonymous shared memory the scoreboard lives in, the
-//! descriptors a reload inherits by number, the process's environment,
+//! signal handlers of the master and of a child, the anonymous shared
+//! memory the scoreboard lives in, the descriptors a reload inherits by
+//! number, the process's environment,
 //! priority and title, the local time `strftime` writes, and the stop
 //! and the task port or the attachment a slow request's trace takes. Each
 //! `unsafe` block is one operation with its `SAFETY` comment.
