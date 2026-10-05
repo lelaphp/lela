@@ -527,6 +527,20 @@ impl Request {
         Ok(top.compile(self, code)?.0)
     }
 
+    /// `f` over a string the host evaluates of its own, `-r`'s code, the
+    /// shell's and a debugger's, compiled as `zend_eval_stringl` compiles
+    /// it: `CG(compiler_options)` set to `ZEND_COMPILE_DEFAULT_FOR_EVAL`
+    /// around the compile and put back after
+    /// (`Z/Zend/zend_execute_API.c:1349-1352`), so its oplines carry no
+    /// extended info whatever the engine's, and an `eval` the string
+    /// serves compiles under the engine's again.
+    pub(crate) fn host_string<T>(&mut self, f: impl FnOnce(&mut Request) -> T) -> T {
+        let outer = std::mem::replace(&mut self.compiling_host_string, true);
+        let compiled = f(self);
+        self.compiling_host_string = outer;
+        compiled
+    }
+
     /// php's own `compile_string`, beneath every link of the pointer:
     /// `source` compiled under `name` as the request's own unit.
     pub(crate) fn compile_string_own(

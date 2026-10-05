@@ -555,7 +555,11 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.send_args(&plan, &arguments, None)?;
-        Ok(Some(self.call_op(Opcode::DoFcall, line, plan.extra_named)))
+        Ok(Some(self.extended_call(
+            Opcode::DoFcall,
+            line,
+            plan.extra_named,
+        )))
     }
 
     /// The statement `zend_compile_property_hooks` makes of a `set`

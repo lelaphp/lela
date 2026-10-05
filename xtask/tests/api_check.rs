@@ -63,8 +63,10 @@ fn the_clean_fixture_passes_every_rule() {
     assert_eq!(api.rule, "api.lock-line");
     assert_eq!(of(&readings, "ext/random").rule, "ext.pub-beyond-extension");
     assert!(
-        of(&readings, "ext/random").message.contains("Handle"),
-        "the pub surface beyond extension() is printed"
+        of(&readings, "ext/random")
+            .message
+            .contains("Handle, each on design §4.10's list of surfaces"),
+        "the pub surface beyond extension() is printed, held to the fixture's design"
     );
     assert_eq!(of(&readings, "sapi").status, Status::Pass);
     assert_eq!(
@@ -78,6 +80,34 @@ fn the_clean_fixture_passes_every_rule() {
         assert_eq!(reading.instrument, "api-check");
         assert_eq!(reading.tree().len(), 40, "{}", reading.scope);
     }
+}
+
+/// An `ext/*` export on no row of design §4.10's list of surfaces fails
+/// its crate's reading, which names every one (#1826): the `surfaces`
+/// fixture's `Regex::study`, a member the row's `with` list does not
+/// write, and `unlisted`, which no row writes, beside `Regex` and
+/// `Regex::compile`, which the row lists. The `clean` fixture's design
+/// lists its one export, and passes.
+#[test]
+fn an_export_on_no_row_of_the_list_of_surfaces_fails() {
+    let readings = readings("surfaces");
+    let pcre = of(&readings, "ext/pcre");
+    assert_eq!(pcre.status, Status::Fail, "{}", pcre.message);
+    assert_eq!(pcre.rule, "ext.pub-beyond-extension");
+    assert!(
+        pcre.message.starts_with(
+            "pub beyond extension() and on no row of design §4.10's list of surfaces, \
+             2 of 4: Regex::study, unlisted"
+        ),
+        "{}",
+        pcre.message
+    );
+    assert!(
+        pcre.message
+            .contains("pub beyond extension(): Regex, Regex::compile, each on design §4.10's list"),
+        "{}",
+        pcre.message
+    );
 }
 
 /// An item lock's reading counts its lines by the module that defines

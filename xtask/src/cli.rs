@@ -507,6 +507,11 @@ pub(crate) struct Identity {
     /// engine's own where cargo puts it.
     #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
+    /// A `[regime.<name>]` of the pin both sides dump under after `dump`:
+    /// `extended-info`, php's `-e`, is the per-commit corpus's second
+    /// (#1822). The reading's scope carries it, `php-src@regime=<name>`.
+    #[arg(long, value_name = "NAME")]
+    pub regime: Option<String>,
 }
 
 /// What is done to a track rather than asked of it.

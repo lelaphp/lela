@@ -148,6 +148,9 @@ pub struct Options {
     /// `-a` taken, which `do_cli` answers with `Interactive shell` and
     /// a blank line on stdout before it serves whatever the mode is.
     pub interactive: bool,
+    /// `-e` taken, `main`'s `use_extended_info`: the engine compiles
+    /// with extended info (`Z/sapi/cli/php_cli.c:1317`, `:1366`).
+    pub extended_info: bool,
     pub ask: Ask,
 }
 
@@ -259,6 +262,7 @@ impl Options {
             ini: Vec::new(),
             repeat: 1,
             interactive: false,
+            extended_info: false,
             ask: Ask::Serve(Program::Stdin, Vec::new()),
         };
         match options.main_pass(&argv)? {
@@ -387,6 +391,10 @@ impl Options {
                     }
                     b'S' => {
                         server = true;
+                        continue;
+                    }
+                    b'e' => {
+                        self.extended_info = true;
                         continue;
                     }
                     b'h' | b'?' => Ask::Usage,
@@ -736,6 +744,7 @@ mod tests {
                 },
                 repeat: 1,
                 interactive: false,
+                extended_info: false,
                 ini: vec![
                     (b"precision".to_vec(), b"10".to_vec()),
                     (b"foo".to_vec(), b"1".to_vec())
@@ -863,15 +872,30 @@ mod tests {
     fn the_switches_taken_and_changing_nothing() {
         let served = Ok(Ask::Serve(direct("echo 1;"), Vec::new()));
         assert_eq!(ask(&["-n", "-c", "/tmp", "-r", "echo 1;"]), served);
-        assert_eq!(ask(&["-n", "-e", "-r", "echo 1;"]), served);
         assert_eq!(ask(&["-n", "-H", "-r", "echo 1;"]), served);
         assert_eq!(ask(&["-n", "-t", "x", "-r", "echo 1;"]), served);
         assert_eq!(ask(&["-n", "-C", "-q", "-r", "echo 1;"]), served);
         assert_eq!(ask(&["-n", "--no-php-ini", "--run", "echo 1;"]), served);
         assert_eq!(ask(&["-n", "--run=echo 1;"]), served);
+    }
+
+    /// `-e` asks for nothing of its own: it is `main`'s
+    /// `use_extended_info`, read in the first loop over the line, and
+    /// the program is served as it would be without it.
+    #[test]
+    fn extended_info_is_read_and_serves_what_the_line_asks() {
+        let read = |words: &[&str]| parse(words).map(|o| (o.extended_info, o.ask));
         assert_eq!(
-            ask(&["-n", "-e"]),
-            Ok(Ask::Serve(Program::Stdin, Vec::new()))
+            read(&["-n", "-e", "-r", "echo 1;"]),
+            Ok((true, Ask::Serve(direct("echo 1;"), Vec::new())))
+        );
+        assert_eq!(
+            read(&["-n", "-e"]),
+            Ok((true, Ask::Serve(Program::Stdin, Vec::new())))
+        );
+        assert_eq!(
+            read(&["-n", "-r", "echo 1;"]),
+            Ok((false, Ask::Serve(direct("echo 1;"), Vec::new())))
         );
     }
 

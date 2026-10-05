@@ -130,7 +130,7 @@ impl Request {
 
     /// The code block itself, on a frame of its own over the global table.
     fn code_over(&mut self, name: &[u8], code: &[u8]) -> Result<Evaluated, Fatal> {
-        let unit = match self.compile_eval(code, name) {
+        let unit = match self.host_string(|req| req.compile_eval(code, name)) {
             Ok(unit) => unit,
             Err(thrown) => {
                 self.leave_pending(&thrown);
@@ -181,7 +181,8 @@ impl Request {
 
     /// `zend_eval_stringl(code, &retval, name)`'s compile and serving
     /// (`Z/Zend/zend_execute_API.c:1333-1390`): `return code;` compiled
-    /// as an `eval` under `name` and served by the loop bound to the
+    /// as an `eval` under `name`, as a host's string is
+    /// ([`Request::host_string`]), and served by the loop bound to the
     /// engine, in `scope`'s frame as a nested code frame is, which
     /// `zend_execute` serves with `EG(current_execute_data)` there: its
     /// variables, `$this` and scope, the frame below the evaluated one.
@@ -196,7 +197,7 @@ impl Request {
         name: &[u8],
     ) -> Result<Evaluation, Fatal> {
         let source = [&b"return "[..], code, b";"].concat();
-        let unit = match self.compile_eval(&source, name) {
+        let unit = match self.host_string(|req| req.compile_eval(&source, name)) {
             Ok(unit) => unit,
             Err(thrown) => {
                 self.leave_pending(&thrown);

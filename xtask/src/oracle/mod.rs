@@ -497,21 +497,46 @@ pub struct Regime {
     pub args: Vec<String>,
 }
 
-impl Regime {
-    /// The regime as an adapter with no command line takes it, the engine
-    /// linked into the harness: its ini, laid over the engine's defaults
-    /// as a host's `-d` lays it. A regime that carries `args` is refused,
-    /// since an argument reaches a binary's command line and nothing
-    /// else, and dropping it from one side of a comparison alone is the
-    /// flag swallowed silently #1780 rejects. The caller names the regime.
-    pub(crate) fn linked_ini(&self) -> Result<&[String]> {
-        if !self.args.is_empty() {
-            bail!(
-                "carries the arguments {:?}, which reach a binary's command line and no linked engine",
-                self.args
-            );
+/// The one argument of php's command line an engine linked into the
+/// harness takes, as every host reads it: `-e`, which a host hands its
+/// engine's builder as extended info (#1780, #1822).
+pub(crate) const EXTENDED_INFO: &str = "-e";
+
+/// One or more regimes as an adapter with no command line takes them,
+/// the engine linked into the harness: their ini in the order named, laid
+/// over the engine's defaults as a host's `-d` lays it, and what their
+/// arguments ask of the engine as it is built, which is
+/// [`EXTENDED_INFO`] and nothing else. Any other argument is refused,
+/// since it reaches a binary's command line and no linked engine, and
+/// dropping it from one side of a comparison alone is the flag
+/// swallowed silently #1780 rejects. The caller names the regime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Linked {
+    pub(crate) ini: Vec<String>,
+    /// [`EXTENDED_INFO`] was among the arguments.
+    pub(crate) extended_info: bool,
+}
+
+impl Linked {
+    /// `regimes` in the order a binary's run hands them.
+    pub(crate) fn of<'a>(regimes: impl IntoIterator<Item = &'a Regime>) -> Result<Linked> {
+        let mut linked = Linked::default();
+        for regime in regimes {
+            let unknown: Vec<&String> = regime
+                .args
+                .iter()
+                .filter(|arg| *arg != EXTENDED_INFO)
+                .collect();
+            if !unknown.is_empty() {
+                bail!(
+                    "carries the arguments {:?}, which reach a binary's command line and no linked engine; the linked engine takes `{EXTENDED_INFO}` alone",
+                    regime.args
+                );
+            }
+            linked.extended_info |= !regime.args.is_empty();
+            linked.ini.extend(regime.ini.iter().cloned());
         }
-        Ok(&self.ini)
+        Ok(linked)
     }
 }
 
@@ -763,9 +788,12 @@ pub struct Invocation<'a> {
     /// lane, so that both run under one recipe.
     pub binary: &'a Path,
     pub program: Program<'a>,
-    /// A `[regime.<name>]` of the pin, its args after the recipe's and
-    /// its ini after the recipe's.
-    pub regime: Option<&'a str>,
+    /// The `[regime.<name>]`s of the pin the run stands under, in order:
+    /// each one's args after the recipe's and the regimes' before it, and
+    /// each one's ini after the recipe's and the regimes' before it, so a
+    /// lane composes the rows a person wrote rather than a row of its own
+    /// (`compile-identity` dumps under `dump` and one more, #1822).
+    pub regimes: &'a [&'a str],
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
     pub ini: &'a [String],
     /// Flags before the program's path, where php takes a mode of its own:
@@ -805,7 +833,7 @@ impl<'a> Invocation<'a> {
         Invocation {
             binary,
             program,
-            regime: None,
+            regimes: &[],
             ini: &[],
             flags: &[],
             args: &[],
@@ -1122,7 +1150,7 @@ impl<'a> Oracle<'a> {
     pub fn run(&self, program: Program<'_>, regime: Option<&str>) -> Result<Observation> {
         self.asserted()?;
         self.run_under(&Invocation {
-            regime,
+            regimes: regime.as_slice(),
             ..Invocation::new(&self.pin.oracle.path, program)
         })
     }
@@ -1134,7 +1162,11 @@ impl<'a> Oracle<'a> {
     /// §4.3, design §8).
     pub fn run_under(&self, call: &Invocation<'_>) -> Result<Observation> {
         let pin = self.pin;
-        let regime = call.regime.map(|name| pin.regime(name)).transpose()?;
+        let regimes = call
+            .regimes
+            .iter()
+            .map(|name| pin.regime(name))
+            .collect::<Result<Vec<_>>>()?;
         let recipe = &pin.recipe;
 
         let scratch = Scratch::for_program(recipe, call.program)?;
@@ -1147,11 +1179,11 @@ impl<'a> Oracle<'a> {
             None => Command::new(call.binary),
         };
         cmd.args(&recipe.args)
-            .args(regime.into_iter().flat_map(|r| &r.args));
+            .args(regimes.iter().flat_map(|r| &r.args));
         for ini in recipe
             .ini
             .iter()
-            .chain(regime.into_iter().flat_map(|r| &r.ini))
+            .chain(regimes.iter().flat_map(|r| &r.ini))
             .chain(call.ini)
         {
             cmd.arg("-d").arg(ini);

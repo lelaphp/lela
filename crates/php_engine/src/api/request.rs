@@ -372,6 +372,11 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     pub(crate) keys_made: u32,
+    /// Whether the string compiling now is one the host evaluates of its
+    /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
+    /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
+    /// extended info ([`Request::host_string`]).
+    pub(crate) compiling_host_string: bool,
     /// `CG(script_encoding_list)` where an `ini_set()` of
     /// `zend.script_encoding` moved it this request; the engine's where
     /// none did.
@@ -645,6 +650,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            compiling_host_string: false,
             script_encodings: None,
             buckets,
             aliases: tables.aliases,
