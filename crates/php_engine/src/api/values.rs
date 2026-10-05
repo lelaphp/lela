@@ -2165,6 +2165,27 @@ impl Resource {
         req.fatal_of(allocated).map(Resource::of)
     }
 
+    /// `zend_register_resource(NULL, type)`: a resource of `kind` with no
+    /// payload, one owner, under the next id; the `Err` is the memory
+    /// limit's fatal.
+    pub fn bare(req: &mut Request, kind: ResourceType) -> Result<Resource, Thrown> {
+        let allocated = req.heap_mut().resource(kind);
+        req.fatal_of(allocated).map(Resource::of)
+    }
+
+    /// [`Resource::sized`] for what php `pemalloc`s persistent, as
+    /// `_php_stream_alloc` does a persistent stream: the resource on the
+    /// request's heap, the `size` bytes off its count.
+    pub fn persistent<T: Any + Send>(
+        req: &mut Request,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Resource, Thrown> {
+        let allocated = req.heap_mut().resource_persistent(kind, payload, size);
+        req.fatal_of(allocated).map(Resource::of)
+    }
+
     /// The resource as a value, `ZVAL_RES`: named, no owner taken.
     #[must_use]
     pub const fn as_value(&self) -> Value {

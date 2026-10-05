@@ -12,9 +12,9 @@
 
 use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw};
+use crate::api::request::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{PhpArray, PhpString, Value};
-use crate::wrapper::TemporaryCheck;
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -769,7 +769,7 @@ fn parts(
         if cancel_upload == 0 {
             blen = mbuff.read(req, FILLUNIT, &mut end);
             let dir = req.ini_get(b"upload_tmp_dir").map(<[u8]>::to_vec);
-            temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryCheck::OnFallback);
+            temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::OnFallback);
             upload_cnt -= 1;
             if temp.is_none() {
                 upload.refuse(req, "File upload error - unable to create a temporary file")?;

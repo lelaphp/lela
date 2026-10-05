@@ -158,7 +158,7 @@ pub use mail::{build_headers as php_mail_build_headers, php_mail};
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::{EngineWrapper, Request};
+use php_ext::request::{EngineWrapper, Request, STREAM_HOOKS, Streams};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -792,6 +792,7 @@ pub fn extension() -> Extension {
         .into_iter()
         .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
         .request_state::<State>()
+        .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)
         .rshutdown(rshutdown)
         .rinit(rinit)

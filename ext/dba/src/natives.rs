@@ -9,7 +9,7 @@ use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
 };
-use php_ext::request::{Cast, Request, Resolve, Stream};
+use php_ext::request::{Cast, Request, Resolve, Stream, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::flatfile::{Flatfile, Stored};

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use php_ext::call::instantiate;
 use php_ext::raising::{Thrown, throw};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::PhpObject;
 
 use crate::archive::{

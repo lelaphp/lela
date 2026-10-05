@@ -107,16 +107,18 @@ impl Engine {
         {
             return;
         }
-        let stdin = req
-            .constant_named(b"STDIN")
-            .and_then(|value| req.stream_of(&value));
+        let stdin = req.constant_named(b"STDIN");
+        let get_line = req.stream_hooks().map(|hooks| hooks.get_line);
         let mut index = 0;
         while req.exit_status() == 0 {
-            let Some(line) = stdin.and_then(|stdin| stdin.get_line(req, None).ok().flatten())
+            let Some(line) = stdin
+                .as_ref()
+                .zip(get_line)
+                .and_then(|(stdin, get_line)| get_line(req, stdin))
             else {
                 break;
             };
-            let line = argn(line.as_bytes().to_vec());
+            let line = argn(line);
             let Ok(line) = PhpString::new(req, &line) else {
                 return;
             };

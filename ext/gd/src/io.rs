@@ -8,7 +8,7 @@ use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
-use php_ext::request::{Opening, Request, Stream};
+use php_ext::request::{Opening, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Encode, Format, GdFormat, Image, Rect, Reported};

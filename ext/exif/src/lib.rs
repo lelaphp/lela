@@ -34,7 +34,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Opening, Request, Stream, Whence};
+use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use image::{EncodingNames, Found, Image, Number, Section, Stored, TAG_NONE, c_int};

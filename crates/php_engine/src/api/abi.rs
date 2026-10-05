@@ -20,7 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{Request, Unresolved};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
 };
@@ -271,6 +271,11 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     }
 }
 
+/// php's `EG(persistent_list)`, the engine's [`Pool`] the stream layer
+/// lends its persistent entries from, each a value of the layer's own
+/// type under php's key ([`Request::persistent_list`]).
+pub type PersistentList = Pool<Vec<u8>, Box<dyn Any + Send>>;
+
 /// The entries of a [`Pool`] one request holds, each under php's key from
 /// the ask that took it out or opened it to the request's end: a second
 /// ask by the key [`find`](Lent::find)s the one held, and the request's
@@ -423,6 +428,55 @@ pub enum PostStartup {
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+
+/// What the engine asks of the stream layer above it, `php_streams`
+/// (design §4.3 seam 5), handed with [`ExtensionBuilder::stream_hooks`]:
+/// php's `zend_stream_open_function` and `zend_resolve_path` as
+/// `php_module_startup` points them at main's streams, opcache's open of
+/// a file it holds, and the standard streams `do_cli` registers and reads
+/// stdin through. With none the engine is Zend alone: an include opens a
+/// plain file and nothing else, a path resolves by `realpath(3)`
+/// (`zend_resolve_path_func`), and no standard stream is registered.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamHooks {
+    /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
+    /// STREAM_OPEN_FOR_INCLUDE)` and the whole read after it: the file a
+    /// path names read through its wrapper, with the `*opened_path` its
+    /// opener set; `None` for the open or the read that failed, which
+    /// warned. The `Err` is what the open threw.
+    pub open: StreamOpenHook,
+    /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
+    /// extension's own ([`ExtensionBuilder::resolve_path`]).
+    pub resolve_path: fn(&mut Request, &[u8]) -> Result<Vec<u8>, Unresolved>,
+    /// The stream opcache's `zend_stream_open` of a file it holds makes
+    /// and frees: its resource's number spent.
+    pub spend: fn(&mut Request),
+    /// `cli_register_file_handles`: the streams over the host's three
+    /// standard handles, `STDIN`, `STDOUT` and `STDERR` in that order, or
+    /// `None` where one of them could not be opened; with `true` once the
+    /// host's stdin was replaced under them, as phpdbg's `run <file`
+    /// replaces it.
+    pub standard_handles: StandardHandlesHook,
+    /// `php_stream_get_line` on the stream `value` names, as `do_cli`
+    /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
+    /// its end, or where it names no stream.
+    pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
+}
+
+/// [`StreamHooks::open`].
+pub type StreamOpenHook = fn(&mut Request, &[u8]) -> Result<Option<IncludeSource>, Thrown>;
+
+/// What [`StreamHooks::open`] read for an include: the file's bytes, and
+/// the `*opened_path` the wrapper's opener set, which the file is
+/// compiled under where it set one.
+#[derive(Debug)]
+pub struct IncludeSource {
+    pub source: Vec<u8>,
+    pub opened_path: Option<Vec<u8>>,
+}
+
+/// [`StreamHooks::standard_handles`].
+pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Value; 3]>, Thrown>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.
@@ -1099,6 +1153,16 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
         self.supplies.resolve_path = Some(hook);
+        self
+    }
+
+    /// The stream layer's hooks ([`StreamHooks`]), which `ext/standard`
+    /// hands as php's `basic_functions` registers the plain files wrapper
+    /// in its `MINIT`. The last supplier's are the ones asked, as
+    /// `php_module_startup` writes `zend_stream_open_function` once.
+    #[must_use]
+    pub fn stream_hooks(mut self, hooks: StreamHooks) -> ExtensionBuilder {
+        self.supplies.stream_hooks = Some(hooks);
         self
     }
 

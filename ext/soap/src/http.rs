@@ -12,7 +12,9 @@ use std::time::Duration;
 use php_ext::call::{call, lookup_function, new_object};
 use php_ext::coerce::{numeric_string, to_callable};
 use php_ext::raising::{Thrown, arg_value_error, throw};
-use php_ext::request::{Handshake, PHP_VERSION, Request, SocketOptions, Stream, Xport};
+use php_ext::request::{
+    Handshake, PHP_VERSION, Request, SocketOptions, Stream, Streams as _, Xport,
+};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::{UriParser, base64, stream_ctx_option, stream_ctx_set_option};

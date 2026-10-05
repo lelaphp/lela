@@ -15,7 +15,7 @@ use php_ext::abi::{OrFalse, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values as php;
 
 use constants::{

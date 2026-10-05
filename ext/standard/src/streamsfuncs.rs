@@ -95,7 +95,9 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, deprecated, docref,
     throw_error,
 };
-use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
+use php_ext::request::{
+    OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;

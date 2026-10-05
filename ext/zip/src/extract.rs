@@ -4,7 +4,7 @@
 
 use php_ext::abi::Union;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Request, Resolve, WrapperOp};
+use php_ext::request::{Request, Resolve, Streams as _, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, ValueRef};
 
 use crate::archive::FL_UNCHANGED;

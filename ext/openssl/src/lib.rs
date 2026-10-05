@@ -52,7 +52,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::Function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s

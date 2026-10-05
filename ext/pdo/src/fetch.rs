@@ -13,7 +13,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{
     Level, Thrown, arg_count_error, argument_error, docref, throw_error, while_pending,
 };
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{
     ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
 };

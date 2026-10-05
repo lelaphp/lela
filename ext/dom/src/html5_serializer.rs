@@ -7,7 +7,7 @@
 //! encoding through lexbor's encoder with `?` for what it lacks.
 
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Request, Stream, Streams as _};
 use php_ext::values::{PhpObject, PhpString};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,

@@ -5,7 +5,7 @@
 use std::os::fd::OwnedFd;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{FdStream, Request, Stream};
+use php_ext::request::{FdStream, Request, Stream, Streams as _};
 
 use crate::cdb::{Maker, Reader};
 use crate::flatfile::Flatfile;

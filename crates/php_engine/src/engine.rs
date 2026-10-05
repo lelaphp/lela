@@ -40,7 +40,6 @@ use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
-use crate::streams::Standard;
 use crate::supplied::{Keyed, Last, Phase, Resolved};
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 pub(crate) use crate::unit_cache::Cached;
@@ -327,6 +326,15 @@ impl Drop for Fds {
             }
         }
     }
+}
+
+/// Which of the host's three standard streams a [`FileHandles`] slot
+/// holds, fd 0, 1 or 2 under php's CLI, as a `php://` path names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standard {
+    Stdin = 0,
+    Stdout = 1,
+    Stderr = 2,
 }
 
 impl FileHandles {
@@ -675,10 +683,12 @@ pub(crate) struct Shared {
     /// functions ([`crate::multibyte`]).
     pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
-    /// The persistent pool (design §4.10, #1172): the sockets
-    /// `pfsockopen` and `STREAM_CLIENT_PERSISTENT` keep between requests,
-    /// php's `EG(persistent_list)`, each lent to one request at a time.
-    pub(crate) persistent: crate::api::abi::Pool<Vec<u8>, crate::streams::persistent::Entry>,
+    /// The persistent pool (design §4.10, #1172), php's
+    /// `EG(persistent_list)`: what the stream layer keeps between
+    /// requests, the sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT`
+    /// open, each lent to one request at a time
+    /// ([`Request::persistent_list`](crate::api::request::Request::persistent_list)).
+    pub(crate) persistent: Arc<crate::api::abi::PersistentList>,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -2726,7 +2736,7 @@ impl EngineBuilder {
                 locked,
                 script_encodings: Vec::new(),
                 units,
-                persistent: crate::api::abi::Pool::new(PERSISTENT_ENTRIES),
+                persistent: Arc::new(crate::api::abi::Pool::new(PERSISTENT_ENTRIES)),
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
@@ -3678,7 +3688,7 @@ impl Engine {
         if !web {
             let _ = req.arm(php_unit::AutoGlobal::Server);
         }
-        let _ = req.register_file_handles();
+        let _ = req.register_file_handles(false);
         req.enter_phase(crate::api::request::Phase::Running);
         Ok(req)
     }
@@ -3909,7 +3919,6 @@ impl Engine {
         // `deactivate`, in reverse, before the resources are closed.
         end_phase(&self.shared.extensions, req, |e| e.deactivate);
         req.close_resources();
-        req.return_persistent();
         req.free_user_handlers();
         req.destroy_symbol_table();
         req.destroy_static_vars();
@@ -4332,44 +4341,12 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     !exited && !req.bailing_out() && req.ending().is_none()
 }
 
-/// The extensions of the pinned build in the order `internal_functions.c`
-/// starts them, what its `php -n` answers `get_loaded_extensions()` in
-/// past `Core`: the order php's `MINIT`s register their stream wrappers
-/// and filters in, which `stream_get_wrappers()`, `stream_get_filters()`
-/// and phpinfo's `Registered PHP Streams` list. The engine starts the
-/// bundle's order as [`sort_modules`] leaves it, which is not the pinned
-/// build's (`openssl` after `standard`, `random` near the front), so the
-/// tables are put in this order after the extensions start
-/// ([`serve_rinits`]).
-#[rustfmt::skip]
-const MODULE_STARTUP: [&str; 65] = [
-    "date", "lexbor", "openssl", "pcre", "sqlite3", "zlib", "bcmath", "bz2", "calendar", "ctype",
-    "curl", "dba", "uri", "json", "mbstring", "SPL", "FFI", "fileinfo", "filter", "ftp", "gd",
-    "gettext", "gmp", "hash", "iconv", "intl", "session", "ldap", "standard", "libxml", "mysqlnd",
-    "mysqli", "odbc", "Zend OPcache", "pcntl", "PDO", "pdo_dblib", "pdo_mysql", "PDO_ODBC",
-    "pdo_pgsql", "pdo_sqlite", "pgsql", "Phar", "posix", "random", "readline", "Reflection",
-    "exif", "shmop", "SimpleXML", "snmp", "soap", "sockets", "sodium", "sysvmsg", "sysvsem",
-    "sysvshm", "tidy", "tokenizer", "dom", "xml", "xmlreader", "xmlwriter", "xsl", "zip",
-];
-
-/// Where php starts the extension `name`, [`MODULE_STARTUP`]'s place
-/// for it, the names compared without regard to case as php compares
-/// them; one php does not build starts after every one it does.
-fn startup_rank(name: &str) -> usize {
-    MODULE_STARTUP
-        .iter()
-        .position(|started| started.eq_ignore_ascii_case(name))
-        .unwrap_or(MODULE_STARTUP.len())
-}
-
-/// Each extension's `rinit` in startup order, with the stream wrappers
-/// and filters each registers placed in php's startup order
-/// ([`MODULE_STARTUP`]): every extension registers into empty tables,
-/// its rows are gathered under its rank, and the tables are the rows
-/// stably sorted by rank, the engine's own wrappers ahead until the
-/// extension that registers them places them. A registration made once
-/// the program runs goes on at the end, as php's does. The pinned build
-/// has `zip`, which the bundle has not:
+/// Each extension's `rinit` in startup order, `zend_activate_modules`,
+/// with the extension being activated named to what it registers
+/// ([`Request::activating`](crate::api::request::Request::activating)),
+/// so the stream layer places the wrappers and filters each registers in
+/// php's startup order. The pinned build has `zip`, which the bundle has
+/// not:
 ///
 /// ```php
 /// echo implode(',', array_diff(stream_get_wrappers(), ['zip'])), "\n", implode(',', stream_get_filters()), "\n";
@@ -4379,34 +4356,14 @@ fn startup_rank(name: &str) -> usize {
 /// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) {
-    let mut wrappers: Vec<(usize, crate::streams::Registered)> =
-        std::mem::take(&mut req.url_stream_wrappers)
-            .into_iter()
-            .map(|row| (0, row))
-            .collect();
-    let mut filters = Vec::new();
-    for extension in extensions {
+    for (at, extension) in extensions.iter().enumerate() {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        let rank = startup_rank(&extension.name) + 1;
+        req.activating = u32::try_from(at).ok().map(crate::api::request::ExtensionId);
         let _ = rinit(req);
-        for row in std::mem::take(&mut req.url_stream_wrappers) {
-            // A wrapper the engine keeps is placed by the extension that
-            // registers it, as `register_engine_wrapper` moves its row.
-            wrappers.retain(|(_, held)| held.scheme != row.scheme);
-            wrappers.push((rank, row));
-        }
-        filters.extend(
-            std::mem::take(&mut req.filters)
-                .into_iter()
-                .map(|row| (rank, row)),
-        );
     }
-    wrappers.sort_by_key(|(rank, _)| *rank);
-    filters.sort_by_key(|(rank, _)| *rank);
-    req.url_stream_wrappers = wrappers.into_iter().map(|(_, row)| row).collect();
-    req.filters = filters.into_iter().map(|(_, row)| row).collect();
+    req.activating = None;
 }
 
 #[cfg(test)]

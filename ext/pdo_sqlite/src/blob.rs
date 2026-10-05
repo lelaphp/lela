@@ -7,7 +7,7 @@
 
 use php_ext::abi::Raw;
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_null_deprecated, docref, warning};
-use php_ext::request::{Request, StreamOps, Whence};
+use php_ext::request::{Request, StreamOps, Streams as _, Whence};
 use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Blob};

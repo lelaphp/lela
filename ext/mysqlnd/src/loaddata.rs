@@ -6,7 +6,7 @@
 //! server's answer read whatever happened.
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Opening, Request};
+use php_ext::request::{Opening, Request, Streams as _};
 
 use crate::conn::ConnData;
 use crate::consts::{Com, client, cr};

@@ -33,8 +33,8 @@ use php_unit::decl::Name;
 
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, EncodingsHook, Entry, Extension, FatalLoggedHook,
-    InputFilterHook, InterruptHook, PostStartupHook, ResolvePathHook, Shell, TicksHook,
-    TreatDataHook, UploadHook,
+    InputFilterHook, InterruptHook, PostStartupHook, ResolvePathHook, Shell, StreamHooks,
+    TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::request::{ExtensionId, Request};
 
@@ -89,6 +89,7 @@ pub(crate) struct Supplies {
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
     pub(crate) resolve_path: Option<ResolvePathHook>,
+    pub(crate) stream_hooks: Option<StreamHooks>,
     pub(crate) post_startup: Option<PostStartupHook>,
     pub(crate) upload: Option<UploadHook>,
     pub(crate) ticks: Option<TicksHook>,
@@ -120,6 +121,11 @@ pub(crate) struct Resolved {
     /// phar's falls through to `phar_save_resolve_path`
     /// (`Z/ext/phar/phar.c:3239-3246`).
     pub(crate) resolve_path: Chain<ResolvePathHook>,
+    /// `zend_stream_open_function` and the `zend_resolve_path` beneath
+    /// every override, which `php_module_startup` points at main's
+    /// streams once (`Z/main/main.c`); the stream layer's, handed by the
+    /// extension that registers the plain files wrapper.
+    pub(crate) stream_hooks: Last<StreamHooks>,
     /// `zend_post_startup_cb`, from the bottom until a link does not
     /// serve, as opcache's calls the one it saved before its own work
     /// and fails where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`);
@@ -185,6 +191,7 @@ impl Resolved {
             table.interrupt.install(own.interrupt);
             table.compile_file.install(own.compile_file);
             table.resolve_path.install(own.resolve_path);
+            table.stream_hooks.install(by, own.stream_hooks);
             table.post_startup.install(own.post_startup);
             table.upload.install(own.upload);
             table.ticks.install(own.ticks);

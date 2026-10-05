@@ -20,7 +20,7 @@ use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::{Countable, RecursiveIterator, SeekableIterator, Stringable};

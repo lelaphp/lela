@@ -78,7 +78,7 @@ use std::process::{Child, Stdio};
 use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::locale::Mblen;

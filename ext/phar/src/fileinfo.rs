@@ -6,7 +6,7 @@
 use php_ext::abi::{Passed, Path as PathArg, This, True};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw};
-use php_ext::request::Request;
+use php_ext::request::{Request, Streams as _};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 use php_ext_spl::directory::{self as spl, Other};
 

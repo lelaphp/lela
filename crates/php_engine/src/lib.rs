@@ -45,7 +45,6 @@ mod preload;
 mod probe;
 mod rfc1867;
 mod signal;
-mod streams;
 mod supplied;
 #[cfg(test)]
 mod tests;
@@ -58,7 +57,6 @@ mod trampoline;
 mod unit_cache;
 mod virtual_cwd;
 mod weakrefs;
-mod wrapper;
 
 pub use api::request::ini_files::IniFile;
 pub use api::request::{BuildDefs, IniFiles, PHP_VERSION};

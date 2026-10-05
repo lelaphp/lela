@@ -1036,7 +1036,7 @@ mahout = "RequestCtx::stream_wrappers"
 sites = 6
 crates = 1
 status = "same"
-api = "request::Request::stream_wrappers"
+api = "request::Streams::stream_wrappers"
 
 [[item]]
 mahout = "RequestCtx::headers_sent"
@@ -1260,7 +1260,7 @@ mahout = "RequestCtx::stream_wrappers_mut"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::register_wrapper"
+api = "request::Streams::register_wrapper"
 
 [[item]]
 mahout = "RequestCtx::suppress_pop"
@@ -1295,7 +1295,7 @@ mahout = "RequestCtx::user_filters"
 sites = 2
 crates = 1
 status = "renamed"
-api = "request::Request::register_filter"
+api = "request::Streams::register_filter"
 
 [[item]]
 mahout = "RequestCtx::write_output_stderr"
@@ -1666,7 +1666,7 @@ mahout = "RequestCtx::stdin_shared"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::stdin"
+api = "request::Streams::stdin"
 
 [[item]]
 mahout = "RequestCtx::strtok_next"
@@ -1743,7 +1743,7 @@ mahout = "RequestCtx::user_filters_mut"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::register_filter"
+api = "request::Streams::register_filter"
 
 [[item]]
 mahout = "RequestCtx::write_output_console"
@@ -4453,7 +4453,7 @@ mahout = "mahout_runtime::resources::DirHandle"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::open_dir"
+api = "request::Streams::open_dir"
 
 [[item]]
 mahout = "mahout_runtime::resources::FilterLink"
@@ -4467,7 +4467,7 @@ mahout = "mahout_runtime::resources::FilterRegister"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::register_filter"
+api = "request::Streams::register_filter"
 
 [[item]]
 mahout = "mahout_runtime::resources::Link"
@@ -4502,7 +4502,7 @@ mahout = "mahout_runtime::resources::StdinLocal"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::stdin"
+api = "request::Streams::stdin"
 
 [[item]]
 mahout = "mahout_runtime::resources::StreamFilter"
@@ -4516,7 +4516,7 @@ mahout = "mahout_runtime::resources::StreamMode"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::open_stream"
+api = "request::Streams::open_stream"
 
 [[item]]
 mahout = "mahout_runtime::resources::WriteOutcome"
@@ -4530,14 +4530,14 @@ mahout = "mahout_runtime::resources::open_stream"
 sites = 1
 crates = 1
 status = "same"
-api = "request::Request::open_stream"
+api = "request::Streams::open_stream"
 
 [[item]]
 mahout = "mahout_runtime::resources::parse_php_filter"
 sites = 1
 crates = 1
 status = "renamed"
-api = "request::Request::open_stream"
+api = "request::Streams::open_stream"
 
 [[item]]
 mahout = "mahout_runtime::settings"

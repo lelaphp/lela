@@ -769,6 +769,7 @@ version = "0.0.0"
 dependencies = [
  "php_engine",
  "php_macros",
+ "php_streams",
 ]
 
 [[package]]
@@ -1378,6 +1379,13 @@ dependencies = [
  "php_bundle",
  "php_ext",
  "php_sapi",
+]
+
+[[package]]
+name = "php_streams"
+version = "0.0.0"
+dependencies = [
+ "php_engine",
 ]
 
 [[package]]

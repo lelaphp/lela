@@ -33,7 +33,9 @@ use php_ext::abi::{Extension, ExtensionBuilder, IniStage, OrFalse, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
-use php_ext::request::{BufferHandler, ContentType, HandlerCall, HandlerStatus, Request};
+use php_ext::request::{
+    BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
+};
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
