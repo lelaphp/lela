@@ -4,8 +4,8 @@
 //! `pdo_stmt_init` installs on it.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Std,
+    DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead,
+    PropertyTest, Refusals, Std,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
@@ -141,30 +141,16 @@ fn by_key(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Valu
 }
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning().comparison()
+    }
+
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let Some(held) = object.native_mut::<Row>(req).and_then(|r| r.stmt.take()) else {
             return;
         };
         stmt::write(req, held, |s| s.lazy = None);
         req.release(held.as_value());
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 
     /// `row_prop_read`: `queryString` off the statement, a column by

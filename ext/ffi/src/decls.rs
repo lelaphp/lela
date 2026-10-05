@@ -5,7 +5,8 @@
 //! trampoline its `get_method` makes under the function's name.
 
 use php_ext::abi::{
-    Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Raw, Ref, Union, Untyped,
+    Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Raw, Ref, Refusals, Union,
+    Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
@@ -1199,6 +1200,10 @@ fn bad_array_access(req: &mut Request) -> Thrown {
 }
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     /// `zend_fake_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
         Err(throw_error(
@@ -1206,11 +1211,6 @@ impl ObjectHandlers for Handlers {
             "Error",
             "Instantiation of FFI is not allowed",
         ))
-    }
-
-    /// No `clone_obj`: an `FFI` object is not cloned.
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
     }
 
     /// `zend_ffi_free_obj`: the declarations' tables, their rows and

@@ -4,7 +4,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, This,
+    DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Refusals,
+    This,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
@@ -460,16 +461,16 @@ fn bad_array_access(req: &mut Request) -> Thrown {
 }
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
         Err(throw_error(
             req,
             "Error",
             "Instantiation of FFI\\CType is not allowed",
         ))
-    }
-
-    fn clone_obj(&self) -> Option<php_ext::abi::CloneObj> {
-        None
     }
 
     /// `zend_ffi_ctype_free_obj`: the types it owns given back.

@@ -5,8 +5,8 @@
 //! the methods that start, bind and describe.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, CloneObjWith, Instance, ObjectHandlers, OrFalse, Passed,
-    PropertiesFor, PropertyPurpose, Raw, Ref, Std, This, True, Union, Variadic,
+    ClassIterator, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor, PropertyPurpose, Raw,
+    Ref, Refusals, Std, This, True, Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -149,6 +149,10 @@ pub(crate) struct Handlers;
 pub(crate) static HANDLERS: Handlers = Handlers;
 
 impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning().comparison()
+    }
+
     /// `struct php_pdo_iterator`: the iterator, its key and the row fetched ahead.
     fn iterator_size(&self) -> usize {
         112
@@ -191,24 +195,6 @@ impl ObjectHandlers for Handlers {
             }
             stmt.target.visit(visit);
         }
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        None
-    }
-
-    fn compare(
-        &self,
-        req: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let _ = (req, left, right);
-        Ok(None)
     }
 
     /// `dbstmt_prop_write` answers for the declared `queryString`, so
