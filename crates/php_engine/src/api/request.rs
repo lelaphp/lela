@@ -7003,27 +7003,27 @@ impl Request {
     /// are the rest of that branch and are not read yet. `true` says the
     /// built-in handler served it.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
-        // `zend_error_va_list`'s site (`Z/Zend/zend.c:1633-1651`): the
-        // executing frame's file and line, and, where nothing is
-        // executing and nothing compiling, no file at all, which
-        // `php_error_cb` is handed as `Unknown` at line zero
-        // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
-        // walk refuses to serve raises there, and so does what a
-        // `zend_catch` raises while a fatal is in flight, since
-        // `_zend_bailout` empties `EG(current_execute_data)` first.
-        if !self.executing() || self.bailout {
-            return self.note_error_in(level, message, b"Unknown", 0);
-        }
-        let line = self.current_line();
-        self.note_error_at(level, message, line)
+        let (file, line) = self.executed_site();
+        self.note_error_in(level, message, &file, line)
     }
 
-    /// The same diagnostic at a line no frame stands on: what a
-    /// compile-time error carries, since php's `zend_error_cb` is given
-    /// the compiler's line while `zend_get_executed_lineno` has none.
-    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) -> bool {
+    /// `get_filename_lineno`'s site (`Z/Zend/zend.c:1640-1679`) for a
+    /// diagnostic raised where the request stands: the executing frame's
+    /// file and line, and, where nothing is executing, no file at all,
+    /// which `php_error_cb` is handed as `Unknown` at line zero
+    /// (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown walk
+    /// refuses to serve raises there, and so does an extension's
+    /// request-end function, which `zend_deactivate_modules` serves with
+    /// `EG(current_execute_data)` emptied, and what a `zend_catch` raises
+    /// while a fatal is in flight, since `_zend_bailout` empties it
+    /// first. php's arm for a file being compiled is not taken: the
+    /// engine compiles with no site of its own.
+    fn executed_site(&self) -> (Vec<u8>, u32) {
+        if !self.executing() || self.bailout {
+            return (b"Unknown".to_vec(), 0);
+        }
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        self.note_error_in(level, message, &file, line)
+        (file, self.current_line())
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -7208,11 +7208,7 @@ impl Request {
     /// handed it and the last error keeps it, one more owner each, as
     /// `trigger_error()`'s string is in php.
     pub(crate) fn note_error_string(&mut self, level: Level, message: PhpString) -> bool {
-        if !self.executing() || self.bailout {
-            return self.note_message_in(level, Message::String(message), b"Unknown", 0);
-        }
-        let line = self.current_line();
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let (file, line) = self.executed_site();
         self.note_message_in(level, Message::String(message), &file, line)
     }
 
@@ -7723,8 +7719,7 @@ impl Request {
         // `php_error_cb` marks the store before it bails out: no object
         // that stands now is destructed, one a shutdown function makes is.
         self.heap.mark_destructed();
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = self.current_line();
+        let (file, line) = self.executed_site();
         self.note_error_in(Level::Error, message, &file, line);
         self.end_at_level(Level::Error, message, &file, line);
     }
@@ -7787,12 +7782,7 @@ impl Request {
     /// d
     /// ```
     pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
-        let (file, line) = if self.executing() {
-            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-            (file, self.current_line())
-        } else {
-            (b"Unknown".to_vec(), 0)
-        };
+        let (file, line) = self.executed_site();
         self.heap.mark_destructed();
         self.end_at_level(level, message, &file, line);
     }

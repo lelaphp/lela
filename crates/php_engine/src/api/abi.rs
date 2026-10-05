@@ -341,6 +341,9 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+/// The function of one end phase, `RSHUTDOWN` or `deactivate`: served
+/// in reverse bundle order, each in a `zend_try` of its own (ADR-0010).
+pub(crate) type EndFunction = fn(&mut Request);
 /// The interrupt hook, php's `zend_interrupt_function`.
 pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The hook `ZEND_TICKS` serves, a function php's `php_add_tick_function`
@@ -631,9 +634,9 @@ pub struct Extension {
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
-    pub(crate) rshutdown: Option<fn(&mut Request)>,
+    pub(crate) rshutdown: Option<EndFunction>,
     /// What [`ExtensionBuilder::deactivate`] was handed.
-    pub(crate) deactivate: Option<fn(&mut Request)>,
+    pub(crate) deactivate: Option<EndFunction>,
     /// What [`ExtensionBuilder::zend_extension`] was handed.
     pub(crate) zend: Option<ZendExtension>,
     /// What the builder methods of the supplied kinds were handed
@@ -723,8 +726,8 @@ pub struct ExtensionBuilder {
     request_state: Option<StateBuilder>,
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
-    rshutdown: Option<fn(&mut Request)>,
-    deactivate: Option<fn(&mut Request)>,
+    rshutdown: Option<EndFunction>,
+    deactivate: Option<EndFunction>,
     zend: Option<ZendExtension>,
     supplies: Supplies,
     info: Option<Info>,
@@ -908,7 +911,9 @@ impl ExtensionBuilder {
     }
 
     /// The request-end function, `RSHUTDOWN`, served with every extension's
-    /// request state still live.
+    /// request state still live, in reverse bundle order and each in a
+    /// `zend_try` of its own: a fatal it raises ends this function only,
+    /// and the next extension's is still served.
     #[must_use]
     pub fn rshutdown(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.rshutdown = Some(hook);
