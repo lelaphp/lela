@@ -430,6 +430,11 @@ budget = 14000    # ffi.c and its C-declaration parser over the platform's libff
 feature = "ffi"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/zend_test"
+budget = 1500
+feature = "zend_test"                      # off by default, as php's --enable-zend-test (#1782)
+oracle = "zend-test"                       # the oracle variant that loads it (#1782)
 # ---------------------------------------------------------------- sapi/
 # One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
