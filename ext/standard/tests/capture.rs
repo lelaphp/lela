@@ -122,6 +122,22 @@ echo 'done';
     );
 }
 
+/// `extract` holds an owner of the array it walks, as php's copies it
+/// into a local ("The array might be stored in a local variable that
+/// will be overwritten"): the element `arr` assigns over the variable
+/// that held the array's only owner, and the elements after it are
+/// still the array's. Without the owner the array was freed mid-walk,
+/// `$kkkkkkkkkk` was handed the freed value's block, and the string of
+/// that size allocated next was handed it again.
+#[test]
+fn extract_holds_the_array_it_walks_when_an_element_overwrites_its_variable() {
+    let (stdout, fatal) = served(
+        "<?php function f() { $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';\n$arr = ['arr' => 1, $k . $k => $v . $v];\necho extract($arr), ',';\n$x = $z . $z;\necho $arr, ',', $kkkkkkkkkk; }\nf();",
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "2,1,vvvvvvvvvv");
+}
+
 /// What `conn` sent until it went quiet for a moment.
 fn sent(conn: &mut std::net::TcpStream) -> Vec<u8> {
     use std::io::Read;

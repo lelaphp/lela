@@ -136,8 +136,23 @@ fn reassign_this(req: &mut Request) -> Thrown {
 /// extract(): Argument #3 ($prefix) must be a valid identifier
 /// Cannot re-assign $this
 /// ```
-// One arm per extract type, php's fourteen helpers folded into one walk.
-#[allow(clippy::too_many_lines)]
+///
+/// The walk holds an owner of the array, as php's `ZVAL_COPY` of it
+/// does, so an element written over the variable that held the array
+/// leaves the elements after it standing. Under `EXTR_REFS` the
+/// reference the call passed holds it, and an element made a reference
+/// over that variable replaces the variable, not the reference's value.
+///
+/// ```php
+/// function f($flags) { $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';
+///   $arr = ['arr' => 1, $k . $k => $v . $v];
+///   echo extract($arr, $flags), ','; $x = $z . $z; echo $arr, ',', $kkkkkkkkkk, "\n"; }
+/// f(EXTR_OVERWRITE); f(EXTR_REFS);
+/// ```
+/// ```expect
+/// 2,1,vvvvvvvvvv
+/// 2,1,vvvvvvvvvv
+/// ```
 ///
 /// ```php
 /// echo new ReflectionFunction('extract');
@@ -193,6 +208,35 @@ fn extract(
     let Some(mut array) = separated.or_else(|| given.get().copied()) else {
         return Ok(0);
     };
+    if refs {
+        // The reference the call passed holds the array: a variable an
+        // element is made a reference over gives up the caller's
+        // variable, never the reference's own value.
+        return extracted(req, &mut array, kind, refs, &prefix);
+    }
+    // `ZVAL_COPY(&array_copy, var_array_param)`: "The array might be
+    // stored in a local variable that will be overwritten". The call
+    // passed that variable by reference, so an element written through
+    // it would give up the owner the variable held. Under this owner the
+    // walk's rows stand until the walk is done, and what writes the
+    // array separates it.
+    let held = array.to_value();
+    req.addref(&held);
+    let count = extracted(req, &mut array, kind, refs, &prefix);
+    req.release(held);
+    count
+}
+
+/// `extract`'s walk over `array`, one arm per extract type, php's
+/// fourteen `php_extract_*` helpers folded into one: the count written.
+#[allow(clippy::too_many_lines)]
+fn extracted(
+    req: &mut Request,
+    array: &mut PhpArray,
+    kind: i64,
+    refs: bool,
+    prefix: &[u8],
+) -> Result<i64, Thrown> {
     let mut count = 0i64;
     for (key, entry) in array.snapshot_refs() {
         let text = match &key {
@@ -246,7 +290,7 @@ fn extract(
                     if !exists && !valid_var_name(&text) {
                         continue;
                     }
-                    let name = prefixed(&prefix, &text);
+                    let name = prefixed(prefix, &text);
                     if !valid_var_name(&name) {
                         continue;
                     }
@@ -265,7 +309,7 @@ fn extract(
                 if req.caller_var(&text).is_none() {
                     continue;
                 }
-                let name = prefixed(&prefix, &text);
+                let name = prefixed(prefix, &text);
                 if !valid_var_name(&name) {
                     continue;
                 }
@@ -278,7 +322,7 @@ fn extract(
                 if text.is_empty() {
                     continue;
                 }
-                let name = prefixed(&prefix, &text);
+                let name = prefixed(prefix, &text);
                 if !valid_var_name(&name) {
                     continue;
                 }
@@ -290,7 +334,7 @@ fn extract(
             _ => {
                 // EXTR_PREFIX_INVALID.
                 let name = if numeric || !valid_var_name(&text) || text == b"this" {
-                    let name = prefixed(&prefix, &text);
+                    let name = prefixed(prefix, &text);
                     if !valid_var_name(&name) {
                         continue;
                     }
@@ -305,7 +349,7 @@ fn extract(
             }
         };
         if refs {
-            assign_ref(req, &mut array, &key, entry, &target)?;
+            assign_ref(req, array, &key, entry, &target)?;
         } else {
             assign(req, &target, entry)?;
         }
