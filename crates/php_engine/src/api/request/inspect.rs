@@ -722,17 +722,6 @@ impl Request {
             })
             .unwrap_or_default()
     }
-
-    /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`.
-    pub(crate) fn last_error_row(&self) -> Option<(Vec<u8>, Vec<u8>, u32)> {
-        self.last_error.map(|last| {
-            (
-                last.message.as_bytes().to_vec(),
-                last.file.as_bytes().to_vec(),
-                last.line,
-            )
-        })
-    }
 }
 
 /// An op array's oplines as the tier face shows them, each opcode with

@@ -88,11 +88,11 @@ impl Request {
         if fatal && !self.record.held.is_empty() {
             let held = mem::take(&mut self.record.held);
             let on = mem::replace(&mut self.record.on, false);
-            let levels = mem::replace(&mut self.error_handler_levels, 0);
+            let levels = self.replace_error_handler_levels(0);
             for held in held {
                 self.note_error_in(held.level, &held.message, &held.file, held.line);
             }
-            self.error_handler_levels = levels;
+            self.replace_error_handler_levels(levels);
             self.record.on = on;
         }
         // php records a fatal too and serves it on; its bailout then

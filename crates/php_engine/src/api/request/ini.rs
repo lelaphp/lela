@@ -331,7 +331,7 @@ impl Request {
             b"zend.enable_gc" => {
                 self.heap.gc_enable(ini_truth(value));
             }
-            b"display_errors" => self.display_errors_word = None,
+            b"display_errors" => self.reset_display_errors_word(),
             _ => {}
         }
         Ok(Some(previous))
