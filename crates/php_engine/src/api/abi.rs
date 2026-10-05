@@ -29,7 +29,9 @@ use crate::supplied::{Keyed, Registered, Supplies};
 mod class;
 mod marshal;
 
-pub use crate::observer::{BeginHandler, EndHandler, Observed, ObserverHandlers, ObserverInit};
+pub use crate::observer::{
+    BeginHandler, EndHandler, Observed, ObserverHandlers, ObserverInit, Removed,
+};
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{

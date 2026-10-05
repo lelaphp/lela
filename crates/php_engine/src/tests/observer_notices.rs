@@ -1,16 +1,21 @@
-//! Seam 9's notices, as `TestExt` records them (design §4.3 row 9,
-//! revision 79): the error observer told of every diagnostic before the
-//! user's handler and `zend_error_cb`, and declared functions and
-//! linked classes told as php tells them with and without opcache and
-//! again when a unit is served from the cache. The sequences are php's,
-//! as `zend_test`'s observer prints them in
+//! Seam 9's notices and the handlers added while a request is served,
+//! as `TestExt` records them (design §4.3 row 9, revision 79): the error
+//! observer told of every diagnostic before the user's handler and
+//! `zend_error_cb`, declared functions and linked classes told as php
+//! tells them with and without opcache and again when a unit is served
+//! from the cache, and handlers added to and removed from one function
+//! while a request is served, which the next request does not see. The
+//! sequences are php's, as `zend_test`'s observer prints them in
 //! `Z/ext/zend_test/tests/observer_declarations_01.phpt` and
-//! `observer_error_*.phpt`.
+//! `observer_error_*.phpt`, and as `Z/Zend/zend_observer.c` lays out
+//! the slot.
 
 use std::path::{Path, PathBuf};
 
-use super::test_ext::{Event, Events, Phase, Recording, TestExt};
-use crate::api::abi::{Admission, ExtensionBuilder, Lookup, Validation};
+use super::test_ext::{Event, Events, Phase, Recording, TestExt, observed_name, record};
+use crate::api::abi::{
+    Admission, ExtensionBuilder, Lookup, Observed, ObserverHandlers, Removed, Validation,
+};
 use crate::api::raising::Level;
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
@@ -316,5 +321,198 @@ fn a_fatal_is_told_before_it_is_rendered_and_the_frames_ended() {
                 ])
         }),
         "{events:?}"
+    );
+}
+
+/// The observer the tests of added handlers declare: it declines `target` and
+/// every file, and gives each function named for an act a begin handler
+/// that does it to `target`.
+fn acting_init(observed: &mut Observed<'_>) -> ObserverHandlers {
+    let name = observed_name(observed);
+    record(0, ObserverInit(name.clone()));
+    let act: fn(&mut Observed<'_>) = match name.as_str() {
+        "add" => add,
+        "add_end" => add_end,
+        "remove" => remove,
+        "remove_end" => remove_end,
+        _ => return ObserverHandlers::default(),
+    };
+    ObserverHandlers {
+        begin: Some(act),
+        end: None,
+    }
+}
+
+fn target(observed: &Observed<'_>) -> crate::api::call::Function {
+    observed
+        .function_named(b"target")
+        .unwrap_or(crate::api::call::Function::PASS)
+}
+
+fn extra_begin(observed: &mut Observed<'_>) {
+    record(0, Begin(format!("extra {}", observed_name(observed))));
+}
+
+fn extra_end(observed: &mut Observed<'_>, returned: Option<&crate::api::values::Value>) {
+    let returned = returned.map(super::test_ext::returned_name);
+    record(
+        0,
+        End(format!("extra {}", observed_name(observed)), returned),
+    );
+}
+
+fn acted(what: String) {
+    record(0, Begin(what));
+}
+
+fn add(observed: &mut Observed<'_>) {
+    let function = target(observed);
+    let untouched = observed.function_named(b"untouched");
+    let added = observed.add_begin_handler(function, extra_begin);
+    let untouched = untouched.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
+    acted(format!("add {added} untouched {untouched}"));
+}
+
+fn add_end(observed: &mut Observed<'_>) {
+    let function = target(observed);
+    let added = observed.add_end_handler(function, extra_end);
+    acted(format!("add_end {added}"));
+}
+
+fn remove(observed: &mut Observed<'_>) {
+    let function = target(observed);
+    let removed = observed.remove_begin_handler(function, extra_begin);
+    acted(format!("remove {}", removed.is_some()));
+}
+
+fn remove_end(observed: &mut Observed<'_>) {
+    let function = target(observed);
+    let removed = observed.remove_end_handler(function, extra_end);
+    acted(format!("remove_end {}", removed.is_some()));
+}
+
+/// `zend_observer_add_begin_handler` and its kin over one function's
+/// slot: a declined function takes a handler added and is begun by it
+/// from its next call; a slot holds one begin and one end handler per
+/// observer declared, so a second addition is refused, as is one to a
+/// function not yet called, whose slot is unresolved; an end handler
+/// added observes the calls after it; removing each leaves the
+/// function declined again, and removing one it does not hold finds
+/// nothing. What one request adds lives in its runtime cache, so the
+/// next request on the engine, sharing the unit, sees none of it.
+#[test]
+fn handlers_are_added_to_and_removed_from_one_function_for_one_request() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .observer(acting_init)
+            .build("test_ext_0")])
+        .build();
+    let dir = scratch("added");
+    let source = "<?php\nfunction target() { return 1; }\nfunction untouched() {}\n\
+                  function add() {}\nfunction add_end() {}\nfunction remove() {}\nfunction remove_end() {}\n\
+                  target(); add(); add(); target(); add_end(); target();\n\
+                  remove(); target(); remove_end(); target(); remove();\n";
+    rec.mark("first");
+    serve_main(&engine, &dir, source);
+    rec.mark("second");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction target() { return 1; }\ntarget();\n",
+    );
+    rec.mark("end");
+    let kinds = [Begin(String::new()), End(String::new(), None)];
+    let events = rec.events();
+    let acted = |what: &str| Ext(0, Begin(what.to_owned()));
+    let extra = || Ext(0, Begin("extra target".to_owned()));
+    let extra_ended = || Ext(0, End("extra target".to_owned(), Some("1".to_owned())));
+    assert_eq!(
+        only(&events.between("first", "second"), &kinds),
+        [
+            acted("add true untouched false"),
+            acted("add false untouched false"),
+            extra(),
+            acted("add_end true"),
+            extra(),
+            extra_ended(),
+            acted("remove true"),
+            extra_ended(),
+            acted("remove_end true"),
+            acted("remove false"),
+        ]
+    );
+    assert_eq!(
+        only(&events.between("second", "end"), &kinds),
+        [],
+        "the next request's slot is its own"
+    );
+}
+
+/// The second observer's begin handler for `f`.
+fn second_begin(observed: &mut Observed<'_>) {
+    record(1, Begin(observed_name(observed)));
+}
+
+/// The first observer's begin handler for `f`, which removes itself the
+/// first time it runs and, as php's contract asks, calls the handler
+/// that moved into its place, which the walk passes over.
+fn first_begin(observed: &mut Observed<'_>) {
+    record(0, Begin(observed_name(observed)));
+    let Some(function) = observed.function() else {
+        return;
+    };
+    if let Some(Removed { next: Some(next) }) = observed.remove_begin_handler(function, first_begin)
+    {
+        next(observed);
+    }
+}
+
+fn first_init(observed: &mut Observed<'_>) -> ObserverHandlers {
+    ObserverHandlers {
+        begin: (observed_name(observed) == "f").then_some(first_begin as fn(&mut Observed<'_>)),
+        end: None,
+    }
+}
+
+fn second_init(observed: &mut Observed<'_>) -> ObserverHandlers {
+    ObserverHandlers {
+        begin: (observed_name(observed) == "f").then_some(second_begin as fn(&mut Observed<'_>)),
+        end: None,
+    }
+}
+
+/// `zend_observer_remove_handler`'s `next`: a begin handler that removes
+/// itself while the slot is walked moves the next one into its place,
+/// which the walk then passes over, and is handed that one to call; so
+/// each observer's handler runs once on the call that removed the
+/// first, and the second's alone on the call after.
+#[test]
+fn a_handler_that_removes_itself_is_handed_the_next_to_call() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::builder()
+                .observer(first_init)
+                .build("test_ext_0"),
+            TestExt::<1>::builder()
+                .observer(second_init)
+                .build("test_ext_1"),
+        ])
+        .build();
+    let dir = scratch("self");
+    rec.mark("built");
+    serve_main(&engine, &dir, "<?php\nfunction f() {}\nf();\nf();\n");
+    rec.mark("served");
+    assert_eq!(
+        only(
+            &rec.events().between("built", "served"),
+            &[Begin(String::new())]
+        ),
+        [
+            Ext(0, Begin("f".to_owned())),
+            Ext(1, Begin("f".to_owned())),
+            Ext(1, Begin("f".to_owned())),
+        ]
     );
 }

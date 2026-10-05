@@ -41,6 +41,16 @@
 //! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
 //! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
+//! The slot is the request's, never the unit's: a handler added to or
+//! removed from one function while a request is served
+//! ([`Request::add_begin_handler`] and its kin, php's
+//! `zend_observer_add_begin_handler`) writes the slot in that request's
+//! runtime cache, so the unit every request shares stays as published
+//! (principle 3), and the next request resolves the function afresh.
+//! The begin and end walks read the slot for each handler they call, as
+//! php's walk the slot in place, so a handler removed mid-walk moves
+//! the next into its place ([`Removed`]).
+//!
 //! Beside the calls stand php's notices, three lists the bundle
 //! declares as it declares observers, each told in declaration order
 //! and checked by one test of its list where php reads its
@@ -53,8 +63,7 @@
 //! What is not here yet, each built on the same slot and chain:
 //! natives (#1810), a generator's resume and yield and a fiber's own
 //! chain (#1811; a generator's frame is never begun at its call, as
-//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`),
-//! adding and removing handlers while a request is served (#1812), the
+//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
 //! stepping function's events (#1813), and a frame reference a handler
 //! may keep (#1827).
 //!
@@ -155,11 +164,152 @@ pub(crate) enum Slot {
 }
 
 /// The handlers a slot resolved to: begin in declaration order, end in
-/// reverse, as `zend_observer_fcall_install` lays them out.
-#[derive(Debug)]
+/// reverse, as `zend_observer_fcall_install` lays them out, and as
+/// handlers added and removed while the request is served leave them
+/// ([`Request::add_begin_handler`] and its kin). php's slot holds one
+/// begin and one end handler per observer declared, so neither list
+/// grows past that count.
+#[derive(Debug, Clone)]
 pub(crate) struct Installed {
-    begin: Box<[BeginHandler]>,
-    end: Box<[EndHandler]>,
+    begin: Vec<BeginHandler>,
+    end: Vec<EndHandler>,
+}
+
+impl Slot {
+    /// The begin handler at `at` of the slot as it stands now, read
+    /// afresh for each one called, as `zend_observer_fcall_begin_prechecked`
+    /// walks the slot itself: a handler that removes itself moves the
+    /// next into its place, which the walk then passes over, and php
+    /// hands the remover that next handler to call itself
+    /// ([`Removed::next`]).
+    fn begin_at(&self, at: usize) -> Option<BeginHandler> {
+        match self {
+            Slot::Installed(handlers) => handlers.begin.get(at).copied(),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// The end handler at `at`, read as [`Slot::begin_at`] reads.
+    fn end_at(&self, at: usize) -> Option<EndHandler> {
+        match self {
+            Slot::Installed(handlers) => handlers.end.get(at).copied(),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// Whether an end handler observes the function now, which is what
+    /// puts a frame begun on the open chain.
+    fn ends(&self) -> bool {
+        matches!(self, Slot::Installed(handlers) if !handlers.end.is_empty())
+    }
+
+    /// The handlers to add one to: none while the slot is unresolved,
+    /// and an empty pair where every observer declined, which the
+    /// addition installs, as `zend_observer_add_begin_handler` writes
+    /// over `ZEND_OBSERVER_NONE_OBSERVED`.
+    fn handlers_for_adding(&mut self) -> Option<&mut Installed> {
+        if matches!(self, Slot::Declined) {
+            *self = Slot::Installed(Arc::new(Installed {
+                begin: Vec::new(),
+                end: Vec::new(),
+            }));
+        }
+        match self {
+            Slot::Installed(handlers) => Some(Arc::make_mut(handlers)),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// `zend_observer_add_begin_handler` (`Z/Zend/zend_observer.c:184-199`):
+    /// `begin` after the begin handlers the slot holds, where fewer than
+    /// `room` stand; php's slot has room for one per observer declared
+    /// and holds the caller to that (`ZEND_UNREACHABLE`), where this
+    /// answers false.
+    pub(crate) fn add_begin(&mut self, begin: BeginHandler, room: usize) -> bool {
+        match self.handlers_for_adding() {
+            Some(handlers) if handlers.begin.len() < room => {
+                handlers.begin.push(begin);
+                true
+            }
+            _ => {
+                self.settle();
+                false
+            }
+        }
+    }
+
+    /// `zend_observer_add_end_handler` (`Z/Zend/zend_observer.c:216-230`):
+    /// `end` before the end handlers the slot holds, so they stay the
+    /// reverse of the begin handlers, where fewer than `room` stand.
+    pub(crate) fn add_end(&mut self, end: EndHandler, room: usize) -> bool {
+        match self.handlers_for_adding() {
+            Some(handlers) if handlers.end.len() < room => {
+                handlers.end.insert(0, end);
+                true
+            }
+            _ => {
+                self.settle();
+                false
+            }
+        }
+    }
+
+    /// `zend_observer_remove_begin_handler` (`Z/Zend/zend_observer.c:201-214`):
+    /// `begin` taken out where the slot holds it, the handlers after it
+    /// moved up, and the one now in its place handed back.
+    pub(crate) fn remove_begin(&mut self, begin: BeginHandler) -> Option<Removed<BeginHandler>> {
+        let Slot::Installed(handlers) = self else {
+            return None;
+        };
+        let at = handlers
+            .begin
+            .iter()
+            .position(|held| std::ptr::fn_addr_eq(*held, begin))?;
+        let handlers = Arc::make_mut(handlers);
+        handlers.begin.remove(at);
+        let next = handlers.begin.get(at).copied();
+        self.settle();
+        Some(Removed { next })
+    }
+
+    /// `zend_observer_remove_end_handler` (`Z/Zend/zend_observer.c:232-244`):
+    /// as [`Slot::remove_begin`], over the end handlers.
+    pub(crate) fn remove_end(&mut self, end: EndHandler) -> Option<Removed<EndHandler>> {
+        let Slot::Installed(handlers) = self else {
+            return None;
+        };
+        let at = handlers
+            .end
+            .iter()
+            .position(|held| std::ptr::fn_addr_eq(*held, end))?;
+        let handlers = Arc::make_mut(handlers);
+        handlers.end.remove(at);
+        let next = handlers.end.get(at).copied();
+        self.settle();
+        Some(Removed { next })
+    }
+
+    /// php's invariant after an addition or a removal: a slot with no
+    /// begin and no end handler is `ZEND_OBSERVER_NONE_OBSERVED`, so the
+    /// call home passes over it as it passes over a declined function.
+    fn settle(&mut self) {
+        if matches!(self, Slot::Installed(handlers) if handlers.begin.is_empty() && handlers.end.is_empty())
+        {
+            *self = Slot::Declined;
+        }
+    }
+}
+
+/// What removing a handler from a function hands back
+/// ([`Request::remove_begin_handler`], [`Request::remove_end_handler`]),
+/// php's `next` out-parameter: the handler that moved into the removed
+/// one's place, if any. A handler that removes itself while the slot is
+/// being walked moves that one into its own place, which the walk then
+/// passes over, so php's contract is that the remover calls it itself,
+/// with the arguments it was handed.
+#[derive(Debug, Clone, Copy)]
+pub struct Removed<H> {
+    pub next: Option<H>,
 }
 
 /// The call home: `frame` pushed, its prologue not yet served. One load and
@@ -202,14 +352,13 @@ fn begin(req: &mut Request, frame: FrameRef) {
         Slot::Unresolved => resolve(req, frame),
         resolved => resolved,
     };
-    let Slot::Installed(handlers) = slot else {
-        return;
-    };
-    if !handlers.end.is_empty() {
+    if slot.ends() {
         req.open_observed(frame);
     }
-    for begin in &handlers.begin {
+    let mut at = 0;
+    while let Some(begin) = req.observer_slot(frame).begin_at(at) {
         begin(&mut Observed { req, frame });
+        at += 1;
     }
 }
 
@@ -228,10 +377,7 @@ fn resolve(req: &mut Request, frame: FrameRef) -> Slot {
     let slot = if begin.is_empty() && end.is_empty() {
         Slot::Declined
     } else {
-        Slot::Installed(Arc::new(Installed {
-            begin: begin.into_boxed_slice(),
-            end: end.into_boxed_slice(),
-        }))
+        Slot::Installed(Arc::new(Installed { begin, end }))
     };
     req.set_observer_slot(frame, slot.clone());
     slot
@@ -251,13 +397,14 @@ fn end(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
 }
 
 /// `call_end_observers` (`Z/Zend/zend_observer.c:296-311`): the end
-/// handlers of `frame`'s slot, called in the order it holds them.
+/// handlers of `frame`'s slot as it stands when the frame is left, which
+/// handlers added or removed since its begin have moved, called in the
+/// order it holds them and read afresh for each, as [`Slot::begin_at`].
 fn call_end_handlers(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
-    let Slot::Installed(handlers) = req.observer_slot(frame) else {
-        return;
-    };
-    for end in &handlers.end {
+    let mut at = 0;
+    while let Some(end) = req.observer_slot(frame).end_at(at) {
         end(&mut Observed { req, frame }, value);
+        at += 1;
     }
 }
 
