@@ -11,7 +11,7 @@ use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
 use crate::api::values::{Key, PhpArray, PhpString, Value};
-use crate::exec::{self};
+use crate::exec;
 
 use super::{ExtensionId, Request, Standard};
 
