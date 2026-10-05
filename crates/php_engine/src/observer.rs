@@ -41,12 +41,19 @@
 //! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
 //! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
+//! A generator's frame is not begun at its call, as php's
+//! `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`: it is begun
+//! at each resumption, [`generator_resumed`]
+//! (`zend_observer_generator_resume`, `Z/Zend/zend_generators.c:847`),
+//! and ended at each suspension with the value it yielded,
+//! [`generator_yielded`] (`:851`), and at its `return` with what it
+//! returned (`ZEND_GENERATOR_RETURN`, `Z/Zend/zend_vm_def.h:4766`), so
+//! each resumption is a begin and an end of its own.
+//!
 //! What is not here yet, each built on the same slot and chain:
-//! natives (#1810), a generator's resume and yield and a fiber's own
-//! chain (#1811; a generator's frame is never begun at its call, as
-//! php's `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`), the
-//! notices and adding and removing handlers while a request is served
-//! (#1812), the stepping function's events (#1813), and a frame
+//! natives (#1810), a fiber's own chain and its notices (#1811), the
+//! other notices and adding and removing handlers while a request is
+//! served (#1812), the stepping function's events (#1813), and a frame
 //! reference a handler may keep (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
@@ -59,7 +66,7 @@ use php_heap::{Fatal, FrameRef};
 
 use crate::api::call::Function;
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, PhpObject, Value};
 
 /// `zend_observer_fcall_init` (`Z/Zend/zend_observer.h:70`): asked once of each function, on its first
 /// call in the request, and of each included, evaluated or main file's
@@ -172,11 +179,10 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
     }
 }
 
-/// `zend_observer_fcall_begin` and `zend_observer_fcall_begin_prechecked`
-/// (`Z/Zend/zend_observer.c:257-294`): the frame's slot resolved on its first
-/// call, the frame put on the open chain where an end handler observes
-/// it, and the begin handlers called in declaration order. A generator's
-/// frame is begun when it is resumed and not at its call (#1811).
+/// `zend_observer_fcall_begin` (`Z/Zend/zend_observer.c:288-294`): the
+/// frame begun ([`begin_prechecked`]) unless it is a generator's, which
+/// is begun when it is resumed ([`generator_resumed`]) and not at its
+/// call.
 #[cold]
 #[inline(never)]
 fn begin(req: &mut Request, frame: FrameRef) {
@@ -187,6 +193,49 @@ fn begin(req: &mut Request, frame: FrameRef) {
     if generator {
         return;
     }
+    begin_prechecked(req, frame);
+}
+
+/// The resumption home: a generator's `frame` pushed again by
+/// `zend_generator_resume` and about to be served, which is begun as a
+/// call is, `zend_observer_generator_resume` (`Z/Zend/zend_observer.c:283-286`,
+/// called at `Z/Zend/zend_generators.c:847`). As [`call`] while no
+/// observer is declared.
+#[inline]
+pub(crate) fn generator_resumed(req: &mut Request, frame: FrameRef) {
+    if req.shared.observers != 0 {
+        begin_prechecked(req, frame);
+    }
+}
+
+/// The suspension home: a generator's `frame` about to leave the stack
+/// at a `YIELD`, or at a `YIELD_FROM` that delegates, ended with the
+/// value the generator holds then, php's
+/// `zend_observer_fcall_end(generator->execute_data, &generator->value)`
+/// once `zend_execute_ex` has returned (`Z/Zend/zend_generators.c:849-852`):
+/// what it yielded, or, at a `yield from`, what it yielded last. As
+/// [`call`] while no observer is declared.
+#[inline]
+pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
+    if req.shared.observers != 0 {
+        end_yielded(req, frame, generator);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn end_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
+    let value = crate::generator::value(req, generator);
+    req.addref(&value);
+    end(req, frame, Some(&value));
+    req.release(value);
+}
+
+/// `zend_observer_fcall_begin_prechecked` (`Z/Zend/zend_observer.c:257-281`):
+/// the frame's slot resolved on its first call, the frame put on the
+/// open chain where an end handler observes it, and the begin handlers
+/// called in declaration order.
+fn begin_prechecked(req: &mut Request, frame: FrameRef) {
     let slot = match req.observer_slot(frame) {
         Slot::Unresolved => resolve(req, frame),
         resolved => resolved,

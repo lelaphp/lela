@@ -1320,7 +1320,9 @@ impl ExtensionBuilder {
     /// observers are asked in the order the extensions start, and an
     /// extension may declare more than one; begin handlers are called in that
     /// order and end handlers in its reverse. A generator's frame is not
-    /// begun at its call. With none declared, a call pays one load and
+    /// begun at its call: it is begun at each resumption and ended at
+    /// each suspension with what it yielded, and at its `return` with
+    /// what it returned. With none declared, a call pays one load and
     /// one branch at the push and one at the return.
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {

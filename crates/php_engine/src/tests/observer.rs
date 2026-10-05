@@ -403,8 +403,8 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
 
     // A frame a generator's body called stands above the generator's
     // frame, which the resumption pops on its way out of the fatal: it
-    // is ended before that, after the fatal is rendered. The generator's
-    // own frame is not begun at its call (#1811).
+    // is ended before that, after the fatal is rendered, and the
+    // generator's frame, begun at its resumption, after it.
     let resumed = observed(&events.between("generator", "end"));
     let fatal = resumed
         .iter()
@@ -416,7 +416,146 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
             .skip(fatal.unwrap_or_default() + 1)
             .cloned()
             .collect::<Vec<_>>(),
-        [end(0, "b", None), end(0, "a", None), end(0, file, None)],
+        [
+            end(0, "b", None),
+            end(0, "g", None),
+            end(0, "a", None),
+            end(0, file, None)
+        ],
         "every open frame ended once after the fatal: {resumed:?}"
+    );
+}
+
+/// A generator's frame is begun at each resumption and ended at each
+/// suspension with what it yielded, and not at its call
+/// (`observer_generator_01.phpt` to `_03`): the frame's slot is
+/// resolved at its first resumption; a `yield from` another generator
+/// ends the delegating frame with what it yielded last and resumes the
+/// one delegated to, whose `return` ends it with what it returned, and
+/// the delegating frame's own `return` ends it with its own.
+#[test]
+fn a_generator_is_begun_at_each_resumption_and_ended_at_each_yield() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction bar() { for ($i = 10; $i < 12; $i++) { yield $i; } }\n\
+         function foo() { yield 0; yield from bar(); yield 42; return 1337; }\n\
+         function run() { $g = foo(); foreach ($g as $v) { echo $v, ','; } return $g->getReturn(); }\n\
+         echo run();\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "0,10,11,42,1337");
+    let file = "file 'main.php'";
+    assert_eq!(
+        observed(&rec.events().between("built", "served")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "run"),
+            begin(0, "run"),
+            init(0, "foo"),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            init(0, "bar"),
+            begin(0, "bar"),
+            end(0, "bar", Some("10")),
+            begin(0, "bar"),
+            end(0, "bar", Some("11")),
+            begin(0, "bar"),
+            end(0, "bar", Some("null")),
+            begin(0, "foo"),
+            end(0, "foo", Some("42")),
+            begin(0, "foo"),
+            end(0, "foo", Some("1337")),
+            end(0, "run", Some("1337")),
+            end(0, file, Some("1")),
+        ]
+    );
+}
+
+/// A generator resumed by `current()`, `next()` and `send()` rather than
+/// by `foreach` (`observer_generator_04.phpt`): its first read runs it
+/// to its first `yield`, each `next()` and the `send()` is one
+/// resumption, and a read of a generator not resumed again begins
+/// nothing; and one that throws out of its body
+/// (`observer_generator_05.phpt`) is ended with nothing, as every frame
+/// the throwable leaves is.
+#[test]
+fn a_generator_resumed_by_hand_or_left_by_a_throwable_pairs_each_resumption() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("generator_by_hand");
+    rec.mark("by_hand");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { $i = 0; while (true) { if (yield $i++) break; } }\n\
+         function run() { $g = foo();\n\
+         while ($g->current() !== null) { echo $g->current(); if ($g->current() === 2) { $g->send('Boop'); } $g->next(); }\n\
+         return 'Done'; }\necho run();\n",
+    );
+    rec.mark("thrown");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction foo() { yield 0; yield 1; throw new Exception('Oops!'); }\n\
+         function run() { foreach (foo() as $v) { echo $v; } return 'unseen'; }\necho run();\n",
+    );
+    rec.mark("end");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "012Done");
+    let file = "file 'main.php'";
+    let events = rec.events();
+    assert_eq!(
+        observed(&events.between("by_hand", "thrown")),
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "run"),
+            begin(0, "run"),
+            init(0, "foo"),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("1")),
+            begin(0, "foo"),
+            end(0, "foo", Some("2")),
+            begin(0, "foo"),
+            end(0, "foo", Some("null")),
+            end(0, "run", Some("'Done'")),
+            end(0, file, Some("1")),
+        ]
+    );
+    let thrown = observed(&events.between("thrown", "end"));
+    let rendered = thrown
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: Oops!")));
+    assert!(rendered.is_some(), "the throwable is rendered: {thrown:?}");
+    assert_eq!(
+        thrown[..rendered.unwrap_or_default()],
+        [
+            init(0, file),
+            begin(0, file),
+            init(0, "run"),
+            begin(0, "run"),
+            init(0, "foo"),
+            begin(0, "foo"),
+            end(0, "foo", Some("0")),
+            begin(0, "foo"),
+            end(0, "foo", Some("1")),
+            begin(0, "foo"),
+            end(0, "foo", None),
+            end(0, "run", None),
+            end(0, file, None),
+        ]
     );
 }
