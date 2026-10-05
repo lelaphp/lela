@@ -218,7 +218,6 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
     }
-    crate::observer::call(req);
     let flow = T::safepoint(req, frame, Site::Entry);
     answered(req, flow, frame)
 }
@@ -305,9 +304,11 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     // over with the throwable pending, as the unwinder leaves an entry
     // frame it caught nothing in.
     if refused_at_entry(req) {
+        // php's `execute_ex` hands the refusal to `ZEND_HANDLE_EXCEPTION`,
+        // whose uncaught arm ends what the frame's push began.
+        crate::observer::returned(req, entry, None);
         return Ok(());
     }
-    crate::observer::call(req);
     let flow = T::safepoint(req, entry, Site::Entry);
     let first = answered(req, flow, entry)?;
     serve_from::<T>(req, first)

@@ -1080,6 +1080,9 @@ pub struct Request {
     /// what its callback left reads the fatal, and a second fatal raised
     /// on the way is not rendered.
     bailout: bool,
+    /// The observed frames begun with an end handler and not yet ended
+    /// (design §4.3 seam 9), php's `EG(current_observed_frame)` chain.
+    pub(crate) observing: crate::observer::Open,
     /// The host bailed out from inside the log it took a fatal into
     /// ([`AfterLog::BailedOut`]), between `php_error_cb`'s log and the
     /// ending that reads it: nothing is displayed and the status is not
@@ -1694,6 +1697,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
+            observing: crate::observer::Open::default(),
             left_in_log: false,
             in_error_log: false,
             display_direct: false,
@@ -1981,6 +1985,7 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 
@@ -2032,6 +2037,7 @@ impl Request {
             state.symbol_table = Some(table);
         }
         self.attach_symbol_table(frame);
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 
@@ -2123,6 +2129,25 @@ impl Request {
         self.vm.prime(&mut self.map, frame, slot, value);
     }
 
+    /// The observer slot of the op array `frame` serves (design §4.3
+    /// seam 9, [`exec::Vm::observer_slot`]).
+    pub(crate) fn observer_slot(&self, frame: FrameRef) -> crate::observer::Slot {
+        self.vm.observer_slot(&self.map, frame)
+    }
+
+    /// That slot resolved to `slot`.
+    pub(crate) fn set_observer_slot(&mut self, frame: FrameRef, slot: crate::observer::Slot) {
+        self.vm.set_observer_slot(&mut self.map, frame, slot);
+    }
+
+    /// `EX(func)->op_array.filename` of the op array `frame` serves.
+    pub(crate) fn frame_filename(&self, frame: FrameRef) -> Option<&[u8]> {
+        self.vm
+            .at(frame)
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.filename.0.as_ref())
+    }
+
     /// Push a frame for the body of the user function `function`, the
     /// call that reached it served (`zend_vm_stack_push_call_frame` and
     /// `i_init_func_execute_data`, design §5.6): the CVs and the
@@ -2197,6 +2222,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
+        crate::observer::call(self, frame);
         Ok(frame)
     }
 
@@ -3093,6 +3119,9 @@ impl Request {
             }
         };
         if raised.is_some() {
+            // The `RECV` that raised is the callee's, whose unwind ends
+            // what it began (`unwind_from`); here it is left at once.
+            crate::observer::returned(self, frame, None);
             while self.vm.frames().len() > standing {
                 self.pop_frame();
             }
@@ -5649,9 +5678,7 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
-        crate::observer::call(self);
         let served = entry(self);
-        crate::observer::returned(self);
         match (served, self.stream_thrown.take()) {
             (Ok(value), Some(thrown)) => {
                 self.release(value);
@@ -6781,6 +6808,7 @@ impl Request {
             let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
         }
         self.bailout = true;
+        crate::observer::end_all(self);
         if self.ending.is_some() {
             return;
         }
@@ -16123,6 +16151,7 @@ impl Request {
         crate::output::disable(self);
         if !self.ini_flag(b"ignore_user_abort") {
             self.bailout = true;
+            crate::observer::end_all(self);
         }
     }
 

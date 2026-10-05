@@ -29,6 +29,7 @@ use crate::supplied::{Keyed, Registered, Supplies};
 mod class;
 mod marshal;
 
+pub use crate::observer::{BeginHandler, EndHandler, Observed, ObserverHandlers, ObserverInit};
 pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
@@ -1300,6 +1301,25 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn thrown(mut self, hook: ThrownHook) -> ExtensionBuilder {
         self.supplies.thrown = Some(hook);
+        self
+    }
+
+    /// An observer of user calls, `zend_observer_fcall_register` at
+    /// `MINIT` (design §4.3 seam 9): `init` is asked of each function on
+    /// its first call in a request, and of each included, evaluated or
+    /// main file's frame as it is pushed, which handlers observe it; a
+    /// begin handler runs as the frame is pushed, before its parameters
+    /// are received, and an end handler as it is left, handed what it
+    /// returned, or nothing where an unwind or a fatal left it. Every
+    /// frame begun with an end handler is ended once. The bundle's
+    /// observers are asked in the order the extensions start, and an
+    /// extension may declare more than one; begin handlers are called in that
+    /// order and end handlers in its reverse. A generator's frame is not
+    /// begun at its call. With none declared, a call pays one load and
+    /// one branch at the push and one at the return.
+    #[must_use]
+    pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
+        self.supplies.observers.push(init);
         self
     }
 

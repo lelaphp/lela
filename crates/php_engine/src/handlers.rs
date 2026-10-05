@@ -19976,7 +19976,7 @@ fn returned_to_caller<T: Tier>(
     op: &Opline,
     returned: Value,
 ) -> Edge {
-    crate::observer::returned(req);
+    crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);
@@ -20992,6 +20992,9 @@ fn unwind_from<T: Tier>(
         }
         at = offset.checked_sub(1);
     }
+    // The uncaught arm (`Z/Zend/zend_vm_def.h:8157-8161`): the frame's
+    // observers ended with no value before its live temporaries go.
+    crate::observer::returned(req, frame, None);
     cleanup_live_vars(req, frame, code, op_num, 0);
     if req.stack_mut().entry() == frame {
         if !req.is_pending() {

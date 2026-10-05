@@ -863,7 +863,8 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// ends them in `zend_dispatch_try_catch_finally_helper`'s uncaught arm
 /// (`zend_observer_fcall_end(execute_data, NULL)`,
 /// `Z/Zend/zend_vm_def.h:8157-8161`), which is `unwind_from` here, where
-/// the observer seam's end will stand (#1809). As php's, the hooks
+/// the observer seam's return home stands ([`crate::observer`]); php
+/// 8.5's observer interface has no notice of a throw. As php's, the hooks
 /// are told nothing where a throwable stands pending already, which
 /// php chains the new one over and returns before the hook, nor where
 /// nothing executes, which php renders without it.

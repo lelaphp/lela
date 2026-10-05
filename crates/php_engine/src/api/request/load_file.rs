@@ -104,6 +104,7 @@ impl Request {
             state.symbol_table = table;
         }
         self.attach_symbol_table(frame);
+        crate::observer::call(self, frame);
         let reenter = self.shared.reenter;
         let served = reenter(self, frame);
         let served = self.fatal_of(served);

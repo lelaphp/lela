@@ -15,6 +15,7 @@ __private::parameter
 __private::property
 abi::Admission
 abi::AfterLog
+abi::BeginHandler
 abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
@@ -56,6 +57,7 @@ abi::Encodings::lexer_compatible
 abi::Encodings::list
 abi::Encodings::name
 abi::Encodings::unicode
+abi::EndHandler
 abi::ErrorBeneath
 abi::ErrorBeneath::file
 abi::ErrorBeneath::level
@@ -90,6 +92,7 @@ abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::input_filter
 abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
+abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
@@ -198,6 +201,12 @@ abi::ObjectHandlers::unset_property
 abi::ObjectHandlers::write_dimension
 abi::ObjectHandlers::write_overloaded
 abi::ObjectHandlers::write_property
+abi::Observed
+abi::Observed::filename
+abi::Observed::function
+abi::Observed::function_scope
+abi::ObserverHandlers
+abi::ObserverInit
 abi::OnModify
 abi::OrFalse
 abi::Passed
