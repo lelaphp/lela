@@ -1111,6 +1111,24 @@ impl Request {
         }
         container.set(self, key, value)
     }
+
+    /// The request headers the host received, `getallheaders()`, as
+    /// strings of the request's.
+    pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
+        let mut array = PhpArray::new(self)?;
+        let headers = self
+            .description
+            .web
+            .as_ref()
+            .map(|web| web.headers.clone())
+            .unwrap_or_default();
+        for (name, value) in &headers {
+            let key = Key::Str(PhpString::new(self, name)?);
+            let value = Value::string(PhpString::new(self, value)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
 }
 
 /// Where one registration writes: the track, the name as it came, and

@@ -1,8 +1,9 @@
 //! The environment area of a request: `getenv()` and `putenv()` over
 //! the host's environment, the locale `setlocale()` answers, the
-//! build's definitions, the host's name, `argv` and the primary file's
-//! name, the working directory, the temporary directory, the umask and
-//! `strerror`. The umask and the locale names are [`Environment`]'s,
+//! build's definitions, the host's name, `argv`, the primary file's
+//! name and the process title, the working directory, the temporary
+//! directory, the umask, `strerror`, and when the request started. The
+//! umask, the locale names and the start time are [`Environment`]'s,
 //! whose fields no file but this one reads.
 
 use std::os::unix::ffi::OsStrExt;
@@ -22,7 +23,8 @@ const P_TMPDIR: &[u8] = if cfg!(target_vendor = "apple") {
     b"/tmp"
 };
 
-/// The environment area's state, whose fields no file but this one reads.
+/// The umask, the locale names and the start time, whose fields no
+/// file but this one reads.
 pub(super) struct Environment {
     umask: u32,
     /// The name `setlocale()` last answered for each category it moved,
@@ -30,14 +32,23 @@ pub(super) struct Environment {
     /// `LC_CTYPE` name while it is not `C` (revision 56).
     locale_names: Vec<(usize, Vec<u8>)>,
     ctype_locale: Option<Vec<u8>>,
+    /// `sapi_get_request_time`: when the request started, since the
+    /// epoch. The host keeps no time of its own, so it is the moment the
+    /// request is made, as `php_time()` makes it.
+    started: std::time::Duration,
 }
 
-impl Default for Environment {
-    fn default() -> Environment {
+impl Environment {
+    /// The environment as the request is made: php's default umask, no
+    /// locale moved, and the start time read now.
+    pub(super) fn new() -> Environment {
         Environment {
             umask: 0o022,
             locale_names: Vec::new(),
             ctype_locale: None,
+            started: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default(),
         }
     }
 }
@@ -230,6 +241,35 @@ impl Request {
             Some(sentence) => sentence.to_owned(),
             None => text,
         }
+    }
+
+    /// `sapi_get_request_time`, when the request started, as `$_SERVER`
+    /// and opcache's `ZCG(request_time)` read it.
+    ///
+    /// ```php
+    /// $t = $_SERVER['REQUEST_TIME_FLOAT'];
+    /// usleep(10000);
+    /// var_dump($t <= microtime(true), (int) $t === $_SERVER['REQUEST_TIME'], $_SERVER['REQUEST_TIME'] <= time());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn started(&self) -> std::time::Duration {
+        self.environment.started
+    }
+
+    /// `ZCG(request_time)` and `sapi_get_request_time()` as a `zend_long`:
+    /// when the request started, in whole seconds.
+    #[must_use]
+    pub fn request_time(&self) -> i64 {
+        i64::try_from(self.environment.started.as_secs()).unwrap_or(i64::MAX)
+    }
+
+    /// `PHP_CLI_PROCESS_TITLE` as the host registers it.
+    pub(crate) fn process_title(&self) -> crate::engine::ProcessTitle {
+        self.description.process_title
     }
 }
 

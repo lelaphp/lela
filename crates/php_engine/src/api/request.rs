@@ -13,8 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use php_heap::{
-    Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval,
-    ZvalRef,
+    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval, ZvalRef,
 };
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility};
@@ -327,15 +326,12 @@ pub struct Request {
     ticks: ticks::Ticks,
     /// The autoload area's state ([`autoload::Autoload`]).
     autoload: autoload::Autoload,
-    /// The environment area's state ([`environment::Environment`]).
+    /// The umask, the locale names and the start time
+    /// ([`environment::Environment`]).
     environment: environment::Environment,
     /// The paths area's state ([`paths::Paths`]).
     paths: paths::Paths,
     cwd: PathBuf,
-    /// `sapi_get_request_time`: when the request started, since the
-    /// epoch. The host keeps no time of its own, so it is the moment the
-    /// request is made, as `php_time()` makes it.
-    started: std::time::Duration,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
     /// suspends to (design §5.11, `crate::fiber`).
@@ -649,11 +645,8 @@ impl Request {
             shutdown_functions: shutdown::ShutdownFunctions::default(),
             ticks: ticks::Ticks::default(),
             autoload: autoload::Autoload::default(),
-            environment: environment::Environment::default(),
+            environment: environment::Environment::new(),
             cwd,
-            started: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default(),
             fibers: crate::fiber::Fibers::default(),
             raised: None,
             bailout: false,
@@ -703,83 +696,9 @@ impl Request {
 
     // -------------------------------------------------- crate-internal
 
-    /// An interned string, never refcounted, for a name the engine holds
-    /// as bytes, as `zend_string_init_interned_request` answers it: the
-    /// engine's permanent one where a declaration made the name
-    /// ([`crate::engine::Shared::permanent`]), which costs the request
-    /// nothing, else this request's heap's; the `Err` is the memory
-    /// limit refusing the intern.
-    ///
-    /// A class's and a method's names are `ce->name` and
-    /// `function_name`, so only the array of names is counted:
-    ///
-    /// ```php
-    /// $o = new ArrayObject; $i = new ArrayIterator;
-    /// $m = memory_get_usage();
-    /// $a = get_class($o); $b = $o::class; $c = get_parent_class($i); $d = get_class_methods('Countable');
-    /// var_dump(memory_get_usage() - $m);
-    /// ```
-    /// ```expect
-    /// int(216)
-    /// ```
-    pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        if let Some(permanent) = self.shared.permanent(bytes) {
-            return Ok(PhpString::of(permanent));
-        }
-        let interned = self.heap.intern(bytes);
-        self.fatal_of(interned).map(PhpString::of)
-    }
-
-    /// The request headers the host received, `getallheaders()`, as
-    /// strings of the request's.
-    pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        let headers = self
-            .description
-            .web
-            .as_ref()
-            .map(|web| web.headers.clone())
-            .unwrap_or_default();
-        for (name, value) in &headers {
-            let key = Key::Str(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, value)?);
-            array.set(self, key, value)?;
-        }
-        Ok(array)
-    }
-
-    /// `sapi_get_request_time`, when the request started, as `$_SERVER`
-    /// and opcache's `ZCG(request_time)` read it.
-    ///
-    /// ```php
-    /// $t = $_SERVER['REQUEST_TIME_FLOAT'];
-    /// usleep(10000);
-    /// var_dump($t <= microtime(true), (int) $t === $_SERVER['REQUEST_TIME'], $_SERVER['REQUEST_TIME'] <= time());
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// ```
-    pub(crate) fn started(&self) -> std::time::Duration {
-        self.started
-    }
-
-    /// `ZCG(request_time)` and `sapi_get_request_time()` as a `zend_long`:
-    /// when the request started, in whole seconds.
-    #[must_use]
-    pub fn request_time(&self) -> i64 {
-        i64::try_from(self.started.as_secs()).unwrap_or(i64::MAX)
-    }
-
     // -------------------------------------------------- diagnostics
 
     // -------------------------------------------------- symbols
-
-    /// `PHP_CLI_PROCESS_TITLE` as the host registers it.
-    pub(crate) fn process_title(&self) -> crate::engine::ProcessTitle {
-        self.description.process_title
-    }
 
     // -------------------------------------------------- state
 
@@ -799,12 +718,6 @@ impl Request {
     #[must_use]
     pub fn persistent_list(&self) -> Arc<crate::api::abi::PersistentList> {
         Arc::clone(&self.shared.persistent)
-    }
-
-    /// The heap's memory limit in bytes, `PG(memory_limit)` as
-    /// `zend_set_memory_limit` set it.
-    pub fn heap_memory_limit(&self) -> usize {
-        self.heap.memory_limit()
     }
 }
 
