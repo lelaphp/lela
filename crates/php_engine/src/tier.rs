@@ -405,6 +405,13 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 /// begin and end (seam 9) are raised as the loop raises them, at the
 /// push a call steps into and the return it steps out of, since their
 /// homes take no tier.
+///
+/// A frame the handler pushed is activated as the loop activates it,
+/// with `Nop` at its `Site::Entry`: the interrupt is checked there, as
+/// php's `ZEND_VM_ENTER_EX` checks it inside `ZEND_DO_UCALL`, so a
+/// stepped call meets an interrupt where the loop's does, after its
+/// push has begun it, and answers `Threw` of the callee where the
+/// interrupt left a throwable pending.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = standing(req, frame)?;
     let code = code_of(&serving, frame)?;
@@ -414,7 +421,13 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     if let Some(sensed) = req.take_sensed() {
         return Err(sensed);
     }
-    Ok(stepped)
+    match stepped {
+        Stepped::Pushed(callee) => match activated::<Nop>(req, callee)? {
+            Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+            _ => Ok(Stepped::Pushed(callee)),
+        },
+        stepped => Ok(stepped),
+    }
 }
 
 /// `ZEND_HANDLE_EXCEPTION` over one frame, what the loop runs for a
@@ -425,9 +438,11 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// `Popped` of its caller, which goes on past the call, or `Done` where
 /// it is the serving's entry frame, its return value `UNDEF`, which a
 /// tier hands back with `Flow::Returned`.
+///
 /// A frame where nothing takes the throwable is ended for its
 /// observers (seam 9) at the unwinder's uncaught arm, as the loop ends
 /// it, once, the entry frame too.
+///
 /// On the entry frame of the serving, which the unwinder does not
 /// leave, `Threw` of that frame says nothing took it; a tier hands that
 /// frame back with `Flow::Resume` and the loop ends the serving, so one

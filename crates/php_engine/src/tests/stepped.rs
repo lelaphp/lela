@@ -7,15 +7,18 @@
 //! [`unwind`] dispatch with `Nop` at the safepoints, so a debugger's own
 //! `safepoint` is never asked from inside its stepping, and reach the
 //! same homes through the same handlers; a tier raises no event of its
-//! own (#1799, #1813).
+//! own (#1799, #1813). What the loop does between the handlers and not
+//! in one, the interrupt check at a pushed frame's activation, `step`
+//! does too, so an interrupt meets a stepped call where it meets the
+//! loop's.
 //!
-//! Each program [`super::observer`] holds the loop to is served four
-//! ways, and the events each recording observer is handed must be the
-//! loop's: under `Nop`; under `Probe`, the seam's test adapter; under a
-//! debugging host that steps every serving one handler at a time as
-//! `sapi/phpdbg` does, handing back the entry frame's own leaving and
-//! an uncaught throwable; and under a recorder that steps the entry
-//! frame's return as well.
+//! The programs `super::observer` holds the loop to, and a generator
+//! sent to, are served four ways, and the events each recording
+//! observer is handed must be the loop's: under `Nop`; under `Probe`,
+//! the seam's test adapter; under a debugging host that steps every
+//! serving one handler at a time as `sapi/phpdbg` does, handing back
+//! the entry frame's own leaving and an uncaught throwable; and under a
+//! recorder that steps the entry frame's return as well.
 //!
 //! [`step`]: crate::tier::step
 //! [`unwind`]: crate::tier::unwind
@@ -25,7 +28,7 @@ use std::cell::Cell;
 use php_heap::FrameRef;
 
 use super::observer::{observed, scratch, serve_main};
-use super::test_ext::{Event, Recording, TestExt};
+use super::test_ext::{Event, Phase, Recording, TestExt};
 use crate::api::request::Request;
 use crate::engine::{Engine, EngineBuilder};
 use crate::probe::Probe;
@@ -35,21 +38,25 @@ thread_local! {
     /// How many handlers a stepping tier dispatched through `step` or
     /// `unwind`, so a serving that stepped nothing does not pass as one.
     static STEPS: Cell<usize> = const { Cell::new(0) };
+    /// Whether the next serving's entry raises the interrupt an
+    /// execution timer of one second leaves when it fires.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Whether the stepping host hands the entry frame's own leaving back
-/// to the loop, as phpdbg does, or steps it too.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Leaving {
-    HandedBack,
-    Stepped,
+/// The interrupt [`ARMED`] asks for, raised once, at the first entry
+/// that takes it.
+fn fire_if_armed(req: &mut Request) {
+    if ARMED.replace(false) {
+        req.interrupt().elapsed(1);
+    }
 }
 
 /// The stepping loop of `sapi/phpdbg`'s `stepped`, the prompt taken out:
 /// a frame unwinding is unwound where it is not the serving's entry,
 /// where the entry catches what is pending or where nothing is, and
-/// handed back otherwise; anything else is one `step`.
-fn stepped(req: &mut Request, frame: FrameRef, leaving: Leaving) -> Flow {
+/// handed back otherwise; the entry frame's leaving is handed back
+/// unless `steps_leaving`; anything else is one `step`.
+fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
     let mut at = frame;
     let mut unwinding = false;
     loop {
@@ -66,7 +73,7 @@ fn stepped(req: &mut Request, frame: FrameRef, leaving: Leaving) -> Flow {
             } else {
                 return Flow::Resume(at);
             }
-        } else if at == entry && leaving == Leaving::HandedBack && leaves(position.opcode) {
+        } else if at == entry && !steps_leaving && leaves(position.opcode) {
             return Flow::Resume(at);
         } else {
             tier::step(req, at)
@@ -107,29 +114,33 @@ fn leaves(opcode: Opcode) -> bool {
     )
 }
 
-/// The debugging host: every serving taken over at its entry frame's
+/// A stepping host: every serving taken over at its entry frame's
 /// `Site::Entry`, the reentered ones a native's callback serves too.
-struct Debugger;
+/// `Stepper<false>` is the debugger, which hands the entry frame's
+/// leaving back to the loop as phpdbg does; `Stepper<true>` a recorder,
+/// which steps it, so `step` itself ends the serving.
+struct Stepper<const STEPS_LEAVING: bool>;
 
-impl Tier for Debugger {
+impl<const STEPS_LEAVING: bool> Tier for Stepper<STEPS_LEAVING> {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         if site != Site::Entry || frame != tier::entry(req) {
             return Flow::Continue;
         }
-        stepped(req, frame, Leaving::HandedBack)
+        fire_if_armed(req);
+        stepped(req, frame, STEPS_LEAVING)
     }
 }
 
-/// A recorder: as the debugger, with the entry frame's return stepped
-/// rather than handed back, so `step` itself ends the serving.
-struct Recorder;
+/// The loop alone, with the interrupt [`ARMED`] asks for raised at its
+/// first entry, as the stepping hosts raise it at theirs.
+struct Firing;
 
-impl Tier for Recorder {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        if site != Site::Entry || frame != tier::entry(req) {
-            return Flow::Continue;
+impl Tier for Firing {
+    fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
+        if site == Site::Entry {
+            fire_if_armed(req);
         }
-        stepped(req, frame, Leaving::Stepped)
+        Flow::Continue
     }
 }
 
@@ -140,12 +151,13 @@ struct Program {
     beside: &'static [(&'static str, &'static str)],
 }
 
-/// The programs `super::observer` pins the loop's events for: calls two
+/// The programs whose events `super::observer` pins as php's: calls two
 /// observers deep, a declined function and a callback a native calls,
 /// an include and an eval, a `RECV` that throws, unwinds caught,
-/// uncaught and by `exit`, fatals the loop and a native raise, the time
-/// limit inside a function a generator's body called, which the loop
-/// resumes and no tier steps, and a generator sent to.
+/// uncaught and by `exit`, fatals the loop and a native raise, and the
+/// time limit inside a function a generator's body called, which the
+/// loop resumes and no tier steps; and, held to the loop alone, a
+/// generator sent to.
 const PROGRAMS: &[Program] = &[
     Program {
         name: "calls",
@@ -217,44 +229,66 @@ const PROGRAMS: &[Program] = &[
     },
 ];
 
-/// The observer's events of every program and the stdout each served,
-/// under the engine `builder` makes, and how many handlers a stepping
-/// tier dispatched.
-fn served(builder: fn() -> EngineBuilder) -> (Vec<(Vec<Event>, String)>, usize) {
+/// A call the main file makes before any back-edge or native: the loop
+/// checks the interrupt at the callee's activation, after its push has
+/// begun it.
+const INTERRUPTED: &[Program] = &[Program {
+    name: "interrupted",
+    source: "<?php\nfunction f() { return 1; }\nf();\necho 'past';\n",
+    beside: &[],
+}];
+
+/// What one program raised: the observer's events and what it echoed.
+#[derive(Debug, PartialEq, Eq)]
+struct Seen {
+    events: Vec<Event>,
+    stdout: String,
+}
+
+/// What each of `programs` raised under the engine `builder` makes, each
+/// served with the interrupt armed where `armed`, and how many handlers
+/// a stepping tier dispatched.
+fn served(builder: fn() -> EngineBuilder, programs: &[Program], armed: bool) -> (Vec<Seen>, usize) {
     let rec = Recording::start();
     STEPS.set(0);
     let engine = builder()
         .extensions(&[TestExt::<0>::observing(), TestExt::<1>::observing()])
         .build();
-    let mut outs = Vec::new();
-    for program in PROGRAMS {
+    let mut stdouts = Vec::new();
+    for program in programs {
         let dir = scratch(&format!("stepped_{}", program.name));
         for (name, source) in program.beside {
             let _ = std::fs::write(dir.join(name), source);
         }
         rec.mark(program.name);
+        ARMED.set(armed);
         let out = serve_main(&engine, &dir, program.source);
-        outs.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        stdouts.push(String::from_utf8_lossy(&out.stdout).into_owned());
     }
+    ARMED.set(false);
     rec.mark("end");
     let events = rec.events();
-    let ends = PROGRAMS.iter().skip(1).map(|p| p.name).chain(["end"]);
-    let each = PROGRAMS
+    let ends = programs.iter().skip(1).map(|p| p.name).chain(["end"]);
+    let seen = programs
         .iter()
         .zip(ends)
-        .zip(outs)
-        .map(|((program, to), out)| (observed(&events.between(program.name, to)), out))
+        .zip(stdouts)
+        .map(|((program, to), stdout)| Seen {
+            events: observed(&events.between(program.name, to)),
+            stdout,
+        })
         .collect();
-    (each, STEPS.get())
+    (seen, STEPS.get())
 }
 
-/// What the loop raised for each program, held against what `tier`
-/// raised for the same program, by name.
-fn same_as_the_loop(tier: &str, loop_: &[(Vec<Event>, String)], under: &[(Vec<Event>, String)]) {
-    for ((program, plain), bound) in PROGRAMS.iter().zip(loop_).zip(under) {
+/// What the loop raised for each program, held against what the tier
+/// `named` raised for the same program.
+fn same_as_the_loop(named: &str, programs: &[Program], plain: &[Seen], bound: &[Seen]) {
+    assert_eq!(plain.len(), bound.len(), "{named}: a program unserved");
+    for ((program, plain), bound) in programs.iter().zip(plain).zip(bound) {
         assert_eq!(
             plain, bound,
-            "{}: the loop's events and stdout (left), {tier}'s (right)",
+            "{}: the loop's events and stdout (left), {named}'s (right)",
             program.name
         );
     }
@@ -264,26 +298,75 @@ fn same_as_the_loop(tier: &str, loop_: &[(Vec<Event>, String)], under: &[(Vec<Ev
 /// and under a debugging host and a recorder that drive `step` and
 /// `unwind` one handler at a time: every begin and end in the same
 /// order, paired through the unwinds, the `RECV` refusals and the
-/// fatals, and the loop's own events are php's as `super::observer`
-/// pins them, so a sequence that observed nothing does not pass here.
+/// fatals. A sequence that observed nothing does not pass here.
 #[test]
 fn a_stepped_program_raises_the_events_the_loop_raises() {
-    let (plain, _) = served(Engine::cli_builder);
-    for (program, (events, _)) in PROGRAMS.iter().zip(&plain) {
+    let (plain, _) = served(Engine::cli_builder, PROGRAMS, false);
+    for (program, seen) in PROGRAMS.iter().zip(&plain) {
         assert!(
-            events
+            seen.events
                 .iter()
-                .any(|e| matches!(e, Event::Ext(_, super::test_ext::Phase::Begin(_)))),
-            "{}: the loop observed nothing: {events:?}",
+                .any(|e| matches!(e, Event::Ext(_, Phase::Begin(_)))),
+            "{}: the loop observed nothing: {seen:?}",
             program.name
         );
     }
-    let (probed, _) = served(|| Engine::cli_builder().tier::<Probe>());
-    same_as_the_loop("Probe", &plain, &probed);
-    let (debugged, steps) = served(|| Engine::cli_builder().tier::<Debugger>());
+    let (probed, _) = served(|| Engine::cli_builder().tier::<Probe>(), PROGRAMS, false);
+    same_as_the_loop("Probe", PROGRAMS, &plain, &probed);
+    let (debugged, steps) = served(
+        || Engine::cli_builder().tier::<Stepper<false>>(),
+        PROGRAMS,
+        false,
+    );
     assert!(steps > 0, "the debugger stepped nothing");
-    same_as_the_loop("the debugger", &plain, &debugged);
-    let (recorded, steps) = served(|| Engine::cli_builder().tier::<Recorder>());
+    same_as_the_loop("the debugger", PROGRAMS, &plain, &debugged);
+    let (recorded, steps) = served(
+        || Engine::cli_builder().tier::<Stepper<true>>(),
+        PROGRAMS,
+        false,
+    );
     assert!(steps > 0, "the recorder stepped nothing");
-    same_as_the_loop("the recorder", &plain, &recorded);
+    same_as_the_loop("the recorder", PROGRAMS, &plain, &recorded);
+}
+
+/// An interrupt standing when a stepped call pushes its frame is met at
+/// the callee's activation, as the loop's `activated` meets it and as
+/// php's `ZEND_VM_ENTER_EX` checks it inside `ZEND_DO_UCALL`: the
+/// callee begun by its push, the time limit's fatal rendered there, and
+/// the callee and the main file ended after it, with nothing echoed.
+#[test]
+fn a_stepped_call_meets_the_interrupt_at_its_activation() {
+    let (plain, _) = served(|| Engine::cli_builder().tier::<Firing>(), INTERRUPTED, true);
+    let fatal = plain.first().and_then(|seen| {
+        seen.events.iter().position(
+            |e| matches!(e, Event::Ext(0, Phase::Error(m)) if m.starts_with("Maximum execution time")),
+        )
+    });
+    assert!(fatal.is_some(), "the loop met the interrupt: {plain:?}");
+    let ended: Vec<_> = plain
+        .first()
+        .map(|seen| {
+            seen.events
+                .iter()
+                .skip(fatal.unwrap_or_default())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        ended.contains(&Event::Ext(0, Phase::End(String::from("f"), None))),
+        "the callee begun and ended at the fatal: {plain:?}"
+    );
+    let (debugged, _) = served(
+        || Engine::cli_builder().tier::<Stepper<false>>(),
+        INTERRUPTED,
+        true,
+    );
+    same_as_the_loop("the debugger", INTERRUPTED, &plain, &debugged);
+    let (recorded, _) = served(
+        || Engine::cli_builder().tier::<Stepper<true>>(),
+        INTERRUPTED,
+        true,
+    );
+    same_as_the_loop("the recorder", INTERRUPTED, &plain, &recorded);
 }
