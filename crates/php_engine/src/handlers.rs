@@ -233,7 +233,7 @@ pub(crate) fn declare_class<T: Tier>(
         )));
     };
     let key = runtime_key(code, op)?;
-    match req.bind_class(&serving.unit, &key) {
+    match req.bind_class_in_slot(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => {
             req.leave_pending(&thrown);

@@ -64,6 +64,12 @@ abi::ErrorBeneath::level
 abi::ErrorBeneath::line
 abi::ErrorBeneath::message
 abi::ErrorBeneath::serve
+abi::ErrorNotice
+abi::ErrorNotice::file
+abi::ErrorNotice::level
+abi::ErrorNotice::line
+abi::ErrorNotice::message
+abi::ErrorNotice::uncaught
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::admission
@@ -71,6 +77,7 @@ abi::ExtensionBuilder::build
 abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
+abi::ExtensionBuilder::class_linked_observer
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
@@ -84,10 +91,12 @@ abi::ExtensionBuilder::encodings
 abi::ExtensionBuilder::engine_end
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::error
+abi::ExtensionBuilder::error_observer
 abi::ExtensionBuilder::fatal_logged
 abi::ExtensionBuilder::fiber_destroy
 abi::ExtensionBuilder::fiber_init
 abi::ExtensionBuilder::fiber_switch
+abi::ExtensionBuilder::function_declared_observer
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::gc_collect
 abi::ExtensionBuilder::info
@@ -214,6 +223,7 @@ abi::Observed::filename
 abi::Observed::frame
 abi::Observed::function
 abi::Observed::function_scope
+abi::Observed::suspend_time_limit
 abi::ObservedFiber
 abi::ObservedFiber::destroyed
 abi::ObservedFiber::fiber
@@ -263,6 +273,7 @@ abi::Refusals::NONE
 abi::Refusals::cloning
 abi::Refusals::comparison
 abi::Refusals::construction
+abi::Removed
 abi::Shell
 abi::StandardHandlesHook
 abi::Start
@@ -473,6 +484,8 @@ raising::too_few_arguments
 raising::uncaught_at
 raising::warning
 raising::while_pending
+request::Allocation
+request::AllocationObserverId
 request::BindTo
 request::BodyLimits
 request::Brigade
@@ -547,6 +560,8 @@ request::Interrupt::receive_signals
 request::Invalidation
 request::Notification
 request::NotifyCode
+request::ObserveAllocations
+request::ObserveAllocations::observe
 request::Opening
 request::OptionAnswer
 request::OutputOp
@@ -572,6 +587,8 @@ request::Request
 request::Request::absolutize
 request::Request::activating
 request::Request::active_function_name
+request::Request::add_begin_handler
+request::Request::add_end_handler
 request::Request::addref
 request::Request::argument
 request::Request::argument_count
@@ -695,6 +712,7 @@ request::Request::method_named
 request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::native_trampoline
+request::Request::observe_allocations
 request::Request::open_temporary_fd
 request::Request::os_error_text
 request::Request::output_buffer_op
@@ -716,6 +734,8 @@ request::Request::register_tick_function
 request::Request::register_variable
 request::Request::registered
 request::Request::release
+request::Request::remove_begin_handler
+request::Request::remove_end_handler
 request::Request::request_headers
 request::Request::request_method
 request::Request::request_time
@@ -759,6 +779,7 @@ request::Request::status_line
 request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
+request::Request::suspend_time_limit
 request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
@@ -769,6 +790,7 @@ request::Request::trampoline
 request::Request::umask
 request::Request::unguarded_host_path
 request::Request::unit_cache
+request::Request::unobserve_allocations
 request::Request::unregister_tick_function
 request::Request::update_server
 request::Request::variadic_arguments
@@ -912,6 +934,7 @@ request::Streams::wrapper_url_stat
 request::Streams::xport_create
 request::Syslog
 request::TemporaryGuard
+request::TimeLimitSuspended
 request::UnitCache
 request::UnitCache::compile
 request::UnitCache::holds

@@ -63,6 +63,26 @@
 //! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
 //! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
 //!
+//! The slot is the request's, never the unit's: a handler added to or
+//! removed from one function while a request is served
+//! ([`Request::add_begin_handler`] and its kin, php's
+//! `zend_observer_add_begin_handler`) writes the slot in that request's
+//! runtime cache, or its table of natives' slots for a native, so the
+//! unit every request shares stays as published
+//! (principle 3), and the next request resolves the function afresh.
+//! The begin and end walks read the slot for each handler they call, as
+//! php's walk the slot in place, so a handler removed mid-walk moves
+//! the next into its place ([`Removed`]).
+//!
+//! Beside the calls stand php's notices, three lists the bundle
+//! declares as it declares observers, each told in declaration order
+//! and checked by one test of its list where php reads its
+//! `zend_observer_*_observed` word: [`error`], every diagnostic before
+//! the user's handler and `zend_error_cb`; [`function_declared`] and
+//! [`class_linked`], at each declaration a request makes, told for a
+//! unit's load as php with and without opcache tells them
+//! ([`declared_at_load`]).
+//!
 //! A generator's frame is not begun at its call, as php's
 //! `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`: it is begun
 //! at each resumption, [`generator_resumed`]
@@ -84,12 +104,9 @@
 //! declared, as php's lists are walked; a switch away from a fiber that
 //! is dead ends what its chain still holds first.
 //!
-//! What is not here yet, each built on the same slot and chain:
-//! the other notices and adding and removing handlers while a request
-//! is served (#1812). A handler reads the frame it is handed through
-//! [`Observed::frame`], and the user frame below it through
-//! [`Observed::caller`], and keeps one as a
-//! [`FrameId`](crate::api::request::FrameId) (#1827).
+//! A handler reads the frame it is handed through [`Observed::frame`],
+//! and the user frame below it through [`Observed::caller`], and keeps
+//! one as a [`FrameId`](crate::api::request::FrameId) (#1827).
 //!
 //! [`Extension`]: crate::api::abi::Extension
 //! [`ExtensionBuilder::observer`]: crate::api::abi::ExtensionBuilder::observer
@@ -100,10 +117,11 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef};
+use php_unit::Unit;
 
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
-use crate::api::request::{FrameView, Request};
+use crate::api::raising::{Level, Thrown};
+use crate::api::request::{FrameView, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, PhpObject, Value};
 
 pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, told_before};
@@ -198,6 +216,14 @@ impl DerefMut for Observed<'_> {
     }
 }
 
+impl AsMut<Request> for Observed<'_> {
+    /// The request whose time limit a [`TimeLimitSuspended`] over the
+    /// frame suspends.
+    fn as_mut(&mut self) -> &mut Request {
+        self.req
+    }
+}
+
 impl Observed<'_> {
     /// The frame observed, `execute_data`, read for as long as the
     /// handler does not write through the request: what it serves, where
@@ -247,6 +273,13 @@ impl Observed<'_> {
         }
     }
 
+    /// [`Request::suspend_time_limit`] over the observed frame: the
+    /// guard derefs to this, so the frame's reads stay the handler's while
+    /// it blocks, a debugger's answers to its client among them.
+    pub fn suspend_time_limit(&mut self) -> TimeLimitSuspended<'_, Self> {
+        TimeLimitSuspended::over(self)
+    }
+
     /// `EX(func)->op_array.filename`: the file the op array was compiled
     /// from, `… : eval()'d code` for an evaluated string's; empty for a
     /// native, which no file holds.
@@ -274,11 +307,152 @@ pub(crate) enum Slot {
 }
 
 /// The handlers a slot resolved to: begin in declaration order, end in
-/// reverse, as `zend_observer_fcall_install` lays them out.
-#[derive(Debug)]
+/// reverse, as `zend_observer_fcall_install` lays them out, and as
+/// handlers added and removed while the request is served leave them
+/// ([`Request::add_begin_handler`] and its kin). php's slot holds one
+/// begin and one end handler per observer declared, so neither list
+/// grows past that count.
+#[derive(Debug, Clone)]
 pub(crate) struct Installed {
-    begin: Box<[BeginHandler]>,
-    end: Box<[EndHandler]>,
+    begin: Vec<BeginHandler>,
+    end: Vec<EndHandler>,
+}
+
+impl Slot {
+    /// The begin handler at `at` of the slot as it stands now, read
+    /// afresh for each one called, as `zend_observer_fcall_begin_prechecked`
+    /// walks the slot itself: a handler that removes itself moves the
+    /// next into its place, which the walk then passes over, and php
+    /// hands the remover that next handler to call itself
+    /// ([`Removed::next`]).
+    pub(crate) fn begin_at(&self, at: usize) -> Option<BeginHandler> {
+        match self {
+            Slot::Installed(handlers) => handlers.begin.get(at).copied(),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// The end handler at `at`, read as [`Slot::begin_at`] reads.
+    pub(crate) fn end_at(&self, at: usize) -> Option<EndHandler> {
+        match self {
+            Slot::Installed(handlers) => handlers.end.get(at).copied(),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// Whether an end handler observes the function now, which is what
+    /// puts a frame begun on the open chain.
+    fn ends(&self) -> bool {
+        matches!(self, Slot::Installed(handlers) if !handlers.end.is_empty())
+    }
+
+    /// The handlers to add one to: none while the slot is unresolved,
+    /// and an empty pair where every observer declined, which the
+    /// addition installs, as `zend_observer_add_begin_handler` writes
+    /// over `ZEND_OBSERVER_NONE_OBSERVED`.
+    fn handlers_for_adding(&mut self) -> Option<&mut Installed> {
+        if matches!(self, Slot::Declined) {
+            *self = Slot::Installed(Arc::new(Installed {
+                begin: Vec::new(),
+                end: Vec::new(),
+            }));
+        }
+        match self {
+            Slot::Installed(handlers) => Some(Arc::make_mut(handlers)),
+            Slot::Unresolved | Slot::Declined => None,
+        }
+    }
+
+    /// `zend_observer_add_begin_handler` (`Z/Zend/zend_observer.c:184-199`):
+    /// `begin` after the begin handlers the slot holds, where fewer than
+    /// `room` stand; php's slot has room for one per observer declared
+    /// and holds the caller to that (`ZEND_UNREACHABLE`), where this
+    /// answers false.
+    pub(crate) fn add_begin(&mut self, begin: BeginHandler, room: usize) -> bool {
+        match self.handlers_for_adding() {
+            Some(handlers) if handlers.begin.len() < room => {
+                handlers.begin.push(begin);
+                true
+            }
+            _ => {
+                self.settle();
+                false
+            }
+        }
+    }
+
+    /// `zend_observer_add_end_handler` (`Z/Zend/zend_observer.c:216-230`):
+    /// `end` before the end handlers the slot holds, so they stay the
+    /// reverse of the begin handlers, where fewer than `room` stand.
+    pub(crate) fn add_end(&mut self, end: EndHandler, room: usize) -> bool {
+        match self.handlers_for_adding() {
+            Some(handlers) if handlers.end.len() < room => {
+                handlers.end.insert(0, end);
+                true
+            }
+            _ => {
+                self.settle();
+                false
+            }
+        }
+    }
+
+    /// `zend_observer_remove_begin_handler` (`Z/Zend/zend_observer.c:201-214`):
+    /// `begin` taken out where the slot holds it, the handlers after it
+    /// moved up, and the one now in its place handed back.
+    pub(crate) fn remove_begin(&mut self, begin: BeginHandler) -> Option<Removed<BeginHandler>> {
+        let Slot::Installed(handlers) = self else {
+            return None;
+        };
+        let at = handlers
+            .begin
+            .iter()
+            .position(|held| std::ptr::fn_addr_eq(*held, begin))?;
+        let handlers = Arc::make_mut(handlers);
+        handlers.begin.remove(at);
+        let next = handlers.begin.get(at).copied();
+        self.settle();
+        Some(Removed { next })
+    }
+
+    /// `zend_observer_remove_end_handler` (`Z/Zend/zend_observer.c:232-244`):
+    /// as [`Slot::remove_begin`], over the end handlers.
+    pub(crate) fn remove_end(&mut self, end: EndHandler) -> Option<Removed<EndHandler>> {
+        let Slot::Installed(handlers) = self else {
+            return None;
+        };
+        let at = handlers
+            .end
+            .iter()
+            .position(|held| std::ptr::fn_addr_eq(*held, end))?;
+        let handlers = Arc::make_mut(handlers);
+        handlers.end.remove(at);
+        let next = handlers.end.get(at).copied();
+        self.settle();
+        Some(Removed { next })
+    }
+
+    /// php's invariant after an addition or a removal: a slot with no
+    /// begin and no end handler is `ZEND_OBSERVER_NONE_OBSERVED`, so the
+    /// call home passes over it as it passes over a declined function.
+    fn settle(&mut self) {
+        if matches!(self, Slot::Installed(handlers) if handlers.begin.is_empty() && handlers.end.is_empty())
+        {
+            *self = Slot::Declined;
+        }
+    }
+}
+
+/// What removing a handler from a function hands back
+/// ([`Request::remove_begin_handler`], [`Request::remove_end_handler`]),
+/// php's `next` out-parameter: the handler that moved into the removed
+/// one's place, if any. A handler that removes itself while the slot is
+/// being walked moves that one into its own place, which the walk then
+/// passes over, so php's contract is that the remover calls it itself,
+/// with the arguments it was handed.
+#[derive(Debug, Clone, Copy)]
+pub struct Removed<H> {
+    pub next: Option<H>,
 }
 
 /// The call home: `frame` pushed, its prologue not yet served. One load and
@@ -410,15 +584,14 @@ fn begin_prechecked(req: &mut Request, at: Observable) -> bool {
         Slot::Unresolved => resolve(req, at),
         resolved => resolved,
     };
-    let Slot::Installed(handlers) = slot else {
-        return false;
-    };
-    let opened = !handlers.end.is_empty();
+    let opened = slot.ends();
     if opened {
         req.open_observed(at);
     }
-    for begin in &handlers.begin {
+    let mut next = 0;
+    while let Some(begin) = req.observer_begin_at(at, next) {
         begin(&mut Observed { req, at });
+        next += 1;
     }
     opened
 }
@@ -457,10 +630,7 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
     let slot = if begin.is_empty() && end.is_empty() {
         Slot::Declined
     } else {
-        Slot::Installed(Arc::new(Installed {
-            begin: begin.into_boxed_slice(),
-            end: end.into_boxed_slice(),
-        }))
+        Slot::Installed(Arc::new(Installed { begin, end }))
     };
     req.set_observer_slot(at, slot.clone());
     slot
@@ -516,13 +686,14 @@ fn end_native(
 }
 
 /// `call_end_observers` (`Z/Zend/zend_observer.c:296-311`): the end
-/// handlers of `at`'s slot, called in the order it holds them.
+/// handlers of `at`'s slot as it stands when the call is left, which
+/// handlers added or removed since its begin have moved, called in the
+/// order it holds them and read afresh for each, as [`Slot::begin_at`].
 fn call_end_handlers(req: &mut Request, at: Observable, value: Option<&Value>) {
-    let Slot::Installed(handlers) = req.observer_slot(at) else {
-        return;
-    };
-    for end in &handlers.end {
+    let mut next = 0;
+    while let Some(end) = req.observer_end_at(at, next) {
         end(&mut Observed { req, at }, value);
+        next += 1;
     }
 }
 
@@ -560,6 +731,278 @@ pub(crate) fn end_all(req: &mut Request) {
     }
     for at in req.take_observed() {
         call_end_handlers(req, at, None);
+    }
+}
+
+/// `zend_observer_error_cb` (`Z/Zend/zend_observer.h:152`): told of a
+/// diagnostic ([`ErrorNotice`]), as php's `zend_error_impl` tells every
+/// one registered before it hands the diagnostic to the user's handler
+/// or to `zend_error_cb`.
+pub(crate) type ErrorObserver = fn(&mut Request, &ErrorNotice<'_>);
+
+/// What an error observer is told of one diagnostic, the four values
+/// `zend_observer_error_cb` is handed: the level, the file, the line and
+/// the message, and whether php's `type` carried `E_DONT_BAIL`.
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorNotice<'a> {
+    level: Level,
+    file: &'a [u8],
+    line: u32,
+    message: &'a [u8],
+    uncaught: bool,
+}
+
+impl<'a> ErrorNotice<'a> {
+    /// The level the diagnostic was raised at, `type & E_ALL`.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// The file the diagnostic names, `Unknown` where nothing executes.
+    #[must_use]
+    pub fn file(&self) -> &'a [u8] {
+        self.file
+    }
+
+    /// The line the diagnostic names.
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The message, its bytes as raised.
+    #[must_use]
+    pub fn message(&self) -> &'a [u8] {
+        self.message
+    }
+
+    /// Whether this is an uncaught throwable rendered as the request
+    /// ends, `zend_exception_error`'s `E_ERROR`, or a `ParseError`'s or a
+    /// `CompileError`'s own level, which php tells with `E_DONT_BAIL` set
+    /// in `type` (`Z/Zend/zend_exceptions.c:926`, `:951-953`), so a tool
+    /// tells it from a fatal `zend_error` raised. A pending throwable
+    /// reported as a warning before a fatal is told as the warning
+    /// alone.
+    #[must_use]
+    pub fn uncaught(&self) -> bool {
+        self.uncaught
+    }
+}
+
+/// `zend_observer_function_declared_cb` (`Z/Zend/zend_observer.h:131`):
+/// told of a function declared, and the lowered name it is declared
+/// under.
+pub(crate) type FunctionDeclared = fn(&mut Request, Function, &[u8]);
+
+/// `zend_observer_class_linked_cb` (`Z/Zend/zend_observer.h:141`): told
+/// of a class linked into the request's table, and the lowered name it
+/// stands under, an alias's for `class_alias()`.
+pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
+
+/// `zend_observer_error_notify` (`Z/Zend/zend_observer.h:156-160`): each
+/// error observer the bundle declared told of the diagnostic, in
+/// declaration order. php calls it in `zend_error_impl` once the
+/// diagnostic is past the compile's record and any pending throwable it
+/// reports, beside and before `zend_error_cb` (`Z/Zend/zend.c:1528`),
+/// and in `zend_exception_error` before an uncaught throwable reaches
+/// `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`). It is not
+/// `zend_error_cb`'s chain ([`crate::supplied::ErrorBeneath`]): an error
+/// observer is a list told of every diagnostic, whether the user's
+/// handler takes it or `error_reporting` hides it, and it changes
+/// nothing of how the diagnostic is served; a link of `zend_error_cb`
+/// serves the diagnostics the user's handler leaves, and may serve one
+/// in place of php's own `php_error_cb`. Nothing more than one check of
+/// the list while none is declared.
+#[inline]
+pub(crate) fn error(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+    if req.shared.supplied.error_observers.is_empty() {
+        return;
+    }
+    notify_error(
+        req,
+        ErrorNotice {
+            level,
+            file,
+            line,
+            message,
+            uncaught: false,
+        },
+    );
+}
+
+/// [`error`] for an uncaught throwable `zend_exception_error` renders,
+/// told with php's `E_DONT_BAIL` ([`ErrorNotice::uncaught`]).
+#[inline]
+pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, message: &[u8]) {
+    if req.shared.supplied.error_observers.is_empty() {
+        return;
+    }
+    notify_error(
+        req,
+        ErrorNotice {
+            level,
+            file,
+            line,
+            message,
+            uncaught: true,
+        },
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.error_observers.iter() {
+        observer(req, &notice);
+    }
+}
+
+/// `zend_observer_function_declared_notify`
+/// (`Z/Zend/zend_observer.h:136-140`): each observer of declared
+/// functions told of `function`, declared under `lowered`, in
+/// declaration order. php tells them where `do_bind_function` binds a
+/// `DECLARE_FUNCTION`'s function (`Z/Zend/zend_compile.c:1300`) and
+/// where a file's top-level function is declared as the file loads
+/// ([`declared_at_load`]).
+pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: &[u8]) {
+    if !functions_declared_observed(req) {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.functions_declared.iter() {
+        observer(req, function, lowered);
+    }
+}
+
+/// `zend_observer_class_linked_notify` (`Z/Zend/zend_observer.h:146-150`):
+/// each observer of linked classes told of `class`, standing under
+/// `lowered`, in declaration order. php tells them where
+/// `zend_bind_class_in_slot` binds a `DECLARE_CLASS`'s class
+/// (`Z/Zend/zend_compile.c:1326`, `:1332`), where a user class is given
+/// an alias (`Z/Zend/zend_API.c:3635`), and where a file's classes are
+/// linked as it loads ([`declared_at_load`]); an anonymous class's
+/// `DECLARE_ANON_CLASS` tells none.
+pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
+    if !classes_linked_observed(req) {
+        return;
+    }
+    let shared = Arc::clone(&req.shared);
+    for observer in shared.supplied.classes_linked.iter() {
+        observer(req, class, lowered);
+    }
+}
+
+/// `zend_observer_function_declared_observed`: whether an observer of
+/// declared functions is declared, which a site asks before it does any
+/// work for the notice.
+pub(crate) fn functions_declared_observed(req: &Request) -> bool {
+    !req.shared.supplied.functions_declared.is_empty()
+}
+
+/// `zend_observer_class_linked_observed`, as
+/// [`functions_declared_observed`].
+pub(crate) fn classes_linked_observed(req: &Request) -> bool {
+    !req.shared.supplied.classes_linked.is_empty()
+}
+
+/// One notice of a unit's load, by the lowered name it is told under.
+enum LoadNotice {
+    Declared(Vec<u8>),
+    Linked(Vec<u8>),
+}
+
+/// What a unit's load bound before its main op array runs, for the
+/// notices of [`declared_at_load`]: the indices of the classes of
+/// [`Unit::classes`] linked, in the order linked, and whether opcache
+/// served the unit, which orders the notices.
+#[derive(Debug, Default)]
+pub(crate) struct LinkedAtLoad {
+    pub(crate) accelerated: bool,
+    pub(crate) classes: Vec<u32>,
+}
+
+/// The notices of a unit's load, its top-level functions declared and
+/// the classes linked early, in php's order: where opcache serves the
+/// unit, as `zend_accel_load_script` copies the cached file's tables
+/// (`Z/ext/opcache/zend_accelerator_util_funcs.c:392-410`), every
+/// function, then every class linked, then the delayed early bindings,
+/// which `linked` already holds in that order; on a cache hit and on
+/// the miss that compiled the file alike, since opcache compiles with
+/// `ZEND_COMPILE_IGNORE_OBSERVER` and tells them at the load
+/// (`Z/ext/opcache/ZendAccelerator.c:1816`). Where it does not, php
+/// tells each as its compile finishes it (`Z/Zend/zend_compile.c:8627`,
+/// `:9386`, `Z/Zend/zend_inheritance.c:3937-4039`): in source order,
+/// which is the order the declarations end in, since no top-level
+/// declaration holds another. A function and a class that end on one
+/// line are told the function first; php tells first the one written
+/// first. The engine's units are shared and kept like opcache's, so a
+/// unit served again from the engine's cache is told again, as each
+/// request's compile or load tells php's observers again.
+pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &LinkedAtLoad) {
+    if !functions_declared_observed(req) && !classes_linked_observed(req) {
+        return;
+    }
+    let functions: Vec<(u32, Vec<u8>)> = unit
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|&(at, _)| {
+            let body = crate::exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+            !req.preloaded_function(unit, body)
+        })
+        .map(|(_, (decl, _))| (decl.end_line, decl.name.0.to_ascii_lowercase()))
+        .collect();
+    let classes: Vec<(u32, Vec<u8>)> = linked
+        .classes
+        .iter()
+        .filter_map(|&at| unit.classes.get(usize::try_from(at).ok()?))
+        .map(|decl| (decl.end_line, decl.name.0.to_ascii_lowercase()))
+        .collect();
+    let mut told: Vec<LoadNotice> = Vec::with_capacity(functions.len() + classes.len());
+    if linked.accelerated {
+        told.extend(
+            functions
+                .into_iter()
+                .map(|(_, name)| LoadNotice::Declared(name)),
+        );
+        told.extend(
+            classes
+                .into_iter()
+                .map(|(_, name)| LoadNotice::Linked(name)),
+        );
+    } else {
+        let mut functions = functions.into_iter().peekable();
+        let mut classes = classes.into_iter().peekable();
+        loop {
+            let function_first = match (functions.peek(), classes.peek()) {
+                (Some(function), Some(class)) => function.0 <= class.0,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let next = if function_first {
+                functions.next().map(|(_, name)| LoadNotice::Declared(name))
+            } else {
+                classes.next().map(|(_, name)| LoadNotice::Linked(name))
+            };
+            told.extend(next);
+        }
+    }
+    for notice in told {
+        match notice {
+            LoadNotice::Declared(name) => {
+                if let Some(declared) = req.function_named(&name) {
+                    function_declared(req, declared, &name);
+                }
+            }
+            LoadNotice::Linked(name) => {
+                if let Some(class) = req.class_named(&name) {
+                    class_linked(req, class, &name);
+                }
+            }
+        }
     }
 }
 

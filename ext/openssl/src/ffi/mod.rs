@@ -125,7 +125,7 @@ const OPENSSL_INIT_LOAD_CONFIG: u64 = 0x0000_0040;
 /// `php_openssl_backend_init`'s `OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG,
 /// NULL)`: the library started with its configuration file read and every
 /// digest and cipher entered in the name table `openssl_get_md_methods`
-/// and `openssl_get_cipher_methods` walk. Once per process, whoever asks.
+/// and `openssl_get_cipher_methods` walk. One time per process, whoever asks.
 pub(crate) fn start() {
     // SAFETY: OPENSSL_init_ssl is safe to call from any thread any number
     // of times; NULL settings are the defaults.
