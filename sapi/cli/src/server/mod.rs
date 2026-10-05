@@ -1,31 +1,46 @@
 //! php's built-in web server, `php -S` (`Z/sapi/cli/php_cli_server.c`):
 //! the document root and the address read as `do_cli_server` reads
 //! them, a listening socket as `php_network_listen_socket` binds it, and
-//! each connection it accepts served on a thread of its own through the
-//! engine ([`client`]), where php serves them one after another in its
-//! event loop, or forks workers for `PHP_CLI_SERVER_WORKERS`. The log is
-//! php's: the startup line, one line as each connection is accepted and
-//! closed, one per response, each after the local time `asctime` writes,
-//! on stderr, as many as the level `-q` lowers leaves.
+//! php's event loop on the one thread the process has: every connection
+//! waited on at once, each request read as its bytes arrive, so a client
+//! that sends slowly holds no other back, and the requests served through
+//! the engine one after another on that thread ([`client`]), as
+//! `php_cli_server_do_event_loop` serves them (#1884, as #1779 ruled). No
+//! request is ever in flight beside another, so a `pcntl_fork` from one
+//! forks as under the CLI, and the child serves on in the loop it was
+//! forked from, as php's does. `PHP_CLI_SERVER_WORKERS`, for which php
+//! forks the server into worker processes before it serves, is not read
+//! yet (#1885). The log is php's: the startup line, one
+//! line as each connection is accepted and closed, one per response, each
+//! after the local time `asctime` writes, on stderr, as many as the level
+//! `-q` lowers leaves.
 
 mod client;
 mod log;
 
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
+use std::collections::BTreeMap;
+use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::thread::JoinHandle;
 
 use php_sapi::{Engine, PHP_VERSION};
 
+use crate::ffi::{Interest, Polled};
+
 use crate::options::Server;
+use client::Connection;
 use log::{Log, Type};
 
 /// `sapi_module.name` for the built-in server: what `php_sapi_name()`
 /// answers under it.
 pub(crate) const NAME: &str = "cli-server";
+
+/// How long the loop waits before it reads the flag a `SIGINT` sets
+/// again, in milliseconds: `php_cli_server_do_event_loop`'s `tv` of one
+/// second.
+const WAIT: i32 = 1000;
 
 /// `php_cli_server_log_level`'s default (`Z/sapi/cli/php_cli_server.c:223`),
 /// which each `-q` lowers.
@@ -40,7 +55,8 @@ pub(crate) fn log_message(entry: &[u8]) {
 
 /// What every connection of one server reads: the engine, the document
 /// root and the router, the host and port the server listens on, and
-/// the log.
+/// the log. Shared with the sink a request holds, which the engine may
+/// keep past the call that serves it.
 struct Site {
     engine: Engine,
     document_root: Vec<u8>,
@@ -56,7 +72,8 @@ struct Site {
 /// parsed and listened on; the startup line; and then each connection
 /// served until a `SIGINT` stops the loop, as
 /// `php_cli_server_sigint_handler` stops it. The exit code: 0 once
-/// stopped, what refused it where it does not start.
+/// stopped, 1 where the wait failed, what refused it where it does not
+/// start.
 pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
     let document_root = match &server.document_root {
         Some(root) => {
@@ -91,6 +108,13 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
             return 1;
         }
     };
+    // Non-blocking, so a connection another process accepted first leaves
+    // this one's `accept` empty rather than stalled (`php_cli_server_ctor`,
+    // `Z/sapi/cli/php_cli_server.c:2577-2584`).
+    if listener.set_nonblocking(true).is_err() {
+        log.write(Type::Error, "Failed to make server socket non-blocking");
+        return 1;
+    }
     let (open, close) = if host.contains(':') {
         ("[", "]")
     } else {
@@ -113,56 +137,91 @@ pub fn run(engine: Engine, server: &Server, color: bool) -> i32 {
         port,
         log,
     });
-    serve_until_stopped(&site, &listener);
-    0
+    serve_until_stopped(&site, &listener)
 }
 
-/// `php_cli_server_do_event_loop` (`Z/sapi/cli/php_cli_server.c:2770-2797`)
-/// with each connection served on a thread of its own: a wait of at most
-/// a second for a connection, the flag a `SIGINT` sets read after each,
-/// and once it is set no connection accepted any more, every one still
-/// open told nothing more is read from it, as `php_cli_server_dtor`
-/// closes the clients, and every thread joined, so the request a thread
-/// was serving finishes as php's one loop finishes it. The engine is then
-/// held by `site` alone, and the caller's drop of it ends the engine, as
-/// the CLI's `php_module_shutdown` follows `do_cli_server`.
-fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) {
+/// `php_cli_server_do_event_loop` (`Z/sapi/cli/php_cli_server.c:2770-2797`):
+/// a wait of at most a second on the listening socket and every open
+/// connection, each for what it waits on, then each that is ready
+/// answered in the order of its fd, as `php_cli_server_poller_iter_on_active`
+/// (`Z/sapi/cli/php_cli_server.c:883`) walks them: the listening socket's one connection accepted, a
+/// request read on and served once whole, a response sent on. The flag a
+/// `SIGINT` sets is read before each wait; once it is set every
+/// connection still open is shut and dropped with nothing logged, as
+/// `php_cli_server_dtor` destroys the clients. A request in flight when
+/// the signal came is on this thread and finishes first, as in php's one
+/// loop. The engine is then held by `site` alone, and the caller's drop
+/// of it ends the engine, as the CLI's `php_module_shutdown` follows
+/// `do_cli_server`. The exit code, `do_cli_server`'s `r`: 0, or 1 where
+/// the wait failed, after php's line.
+fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) -> i32 {
     let stop = crate::ffi::stop_on_sigint();
-    let _ = listener.set_nonblocking(true);
-    let mut clients: Vec<(Option<TcpStream>, JoinHandle<()>)> = Vec::new();
+    let listening = listener.as_raw_fd();
+    let mut clients: BTreeMap<RawFd, Connection> = BTreeMap::new();
+    let mut status = 0;
     while !stop.load(Ordering::Relaxed) {
-        clients.retain(|(_, thread)| !thread.is_finished());
-        if !crate::ffi::wait_readable(listener.as_raw_fd(), 1000) {
-            continue;
-        }
-        match listener.accept() {
-            Ok((stream, peer)) => {
-                let _ = stream.set_nonblocking(false);
-                let held = stream.try_clone().ok();
-                let site = Arc::clone(site);
-                let name = peer_name(peer);
-                site.log.write(Type::Message, &format!("{name} Accepted"));
-                let thread = std::thread::spawn(move || client::serve(&site, stream, name));
-                clients.push((held, thread));
+        let mut polled: Vec<Polled> = std::iter::once(Polled::new(listening, Interest::Read))
+            .chain(clients.values().filter_map(Connection::polled))
+            .collect();
+        polled.sort_by_key(Polled::fd);
+        match crate::ffi::poll(&mut polled, WAIT) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                site.log.write(Type::Error, &strerror(&error));
+                status = 1;
+                break;
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) => {}
-            Err(error) => site.log.write(
+        }
+        let mut failed = false;
+        for fd in polled.iter().filter(|fd| fd.ready()).map(Polled::fd) {
+            if fd == listening {
+                failed |= !accept(site, listener, &mut clients);
+            } else if let Some(connection) = clients.remove(&fd) {
+                let connection = connection.ready(site);
+                if connection.is_open() {
+                    clients.insert(fd, connection);
+                }
+            }
+        }
+        if failed {
+            site.log.write(Type::Error, "Failed to poll event");
+        }
+    }
+    for connection in clients.into_values() {
+        connection.drop_unlogged();
+    }
+    status
+}
+
+/// `accept` on the listening socket, as
+/// `php_cli_server_do_event_for_each_fd_callback`
+/// (`Z/sapi/cli/php_cli_server.c:2704`) answers it: the
+/// connection made non-blocking, `%s Accepted` logged and its request
+/// waited on; nothing where another process took the connection first.
+/// False where the accept failed, after php's line, or the connection
+/// could not be made non-blocking, which the loop answers with
+/// `Failed to poll event` once the pass is over, as
+/// `php_cli_server_do_event_for_each_fd` (`:2755`) does.
+fn accept(site: &Site, listener: &TcpListener, clients: &mut BTreeMap<RawFd, Connection>) -> bool {
+    match listener.accept() {
+        Ok((stream, peer)) => {
+            if stream.set_nonblocking(true).is_err() {
+                return false;
+            }
+            let name = peer_name(peer);
+            site.log.write(Type::Message, &format!("{name} Accepted"));
+            clients.insert(stream.as_raw_fd(), Connection::accepted(stream, name));
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error) => {
+            site.log.write(
                 Type::Error,
                 &format!("Failed to accept a client (reason: {})", strerror(&error)),
-            ),
+            );
+            false
         }
-    }
-    for (held, _) in &clients {
-        if let Some(stream) = held {
-            let _ = stream.shutdown(Shutdown::Read);
-        }
-    }
-    for (_, thread) in clients {
-        let _ = thread.join();
     }
 }
 
