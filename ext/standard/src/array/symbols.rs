@@ -21,7 +21,6 @@ use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
     EXTR_REFS, EXTR_SKIP,
 };
-use super::key_copy;
 
 /// `php_valid_var_name`: `[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*`.
 fn valid_var_name(name: &[u8]) -> bool {
@@ -53,29 +52,6 @@ fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
         return cell.set(req, value);
     }
     req.set_caller_var(name, value);
-    Ok(())
-}
-
-/// The element made a reference in place (`ZVAL_MAKE_REF_EX`), and the
-/// variable made that reference.
-fn assign_ref(
-    req: &mut Request,
-    array: &mut PhpArray,
-    key: &Key,
-    value: Value,
-    name: &[u8],
-) -> Result<(), Thrown> {
-    let cell = if let Some(cell) = value.as_php_ref() {
-        *cell
-    } else {
-        req.addref(&value);
-        let cell = PhpRef::new(req, value)?;
-        let written = key_copy(req, key);
-        array.set(req, written, cell.as_value())?;
-        cell
-    };
-    req.addref(&cell.as_value());
-    req.set_caller_var(name, cell.as_value());
     Ok(())
 }
 
@@ -205,25 +181,12 @@ fn extract(
     }
     req.forbid_dynamic_call()?;
     let prefix = prefix.unwrap_or_default();
-    // `EXTR_REFS` writes references into the caller's array, separated
-    // in place where the call passed it by reference.
-    let separated = if refs { given.separated(req)? } else { None };
-    let Some(mut array) = separated.or_else(|| given.get().copied()) else {
+    if refs {
+        return extracted_refs(req, &given, kind, &prefix);
+    }
+    let Some(array) = given.get().copied() else {
         return Ok(0);
     };
-    if refs {
-        // The reference the call passed holds the array: a variable an
-        // element is made a reference over gives up the caller's
-        // variable, never the reference's own value.
-        let mut count = 0i64;
-        for (key, entry) in array.snapshot_refs() {
-            if let Some(target) = target(req, kind, &prefix, &key)? {
-                assign_ref(req, &mut array, &key, entry, &target)?;
-                count += 1;
-            }
-        }
-        return Ok(count);
-    }
     // `ZVAL_COPY(&array_copy, var_array_param)`: "The array might be
     // stored in a local variable that will be overwritten". The call
     // passed that variable by reference, so an element written through
@@ -243,6 +206,59 @@ fn extract(
         Ok(ControlFlow::<()>::Continue(()))
     })?;
     Ok(count)
+}
+
+/// `extract` under `EXTR_REFS`, php's `php_extract_ref_*` helpers: the
+/// array the call's reference holds walked live, as their
+/// `ZEND_HASH_MAP_FOREACH` walks its buckets, each row a variable takes
+/// made a reference in place (`ZVAL_MAKE_REF_EX`) and the variable bound
+/// to it. Overwriting a variable can serve a destructor that writes the
+/// array; a row it unsets ahead is not visited and one it rewrites is
+/// read as it now stands. A temporary passed where a reference was
+/// asked for is walked in a cell of its own, which nobody reads after.
+///
+/// ```php
+/// class D { function __destruct() { unset($GLOBALS['arr']['kkkkkkkkkk']); echo "d,"; } }
+/// $o = new D; $k = 'kkkkk'; $v = 'vvvvv';
+/// $arr = ['o' => 1, $k . $k => $v . $v];
+/// echo extract($arr, EXTR_REFS), ',', $kkkkkkkkkk ?? 'unset', "\n";
+/// class E { function __destruct() { $GLOBALS['brr']['b'] = 'new'; echo "e,"; } }
+/// $p = new E; $brr = ['p' => 1, 'b' => 'old'];
+/// echo extract($brr, EXTR_REFS), ',', $b, "\n";
+/// ```
+/// ```expect
+/// d,1,unset
+/// e,2,new
+/// ```
+fn extracted_refs(
+    req: &mut Request,
+    given: &Ref<PhpArray>,
+    kind: i64,
+    prefix: &[u8],
+) -> Result<i64, Thrown> {
+    let holder = if let Some(reference) = given.reference() {
+        reference
+    } else {
+        let Some(array) = given.get().copied() else {
+            return Ok(0);
+        };
+        req.addref(&array.to_value());
+        PhpRef::new(req, array.to_value())?
+    };
+    let mut count = 0i64;
+    let walked = walk::live(req, holder, |req, row| {
+        if let Some(target) = target(req, kind, prefix, row.key())? {
+            let cell = row.make_ref(req)?;
+            req.addref(&cell.as_value());
+            req.set_caller_var(&target, cell.as_value());
+            count += 1;
+        }
+        Ok(ControlFlow::<()>::Continue(()))
+    });
+    if given.reference().is_none() {
+        req.release(holder.as_value());
+    }
+    walked.map(|_| count)
 }
 
 /// The variable `extract` writes the element under `key` into, one arm

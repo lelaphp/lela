@@ -138,6 +138,26 @@ fn extract_holds_the_array_it_walks_when_an_element_overwrites_its_variable() {
     assert_eq!(stdout, "2,1,vvvvvvvvvv");
 }
 
+/// `extract` under `EXTR_REFS` walks the array its reference holds live,
+/// as php's ref helpers walk its buckets (`ZEND_HASH_MAP_FOREACH`): a
+/// destructor served as a variable is overwritten that unsets a row
+/// ahead leaves it unvisited, and one that rewrites the row in place
+/// leaves the walk reading the new value (#2042).
+#[test]
+fn extract_refs_walks_the_array_live_under_a_destructor() {
+    let script = |body: &str| {
+        format!(
+            "<?php class D {{ function __destruct() {{ {body} echo \"d,\"; }} }}\n$o = new D; $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';\n$arr = ['o' => 1, $k . $k => $v . $v];\necho extract($arr, EXTR_REFS), ',';\n$x = $z . $z; echo $kkkkkkkkkk ?? 'unset';"
+        )
+    };
+    let (stdout, fatal) = served(&script("unset($GLOBALS['arr']['kkkkkkkkkk']);"));
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "d,1,unset");
+    let (stdout, fatal) = served(&script("$GLOBALS['arr']['kkkkkkkkkk'] = 'new';"));
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "d,2,new");
+}
+
 /// `serialize` holds an owner of a nested array while it walks it when
 /// it reached the array through a shared reference. An element's
 /// `__serialize` that assigns over that reference gives up the array's
