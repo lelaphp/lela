@@ -9,7 +9,7 @@ use php_ext::abi::This;
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error, deprecated, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::{Algo, Failure, Field, Generated, Serial, constants, csprng};
 
@@ -343,7 +343,7 @@ impl Mt19937 {
     /// ac0a7f8c 2faac497
     /// bool(true)
     /// ```
-    fn generate(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn generate(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let drawn = crate::draw(req, this, |algo| algo.generate())?;
         let bytes = drawn.result.to_le_bytes();
@@ -363,16 +363,16 @@ impl Mt19937 {
     /// 13069 O:21:"Random\Engine\Mt19937":2:{i:0;a:0:{}i:1;a:626:{i:0;s:8
     /// 25f4c16a
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let Some(fields) = crate::with_serial(req, this, |s| s.serialize()) else {
             return Err(throw(req, "Exception", "Engine serialize failed"));
         };
         let mut out = PhpArray::new(req)?;
         let members = crate::members(req, this)?;
-        out.append(req, Value::array(members))?;
+        out.append(req, Value::array(members.hand_on_unmigrated()))?;
         let state = crate::fields(req, &fields)?;
-        out.append(req, Value::array(state))?;
+        out.append(req, Value::array(state.hand_on_unmigrated()))?;
         Ok(out)
     }
 
@@ -440,13 +440,17 @@ impl Mt19937 {
     ///   }
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let mut out = crate::members(req, this)?;
         if let Some(fields) = crate::with_serial(req, this, |s| s.serialize()) {
             let state = crate::fields(req, &fields)?;
             let key = PhpString::new(req, b"__states")?;
-            out.set(req, Key::Str(key), Value::array(state))?;
+            out.set(
+                req,
+                Key::Str(key.hand_on_unmigrated()),
+                Value::array(state.hand_on_unmigrated()),
+            )?;
         }
         Ok(out)
     }

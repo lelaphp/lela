@@ -7,7 +7,7 @@
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::locale as c;
 
@@ -63,7 +63,7 @@ const TABLE: &[u8; 26] = b"\x00123\x0012\x00\x0022455\x0012623\x001\x002\x002";
 /// string(4) "I652"
 /// ```
 #[php_function]
-fn soundex(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn soundex(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut out: Vec<u8> = Vec::with_capacity(4);
     let mut last: Option<u8> = None;
     for &c in string.as_bytes() {

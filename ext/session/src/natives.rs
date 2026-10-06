@@ -10,7 +10,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, arity, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::user::{Slot, method_of, store};
 use crate::{
@@ -57,14 +57,17 @@ fn can_change(req: &mut Request, setting: &str, check_cookies: bool) -> bool {
 fn session_name(
     req: &mut Request,
     #[php(default = null)] name: Option<Path>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if name.is_some() && !can_change(req, "name", false) {
         return Ok(OrFalse::False);
     }
     let current = ini(req, b"session.name");
     let current = PhpString::new(req, &current)?;
-    if let Some(name) = name {
-        crate::ini::alter_string(req, b"session.name", name.0)?;
+    if let Some(name) = name
+        && let Err(thrown) = crate::ini::alter_string(req, b"session.name", name.0)
+    {
+        current.give_up(req);
+        return Err(thrown);
     }
     Ok(OrFalse::Value(current))
 }
@@ -88,7 +91,7 @@ fn session_name(
 fn session_module_name(
     req: &mut Request,
     #[php(default = null)] module: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name = module.map(|module| module.as_bytes().to_vec());
     if name.is_some() && !can_change(req, "save handler module", false) {
         return Ok(OrFalse::False);
@@ -99,7 +102,7 @@ fn session_module_name(
         return Ok(OrFalse::Value(current));
     };
     if crate::c_str(&name).eq_ignore_ascii_case(b"user") {
-        req.release(Value::string(current));
+        current.give_up(req);
         return Err(php_ext::raising::argument_error(
             req,
             "ValueError",
@@ -108,7 +111,7 @@ fn session_module_name(
         ));
     }
     if Module::find(&name).is_none() {
-        req.release(Value::string(current));
+        current.give_up(req);
         docref(
             req,
             Level::Warning,
@@ -119,10 +122,16 @@ fn session_module_name(
         );
         return Ok(OrFalse::False);
     }
-    session::close(req)?;
+    if let Err(thrown) = session::close(req) {
+        current.give_up(req);
+        return Err(thrown);
+    }
     req.state::<State>().files = None;
-    if let Some(module) = module {
-        crate::ini::alter_string(req, b"session.save_handler", module)?;
+    if let Some(module) = module
+        && let Err(thrown) = crate::ini::alter_string(req, b"session.save_handler", module)
+    {
+        current.give_up(req);
+        return Err(thrown);
     }
     answer(req, OrFalse::Value(current))
 }
@@ -141,14 +150,17 @@ fn session_module_name(
 fn session_save_path(
     req: &mut Request,
     #[php(default = null)] path: Option<Path>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if path.is_some() && !can_change(req, "save path", false) {
         return Ok(OrFalse::False);
     }
     let current = ini(req, b"session.save_path");
     let current = PhpString::new(req, &current)?;
-    if let Some(path) = path {
-        crate::ini::alter_string(req, b"session.save_path", path.0)?;
+    if let Some(path) = path
+        && let Err(thrown) = crate::ini::alter_string(req, b"session.save_path", path.0)
+    {
+        current.give_up(req);
+        return Err(thrown);
     }
     Ok(OrFalse::Value(current))
 }
@@ -170,7 +182,7 @@ fn session_save_path(
 fn session_id(
     req: &mut Request,
     #[php(default = null)] id: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if id.is_some() && !can_change(req, "ID", true) {
         return Ok(OrFalse::False);
     }
@@ -367,7 +379,7 @@ fn regenerate(req: &mut Request, delete: bool) -> Result<bool, Thrown> {
 fn session_create_id(
     req: &mut Request,
     #[php(default = "")] prefix: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let prefix = prefix.0.as_bytes().to_vec();
     if !prefix.is_empty() {
         if prefix.len() > 256 {
@@ -434,7 +446,7 @@ fn session_create_id(
 fn session_cache_limiter(
     req: &mut Request,
     #[php(default = null)] value: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if value.is_some() && req.state::<State>().status == Status::Active {
         started_error(
             req,
@@ -452,8 +464,11 @@ fn session_cache_limiter(
     }
     let current = ini(req, b"session.cache_limiter");
     let current = PhpString::new(req, &current)?;
-    if let Some(limiter) = value {
-        crate::ini::alter_string(req, b"session.cache_limiter", limiter)?;
+    if let Some(limiter) = value
+        && let Err(thrown) = crate::ini::alter_string(req, b"session.cache_limiter", limiter)
+    {
+        current.give_up(req);
+        return Err(thrown);
     }
     Ok(OrFalse::Value(current))
 }
@@ -522,7 +537,7 @@ fn session_cache_expire(
 /// bool(false)
 /// ```
 #[php_function]
-fn session_encode(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn session_encode(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let encoded = session::encode(req)?;
     let value = match encoded {
         Some(bytes) => OrFalse::Value(PhpString::new(req, &bytes)?),
@@ -802,7 +817,7 @@ fn session_gc(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn session_get_cookie_params(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], &[u8], u8); 7] = [
         (b"lifetime", b"session.cookie_lifetime", 0),
@@ -818,11 +833,11 @@ fn session_get_cookie_params(req: &mut Request) -> Result<PhpArray, Thrown> {
             0 => Value::int(ini_long(req, entry)),
             1 => {
                 let text = ini(req, entry);
-                string_value(req, &text)?
+                string_value(req, &text)?.hand_on_unmigrated()
             }
             _ => Value::bool(ini_bool(req, entry)),
         };
-        let key = PhpString::new(req, key)?;
+        let key = PhpString::new(req, key)?.hand_on_unmigrated();
         array.set(req, Key::Str(key), value)?;
     }
     Ok(array)
@@ -955,7 +970,7 @@ fn session_set_cookie_params(
             let key = key.as_bytes().to_ascii_lowercase();
             let made = match key.as_slice() {
                 b"lifetime" | b"path" | b"domain" | b"samesite" => match to_string(req, &value) {
-                    Ok(made) => Some(Cookie::Made(made)),
+                    Ok(made) => Some(Cookie::Made(made.hand_on_unmigrated())),
                     Err(thrown) => {
                         for set in [lifetime, path, domain, samesite].into_iter().flatten() {
                             set.release(req);
@@ -1004,10 +1019,9 @@ fn session_set_cookie_params(
             return Err(arg_value_error(req, 1, "contain at least 1 valid key"));
         }
     } else {
-        lifetime = Some(Cookie::Made(php_ext::coerce::int_to_string(
-            req,
-            lifetime_long,
-        )?));
+        lifetime = Some(Cookie::Made(
+            php_ext::coerce::int_to_string(req, lifetime_long)?.hand_on_unmigrated(),
+        ));
     }
     let flag = |b: bool| Cookie::Chars(if b { b"1" } else { b"0" });
     let settings: [(&[u8], Option<Cookie>); 7] = [
@@ -1199,11 +1213,15 @@ fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
 /// The callable a native's name is.
 fn named(req: &mut Request, name: &[u8]) -> Result<Callable, Thrown> {
     let value = string_value(req, name)?;
-    let callable = callable_checked(req, &value);
-    match callable {
-        Ok(callable) => Ok(callable),
+    match callable_checked(req, &value) {
+        // The callable is a view of the name, and its owner goes with it
+        // to the shutdown table that takes the callable.
+        Ok(callable) => {
+            let _named = value.hand_on_unmigrated();
+            Ok(callable)
+        }
         Err(message) => {
-            req.release(value);
+            value.give_up(req);
             Err(throw_error(req, "Error", &message))
         }
     }
@@ -1390,16 +1408,16 @@ fn session_set_save_handler(
             (Slot::Gc, b"gc"),
         ] {
             let pair = method_of(req, first, name)?;
-            store(req, slot, Some(pair));
-            req.release(pair);
+            store(req, slot, Some(*pair));
+            pair.give_up(req);
         }
         let optional =
             |req: &mut Request, slot: Slot, interface: &[u8], name: &[u8]| -> Result<(), Thrown> {
                 store(req, slot, None);
                 if implements(req, object, interface)? || class_has(req, object, name) {
                     let pair = method_of(req, first, name)?;
-                    store(req, slot, Some(pair));
-                    req.release(pair);
+                    store(req, slot, Some(*pair));
+                    pair.give_up(req);
                 }
                 Ok(())
             };

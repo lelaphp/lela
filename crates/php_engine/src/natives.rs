@@ -35,7 +35,7 @@ use crate::api::raising::{
 };
 use crate::api::request::Request;
 use crate::api::values::{
-    ClassId, Key, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
 use php_unit::decl::FunctionDecl;
 
@@ -429,7 +429,7 @@ fn gc_disable(req: &mut Request) {
 /// int(10001)
 /// ```
 #[php_function]
-fn gc_status(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn gc_status(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.gc_status()
 }
 
@@ -495,12 +495,13 @@ fn clone(
     req: &mut Request,
     object: PhpObject,
     #[php(default = [])] withProperties: Passed<PhpArray>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let with = match withProperties {
         Passed::Given(with) => Some(with),
         Passed::Omitted => None,
     };
-    req.clone_object(object, with)
+    let made = req.clone_object(object, with);
+    crate::api::values::adopted(req, made)
 }
 
 /// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`
@@ -962,7 +963,7 @@ fn define(
                 "cannot be a recursive array",
             ));
         }
-        Value::array(copy_constant_array(req, *array)?)
+        copy_constant_array(req, *array)?.into_value().hand_on()
     } else {
         req.addref(&value);
         value
@@ -1020,14 +1021,16 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
 /// keys, each value with its reference followed, a nested array copied
 /// the same way where it is refcounted, and everything else, an
 /// immutable array among it, one more owner.
-fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     crate::api::raising::call_stack_end(req)?;
     let mut copy = PhpArray::new(req)?;
     for (key, value) in array.snapshot() {
         let value = if let Some(nested) = value.as_array()
             && value.is_refcounted()
         {
-            Value::array(copy_constant_array(req, *nested)?)
+            copy_constant_array(req, *nested)?
+                .into_value()
+                .hand_on_unmigrated()
         } else {
             req.addref(&value);
             value
@@ -2242,7 +2245,7 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// bool(false)
 /// ```
 #[php_function]
-fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let value = req.ini_get(option.as_bytes()).map(<[u8]>::to_vec);
     Ok(match value {
         Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
@@ -2303,7 +2306,7 @@ fn ini_set(
     req: &mut Request,
     option: PhpString,
     value: Raw<IniValue>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let value = &value.value();
     if matches!(
         value.as_ref(),
@@ -2323,11 +2326,11 @@ fn ini_set(
         b"java.class.path" | b"java.home" | b"java.library.path" | b"vpopmail.directory"
     ) && req.check_open_basedir(value.as_bytes(), true).is_err()
     {
-        req.release(Value::string(value));
+        value.give_up(req);
         return Ok(OrFalse::False);
     }
-    let set = req.ini_set_string(option.as_bytes(), value);
-    req.release(Value::string(value));
+    let set = req.ini_set_string(option.as_bytes(), *value);
+    value.give_up(req);
     Ok(match set? {
         Some(previous) => OrFalse::Value(PhpString::new(req, &previous)?),
         None => OrFalse::False,
@@ -2571,7 +2574,7 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
     while let Some((position, callback, arguments)) = req.shutdown_function(at) {
         at = position + 1;
         match crate::api::call::call(req, &callback, &arguments) {
-            Ok(value) => req.release(value),
+            Ok(value) => value.give_up(req),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 if let Err(fatal) = req.uncaught() {

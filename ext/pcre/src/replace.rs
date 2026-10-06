@@ -11,7 +11,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref, raise_while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::Either;
 use crate::constants::{PREG_INTERNAL_ERROR, PREG_NO_ERROR};
@@ -21,7 +21,17 @@ use crate::pattern::{Pattern, compiled, compiled_under};
 use crate::{exec_error, set_error};
 
 /// What a replacing native answers, `string|array|null`.
-type Replacement = Option<Union<PhpString, PhpArray>>;
+type Replacement = Option<Union<Owner<PhpString>, Owner<PhpArray>>>;
+
+/// A replacing native's answer given up, where the `$count` written
+/// after it threw.
+fn give_up(req: &mut Request, value: Replacement) {
+    match value {
+        Some(Union::A(string)) => string.give_up(req),
+        Some(Union::B(array)) => array.give_up(req),
+        None => {}
+    }
+}
 
 /// What one subject came to.
 enum Replaced {
@@ -201,12 +211,9 @@ fn owned(
     req: &mut Request,
     subject: PhpString,
     replaced: Replaced,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     match replaced {
-        Replaced::Same => {
-            req.addref(&Value::string(subject));
-            Ok(Some(subject))
-        }
+        Replaced::Same => Ok(Some(Owner::take(req, subject))),
         Replaced::Built(bytes) => Ok(Some(PhpString::new(req, &bytes)?)),
         Replaced::Failed => Ok(None),
     }
@@ -220,7 +227,7 @@ fn replace_one(
     replacement: &[u8],
     limit: usize,
     count: &mut usize,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let Some(pattern) = compiled(req, regex) else {
         return Ok(None);
     };
@@ -235,7 +242,7 @@ pub(super) fn replace_impl(
     replacement: &[u8],
     limit: usize,
     count: &mut usize,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let bytes = subject.as_bytes();
     let replaced = replace_loop(req, pattern, bytes, limit, count, |_, scratch, n, out| {
         expand(replacement, bytes, scratch, n, out);
@@ -267,7 +274,7 @@ fn replace_one_func(
     subject: PhpString,
     calling: Calling<'_>,
     count: &mut usize,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let Calling {
         callback,
         limit,
@@ -290,15 +297,15 @@ fn replace_one_func(
             }
             let mut groups = PhpArray::new(req)?;
             populate(req, &mut groups, &pattern, scratch, bytes, n, flags)?;
-            let argument = groups.to_value();
-            let returned = call(req, callback, &[argument]);
-            req.release(argument);
+            let argument = groups.into_value();
+            let returned = call(req, callback, &[*argument]);
+            argument.give_up(req);
             let returned = returned?;
             let text = to_string(req, &returned);
-            req.release(returned);
+            returned.give_up(req);
             let text = text?;
             out.extend_from_slice(text.as_bytes());
-            req.release(Value::string(text));
+            text.give_up(req);
             Ok(true)
         },
     )?;
@@ -316,7 +323,7 @@ fn in_subject(
     subject: PhpString,
     limit: usize,
     count: &mut usize,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let patterns = match regex {
         Union::B(regex) => {
             let Union::B(replacement) = replacement else {
@@ -337,32 +344,41 @@ fn in_subject(
         Union::A(replacements) => Some(replacements.snapshot()),
         Union::B(_) => None,
     };
-    req.addref(&Value::string(subject));
-    let mut current = subject;
+    let mut current = Owner::take(req, subject);
     for (at, (_, entry)) in patterns.snapshot().into_iter().enumerate() {
-        let regex = to_string(req, &entry)?;
+        let regex = match to_string(req, &entry) {
+            Ok(regex) => regex,
+            Err(thrown) => {
+                current.give_up(req);
+                return Err(thrown);
+            }
+        };
         let replacement = match (&replacements, replacement) {
             (Some(all), _) => match all.get(at) {
-                Some((_, value)) => to_string(req, value)?,
+                Some((_, value)) => match to_string(req, value) {
+                    Ok(text) => text,
+                    Err(thrown) => {
+                        regex.give_up(req);
+                        current.give_up(req);
+                        return Err(thrown);
+                    }
+                },
                 None => PhpString::new(req, b"")?,
             },
-            (None, Union::B(text)) => {
-                req.addref(&Value::string(text));
-                text
-            }
+            (None, Union::B(text)) => Owner::take(req, text),
             (None, Union::A(_)) => PhpString::new(req, b"")?,
         };
         let result = replace_one(
             req,
             regex.as_bytes(),
-            current,
+            *current,
             replacement.as_bytes(),
             limit,
             count,
         );
-        req.release(Value::string(replacement));
-        req.release(Value::string(regex));
-        req.release(Value::string(current));
+        replacement.give_up(req);
+        regex.give_up(req);
+        current.give_up(req);
         match result? {
             Some(next) => current = next,
             None => return Ok(None),
@@ -381,15 +397,14 @@ fn in_subject_func(
     subject: PhpString,
     calling: Calling<'_>,
     count: &mut usize,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let patterns = match regex {
         Union::B(regex) => {
             return replace_one_func(req, regex.as_bytes(), subject, calling, count);
         }
         Union::A(patterns) => patterns,
     };
-    req.addref(&Value::string(subject));
-    let mut current = subject;
+    let mut current = Owner::take(req, subject);
     for (_, entry) in patterns.snapshot() {
         let converted = match calling.pending {
             None => to_string(req, &entry).map(Some),
@@ -399,13 +414,13 @@ fn in_subject_func(
             Ok(Some(regex)) => regex,
             Ok(None) => break,
             Err(thrown) => {
-                req.release(Value::string(current));
+                current.give_up(req);
                 return Err(thrown);
             }
         };
-        let result = replace_one_func(req, regex.as_bytes(), current, calling, count);
-        req.release(Value::string(regex));
-        req.release(Value::string(current));
+        let result = replace_one_func(req, regex.as_bytes(), *current, calling, count);
+        regex.give_up(req);
+        current.give_up(req);
         match result? {
             Some(next) => current = next,
             None => return Ok(None),
@@ -423,7 +438,7 @@ fn string_while_pending(
     req: &mut Request,
     pending: &Thrown,
     value: &Value,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     match value.deref().as_ref() {
         ValueRef::Array(_) => {
             raise_while_pending(req, pending, Level::Warning, "Array to string conversion");
@@ -464,7 +479,7 @@ fn over_array_func(
     subjects: PhpArray,
     calling: Calling<'_>,
     count: &mut usize,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     let mut pending: Option<Thrown> = None;
     for (key, entry) in subjects.snapshot() {
@@ -484,14 +499,14 @@ fn over_array_func(
             pending: pending.as_ref(),
             ..calling
         };
-        let result = in_subject_func(req, regex, subject, calling, count);
-        req.release(Value::string(subject));
+        let result = in_subject_func(req, regex, *subject, calling, count);
+        subject.give_up(req);
         match result {
             Ok(Some(result)) => {
                 if let Key::Str(s) = &key {
                     req.addref(&Value::string(*s));
                 }
-                out.set(req, key, Value::string(result))?;
+                out.set(req, key, result.into_value().hand_on_unmigrated())?;
             }
             Ok(None) => {}
             Err(thrown) => pending = Some(thrown),
@@ -499,7 +514,7 @@ fn over_array_func(
     }
     match pending {
         Some(thrown) => {
-            req.release(out.to_value());
+            out.give_up(req);
             Err(thrown)
         }
         None => Ok(out),
@@ -512,26 +527,41 @@ fn over_array(
     req: &mut Request,
     subjects: PhpArray,
     count: &mut usize,
-    mut each: impl FnMut(&mut Request, PhpString, &mut usize) -> Result<Option<PhpString>, Thrown>,
+    mut each: impl FnMut(
+        &mut Request,
+        PhpString,
+        &mut usize,
+    ) -> Result<Option<Owner<PhpString>>, Thrown>,
     keep: impl Fn(usize, usize) -> bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, entry) in subjects.snapshot() {
         let before = *count;
-        let subject = to_string(req, &entry)?;
-        let result = each(req, subject, count);
-        req.release(Value::string(subject));
-        let Some(result) = result? else {
-            continue;
+        let subject = match to_string(req, &entry) {
+            Ok(subject) => subject,
+            Err(thrown) => {
+                out.give_up(req);
+                return Err(thrown);
+            }
+        };
+        let result = each(req, *subject, count);
+        subject.give_up(req);
+        let result = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => continue,
+            Err(thrown) => {
+                out.give_up(req);
+                return Err(thrown);
+            }
         };
         if !keep(before, *count) {
-            req.release(Value::string(result));
+            result.give_up(req);
             continue;
         }
         if let Key::Str(s) = &key {
             req.addref(&Value::string(*s));
         }
-        out.set(req, key, Value::string(result))?;
+        out.set(req, key, result.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -658,7 +688,7 @@ fn replace_common(
             match in_subject(req, regex, replacement, subject, limit, &mut count)? {
                 Some(result) if keep(0, count) => Some(Union::A(result)),
                 Some(result) => {
-                    req.release(Value::string(result));
+                    result.give_up(req);
                     None
                 }
                 None => None,
@@ -672,10 +702,14 @@ fn replace_common(
             keep,
         )?)),
     };
-    count_out.set(
+    let written = count_out.set(
         req,
         Untyped(Value::int(i64::try_from(count).unwrap_or(i64::MAX))),
-    )?;
+    );
+    if let Err(thrown) = written {
+        give_up(req, result);
+        return Err(thrown);
+    }
     Ok(result)
 }
 
@@ -774,10 +808,14 @@ fn preg_replace_callback(
 ) -> Result<Replacement, Thrown> {
     let limit = limit_of(limit);
     let (value, replaced) = func_impl(req, pattern, &callback, subject, limit, flags)?;
-    count.set(
+    let written = count.set(
         req,
         Untyped(Value::int(i64::try_from(replaced).unwrap_or(i64::MAX))),
-    )?;
+    );
+    if let Err(thrown) = written {
+        give_up(req, value);
+        return Err(thrown);
+    }
     Ok(value)
 }
 
@@ -817,16 +855,20 @@ fn preg_replace_callback_array(
     #[php(default = 0)] flags: i64,
 ) -> Result<Replacement, Thrown> {
     let limit = limit_of(limit);
-    let mut current = subject;
-    let own = |req: &mut Request, value: Either| match value {
-        Union::B(s) => req.addref(&Value::string(s)),
-        Union::A(a) => req.addref(&a.to_value()),
+    let mut current = match subject {
+        Union::A(a) => Union::A(Owner::take(req, a)),
+        Union::B(s) => Union::B(Owner::take(req, s)),
     };
-    let release = |req: &mut Request, value: Either| match value {
-        Union::B(s) => req.release(Value::string(s)),
-        Union::A(a) => req.release(a.to_value()),
+    let view = |value: &Union<Owner<PhpArray>, Owner<PhpString>>| -> Either {
+        match value {
+            Union::A(a) => Union::A(**a),
+            Union::B(s) => Union::B(**s),
+        }
     };
-    own(req, current);
+    let release = |req: &mut Request, value: Union<Owner<PhpArray>, Owner<PhpString>>| match value {
+        Union::B(s) => s.give_up(req),
+        Union::A(a) => a.give_up(req),
+    };
     let mut total = 0;
     for (key, callback) in pattern.snapshot() {
         let Key::Str(regex) = key else {
@@ -841,7 +883,14 @@ fn preg_replace_callback_array(
             release(req, current);
             return Err(arg_type_error(req, 1, "contain only valid callbacks"));
         };
-        let replaced = func_impl(req, Union::B(regex), &callable, current, limit, flags);
+        let replaced = func_impl(
+            req,
+            Union::B(regex),
+            &callable,
+            view(&current),
+            limit,
+            flags,
+        );
         release(req, current);
         let (value, replaced) = replaced?;
         total += replaced;
@@ -851,10 +900,14 @@ fn preg_replace_callback_array(
             None => return Ok(None),
         };
     }
-    count.set(
+    let written = count.set(
         req,
         Untyped(Value::int(i64::try_from(total).unwrap_or(i64::MAX))),
-    )?;
+    );
+    if let Err(thrown) = written {
+        release(req, current);
+        return Err(thrown);
+    }
     Ok(Some(match current {
         Union::A(array) => Union::B(array),
         Union::B(string) => Union::A(string),

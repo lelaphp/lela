@@ -56,7 +56,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
 fn spend(req: &mut Request) {
     let kind = req.types().stream;
     if let Ok(opened) = Resource::bare(req, kind) {
-        req.release(opened.as_value());
+        opened.give_up(req);
     }
 }
 

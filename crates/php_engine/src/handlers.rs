@@ -1601,7 +1601,7 @@ fn dynamic_call_array(
         None => req.call_trampoline(class, &method, false),
     };
     let Some(function) = found else {
-        let written = Value::string(PhpString::new(req, &method)?);
+        let written = Value::string(req.string(&method)?);
         let thrown = undefined_method(req, class, &written);
         req.release(written);
         return Err(thrown);
@@ -1613,7 +1613,7 @@ fn dynamic_call_array(
             .unwrap_or(function)
     };
     req.check_method_access(function, &method)?;
-    let name = PhpString::new(req, &method)?;
+    let name = req.string(&method)?;
     let this = if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -1668,7 +1668,7 @@ fn dynamic_call_static(
     method: &[u8],
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let written = Value::string(PhpString::new(req, method)?);
+    let written = Value::string(req.string(method)?);
     let found = static_method(req, class, &method.to_ascii_lowercase(), &written, this);
     req.release(written);
     let (function, _) = found?;
@@ -1678,7 +1678,7 @@ fn dynamic_call_static(
     {
         return Err(non_static_method_call(req, function));
     }
-    let name = PhpString::new(req, method)?;
+    let name = req.string(method)?;
     Ok(DynamicTarget {
         function,
         name: Some(name),
@@ -2667,7 +2667,7 @@ pub(crate) fn send_user<T: Tier>(
         if let Some(function) = req.vm().building_call_function() {
             req.param_must_be_ref(function, reserved.number);
         }
-        match PhpRef::new(req, value) {
+        match req.reference(value) {
             Ok(cell) => cell.as_value(),
             Err(thrown) => return threw(req, frame, &thrown),
         }
@@ -2901,7 +2901,7 @@ fn send_array_element(
                 req.param_must_be_ref(function, number);
             }
             req.addref(&element);
-            PhpRef::new(req, element)?.as_value()
+            req.reference(element)?.as_value()
         } else {
             req.addref(&element);
             element
@@ -4766,7 +4766,7 @@ pub(crate) fn new<T: Tier>(
         Ok(class) => class,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let object = match crate::api::call::new_object(req, class) {
+    let object = match crate::api::call::new_object_made(req, class) {
         Ok(object) => object,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -5267,7 +5267,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let this = req.vm().this(frame);
     let receiver = this.map(exec::Receiver::lent);
     let written = format!("${shown}::{}", kind.name());
-    let written = match crate::api::values::PhpString::new(req, written.as_bytes()) {
+    let written = match req.string(written.as_bytes()) {
         Ok(written) => written,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -9100,7 +9100,7 @@ fn assign_string_offset(
         s.put_byte(index, byte);
     } else {
         let need = index.saturating_add(1).max(text.len());
-        let fresh = PhpString::filled(req, need, |bytes| {
+        let fresh = req.string_with(need, |bytes| {
             let old = text.as_bytes();
             let copied = old.len().min(bytes.len());
             if let (Some(head), Some(from)) = (bytes.get_mut(..copied), old.get(..copied)) {
@@ -9131,7 +9131,7 @@ fn separate_string(req: &mut Request, at: php_heap::ZvalRef) -> Result<Option<Ph
     if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 {
         return Ok(Some(text));
     }
-    let fresh = PhpString::filled(req, text.len(), |bytes| {
+    let fresh = req.string_with(text.len(), |bytes| {
         for (slot, byte) in bytes.iter_mut().zip(text.as_bytes()) {
             *slot = *byte;
         }
@@ -13027,7 +13027,7 @@ fn assign_text_dim(
     // `FREE_OP_DATA`, where the write landed before the value was read.
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let byte = match written? {
-        TextWrite::Byte(byte) => Value::string(PhpString::new(req, &[byte])?),
+        TextWrite::Byte(byte) => Value::string(req.string(&[byte])?),
         TextWrite::Gone => Value::null(),
     };
     write_out(req, frame, code, op, &byte);
@@ -18219,7 +18219,7 @@ pub(crate) fn rope_end<T: Tier>(
                 .map_or(0, crate::api::values::PhpString::len)
         })
         .sum();
-    let joined = crate::api::values::PhpString::filled(req, len, |bytes| {
+    let joined = req.string_with(len, |bytes| {
         let mut at: usize = 0;
         for (_, v) in &rope {
             let Some(s) = v.as_php_string() else {
@@ -19174,7 +19174,7 @@ pub(crate) fn func_get_args<T: Tier>(
         if arguments.len() <= skip {
             return Ok(PhpArray::empty());
         }
-        let mut array = PhpArray::new(req)?;
+        let mut array = req.array()?;
         for argument in arguments.into_iter().skip(skip) {
             let value = argument.deref();
             let value = if value.tag() == TypeTag::Undef {
@@ -19392,7 +19392,8 @@ pub(crate) fn get_type<T: Tier>(
     op: &Opline,
 ) -> Edge {
     unary(req, frame, code, op, |req, value| {
-        PhpString::new(req, crate::ops::legacy_type(value)).map(Value::string)
+        req.string(crate::ops::legacy_type(value))
+            .map(Value::string)
     })
 }
 
@@ -20756,7 +20757,7 @@ pub(crate) fn catch<T: Tier>(
         }
         return jump_to(req, frame, op.op2);
     }
-    let Some(caught) = req.take_pending() else {
+    let Some(caught) = req.take_pending_view() else {
         return Ok(advance(req, frame));
     };
     if op.out_type == OperandKind::Cv {
@@ -22444,7 +22445,7 @@ mod tests {
                 Ok(Stepped::Threw(frame)),
                 "a constructor is an instance method on pass {pass}"
             );
-            assert!(req.take_pending().is_some(), "it threw on pass {pass}");
+            assert!(req.take_pending_view().is_some(), "it threw on pass {pass}");
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
                 matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class)
@@ -22882,10 +22883,10 @@ mod tests {
         let mut op = code.oplines.first().copied().unwrap_or_default();
         op.out_type = OperandKind::Tmp;
         op.out = 0;
-        let Ok(text) = crate::api::values::PhpString::new(&mut req, b"in the cell") else {
+        let Ok(text) = req.string(b"in the cell") else {
             return;
         };
-        let Ok(cell) = crate::api::values::PhpRef::new(&mut req, Value::string(text)) else {
+        let Ok(cell) = req.reference(Value::string(text)) else {
             return;
         };
         let start = req.memory_usage(false);
@@ -22992,7 +22993,7 @@ mod tests {
         let named = req.class_named(b"exception");
         assert!(named.is_some(), "the engine declares Exception");
         let class = named.unwrap_or(ClassId(u32::MAX));
-        let made = crate::api::call::new_object(&mut req, class);
+        let made = crate::api::call::new_object_made(&mut req, class);
         assert!(made.is_ok(), "Exception is instantiable");
         if let Ok(object) = made {
             let started = req.object_walk_start(object);
@@ -23040,7 +23041,7 @@ mod tests {
             ..Unit::default()
         });
         let frame = req.pushed(Arc::clone(&unit));
-        let Ok(left) = crate::api::values::PhpString::new(&mut req, b"an owner left behind") else {
+        let Ok(left) = req.string(b"an owner left behind") else {
             return;
         };
         let planted = req.set_slot(frame, 0, Value::string(left));

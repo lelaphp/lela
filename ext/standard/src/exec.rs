@@ -79,7 +79,7 @@ use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::locale::Mblen;
 
@@ -129,11 +129,10 @@ fn strip_trailing_whitespace(line: &[u8]) -> &[u8] {
 /// into an array, `3` writes the bytes as they come.
 /// What `php_exec` answers: `false` where the command did not start, and
 /// otherwise the last line, which a raw pass-through leaves out.
-#[derive(Clone, Copy)]
 enum Ran {
     Failed,
     Raw,
-    Last(PhpString),
+    Last(Owner<PhpString>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,7 +153,7 @@ fn php_exec(
     req: &mut Request,
     mode: Mode,
     command: &[u8],
-    mut array: Option<&mut PhpArray>,
+    mut array: Option<&mut Owner<PhpArray>>,
 ) -> Result<(Ran, i64), Thrown> {
     let Some(mut child) = popen(req, command) else {
         let text = format!("Unable to fork [{}]", String::from_utf8_lossy(command));
@@ -193,7 +192,7 @@ fn php_exec(
             Mode::Gather => {
                 last = strip_trailing_whitespace(&line).to_vec();
                 if let Some(array) = array.as_deref_mut() {
-                    let value = Value::string(PhpString::new(req, &last)?);
+                    let value = Value::string(PhpString::new(req, &last)?.hand_on_unmigrated());
                     array.append(req, value)?;
                 }
             }
@@ -216,7 +215,7 @@ fn command_bytes(req: &mut Request, command: Path) -> Result<Vec<u8>, Thrown> {
 
 /// `string|false`: the last line, or `false` where the command did not
 /// start.
-fn last_line(ran: Ran) -> OrFalse<PhpString> {
+fn last_line(ran: Ran) -> OrFalse<Owner<PhpString>> {
     match ran {
         Ran::Last(line) => OrFalse::Value(line),
         Ran::Failed | Ran::Raw => OrFalse::False,
@@ -280,27 +279,39 @@ fn exec(
     command: Path,
     #[php(default = null)] output: Out,
     #[php(default = null)] result_code: Out,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let command = command_bytes(req, command)?;
     let (answer, status) = if output.is_given() {
         let held = output.get().map_or_else(Value::null, |held| held.0);
         let mut array = match held.as_ref() {
             ValueRef::Array(array) => {
-                let mut array = *array;
-                req.addref(&Value::array(array));
+                let mut array = Owner::take(req, *array);
                 array.separate(req)?;
                 array
             }
             _ => PhpArray::new(req)?,
         };
         let done = php_exec(req, Mode::Gather, &command, Some(&mut array));
-        output.set(req, Untyped(Value::array(array)))?;
+        output.set(req, Untyped(array.into_value()))?;
         done?
     } else {
         php_exec(req, Mode::Last, &command, None)?
     };
-    result_code.set(req, Untyped(Value::int(status)))?;
-    Ok(last_line(answer))
+    set_code(req, &result_code, status, answer).map(last_line)
+}
+
+/// The exit status written to `$result_code`, the answer given up where
+/// the write throws.
+fn set_code(req: &mut Request, result_code: &Out, status: i64, answer: Ran) -> Result<Ran, Thrown> {
+    match result_code.set(req, Untyped(Value::int(status))) {
+        Ok(()) => Ok(answer),
+        Err(thrown) => {
+            if let Ran::Last(line) = answer {
+                line.give_up(req);
+            }
+            Err(thrown)
+        }
+    }
 }
 
 /// `system(string $command, &$result_code = null): string|false`,
@@ -324,11 +335,10 @@ fn system(
     req: &mut Request,
     command: Path,
     #[php(default = null)] result_code: Out,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let command = command_bytes(req, command)?;
     let (answer, status) = php_exec(req, Mode::Print, &command, None)?;
-    result_code.set(req, Untyped(Value::int(status)))?;
-    Ok(last_line(answer))
+    set_code(req, &result_code, status, answer).map(last_line)
 }
 
 /// `passthru(string $command, &$result_code = null): false|null`,
@@ -350,10 +360,13 @@ fn passthru(
 ) -> Result<Option<False>, Thrown> {
     let command = command_bytes(req, command)?;
     let (answer, status) = php_exec(req, Mode::Raw, &command, None)?;
-    result_code.set(req, Untyped(Value::int(status)))?;
-    Ok(match answer {
+    Ok(match set_code(req, &result_code, status, answer)? {
         Ran::Failed => Some(False),
-        Ran::Raw | Ran::Last(_) => None,
+        Ran::Raw => None,
+        Ran::Last(line) => {
+            line.give_up(req);
+            None
+        }
     })
 }
 
@@ -479,7 +492,7 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
 /// string(8) "5c5c5c3b"
 /// ```
 #[php_function]
-fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown> {
+fn escapeshellcmd(req: &mut Request, command: Path) -> Result<Owner<PhpString>, Thrown> {
     let escaped = escape_shell_cmd(req, command.0.as_bytes())?;
     PhpString::new(req, &escaped)
 }
@@ -510,7 +523,7 @@ fn escapeshellcmd(req: &mut Request, command: Path) -> Result<PhpString, Thrown>
 /// string(12) "27275c272727"
 /// ```
 #[php_function]
-fn escapeshellarg(req: &mut Request, arg: Path) -> Result<PhpString, Thrown> {
+fn escapeshellarg(req: &mut Request, arg: Path) -> Result<Owner<PhpString>, Thrown> {
     let escaped = escape_shell_arg(req, arg.0.as_bytes())?;
     PhpString::new(req, &escaped)
 }
@@ -545,7 +558,10 @@ fn escapeshellarg(req: &mut Request, arg: Path) -> Result<PhpString, Thrown> {
 /// shell_exec() expects exactly 1 argument, 0 given
 /// ```
 #[php_function]
-fn shell_exec(req: &mut Request, command: PhpString) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+fn shell_exec(
+    req: &mut Request,
+    command: PhpString,
+) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
     let command = command.as_bytes().to_vec();
     if command.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));

@@ -11,7 +11,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::{Module, State, Status, absorb, answer, files, pending, session, string_value};
 
@@ -113,7 +113,7 @@ fn call_handler(
     req: &mut Request,
     slot: Slot,
     arguments: &[Value],
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     let callable = *req.state::<State>().handlers.slot(slot);
     let done = if req.state::<State>().in_save_handler {
         req.state::<State>().in_save_handler = false;
@@ -150,7 +150,7 @@ fn call_handler(
 /// `verify_bool_return_type_userland_calls`: `true` is success, `false`
 /// failure, `0` and `-1` the deprecated ints, anything else php's
 /// `TypeError`.
-fn verify_bool(req: &mut Request, answer: Option<Value>) -> bool {
+fn verify_bool(req: &mut Request, answer: Option<Owner<Value>>) -> bool {
     let Some(value) = answer else {
         return false;
     };
@@ -183,14 +183,17 @@ fn verify_bool(req: &mut Request, answer: Option<Value>) -> bool {
         }
         false
     });
-    req.release(value);
+    value.give_up(req);
     verdict
 }
 
 /// `PS_OPEN_FUNC(user)`: `open($path, $name)`, and the handler counted
 /// open whatever it answered.
 pub(super) fn open(req: &mut Request, path: &[u8], name: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [string_value(req, path)?, string_value(req, name)?];
+    let arguments = [
+        string_value(req, path)?.hand_on_unmigrated(),
+        string_value(req, name)?.hand_on_unmigrated(),
+    ];
     let answered = call_handler(req, Slot::Open, &arguments);
     req.state::<State>().user_open = true;
     let answered = answered?;
@@ -211,17 +214,20 @@ pub(super) fn close(req: &mut Request) -> Result<(), Thrown> {
 
 /// `PS_READ_FUNC(user)`: `read($id)`, whose string is the data.
 pub(super) fn read(req: &mut Request, id: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let arguments = [string_value(req, id)?];
+    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
     let Some(value) = call_handler(req, Slot::Read, &arguments)? else {
         return Ok(None);
     };
     let data = value.as_str_bytes().map(<[u8]>::to_vec);
-    req.release(value);
+    value.give_up(req);
     Ok(data)
 }
 
 fn two(req: &mut Request, slot: Slot, id: &[u8], val: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [string_value(req, id)?, string_value(req, val)?];
+    let arguments = [
+        string_value(req, id)?.hand_on_unmigrated(),
+        string_value(req, val)?.hand_on_unmigrated(),
+    ];
     let answered = call_handler(req, slot, &arguments)?;
     Ok(verify_bool(req, answered))
 }
@@ -244,7 +250,7 @@ pub(super) fn update_timestamp(req: &mut Request, id: &[u8], val: &[u8]) -> Resu
 
 /// `PS_DESTROY_FUNC(user)`: `destroy($id)`.
 pub(super) fn destroy(req: &mut Request, id: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [string_value(req, id)?];
+    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
     let answered = call_handler(req, Slot::Destroy, &arguments)?;
     Ok(verify_bool(req, answered))
 }
@@ -261,7 +267,7 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
         ValueRef::Bool(true) => 1,
         _ => -1,
     };
-    req.release(value);
+    value.give_up(req);
     Ok(count)
 }
 
@@ -276,7 +282,7 @@ pub(super) fn create_sid(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
         return Ok(None);
     };
     let id = value.as_str_bytes().map(<[u8]>::to_vec);
-    req.release(value);
+    value.give_up(req);
     if id.is_none() {
         crate::throw_error(req, "Session id must be a string");
     }
@@ -289,7 +295,7 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
     if req.state::<State>().handlers.validate_sid.is_none() {
         return Ok(true);
     }
-    let arguments = [string_value(req, id)?];
+    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
     let answered = call_handler(req, Slot::ValidateSid, &arguments)?;
     Ok(verify_bool(req, answered))
 }
@@ -496,7 +502,7 @@ impl SessionHandler {
         req: &mut Request,
         _this: This<Self>,
         id: PhpString,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let Some(module) = sanity(req, true)? else {
             return Ok(OrFalse::False);
         };
@@ -585,7 +591,7 @@ impl SessionHandler {
     /// made
     /// ```
     #[php(tentative)]
-    fn create_sid(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+    fn create_sid(req: &mut Request, _this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         // `sanity` answers a module whenever it does not require the
         // parent opened.
         let Some(module) = sanity(req, false)? else {
@@ -605,11 +611,15 @@ impl SessionHandler {
 
 /// `[$object, $method]`, the callable `SESSION_SET_USER_HANDLER_OO`
 /// stores.
-pub(super) fn method_of(req: &mut Request, object: Value, name: &[u8]) -> Result<Value, Thrown> {
+pub(super) fn method_of(
+    req: &mut Request,
+    object: Value,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     let mut pair = PhpArray::new(req)?;
     req.addref(&object);
     pair.append(req, object)?;
     let name = string_value(req, name)?;
-    pair.append(req, name)?;
-    Ok(pair.to_value())
+    pair.append(req, name.hand_on_unmigrated())?;
+    Ok(pair.into_value())
 }

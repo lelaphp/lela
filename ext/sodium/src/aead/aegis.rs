@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use super::{Construction, Guard, decrypt, encrypt};
 use crate::ffi;
@@ -48,7 +48,7 @@ pub(crate) fn sodium_crypto_aead_aegis128l_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(req, &AEGIS128L, (ciphertext, additional_data, nonce, key))
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn sodium_crypto_aead_aegis128l_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(req, &AEGIS128L, (message, additional_data, nonce, key))
 }
 
@@ -85,12 +85,14 @@ pub(crate) fn sodium_crypto_aead_aegis128l_encrypt(
 /// int(16)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_aead_aegis128l_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_aead_aegis128l_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     aegis_key(req, ffi::AEGIS128L.key)
 }
 
 /// `crypto_aead_aegis*_keygen` into a key of `len` bytes.
-fn aegis_key(req: &mut Request, len: usize) -> Result<PhpString, Thrown> {
+fn aegis_key(req: &mut Request, len: usize) -> Result<Owner<PhpString>, Thrown> {
     let mut key = vec![0u8; len];
     if ffi::aegis_keygen(&mut key).is_err() {
         return Err(internal(req));
@@ -119,7 +121,7 @@ pub(crate) fn sodium_crypto_aead_aegis256_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(req, &AEGIS256, (ciphertext, additional_data, nonce, key))
 }
 
@@ -142,7 +144,7 @@ pub(crate) fn sodium_crypto_aead_aegis256_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(req, &AEGIS256, (message, additional_data, nonce, key))
 }
 
@@ -156,6 +158,8 @@ pub(crate) fn sodium_crypto_aead_aegis256_encrypt(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_aead_aegis256_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_aead_aegis256_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     aegis_key(req, ffi::AEGIS256.key)
 }

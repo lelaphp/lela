@@ -34,7 +34,7 @@ use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
 use crate::exec::{self, CallState, FrameState};
 use crate::interfaces::Iterator;
@@ -1278,7 +1278,7 @@ fn resumed(req: &mut Request, generator: PhpObject) -> Result<(), Thrown> {
 }
 
 fn pending_as_err(req: &mut Request) -> Result<(), Thrown> {
-    if let Some(pending) = req.take_pending() {
+    if let Some(pending) = req.take_pending_view() {
         return Err(Thrown::of(Some(pending)));
     }
     if req.is_pending() {
@@ -1739,14 +1739,12 @@ pub(crate) fn iterator_rewind(req: &mut Request, generator: PhpObject) -> Result
 // ----- the methods -----
 
 /// `RETURN_COPY_DEREF` of `value` where it is set, `null` where it is
-/// not.
-fn copy_deref(req: &mut Request, value: Value) -> Value {
+/// not: the view, which the engine takes its owner of as the return.
+fn copy_deref(value: Value) -> Value {
     if value.tag() == TypeTag::Undef {
         return Value::null();
     }
-    let value = value.deref();
-    req.addref(&value);
-    value
+    value.deref()
 }
 
 /// The receiver's value past `root`'s: `null` once the generator has
@@ -1758,7 +1756,7 @@ fn yielded_now(req: &mut Request, this: PhpObject, pick: fn(&ZendGenerator) -> V
         return Value::null();
     }
     let value = read(req, root, pick).unwrap_or_else(Value::undef);
-    copy_deref(req, value)
+    copy_deref(value)
 }
 
 /// `final class Generator implements Iterator`, `@strict-properties`
@@ -2003,7 +2001,6 @@ impl Generator {
                 "Cannot get return value of a generator that hasn't returned",
             ));
         }
-        req.addref(&retval);
         Ok(retval)
     }
 
@@ -2025,7 +2022,7 @@ impl Generator {
     ///   string(4) "C::m"
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let mut out = PhpArray::new(req)?;
         let function = read(req, this, |g| g.function).flatten();
@@ -2045,8 +2042,10 @@ impl Generator {
             }
         });
         if let Some(name) = name {
-            let key = Key::from_string(PhpString::new(req, b"function")?);
-            let value = Value::string(PhpString::new(req, &name)?);
+            let key = Key::from_string(PhpString::new(req, b"function")?.hand_on_unmigrated());
+            let value = PhpString::new(req, &name)?
+                .into_value()
+                .hand_on_unmigrated();
             out.set(req, key, value)?;
         }
         Ok(out)

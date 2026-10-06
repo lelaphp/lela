@@ -31,8 +31,8 @@ use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, DeclaredRows, HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value,
-    ValueRef,
+    ClassId, DeclaredRows, HashIterator, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place,
+    Value, ValueRef,
 };
 
 use crate::{
@@ -386,7 +386,7 @@ impl ArrayObject {
     /// int(3)
     /// ```
     #[php(tentative)]
-    fn getArrayCopy(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getArrayCopy(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         table(req, this.object())?.copy(req)
     }
 
@@ -614,7 +614,7 @@ impl ArrayObject {
     /// `serialize(): string`, php's `x:i:flags;storage;m:members`; the
     /// witness is the class's.
     #[php(tentative)]
-    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let flags = ar_flags(req, this)? & CLONE_MASK;
         crate::serialized_parts(req, |req, serializer, out| {
@@ -623,14 +623,14 @@ impl ArrayObject {
             if flags & IS_SELF == 0 {
                 let stored = storage(req, this)?;
                 let written = serializer.write(req, out, &stored);
-                req.release(stored);
+                stored.give_up(req);
                 written?;
                 out.push(b';');
             }
             out.extend_from_slice(b"m:");
             let members = crate::members(req, this)?;
-            let written = serializer.write(req, out, &Value::array(members));
-            req.release(Value::array(members));
+            let written = serializer.write(req, out, &Value::array(*members));
+            members.give_up(req);
             written
         })
     }
@@ -662,28 +662,28 @@ impl ArrayObject {
     /// }
     /// ```
     #[php(tentative)]
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let flags = ar_flags(req, this)?;
         let iterator_class = payload(req, this)?.iterator_class;
         let mut out = PhpArray::new(req)?;
         out.append(req, Value::int(flags & CLONE_MASK))?;
         let stored = if flags & IS_SELF != 0 {
-            Value::null()
+            Owner::take(req, Value::null())
         } else {
             storage(req, this)?
         };
-        out.append(req, stored)?;
+        out.append(req, stored.hand_on_unmigrated())?;
         let members = crate::members(req, this)?;
-        out.append(req, Value::array(members))?;
+        out.append(req, members.into_value().hand_on_unmigrated())?;
         let class = match iterator_class {
             Some(class) if !is_array_iterator(req, class) => {
                 let name = crate::class_name(req, class);
                 crate::string_value(req, &name)?
             }
-            _ => Value::null(),
+            _ => Owner::take(req, Value::null()),
         };
-        out.append(req, class)?;
+        out.append(req, class.hand_on_unmigrated())?;
         Ok(out)
     }
 
@@ -801,7 +801,10 @@ impl ArrayObject {
     /// a=1;b=2;c=3;
     /// ```
     #[php(tentative)]
-    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<Iterator>>, Thrown> {
         let this = this.object();
         let (flags, class) = {
             let p = payload(req, this)?;
@@ -821,7 +824,7 @@ impl ArrayObject {
         };
         let iterator = php_ext::call::new_object(req, class)?;
         req.addref(&this.as_value());
-        let old = with(req, iterator, |p| {
+        let old = with(req, *iterator, |p| {
             p.flags = flags & CLONE_MASK;
             p.iterator_class = None;
             std::mem::replace(&mut p.storage, Storage::Other(this))
@@ -829,7 +832,7 @@ impl ArrayObject {
         if let Some(old) = old.held() {
             req.release(old);
         }
-        Ok(Instance::of(iterator))
+        Ok(iterator.into_instance())
     }
 
     /// `exchangeArray(array|object $array): array`: the old table handed
@@ -856,13 +859,13 @@ impl ArrayObject {
         req: &mut Request,
         this: This<Self>,
         array: Raw<Union<PhpArray, PhpObject>>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let given = array_or_object(req, array.value(), 1)?;
         sorting_refused(req, this)?;
         let old = table(req, this)?.copy(req)?;
         if let Err(thrown) = set_array(req, this, &given, 0, true) {
-            req.release(Value::array(old));
+            old.give_up(req);
             return Err(thrown);
         }
         Ok(old)
@@ -893,7 +896,7 @@ impl ArrayObject {
 
     /// `getIteratorClass(): string`; the witness is `setIteratorClass`'s.
     #[php(tentative)]
-    fn getIteratorClass(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getIteratorClass(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = match payload(req, this.object())?.iterator_class {
             Some(class) => crate::class_name(req, class),
             None => b"ArrayIterator".to_vec(),
@@ -912,7 +915,7 @@ impl ArrayObject {
     /// \0ArrayIterator\0storage => [1]
     /// ```
     #[php(tentative)]
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         spl_array_debug_info(req, this.object())
     }
 }
@@ -1033,7 +1036,7 @@ impl ArrayIterator {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         Ok(match here(req, this.object())? {
-            Some((_, _, value)) => crate::copied(req, value),
+            Some((_, _, value)) => value.deref(),
             None => Value::null(),
         })
     }
@@ -1043,10 +1046,7 @@ impl ArrayIterator {
     fn key(req: &mut Request, this: This<Self>) -> Result<Option<Union<PhpString, i64>>, Thrown> {
         Ok(match here(req, this.object())? {
             Some((_, Key::Int(n), _)) => Some(Union::B(n)),
-            Some((_, Key::Str(s), _)) => {
-                req.addref(&Value::string(s));
-                Some(Union::A(s))
-            }
+            Some((_, Key::Str(s), _)) => Some(Union::A(s)),
             None => None,
         })
     }
@@ -1202,7 +1202,7 @@ impl RecursiveArrayIterator {
     fn getChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<RecursiveArrayIterator>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<RecursiveArrayIterator>>>, Thrown> {
         let this = this.object();
         let flags = flags(req, this)?;
         let Some((_, _, value)) = here(req, this)? else {
@@ -1214,12 +1214,11 @@ impl RecursiveArrayIterator {
                 return Ok(None);
             }
             if crate::class_is(req, object.class(), this.class(), 0) {
-                req.addref(&value);
-                return Ok(Some(Instance::of(object)));
+                return Ok(Some(Owner::take(req, object).into_instance()));
             }
         }
         let child = instantiate(req, this.class(), &[value, Value::int(flags)])?;
-        Ok(Some(Instance::of(child)))
+        Ok(Some(child.into_instance()))
     }
 }
 
@@ -1269,7 +1268,8 @@ fn table(req: &mut Request, object: PhpObject) -> Result<Table, Thrown> {
             Storage::Other(backing) => at = backing,
             Storage::Array(array) => return Ok(Table::Array(at, array)),
             Storage::Fresh => {
-                let array = PhpArray::new(req)?;
+                // The payload's own array, which the table reads through.
+                let array = PhpArray::new(req)?.hand_on_unmigrated();
                 with(req, at, |p| p.storage = Storage::Array(array))?;
                 return Ok(Table::Array(at, array));
             }
@@ -1329,8 +1329,8 @@ impl Table {
             Table::Array(_, array) => Ok(array.get(key)),
             Table::Props(object) => {
                 let name = key.to_prop_name(req)?;
-                let row = object.row(req, &Key::Str(name));
-                req.release(Value::string(name));
+                let row = object.row(req, &Key::Str(*name));
+                name.give_up(req);
                 row
             }
         }
@@ -1353,8 +1353,8 @@ impl Table {
                         return Err(thrown);
                     }
                 };
-                let written = object.set_row(req, &Key::Str(name), value);
-                req.release(Value::string(name));
+                let written = object.set_row(req, &Key::Str(*name), value);
+                name.give_up(req);
                 written
             }
         }
@@ -1376,8 +1376,8 @@ impl Table {
             }
             Table::Props(object) => {
                 let name = key.to_prop_name(req)?;
-                let unset = object.unset_row(req, &Key::Str(name));
-                req.release(Value::string(name));
+                let unset = object.unset_row(req, &Key::Str(*name));
+                name.give_up(req);
                 unset
             }
         }
@@ -1403,7 +1403,7 @@ impl Table {
 
     /// The table as an array of its own, one owner, `zend_array_dup`:
     /// a property table's every row, mangled names and all.
-    fn copy(self, req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn copy(self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         match self {
             Table::Array(_, array) => array.copy(req),
             Table::Props(_) => {
@@ -1435,14 +1435,16 @@ impl Table {
                     return Ok(cell);
                 }
                 let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
-                let cell = PhpRef::new(req, held)?;
+                // The cell's first owner goes to the table, the second to
+                // the slot's caller.
+                let cell = PhpRef::new(req, held)?.hand_on_unmigrated();
                 req.addref(&cell.as_value());
                 let key = crate::owned_key(req, key);
                 array.set(req, key, cell.as_value())?;
                 store(req, owner, array)?;
                 Ok(cell)
             }
-            Table::Props(backing) => backing.row_ref(req, key),
+            Table::Props(backing) => backing.row_ref(req, key).map(Owner::hand_on_unmigrated),
         }
     }
 
@@ -1473,7 +1475,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
                 req,
                 "Using null as an array offset is deprecated, use an empty string instead",
             );
-            Key::Str(PhpString::new(req, b"")?)
+            Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated())
         }
         ValueRef::Str(s) => Key::from_string(*s),
         ValueRef::Resource(r) => {
@@ -1526,7 +1528,7 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
     };
     let table = table(req, object)?;
     if let Some(value) = table.get(req, &key)? {
-        Ok(crate::copied(req, value))
+        Ok(value.deref())
     } else {
         if warn {
             warning(req, &format!("Undefined array key {}", shown(&key)));
@@ -1630,7 +1632,9 @@ fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>,
         if unbound {
             refuse_readonly(req, backing, &key)?;
         }
-        return backing.typed_row_ref(req, &key).map(Some);
+        return backing
+            .typed_row_ref(req, &key)
+            .map(|cell| Some(cell.hand_on_unmigrated()));
     }
     let table = table(req, object)?;
     table.element_ref(req, &key, Some(value)).map(Some)
@@ -1726,12 +1730,12 @@ fn has(
     how: u8,
     inherited: bool,
 ) -> Result<bool, Thrown> {
-    let mut value: Option<Value> = None;
+    let mut value: Option<Owner<Value>> = None;
     let get_overridden = inherited && crate::overridden(req, object, b"offsetget");
     if inherited && crate::overridden(req, object, b"offsetexists") {
         let answered = call_method(req, &object, b"offsetExists", &[*offset])?;
         let exists = truthy(req, &answered);
-        req.release(answered);
+        answered.give_up(req);
         if !exists {
             return Ok(false);
         }
@@ -1758,15 +1762,15 @@ fn has(
         if how == 1 && get_overridden {
             call_method(req, &object, b"offsetGet", &[*offset])?
         } else {
-            crate::copied(req, found)
+            Owner::take(req, found.deref())
         }
     };
     let answer = if how > 0 {
         truthy(req, &value)
     } else {
-        !matches!(value.deref().as_ref(), ValueRef::Null)
+        !matches!((*value).deref().as_ref(), ValueRef::Null)
     };
-    req.release(value);
+    value.give_up(req);
     Ok(answer)
 }
 
@@ -1799,11 +1803,17 @@ impl ObjectHandlers for Handlers {
     /// `array_init(&intern->array)`, the table a constructor replaces.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         let array = PhpArray::new(req)?;
-        let fresh = object.native_mut::<SplArrayObject>(req).and_then(|p| {
-            matches!(p.storage, Storage::Fresh).then(|| p.storage = Storage::Array(array))
-        });
-        if fresh.is_none() {
-            req.release(Value::array(array));
+        let fresh = object
+            .native::<SplArrayObject>(req)
+            .is_some_and(|p| matches!(p.storage, Storage::Fresh));
+        if !fresh {
+            array.give_up(req);
+            return Ok(());
+        }
+        // The payload's own array from here.
+        let array = array.hand_on_unmigrated();
+        if let Some(p) = object.native_mut::<SplArrayObject>(req) {
+            p.storage = Storage::Array(array);
         }
         Ok(())
     }
@@ -1949,15 +1959,20 @@ impl ObjectHandlers for Handlers {
                         ),
                     );
                 }
-                return got;
+                return got.map(Owner::hand_on_unmigrated);
             }
         }
         let Some(offset) = offset else {
             return Ok(Value::null());
         };
         match read {
-            DimensionRead::Warning => self::read(req, object, offset, true),
-            DimensionRead::Silent => self::read(req, object, offset, false),
+            // The slot hands the engine an owner of what it read.
+            DimensionRead::Warning => {
+                self::read(req, object, offset, true).map(|v| crate::copied(req, v))
+            }
+            DimensionRead::Silent => {
+                self::read(req, object, offset, false).map(|v| crate::copied(req, v))
+            }
             DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset => {
                 Ok(place(req, object, offset, read)?
                     .map_or_else(Value::null, |cell| cell.as_value()))
@@ -2063,7 +2078,7 @@ impl ObjectHandlers for Handlers {
             let offset = offset.copied().unwrap_or_default();
             let answered = call_method(req, &object, b"offsetSet", &[offset, value]);
             req.release(value);
-            req.release(answered?);
+            answered?.give_up(req);
             return Ok(());
         }
         let written = write(req, object, offset, value);
@@ -2089,7 +2104,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         if crate::overridden(req, object, b"offsetunset") {
             let answered = call_method(req, &object, b"offsetUnset", &[*offset])?;
-            req.release(answered);
+            answered.give_up(req);
             return Ok(());
         }
         unset(req, object, offset)
@@ -2098,8 +2113,9 @@ impl ObjectHandlers for Handlers {
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         if crate::overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
-            let n = to_long(req, &answered)?;
-            req.release(answered);
+            let n = to_long(req, &answered);
+            answered.give_up(req);
+            let n = n?;
             return Ok(Some(n));
         }
         let n = table(req, object)?.len(req)?;
@@ -2122,7 +2138,7 @@ impl ObjectHandlers for Handlers {
                 PropertyRead::Unset => DimensionRead::Unset,
             };
             let read = self.read_dimension(req, object, Some(&member), fetch);
-            req.release(member);
+            member.give_up(req);
             return read;
         }
         Std.read_property(req, object, name, how)
@@ -2187,7 +2203,7 @@ impl ObjectHandlers for Handlers {
                 PropertyTest::Exists => 2,
             };
             let answer = has(req, object, &member, how, true);
-            req.release(member);
+            member.give_up(req);
             return answer;
         }
         Std.has_property(req, object, name, test)
@@ -2202,7 +2218,7 @@ impl ObjectHandlers for Handlers {
         if as_props(req, object, name)? {
             let member = crate::string_value(req, name)?;
             let done = self.unset_dimension(req, object, &member);
-            req.release(member);
+            member.give_up(req);
             return done;
         }
         Std.unset_property(req, object, name)
@@ -2222,9 +2238,9 @@ impl ObjectHandlers for Handlers {
         }
         let a = table(req, l)?.copy(req)?;
         let b = table(req, r)?.copy(req)?;
-        let ordering = compare(req, &Value::array(a), &Value::array(b));
-        req.release(Value::array(a));
-        req.release(Value::array(b));
+        let ordering = compare(req, &Value::array(*a), &Value::array(*b));
+        a.give_up(req);
+        b.give_up(req);
         match ordering? {
             Ordering::Equal => Std.compare(req, left, right),
             other => Ok(Some(other)),
@@ -2257,7 +2273,7 @@ impl ObjectHandlers for Handlers {
 
 /// `spl_array_get_debug_info`: the properties, then the storage under
 /// the private name `storage` of `ArrayObject` or `ArrayIterator`.
-fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
         req.addref(&value);
@@ -2267,7 +2283,8 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray
     let storage = match payload(req, object)?.storage {
         Storage::OwnProps => return Ok(out),
         Storage::Fresh => {
-            let array = PhpArray::new(req)?;
+            // The payload's own array, which the debug table shares.
+            let array = PhpArray::new(req)?.hand_on_unmigrated();
             with(req, object, |p| p.storage = Storage::Array(array))?;
             Value::array(array)
         }
@@ -2282,7 +2299,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray
     };
     let name = [b"\0".as_slice(), base, b"\0storage"].concat();
     let name = PhpString::new(req, &name)?;
-    out.set(req, Key::Str(name), storage)?;
+    out.set(req, Key::Str(name.hand_on_unmigrated()), storage)?;
     Ok(out)
 }
 
@@ -2297,7 +2314,7 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
     let storage = match storage {
         Storage::OwnProps => Storage::OwnProps,
         _ if crate::is_a(req, object.class(), b"ArrayObject") => {
-            Storage::Array(table(req, object)?.copy(req)?)
+            Storage::Array(table(req, object)?.copy(req)?.hand_on_unmigrated())
         }
         _ => {
             req.addref(&object.as_value());
@@ -2310,7 +2327,7 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
         iterator_class,
         ..SplArrayObject::default()
     };
-    clone_with(req, &object, copy)
+    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
 }
 
 /// `spl_array_set_array`: the storage replaced by `given`, an array held
@@ -2374,7 +2391,7 @@ fn set_array(
             req.addref(&given);
             Storage::Array(*array)
         } else {
-            Storage::Array(array.copy(req)?)
+            Storage::Array(array.copy(req)?.hand_on_unmigrated())
         }
     } else if let Some(other) = given.as_object().copied() {
         let what = if crate::is_a(req, object.class(), b"ArrayIterator") {
@@ -2486,7 +2503,7 @@ fn sort_through(
 ) -> Result<True, Thrown> {
     let name = crate::string_value(req, native)?;
     let callable: Option<Callable> = callable_checked(req, &name).ok();
-    req.release(name);
+    name.give_up(req);
     let Some(callable) = callable else {
         let shown = String::from_utf8_lossy(native).into_owned();
         return Err(throw_error(
@@ -2501,7 +2518,7 @@ fn sort_through(
             req.addref(&Value::array(array));
             array
         }
-        Table::Props(_) => table.copy(req)?,
+        Table::Props(_) => table.copy(req)?.hand_on_unmigrated(),
     };
     let cell = PhpRef::new(req, Value::array(handed))?;
     let mut arguments = vec![cell.as_value()];
@@ -2515,9 +2532,9 @@ fn sort_through(
         Ok(None) => Ok(()),
         Err(thrown) => Err(thrown),
     };
-    req.release(cell.as_value());
+    cell.give_up(req);
     put?;
-    req.release(answered?);
+    answered?.give_up(req);
     Ok(True)
 }
 
@@ -2571,14 +2588,13 @@ fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thr
 
 /// The storage as `serialize` and `__serialize` write it: the array or
 /// the object read through, one more owner.
-fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+fn storage(req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
     let value = match payload(req, object)?.storage {
         Storage::Other(backing) | Storage::Object(backing) => backing.as_value(),
         Storage::Array(array) => Value::array(array),
-        Storage::Fresh | Storage::OwnProps => Value::array(PhpArray::new(req)?),
+        Storage::Fresh | Storage::OwnProps => return Ok(PhpArray::new(req)?.into_value()),
     };
-    req.addref(&value);
-    Ok(value)
+    Ok(Owner::take(req, value))
 }
 
 /// The body of `ArrayObject::unserialize` over one reader: `None` once

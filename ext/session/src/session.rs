@@ -218,7 +218,7 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
     req.set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
-    bind_vars(req, array.to_value())
+    bind_vars(req, array.into_value().hand_on_unmigrated())
 }
 
 /// `php_session_encode`: the session's variables through the serializer,
@@ -840,11 +840,13 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     };
     let sid = crate::string_value(req, &sid)?;
     let registered = match req.extension_named(b"session") {
-        Some(session) => req.register_constant(session, b"SID", sid, sid_attributes()),
+        Some(session) => req.register_constant(session, b"SID", *sid, sid_attributes()),
         None => false,
     };
-    if !registered {
-        req.release(sid);
+    if registered {
+        let _constant = sid.hand_on_unmigrated();
+    } else {
+        sid.give_up(req);
     }
     // `APPLY_TRANS_SID`, where no cookie of the session's name came with
     // the request: the id added to the session context's URLs and forms,

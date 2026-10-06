@@ -997,7 +997,7 @@ mod tests {
     /// a Rust body on the request that served it, which gives up the
     /// string it made once it is written.
     fn writes_d(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
-        let text = crate::api::values::PhpString::new(req, b"d\n")?;
+        let text = req.string(b"d\n")?;
         req.write(text.as_bytes());
         req.release(crate::api::values::Value::string(text));
         Ok(crate::api::values::Value::null())

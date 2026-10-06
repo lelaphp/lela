@@ -7,7 +7,7 @@ use php_ext::call::write_prop;
 use php_ext::coerce::{numeric_string, to_long, value_name};
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::constants as c;
@@ -111,12 +111,12 @@ const PERSISTENT: Refusals = SHARE.construction(Some("curl_share_init_persistent
 /// bool(true)
 /// ```
 #[php_function]
-fn curl_share_init(req: &mut Request) -> Result<Instance<CurlShareHandle>, Thrown> {
+fn curl_share_init(req: &mut Request) -> Result<Owner<Instance<CurlShareHandle>>, Thrown> {
     let object = made(req, b"CurlShareHandle")?;
     if let Some(sh) = object.native_mut::<Sh>(req) {
         sh.share = Share::init();
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `curl_share_close(CurlShareHandle $share_handle): void`, which does
@@ -208,7 +208,10 @@ fn curl_share_errno(
 /// string(18) "CURLSHcode unknown"
 /// ```
 #[php_function]
-fn curl_share_strerror(req: &mut Request, error_code: i64) -> Result<Option<PhpString>, Thrown> {
+fn curl_share_strerror(
+    req: &mut Request,
+    error_code: i64,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     match share_strerror(error_code) {
         Some(text) => PhpString::new(req, &text).map(Some),
         None => Ok(None),
@@ -260,7 +263,7 @@ const LOCKS: [(i64, u8); 4] = [
 fn curl_share_init_persistent(
     req: &mut Request,
     share_options: PhpArray,
-) -> Result<Instance<CurlSharePersistentHandle>, Thrown> {
+) -> Result<Owner<Instance<CurlSharePersistentHandle>>, Thrown> {
     if share_options.is_empty() {
         return Err(argument_error(req, "ValueError", 1, "must not be empty"));
     }
@@ -298,7 +301,15 @@ fn curl_share_init_persistent(
             options.append(req, Value::int(lock))?;
         }
     }
-    write_prop(req, &object, b"options", Value::array(options))?;
+    if let Err(thrown) = write_prop(
+        req,
+        &object,
+        b"options",
+        options.into_value().hand_on_unmigrated(),
+    ) {
+        object.give_up(req);
+        return Err(thrown);
+    }
     let kept = req
         .state::<State>()
         .persistent
@@ -310,7 +321,7 @@ fn curl_share_init_persistent(
     } else {
         {
             let Some(share) = Share::init() else {
-                req.release(object.as_value());
+                object.give_up(req);
                 return Err(throw(
                     req,
                     "Exception",
@@ -324,7 +335,7 @@ fn curl_share_init_persistent(
                     0
                 };
                 if code != 0 {
-                    req.release(object.as_value());
+                    object.give_up(req);
                     let text = format!(
                         "Could not construct persistent cURL share handle: {}",
                         String::from_utf8_lossy(&share_strerror(code).unwrap_or_default())
@@ -339,5 +350,5 @@ fn curl_share_init_persistent(
     if let Some(sh) = object.native_mut::<Sh>(req) {
         sh.share = Some(share);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }

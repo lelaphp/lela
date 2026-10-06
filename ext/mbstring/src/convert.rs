@@ -16,7 +16,7 @@ use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `mb_fast_convert` under a substitute, with the errors met.
 pub(crate) fn convert(
@@ -70,7 +70,7 @@ fn convert_array(
     input: PhpArray,
     to: Encoding,
     from: &[Encoding],
-) -> Result<Option<PhpArray>, Thrown> {
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     if input.is_recursive() {
         input.unprotect();
         docref(
@@ -85,7 +85,7 @@ fn convert_array(
     for (key, value) in input.snapshot() {
         let key = match key {
             Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
-                Some(name) => Key::Str(new_string(req, &name)?),
+                Some(name) => Key::Str(new_string(req, &name)?.hand_on_unmigrated()),
                 None => continue,
             },
             Key::Int(n) => Key::Int(n),
@@ -93,16 +93,18 @@ fn convert_array(
         let value = value.deref();
         let converted = match value.as_ref() {
             ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
-                Some(s) => Value::string(new_string(req, &s)?),
+                Some(s) => new_string(req, &s)?.into_value(),
                 None => continue,
             },
-            ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => value,
+            ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
+                Owner::take(req, value)
+            }
             ValueRef::Array(inner) => {
                 let inner = *inner;
                 match convert_array(req, inner, to, from)? {
-                    Some(array) => Value::array(array),
+                    Some(array) => array.into_value(),
                     // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
-                    None => Value::array(PhpArray::empty()),
+                    None => Owner::take(req, Value::array(PhpArray::empty())),
                 }
             }
             _ => {
@@ -110,7 +112,7 @@ fn convert_array(
                 continue;
             }
         };
-        out.set(req, key, converted)?;
+        out.set(req, key, converted.hand_on_unmigrated())?;
     }
     input.unprotect();
     Ok(Some(out))
@@ -177,12 +179,14 @@ fn convert_array(
 /// string(1) "A" interned
 /// ```
 #[php_function]
+// The declared `array|string|false`, each fresh value an owner.
+#[allow(clippy::type_complexity)]
 fn mb_convert_encoding(
     req: &mut Request,
     string: Union<PhpArray, PhpString>,
     to_encoding: PhpString,
     #[php(default = null)] from_encoding: Option<Union<PhpArray, PhpString>>,
-) -> Result<OrFalse<Union<PhpArray, PhpString>>, Thrown> {
+) -> Result<OrFalse<Union<Owner<PhpArray>, Owner<PhpString>>>, Thrown> {
     let to = self::encoding(req, Some(to_encoding), 2)?;
     let mut from = match from_encoding {
         Some(given) => encodings(req, given, 3)?,
@@ -393,7 +397,7 @@ fn mb_detect_encoding(
     string: PhpString,
     #[php(default = null)] encodings: Option<Union<PhpArray, PhpString>>,
     #[php(default = false)] strict: Passed<bool>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut order_significant = true;
     let mut list = match encodings {
         Some(Union::A(array)) => {
@@ -448,18 +452,17 @@ fn mb_detect_encoding(
 /// bool(true)
 /// ```
 #[php_function]
-fn mb_list_encodings(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     if let Some(all) = req.state::<State>().all_encodings {
-        req.addref(&Value::array(all));
-        return Ok(all);
+        return Ok(Owner::take(req, all));
     }
     let mut all = PhpArray::new(req)?;
     for enc in Encoding::all() {
         let name = new_string(req, enc.name())?;
-        all.append(req, Value::string(name))?;
+        all.append(req, name.into_value().hand_on_unmigrated())?;
     }
-    req.addref(&Value::array(all));
-    req.state::<State>().all_encodings = Some(all);
+    let kept = Owner::take(req, *all);
+    req.state::<State>().all_encodings = Some(kept.hand_on_unmigrated());
     Ok(all)
 }
 
@@ -499,12 +502,12 @@ fn mb_list_encodings(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// mb_encoding_aliases(): Argument #1 ($encoding) must be a valid encoding, "nope" given
 /// ```
 #[php_function]
-fn mb_encoding_aliases(req: &mut Request, encoding: PhpString) -> Result<PhpArray, Thrown> {
+fn mb_encoding_aliases(req: &mut Request, encoding: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let enc = self::encoding(req, Some(encoding), 1)?;
     let mut out = PhpArray::new(req)?;
     for alias in enc.aliases() {
         let alias = new_string(req, alias)?;
-        out.append(req, Value::string(alias))?;
+        out.append(req, alias.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -691,7 +694,7 @@ fn mb_convert_kana(
     string: PhpString,
     #[php(default = "KV")] mode: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut opt = 0u32;
     for &c in mode.as_bytes() {
         if c == b'A' {
@@ -799,7 +802,7 @@ enum Walk {
     Kept,
     /// The slot takes this value, a string in place of the reference
     /// that held one, as php's `ZVAL_STR(orig_var, ..)` puts it.
-    Replace(Value),
+    Replace(Owner<Value>),
 }
 
 /// `mb_recursive_convert_variable` over a slot's value: a string
@@ -836,7 +839,7 @@ fn convert_value(
         }
         ValueRef::Str(s) => {
             let out = convert_counted(req, s.as_bytes(), from, to);
-            Ok(Walk::Replace(Value::string(new_string(req, &out)?)))
+            Ok(Walk::Replace(new_string(req, &out)?.into_value()))
         }
         ValueRef::Array(array) => {
             let original = *array;
@@ -845,13 +848,21 @@ fn convert_value(
             }
             original.protect();
             let separated = original.copy(req)?;
-            let stopped = convert_array_in(req, separated, from, to)?;
+            // The copy has the one owner, so the walk's writes never
+            // separate it and the view walked is the array it owns.
+            let stopped = match convert_array_in(req, *separated, from, to) {
+                Ok(stopped) => stopped,
+                Err(thrown) => {
+                    separated.give_up(req);
+                    return Err(thrown);
+                }
+            };
             original.unprotect();
             if stopped {
-                req.release(Value::array(separated));
+                separated.give_up(req);
                 return Ok(Walk::Stopped);
             }
-            Ok(Walk::Replace(Value::array(separated)))
+            Ok(Walk::Replace(separated.into_value()))
         }
         ValueRef::Object(object) => {
             let object = *object;
@@ -866,7 +877,7 @@ fn convert_value(
                         return Ok(Walk::Stopped);
                     }
                     Walk::Kept => {}
-                    Walk::Replace(new) => object.set_row(req, &key, new)?,
+                    Walk::Replace(new) => object.set_row(req, &key, new.hand_on_unmigrated())?,
                 }
             }
             object.unprotect();
@@ -900,7 +911,7 @@ fn convert_array_in(
             }
             Walk::Kept => {}
             Walk::Replace(new) => {
-                if !array.replace(req, &key, new)? {
+                if !array.replace(req, &key, new.hand_on_unmigrated())? {
                     array.unprotect();
                     return Err(fatal(
                         req,
@@ -980,7 +991,7 @@ fn mb_convert_variables(
     from_encoding: Union<PhpArray, PhpString>,
     var: Ref<Value>,
     vars: Variadic<Ref<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let to = self::encoding(req, Some(to_encoding), 1)?;
     let mut order_significant = true;
     if let Union::A(array) = &from_encoding
@@ -1026,7 +1037,7 @@ fn mb_convert_variables(
                 return Ok(OrFalse::False);
             }
             Walk::Kept => {}
-            Walk::Replace(new) => cell.set(req, new)?,
+            Walk::Replace(new) => cell.set(req, new.hand_on_unmigrated())?,
         }
     }
     Ok(OrFalse::Value(new_string(req, from.name())?))
@@ -1118,7 +1129,7 @@ fn mb_encode_numericentity(
     map: PhpArray,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = false)] hex: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 3)?;
     let map = conversion_map(req, map)?;
     let sub = substitute(req);
@@ -1283,7 +1294,7 @@ fn mb_decode_numericentity(
     string: PhpString,
     map: PhpArray,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 3)?;
     let map = conversion_map(req, map)?;
     let sub = substitute(req);

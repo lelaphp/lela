@@ -800,7 +800,7 @@ pub(crate) fn tmp_string_bytes(
 ) -> Result<Vec<u8>, Thrown> {
     let text = php_ext::coerce::to_string(req, value)?;
     let bytes = text.as_bytes().to_vec();
-    req.release(php_ext::values::Value::string(text));
+    text.give_up(req);
     Ok(bytes)
 }
 

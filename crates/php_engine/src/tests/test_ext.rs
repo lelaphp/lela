@@ -677,7 +677,8 @@ impl<const N: u8> TestExt<N> {
         let kind = req
             .resources()
             .register_type(b"test_ext", Some(Self::resource_closed));
-        Resource::new(req, kind, ())?;
+        // The owner stands with the request's list until its end closes it.
+        let _listed = Resource::new(req, kind, ())?.hand_on_unmigrated();
         Ok(())
     }
 

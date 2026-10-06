@@ -12,7 +12,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::locale::{self as c, Class, Mblen};
 
@@ -385,7 +385,7 @@ pub(super) fn str_getcsv(
     #[php(default = ",")] separator: PhpString,
     #[php(default = "\"")] enclosure: PhpString,
     #[php(default = "\\")] escape: Passed<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let delimiter = match separator.as_bytes() {
         [c] => *c,
         _ => return Err(arg_value_error(req, 2, "be a single character")),
@@ -402,7 +402,7 @@ pub(super) fn str_getcsv(
         None => array.append(req, Value::null())?,
         Some(fields) => {
             for field in fields {
-                let value = Value::string(PhpString::new(req, &field)?);
+                let value = Value::string(PhpString::new(req, &field)?.hand_on_unmigrated());
                 array.append(req, value)?;
             }
         }

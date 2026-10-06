@@ -30,6 +30,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::Request;
+use php_ext::values::Owner;
 
 use crate::ffi::Op;
 
@@ -217,7 +218,7 @@ fn sem_get(
     #[php(default = 1)] max_acquire: i64,
     #[php(default = 0666)] permissions: i64,
     #[php(default = true)] auto_release: bool,
-) -> Result<OrFalse<Instance<SysvSemaphore>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SysvSemaphore>>>, Thrown> {
     let warn = |req: &mut Request, what: &str, errno: i32| {
         let text = req.os_error_text(errno);
         docref(
@@ -277,7 +278,7 @@ fn sem_get(
             "Class \"SysvSemaphore\" not found",
         ));
     };
-    let semaphore = Instance::of(new_object(req, class)?);
+    let semaphore = new_object(req, class)?.into_instance::<SysvSemaphore>();
     *semaphore.payload_mut(req)? = Some(Sem {
         key: key as i32,
         id,

@@ -1619,7 +1619,10 @@ fn handle_avif(s: &mut Stream<'_>) -> Option<GfxInfo> {
 /// }
 /// ```
 #[php_function]
-fn image_type_to_mime_type(req: &mut Request, image_type: i64) -> Result<php::PhpString, Thrown> {
+fn image_type_to_mime_type(
+    req: &mut Request,
+    image_type: i64,
+) -> Result<php::Owner<php::PhpString>, Thrown> {
     let mime = php_image_type_to_mime_type(req, image_type);
     php::PhpString::new(req, mime.as_bytes())
 }
@@ -1643,7 +1646,7 @@ fn image_type_to_extension(
     req: &mut Request,
     image_type: i64,
     #[php(default = true)] include_dot: bool,
-) -> Result<OrFalse<php::PhpString>, Thrown> {
+) -> Result<OrFalse<php::Owner<php::PhpString>>, Thrown> {
     if let Some(ext) = extension(image_type) {
         let text = if include_dot {
             format!(".{ext}")
@@ -1667,7 +1670,9 @@ fn image_type_to_extension(
 
 /// A new string of the request's.
 fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Value, Thrown> {
-    Ok(php::Value::string(php::PhpString::new(req, bytes)?))
+    Ok(php::Value::string(
+        php::PhpString::new(req, bytes)?.hand_on_unmigrated(),
+    ))
 }
 
 /// `php_getimagesize_from_any`'s end (`Z/ext/standard/image.c:1541`):
@@ -1678,7 +1683,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Value, Thrown> {
 fn clear_info(req: &mut Request, image_info: Ref<Untyped<php::Value>>) -> Result<(), Thrown> {
     if image_info.is_given() {
         let empty = php::PhpArray::new(req)?;
-        image_info.set(req, Untyped(php::Value::array(empty)))?;
+        image_info.set(req, Untyped(empty.into_value()))?;
     }
     Ok(())
 }
@@ -1734,7 +1739,7 @@ fn answer(
     bytes: &[u8],
     shown: &[u8],
     image_info: Ref<Untyped<php::Value>>,
-) -> Result<OrFalse<php::PhpArray>, Thrown> {
+) -> Result<OrFalse<php::Owner<php::PhpArray>>, Thrown> {
     let want_info = image_info.is_given();
     let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
     let found = image_size(bytes, want_info, &handlers);
@@ -1742,13 +1747,15 @@ fn answer(
     if want_info {
         let mut info = php::PhpArray::new(req)?;
         for segment in &found.segments {
-            let key = php::Key::Str(php::PhpString::new(req, segment.name().as_bytes())?);
-            if !info.contains(&key) {
+            let name = php::PhpString::new(req, segment.name().as_bytes())?;
+            if info.contains(&php::Key::Str(*name)) {
+                name.give_up(req);
+            } else {
                 let value = string(req, &segment.bytes)?;
-                info.set(req, key, value)?;
+                info.set(req, php::Key::Str(name.hand_on_unmigrated()), value)?;
             }
         }
-        image_info.set(req, Untyped(php::Value::array(info)))?;
+        image_info.set(req, Untyped(info.into_value()))?;
     }
     let Some(data) = found.data else {
         return Ok(OrFalse::False);
@@ -1757,7 +1764,9 @@ fn answer(
     for (key, value) in data.entries() {
         let key = match key {
             Key::Index(i) => php::Key::Int(i),
-            Key::Name(name) => php::Key::Str(php::PhpString::new(req, name.as_bytes())?),
+            Key::Name(name) => {
+                php::Key::Str(php::PhpString::new(req, name.as_bytes())?.hand_on_unmigrated())
+            }
         };
         let value = match value {
             Value::Int(n) => php::Value::int(n),
@@ -1833,16 +1842,22 @@ fn getimagesize(
     req: &mut Request,
     filename: Path,
     #[php(default = null)] image_info: Ref<Untyped<php::Value>>,
-) -> Result<OrFalse<php::PhpArray>, Thrown> {
+) -> Result<OrFalse<php::Owner<php::PhpArray>>, Thrown> {
     let Path(filename) = filename;
     clear_info(req, image_info)?;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
         return Ok(OrFalse::False);
     };
-    let bytes = stream.copy_to_mem(req, None)?;
-    stream.free(req);
+    let bytes = match stream.copy_to_mem(req, None) {
+        Ok(bytes) => bytes,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     let answered = answer(req, bytes.as_bytes(), filename.as_bytes(), image_info);
-    req.release(php::Value::string(bytes));
+    bytes.give_up(req);
     answered
 }
 
@@ -1884,7 +1899,7 @@ fn getimagesizefromstring(
     req: &mut Request,
     string: php::PhpString,
     #[php(default = null)] image_info: Ref<Untyped<php::Value>>,
-) -> Result<OrFalse<php::PhpArray>, Thrown> {
+) -> Result<OrFalse<php::Owner<php::PhpArray>>, Thrown> {
     let data = string;
     clear_info(req, image_info)?;
     answer(req, data.as_bytes(), data.as_bytes(), image_info)

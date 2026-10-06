@@ -49,7 +49,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, clear, docref, throw_error,
 };
 use php_ext::request::{Cast, Request, Resolve, Stream};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -277,14 +277,19 @@ fn check_pid(
 }
 
 /// `add_assoc_*`: one row under a string key.
-fn set(req: &mut Request, array: &mut PhpArray, key: &[u8], value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?);
+fn set(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    key: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// A string of the request's as a value.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `posix_kill(int $process_id, int $signal): bool`: `kill(2)`. Signal
@@ -479,7 +484,7 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
 /// bool(true)
 /// ```
 #[php_function]
-fn posix_getgroups(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_getgroups(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let groups = match process::groups() {
         Ok(groups) => groups,
         Err(error) => {
@@ -505,7 +510,7 @@ fn posix_getgroups(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
 /// bool(true)
 /// ```
 #[php_function]
-fn posix_getlogin(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn posix_getlogin(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match ffi::getlogin() {
         Ok(name) => Ok(OrFalse::Value(PhpString::new(req, &name)?)),
         Err(errno) => Ok(failed_or(req, errno)),
@@ -639,7 +644,7 @@ fn posix_getsid(req: &mut Request, process_id: i64) -> Result<OrFalse<i64>, Thro
 /// bool(true)
 /// ```
 #[php_function]
-fn posix_uname(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_uname(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let u = match nix::sys::utsname::uname() {
         Ok(u) => u,
         Err(errno) => return Ok(failed_or(req, errno)),
@@ -653,7 +658,7 @@ fn posix_uname(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
         (b"machine", u.machine()),
     ] {
         let value = string(req, field.as_bytes())?;
-        set(req, &mut array, key, value)?;
+        set(req, &mut array, key, value.hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -680,7 +685,7 @@ fn posix_uname(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
 /// int(5)
 /// ```
 #[php_function]
-fn posix_times(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_times(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let t = match ffi::times() {
         Ok(t) => t,
         Err(errno) => return Ok(failed_or(req, errno)),
@@ -708,7 +713,7 @@ fn posix_times(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
 /// string(8) "/dev/tty"
 /// ```
 #[php_function]
-fn posix_ctermid(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn posix_ctermid(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match ffi::controlling_terminal() {
         Ok(path) => Ok(OrFalse::Value(PhpString::new(req, &path)?)),
         Err(errno) => Ok(failed_or(req, errno)),
@@ -821,7 +826,7 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
 fn posix_ttyname(
     req: &mut Request,
     file_descriptor: Untyped<Value>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(fd) = fd_of(req, &file_descriptor.0, FdReader::Ttyname)? else {
         return Ok(OrFalse::False);
     };
@@ -886,7 +891,7 @@ fn posix_isatty(req: &mut Request, file_descriptor: Untyped<Value>) -> Result<bo
 /// bool(true)
 /// ```
 #[php_function]
-fn posix_getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn posix_getcwd(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let cwd = req.cwd();
     Ok(OrFalse::Value(PhpString::new(
         req,
@@ -1069,18 +1074,23 @@ fn posix_eaccess(
 }
 
 /// `php_posix_group_to_array`: name, passwd, members and gid.
-fn group_array(req: &mut Request, group: &Group) -> Result<PhpArray, Thrown> {
+fn group_array(req: &mut Request, group: &Group) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let name = string(req, group.name.as_bytes())?;
-    set(req, &mut array, b"name", name)?;
+    set(req, &mut array, b"name", name.hand_on_unmigrated())?;
     let passwd = string(req, group.passwd.as_bytes())?;
-    set(req, &mut array, b"passwd", passwd)?;
+    set(req, &mut array, b"passwd", passwd.hand_on_unmigrated())?;
     let mut members = PhpArray::new(req)?;
     for member in &group.mem {
         let member = string(req, member.as_bytes())?;
-        members.append(req, member)?;
+        members.append(req, member.hand_on_unmigrated())?;
     }
-    set(req, &mut array, b"members", Value::array(members))?;
+    set(
+        req,
+        &mut array,
+        b"members",
+        members.into_value().hand_on_unmigrated(),
+    )?;
     let gid = Value::int(i64::from(group.gid.as_raw()));
     set(req, &mut array, b"gid", gid)?;
     Ok(array)
@@ -1091,7 +1101,7 @@ fn group_array(req: &mut Request, group: &Group) -> Result<PhpArray, Thrown> {
 fn group_or(
     req: &mut Request,
     found: nix::Result<Option<Group>>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     match found {
         Ok(Some(group)) => Ok(OrFalse::Value(group_array(req, &group)?)),
         Ok(None) => Ok(failed_or(req, Errno::last())),
@@ -1121,7 +1131,7 @@ fn group_or(
 /// bool(false)
 /// ```
 #[php_function]
-fn posix_getgrnam(req: &mut Request, name: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_getgrnam(req: &mut Request, name: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Ok(name) = std::str::from_utf8(name.as_bytes()) else {
         return Ok(failed_or(req, Errno::ENOENT));
     };
@@ -1140,18 +1150,18 @@ fn posix_getgrnam(req: &mut Request, name: PhpString) -> Result<OrFalse<PhpArray
 /// bool(false)
 /// ```
 #[php_function]
-fn posix_getgrgid(req: &mut Request, group_id: i64) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_getgrgid(req: &mut Request, group_id: i64) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let found = Group::from_gid(Gid::from_raw(as_id(group_id)));
     group_or(req, found)
 }
 
 /// `php_posix_passwd_to_array`: the seven fields.
-fn user_array(req: &mut Request, user: &User) -> Result<PhpArray, Thrown> {
+fn user_array(req: &mut Request, user: &User) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let name = string(req, user.name.as_bytes())?;
-    set(req, &mut array, b"name", name)?;
+    set(req, &mut array, b"name", name.hand_on_unmigrated())?;
     let passwd = string(req, user.passwd.as_bytes())?;
-    set(req, &mut array, b"passwd", passwd)?;
+    set(req, &mut array, b"passwd", passwd.hand_on_unmigrated())?;
     set(
         req,
         &mut array,
@@ -1165,11 +1175,11 @@ fn user_array(req: &mut Request, user: &User) -> Result<PhpArray, Thrown> {
         Value::int(i64::from(user.gid.as_raw())),
     )?;
     let gecos = string(req, user.gecos.as_bytes())?;
-    set(req, &mut array, b"gecos", gecos)?;
+    set(req, &mut array, b"gecos", gecos.hand_on_unmigrated())?;
     let dir = string(req, user.dir.as_os_str().as_bytes())?;
-    set(req, &mut array, b"dir", dir)?;
+    set(req, &mut array, b"dir", dir.hand_on_unmigrated())?;
     let shell = string(req, user.shell.as_os_str().as_bytes())?;
-    set(req, &mut array, b"shell", shell)?;
+    set(req, &mut array, b"shell", shell.hand_on_unmigrated())?;
     Ok(array)
 }
 
@@ -1178,7 +1188,7 @@ fn user_array(req: &mut Request, user: &User) -> Result<PhpArray, Thrown> {
 fn user_or(
     req: &mut Request,
     found: nix::Result<Option<User>>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     match found {
         Ok(Some(user)) => Ok(OrFalse::Value(user_array(req, &user)?)),
         Ok(None) => Ok(failed_or(req, Errno::last())),
@@ -1214,7 +1224,10 @@ fn user_or(
 /// bool(false)
 /// ```
 #[php_function]
-fn posix_getpwnam(req: &mut Request, username: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_getpwnam(
+    req: &mut Request,
+    username: PhpString,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Ok(name) = std::str::from_utf8(username.as_bytes()) else {
         return Ok(failed_or(req, Errno::ENOENT));
     };
@@ -1232,7 +1245,7 @@ fn posix_getpwnam(req: &mut Request, username: PhpString) -> Result<OrFalse<PhpA
 /// bool(false)
 /// ```
 #[php_function]
-fn posix_getpwuid(req: &mut Request, user_id: i64) -> Result<OrFalse<PhpArray>, Thrown> {
+fn posix_getpwuid(req: &mut Request, user_id: i64) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let found = User::from_uid(Uid::from_raw(as_id(user_id)));
     user_or(req, found)
 }
@@ -1257,9 +1270,9 @@ const LIMITS: &[(i64, &str)] = &[
 ];
 
 /// One limit as php renders it: the number, or `"unlimited"`.
-fn limit_value(req: &mut Request, limit: Option<i64>) -> Result<Value, Thrown> {
+fn limit_value(req: &mut Request, limit: Option<i64>) -> Result<Owner<Value>, Thrown> {
     match limit {
-        Some(n) => Ok(Value::int(n)),
+        Some(n) => Ok(Owner::take(req, Value::int(n))),
         None => string(req, b"unlimited"),
     }
 }
@@ -1290,7 +1303,7 @@ fn limit_value(req: &mut Request, limit: Option<i64>) -> Result<Value, Thrown> {
 fn posix_getrlimit(
     req: &mut Request,
     #[php(default = null)] resource: Option<i64>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let asked: Vec<(i64, Option<&str>)> = match resource {
         None => LIMITS.iter().map(|&(r, name)| (r, Some(name))).collect(),
         Some(resource) => vec![(resource, None)],
@@ -1300,18 +1313,28 @@ fn posix_getrlimit(
         let limits = match ffi::getrlimit(resource) {
             Ok(limits) => limits,
             Err(errno) => {
-                req.release(Value::array(array));
+                array.give_up(req);
                 return Ok(failed_or(req, errno));
             }
         };
         let soft = limit_value(req, limits.soft)?;
         let hard = limit_value(req, limits.hard)?;
         if let Some(name) = name {
-            set(req, &mut array, format!("soft {name}").as_bytes(), soft)?;
-            set(req, &mut array, format!("hard {name}").as_bytes(), hard)?;
+            set(
+                req,
+                &mut array,
+                format!("soft {name}").as_bytes(),
+                soft.hand_on_unmigrated(),
+            )?;
+            set(
+                req,
+                &mut array,
+                format!("hard {name}").as_bytes(),
+                hard.hand_on_unmigrated(),
+            )?;
         } else {
-            array.append(req, soft)?;
-            array.append(req, hard)?;
+            array.append(req, soft.hand_on_unmigrated())?;
+            array.append(req, hard.hand_on_unmigrated())?;
         }
     }
     Ok(OrFalse::Value(array))
@@ -1390,7 +1413,7 @@ fn posix_get_last_error(req: &mut Request) -> i64 {
 /// string(18) "Undefined error: 0"
 /// ```
 #[php_function]
-fn posix_strerror(req: &mut Request, error_code: i64) -> Result<PhpString, Thrown> {
+fn posix_strerror(req: &mut Request, error_code: i64) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, &ffi::strerror(error_code))
 }
 

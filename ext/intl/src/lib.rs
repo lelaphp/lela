@@ -57,7 +57,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use error::IntlError;
 use ffi::Code;
@@ -544,7 +544,7 @@ fn intl_get_error_code(req: &mut Request) -> i64 {
 /// string(12) "U_ZERO_ERROR"
 /// ```
 #[php_function]
-fn intl_get_error_message(req: &mut Request) -> Result<PhpString, Thrown> {
+fn intl_get_error_message(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let message = error::message(req);
     PhpString::new(req, &message)
 }
@@ -581,6 +581,6 @@ fn intl_is_failure(errorCode: i64) -> bool {
 /// ```
 #[php_function]
 #[allow(non_snake_case)]
-fn intl_error_name(req: &mut Request, errorCode: i64) -> Result<PhpString, Thrown> {
+fn intl_error_name(req: &mut Request, errorCode: i64) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, code_of(errorCode).name().as_bytes())
 }

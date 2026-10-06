@@ -9,7 +9,7 @@ use php_ext::call::call;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpString, Value, ValueRef};
 use php_ext_pdo_sqlite::ffi::{
     Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
     SQLITE_OK,
@@ -32,15 +32,15 @@ pub(crate) fn serving(exceptions: bool) -> &'static Sqlite3 {
 
 /// The arguments as `sqlite3_do_callback` hands them: an integer as the
 /// library's 64 bits, text and blobs alike as strings.
-fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Value>, Thrown> {
+fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Owner<Value>>, Thrown> {
     let mut out = Vec::with_capacity(given.len());
     for one in given {
         out.push(match one {
-            Argument::Int(n) => Value::int(n),
-            Argument::Float(f) => Value::float(f),
-            Argument::Null => Value::null(),
+            Argument::Int(n) => Owner::take(req, Value::int(n)),
+            Argument::Float(f) => Owner::take(req, Value::float(f)),
+            Argument::Null => Owner::take(req, Value::null()),
             Argument::Text(bytes) => match PhpString::new(req, &bytes) {
-                Ok(text) => Value::string(text),
+                Ok(text) => text.into_value(),
                 Err(thrown) => {
                     release_all(req, out);
                     return Err(thrown);
@@ -51,16 +51,25 @@ fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Value>, Thro
     Ok(out)
 }
 
-fn release_all(req: &mut Request, values: Vec<Value>) {
+fn release_all(req: &mut Request, values: Vec<Owner<Value>>) {
     for value in values {
-        req.release(value);
+        value.give_up(req);
     }
+}
+
+/// The views of `values`, as a call is handed them.
+fn views(values: &[Owner<Value>]) -> Vec<Value> {
+    values.iter().map(|value| **value).collect()
 }
 
 /// The callback's return as the function's answer: an integer, `null`
 /// and a float as they are, and anything else as its string, the answer
 /// left unset where that conversion throws.
-fn answer(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Result<(), Thrown> {
+fn answer(
+    req: &mut Request,
+    returned: Owner<Value>,
+    call: &mut Invocation<'_>,
+) -> Result<(), Thrown> {
     let answered = match returned.deref().as_ref() {
         ValueRef::Int(n) => {
             call.return_int64(n);
@@ -76,10 +85,10 @@ fn answer(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Resu
         }
         _ => to_string(req, &returned.deref()).map(|text| {
             call.return_text(text.as_bytes());
-            req.release(Value::string(text));
+            text.give_up(req);
         }),
     };
-    req.release(returned);
+    returned.give_up(req);
     answered
 }
 
@@ -92,7 +101,7 @@ impl Callbacks for Sqlite3 {
         invocation: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
         let values = arguments(req, invocation.arguments())?;
-        let returned = call(req, &handler.callable, &values);
+        let returned = call(req, &handler.callable, &views(&values));
         release_all(req, values);
         match returned {
             Ok(returned) => answer(req, returned, invocation),
@@ -122,11 +131,11 @@ impl Callbacks for Sqlite3 {
         held.row += 1;
         let extra = arguments(req, args)?;
         let mut values = vec![held.value, Value::int(held.row)];
-        values.extend(extra.iter().copied());
+        values.extend(views(&extra));
         let returned = call(req, &handler.callable, &values);
         release_all(req, extra);
         let (kept, thrown) = match returned {
-            Ok(value) => (value, None),
+            Ok(value) => (value.hand_on_unmigrated(), None),
             Err(thrown) => (Value::null(), Some(thrown)),
         };
         let old = std::mem::replace(&mut held.value, kept);
@@ -169,17 +178,17 @@ impl Callbacks for Sqlite3 {
         right: &[u8],
     ) -> (i32, Option<Thrown>) {
         let values = match (PhpString::new(req, left), PhpString::new(req, right)) {
-            (Ok(left), Ok(right)) => [Value::string(left), Value::string(right)],
+            (Ok(left), Ok(right)) => vec![left.into_value(), right.into_value()],
             (Err(thrown), _) | (_, Err(thrown)) => return (0, Some(thrown)),
         };
-        let returned = call(req, &handler.callable, &values);
-        release_all(req, values.to_vec());
+        let returned = call(req, &handler.callable, &views(&values));
+        release_all(req, values);
         let returned = match returned {
             Ok(returned) => returned,
             Err(thrown) => return (0, Some(thrown)),
         };
         let order = returned.deref().as_int();
-        req.release(returned);
+        returned.give_up(req);
         if let Some(n) = order {
             // php keeps the `zend_long` in an `int`.
             #[allow(clippy::cast_possible_truncation)]
@@ -222,18 +231,18 @@ impl Callbacks for Sqlite3 {
         if pending {
             return Ok(SQLITE_DENY);
         }
-        let mut values = vec![Value::int(i64::from(action))];
+        let mut values = vec![Owner::take(req, Value::int(i64::from(action)))];
         for name in names {
             values.push(match name.map(|name| PhpString::new(req, &name)) {
-                Some(Ok(name)) => Value::string(name),
+                Some(Ok(name)) => name.into_value(),
                 Some(Err(thrown)) => {
                     release_all(req, values);
                     return Err(thrown);
                 }
-                None => Value::null(),
+                None => Owner::take(req, Value::null()),
             });
         }
-        let returned = call(req, &handler.callable, &values);
+        let returned = call(req, &handler.callable, &views(&values));
         release_all(req, values);
         let exceptions = self.exceptions;
         let returned = match returned {
@@ -244,7 +253,7 @@ impl Callbacks for Sqlite3 {
             }
         };
         let answer = returned.deref().as_int();
-        req.release(returned);
+        returned.give_up(req);
         let Some(answer) = answer else {
             let text = "The authorizer callback returned an invalid type: expected int";
             fail(req, exceptions, None, 0, text)?;

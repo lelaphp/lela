@@ -7,7 +7,7 @@ use php_ext::abi::{Instance, Static, This};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, PhpArray, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 use crate::ffi::{self, Refusal};
 use crate::{
@@ -427,7 +427,7 @@ impl Uri {
         req: &mut Request,
         uri: PhpString,
         #[php(default = null)] baseUrl: Option<Instance<Uri>>,
-    ) -> Result<Option<Static>, Thrown> {
+    ) -> Result<Option<Owner<Static>>, Thrown> {
         crate::parse_static::<R>(req, uri, baseUrl.map(|base| base.object()), None)
     }
 
@@ -465,7 +465,7 @@ impl Uri {
     /// string(5) "https"
     /// NULL
     /// ```
-    fn getScheme(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getScheme(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "scheme", ReadAs::NormalizedAscii, |u| {
             u.scheme(ReadAs::NormalizedAscii)
         })
@@ -479,7 +479,10 @@ impl Uri {
     /// ```expect
     /// string(5) "HTTPS"
     /// ```
-    fn getRawScheme(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawScheme(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "scheme", ReadAs::Raw, |u| {
             u.scheme(ReadAs::Raw)
         })
@@ -502,7 +505,7 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
         scheme: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<R>(req, this.object(), scheme, R::set_scheme)
     }
 
@@ -515,7 +518,10 @@ impl Uri {
     /// string(9) "user:pass"
     /// NULL
     /// ```
-    fn getUserInfo(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getUserInfo(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         user_info(req, this, ReadAs::NormalizedAscii)
     }
 
@@ -527,7 +533,10 @@ impl Uri {
     /// ```expect
     /// string(13) "%75ser:p%61ss"
     /// ```
-    fn getRawUserInfo(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawUserInfo(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         user_info(req, this, ReadAs::Raw)
     }
 
@@ -549,7 +558,7 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
         #[php(sensitive)] userinfo: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<R>(req, this.object(), userinfo, R::set_user_info)
     }
 
@@ -562,7 +571,10 @@ impl Uri {
     /// string(4) "user"
     /// string(0) ""
     /// ```
-    fn getUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getUsername(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(
             req,
             this.object(),
@@ -580,7 +592,10 @@ impl Uri {
     /// ```expect
     /// string(6) "%75ser"
     /// ```
-    fn getRawUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawUsername(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "username", ReadAs::Raw, |u| {
             u.username(ReadAs::Raw)
         })
@@ -595,7 +610,10 @@ impl Uri {
     /// string(4) "pass"
     /// string(0) ""
     /// ```
-    fn getPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getPassword(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(
             req,
             this.object(),
@@ -613,7 +631,10 @@ impl Uri {
     /// ```expect
     /// string(6) "p%61ss"
     /// ```
-    fn getRawPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawPassword(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "password", ReadAs::Raw, |u| {
             u.password(ReadAs::Raw)
         })
@@ -629,7 +650,7 @@ impl Uri {
     /// string(5) "[::1]"
     /// NULL
     /// ```
-    fn getHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getHost(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
             u.host(ReadAs::NormalizedAscii)
         })
@@ -643,7 +664,7 @@ impl Uri {
     /// ```expect
     /// string(11) "EXAMPLE.com"
     /// ```
-    fn getRawHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawHost(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "host", ReadAs::Raw, |u| {
             u.host(ReadAs::Raw)
         })
@@ -669,7 +690,7 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
         host: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<R>(req, this.object(), host, R::set_host)
     }
 
@@ -702,7 +723,11 @@ impl Uri {
     /// The specified port is malformed
     /// Cannot set a port without having a host
     /// ```
-    fn withPort(req: &mut Request, this: This<Self>, port: Option<i64>) -> Result<Static, Thrown> {
+    fn withPort(
+        req: &mut Request,
+        this: This<Self>,
+        port: Option<i64>,
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write::<R>(req, this.object(), |req, uri| uri.set_port(req, port))
     }
 
@@ -716,7 +741,7 @@ impl Uri {
     /// string(0) ""
     /// string(3) "a/b"
     /// ```
-    fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         path(req, this, ReadAs::NormalizedAscii)
     }
 
@@ -729,7 +754,7 @@ impl Uri {
     /// string(14) "/a/./b/../%7Ec"
     /// string(1) "/"
     /// ```
-    fn getRawPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getRawPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         path(req, this, ReadAs::Raw)
     }
 
@@ -745,7 +770,11 @@ impl Uri {
     /// string(19) "https://example.com"
     /// The specified path is malformed
     /// ```
-    fn withPath(req: &mut Request, this: This<Self>, path: PhpString) -> Result<Static, Thrown> {
+    fn withPath(
+        req: &mut Request,
+        this: This<Self>,
+        path: PhpString,
+    ) -> Result<Owner<Static>, Thrown> {
         let path = path.as_bytes().to_vec();
         crate::write::<R>(req, this.object(), |req, uri| uri.set_path(req, &path))
     }
@@ -759,7 +788,7 @@ impl Uri {
     /// string(3) "a=~"
     /// NULL
     /// ```
-    fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
             u.query(ReadAs::NormalizedAscii)
         })
@@ -773,7 +802,10 @@ impl Uri {
     /// ```expect
     /// string(5) "a=%7e"
     /// ```
-    fn getRawQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawQuery(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "query", ReadAs::Raw, |u| {
             u.query(ReadAs::Raw)
         })
@@ -795,7 +827,7 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
         query: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<R>(req, this.object(), query, R::set_query)
     }
 
@@ -808,7 +840,10 @@ impl Uri {
     /// string(1) "~"
     /// NULL
     /// ```
-    fn getFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getFragment(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(
             req,
             this.object(),
@@ -826,7 +861,10 @@ impl Uri {
     /// ```expect
     /// string(3) "%7e"
     /// ```
-    fn getRawFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getRawFragment(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<R>(req, this.object(), "fragment", ReadAs::Raw, |u| {
             u.fragment(ReadAs::Raw)
         })
@@ -848,7 +886,7 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
         fragment: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<R>(req, this.object(), fragment, R::set_fragment)
     }
 
@@ -882,7 +920,7 @@ impl Uri {
     /// ```expect
     /// string(26) "https://example.com/~b?~#~"
     /// ```
-    fn toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         crate::recompose::<R>(req, this.object(), Recomposition::NormalizedAscii)
     }
 
@@ -894,7 +932,7 @@ impl Uri {
     /// ```expect
     /// string(29) "HTTPS://EXAMPLE.com/a/../%7eb"
     /// ```
-    fn toRawString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn toRawString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         crate::recompose::<R>(req, this.object(), Recomposition::RawAscii)
     }
 
@@ -912,7 +950,11 @@ impl Uri {
     /// string(17) "https://other.org"
     /// The specified URI is malformed
     /// ```
-    fn resolve(req: &mut Request, this: This<Self>, uri: PhpString) -> Result<Static, Thrown> {
+    fn resolve(
+        req: &mut Request,
+        this: This<Self>,
+        uri: PhpString,
+    ) -> Result<Owner<Static>, Thrown> {
         crate::resolve::<R>(req, this.object(), uri, None)
     }
 
@@ -926,7 +968,7 @@ impl Uri {
     /// string(88) "O:15:"Uri\Rfc3986\Uri":2:{i:0;a:1:{s:3:"uri";s:23:"HTTPS://example.com/%7e";}i:1;a:0:{}}"
     /// string(23) "HTTPS://example.com/%7e"
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         crate::serialize::<R>(req, this.object())
     }
 
@@ -972,7 +1014,7 @@ impl Uri {
     ///   string(1) "c"
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         crate::debug_info::<R>(req, this.object())
     }
 }
@@ -983,7 +1025,7 @@ fn user_info(
     req: &mut Request,
     this: This<Uri>,
     mode: ReadAs,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let bytes = crate::read::<R, _>(req, this.object(), mode, |u| u.user_info(mode))?;
     match bytes {
         Ok(bytes) => bytes.map(|bytes| PhpString::new(req, &bytes)).transpose(),
@@ -996,7 +1038,7 @@ fn user_info(
 }
 
 /// The path read, a string always.
-fn path(req: &mut Request, this: This<Uri>, mode: ReadAs) -> Result<PhpString, Thrown> {
+fn path(req: &mut Request, this: This<Uri>, mode: ReadAs) -> Result<Owner<PhpString>, Thrown> {
     let bytes = crate::component::<R, _>(req, this.object(), "path", mode, |u| u.path(mode))?;
     PhpString::new(req, &bytes)
 }

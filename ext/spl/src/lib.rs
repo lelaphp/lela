@@ -46,7 +46,7 @@ use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::{ClassKind, Name};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_standard::Serializer;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -372,15 +372,15 @@ fn zval_type_name(req: &Request, value: &Value) -> String {
 }
 
 /// A string value made of `bytes`, one owner, the caller's.
-fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// A value a method hands back as it came, under the declared type `T`:
 /// php's `RETURN_COPY_VALUE` of what an inner iterator or a callback
 /// answered, which an internal method's return is not verified against.
-fn answered<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
-    Raw::<T>::from_value(req, value)
+fn answered<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
+    value.into_raw()
 }
 
 /// A value handed back with one more owner, `RETURN_COPY`.
@@ -394,14 +394,15 @@ fn copied(req: &Request, value: Value) -> Value {
 
 /// One method served on `object` with no arguments; the return is the
 /// caller's, one owner.
-fn method(req: &mut Request, object: PhpObject, method: &[u8]) -> Result<Value, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+fn method(req: &mut Request, object: PhpObject, method: &[u8]) -> Result<Owner<Value>, Thrown> {
     call_method(req, &object, method, &[])
 }
 
 /// A method served for its effect, its return given up.
 fn effect(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
     let returned = method(req, object, name)?;
-    req.release(returned);
+    returned.give_up(req);
     Ok(())
 }
 
@@ -409,8 +410,16 @@ fn effect(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(), Throw
 fn valid(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     let answered = method(req, object, b"valid")?;
     let valid = truthy(req, &answered);
-    req.release(answered);
+    answered.give_up(req);
     Ok(valid)
+}
+
+/// A value that is its one owner, as the `Owner` a native returns.
+#[cfg_attr(debug_assertions, track_caller)]
+fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
 }
 
 /// A value with a reference followed, the owner moved to what it holds.
@@ -482,10 +491,17 @@ fn apply(
 /// ```
 fn set_key(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     key: &Value,
     value: Value,
 ) -> Result<(), Thrown> {
+    let (key, value) = keyed(req, key, value)?;
+    array.set(req, key, value)
+}
+
+/// [`set_key`]'s key and value, each one owner, for an array the
+/// caller writes itself.
+fn keyed(req: &mut Request, key: &Value, value: Value) -> Result<(Key, Value), Thrown> {
     let value = owned(req, value);
     let key = match zval_key(req, &key.deref()) {
         Ok(key) => key,
@@ -494,13 +510,13 @@ fn set_key(
             return Err(thrown);
         }
     };
-    array.set(req, key, value)
+    Ok((key, value))
 }
 
 /// The key [`set_key`] places a value under, one owner of a string key.
 fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
     if let Some(s) = key.as_php_string() {
-        return key_of(req, &Value::string(*s));
+        return key_of(req, &Value::string(*s)).map(Owner::hand_on_unmigrated);
     }
     if let Some(n) = key.as_int() {
         return Ok(Key::Int(n));
@@ -526,7 +542,7 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
             "Using null as an array offset is deprecated, use an empty string instead",
         );
         php_ext::raising::pending(req)?;
-        return Ok(Key::Str(PhpString::new(req, b"")?));
+        return Ok(Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated()));
     }
     let name = zval_type_name(req, key);
     Err(throw_error(
@@ -544,13 +560,13 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
 fn float_key(req: &mut Request, f: f64) -> Result<i64, Thrown> {
     // An array's own offset reading of a float is this one, 8.5's
     // warning for a float no long represents included.
-    match php_ext::coerce::key_of(req, &Value::float(f))? {
-        Key::Int(n) => Ok(n),
-        Key::Str(s) => {
-            req.release(Value::string(s));
-            Ok(0)
-        }
-    }
+    let key = php_ext::coerce::key_of(req, &Value::float(f))?;
+    let n = match &*key {
+        Key::Int(n) => *n,
+        Key::Str(_) => 0,
+    };
+    key.give_up(req);
+    Ok(n)
 }
 
 /// Whether the class of `object` overrides `lowered` with a method of
@@ -592,7 +608,7 @@ fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
 fn serialized_parts(
     req: &mut Request,
     write: impl FnOnce(&mut Request, &mut Serializer, &mut Vec<u8>) -> Result<(), Thrown>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut serializer = Serializer::new(req);
     let mut out = Vec::new();
     let written = write(req, &mut serializer, &mut out);
@@ -637,7 +653,7 @@ fn std_properties(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Valu
 ///   }
 /// }
 /// ```
-fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in std_properties(req, object)? {
         req.addref(&value);
@@ -711,7 +727,7 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
             }
             let name = key.to_prop_name(req)?;
             req.addref(&value);
-            object.unserialize_prop(req, name, value)?;
+            object.unserialize_prop(req, name.hand_on_unmigrated(), value)?;
         }
     }
     Ok(())

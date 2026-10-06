@@ -9,7 +9,7 @@
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// The hex digits `=XX` writes.
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -61,7 +61,10 @@ fn hex2int(c: u8) -> u8 {
 /// }
 /// ```
 #[php_function]
-fn quoted_printable_decode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn quoted_printable_decode(
+    req: &mut Request,
+    string: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     let mut out = Vec::with_capacity(s.len());
@@ -199,7 +202,10 @@ pub fn decode(input: &[u8], underscores: bool) -> Option<Vec<u8>> {
 /// string(0) ""
 /// ```
 #[php_function]
-fn quoted_printable_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn quoted_printable_encode(
+    req: &mut Request,
+    string: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     if s.is_empty() {
         return PhpString::new(req, b"");

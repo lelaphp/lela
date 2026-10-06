@@ -5,7 +5,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{to_long, to_string, truthy, type_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::compat::Collected;
 use crate::{
@@ -196,8 +196,8 @@ const ERRORS: [&str; 102] = [
 fn xml_parser_create(
     req: &mut Request,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<Instance<XMLParser>, Thrown> {
-    create(req, encoding, None).map(Instance::of)
+) -> Result<Owner<Instance<XMLParser>>, Thrown> {
+    create(req, encoding, None).map(Owner::into_instance)
 }
 
 /// `xml_parser_create_ns(?string $encoding = null, string $separator = ":"): XMLParser`.
@@ -216,9 +216,9 @@ fn xml_parser_create_ns(
     req: &mut Request,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = ":")] separator: PhpString,
-) -> Result<Instance<XMLParser>, Thrown> {
+) -> Result<Owner<Instance<XMLParser>>, Thrown> {
     let separator = separator.as_bytes().to_vec();
-    create(req, encoding, Some(separator)).map(Instance::of)
+    create(req, encoding, Some(separator)).map(Owner::into_instance)
 }
 
 /// `xml_set_object(XMLParser $parser, object $object): true`, deprecated
@@ -526,10 +526,10 @@ fn xml_parse_into_struct(
     }
     if index.is_given() {
         let empty = PhpArray::new(req)?;
-        index.set(req, Untyped(Value::array(empty)))?;
+        index.set(req, Untyped(empty.into_value()))?;
     }
     let empty = PhpArray::new(req)?;
-    values.set(req, Untyped(Value::array(empty)))?;
+    values.set(req, Untyped(empty.into_value()))?;
     let (Some(data_ref), info_ref) = (values.reference(), index.reference()) else {
         return Ok(OrFalse::False);
     };
@@ -598,7 +598,10 @@ fn xml_get_error_code(req: &mut Request, parser: Instance<XMLParser>) -> i64 {
 /// string(7) "Unknown"
 /// ```
 #[php_function]
-fn xml_error_string(req: &mut Request, error_code: i64) -> Result<Option<PhpString>, Thrown> {
+fn xml_error_string(
+    req: &mut Request,
+    error_code: i64,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     // `XML_ErrorString((int) code)`.
     #[allow(clippy::cast_possible_truncation)]
     let code = error_code as i32;
@@ -759,7 +762,7 @@ fn xml_parser_set_option(
         Setting::TargetEncoding => {
             let name = to_string(req, &value)?;
             let target = Target::named(name.as_bytes());
-            req.release(Value::string(name));
+            name.give_up(req);
             let Some(target) = target else {
                 return Err(argument_error(
                     req,
@@ -796,7 +799,7 @@ fn xml_parser_get_option(
     req: &mut Request,
     parser: Instance<XMLParser>,
     option: i64,
-) -> Result<Union<PhpString, Union<i64, bool>>, Thrown> {
+) -> Result<Union<Owner<PhpString>, Union<i64, bool>>, Thrown> {
     let Some(option) = Setting::of(option) else {
         return Err(arg_value_error(req, 2, "be a XML_OPTION_* constant"));
     };

@@ -13,7 +13,7 @@ use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::State;
 use php_ext::syntax::{IniEvent as Event, IniScanner, IniValue as Scalar};
@@ -383,7 +383,7 @@ fn get_browser(
     req: &mut Request,
     #[php(default = null)] user_agent: Option<PhpString>,
     #[php(default = false)] return_array: bool,
-) -> Result<Union<PhpObject, OrFalse<PhpArray>>, Thrown> {
+) -> Result<Union<Owner<PhpObject>, OrFalse<Owner<PhpArray>>>, Thrown> {
     let agent = user_agent;
     loaded(req)?;
     if req.state::<State>().browscap.entries.is_empty() {
@@ -436,8 +436,8 @@ fn get_browser(
     }
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
-        let key = Key::Str(PhpString::new(req, &key)?);
-        let value = Value::string(PhpString::new(req, &value)?);
+        let key = Key::Str(PhpString::new(req, &key)?.hand_on_unmigrated());
+        let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
         array.set(req, key, value)?;
     }
     if return_array {
@@ -454,6 +454,6 @@ fn get_browser(
             object.set_prop(req, name, value)?;
         }
     }
-    req.release(Value::array(array));
+    array.give_up(req);
     Ok(Union::A(object))
 }

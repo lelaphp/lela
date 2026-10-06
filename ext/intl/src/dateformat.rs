@@ -14,7 +14,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, binary_op, numeric_string, to_long, to_string, value_name};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::calendar::{self, IntlCalendar};
 use crate::common_date::{
@@ -105,9 +105,9 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     let message = match held {
         false => "Cannot clone uninitialized IntlDateFormatter",
         true if status.is_failure() => "Failed to clone IntlDateFormatter",
-        true => return Ok(new),
+        true => return Ok(new.hand_on_unmigrated()),
     };
-    req.release(Value::object(new));
+    new.give_up(req);
     Err(throw_error(req, "Error", message))
 }
 
@@ -168,7 +168,7 @@ fn check(
 
 /// `INTL_METHOD_RETVAL_UTF8`: the UTF-16 converted, a failure answered
 /// `false`.
-fn utf8(req: &mut Request, object: PhpObject, units: &[u16]) -> Answer<PhpString> {
+fn utf8(req: &mut Request, object: PhpObject, units: &[u16]) -> Answer<Owner<PhpString>> {
     let converted = ffi::to_utf8(units);
     let code = converted.as_ref().err().copied().unwrap_or(Code::ZERO);
     if let Err(stop) = check(req, object, code, "Error converting value to UTF-8") {
@@ -416,19 +416,19 @@ fn set_code(req: &mut Request, object: PhpObject, code: Code) {
 
 /// `datefmt_create`: a fresh `IntlDateFormatter`, or null where its
 /// constructor failed.
-fn create(req: &mut Request, a: Args) -> Result<Option<Fmt>, Thrown> {
+fn create(req: &mut Request, a: Args) -> Result<Option<Owner<Fmt>>, Thrown> {
     let Some(class) = lookup_class(req, b"IntlDateFormatter")? else {
         return Err(fatal(req, "InternalError: IntlDateFormatter is not linked"));
     };
     let object = new_object(req, class)?;
-    match construct(req, object, a) {
-        Ok(true) => Ok(Some(Instance::of(object))),
+    match construct(req, *object, a) {
+        Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Ok(None)
         }
         Err(thrown) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -484,7 +484,7 @@ fn set_calendar(req: &mut Request, object: PhpObject, calendar: CalArg) -> Resul
 }
 
 /// `datefmt_get_timezone_id`.
-fn get_timezone_id(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
+fn get_timezone_id(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
     with(req, object, |req, udatf| {
         let id = df::php_intl_datefmt_zone(udatf).and_then(|zone| tz::php_intl_tz_id(&zone));
         let converted = id.map_or(Ok(Vec::new()), |id| id.to_utf8());
@@ -500,7 +500,7 @@ fn get_timezone_id(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
 
 /// `datefmt_get_timezone`: a new `IntlTimeZone` holding a clone of the
 /// formatter's zone.
-fn get_timezone(req: &mut Request, object: PhpObject) -> Answer<Instance<IntlTimeZone>> {
+fn get_timezone(req: &mut Request, object: PhpObject) -> Answer<Owner<Instance<IntlTimeZone>>> {
     let zone = with(req, object, |_, udatf| Ok(df::php_intl_datefmt_zone(udatf)))?;
     let Some(zone) = zone else {
         let message = "Out of memory when cloning time zone";
@@ -528,7 +528,7 @@ fn set_timezone(req: &mut Request, object: PhpObject, zone: Value) -> Result<boo
 fn get_calendar_object(
     req: &mut Request,
     object: PhpObject,
-) -> Result<Option<OrFalse<Instance<IntlCalendar>>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<Instance<IntlCalendar>>>>, Thrown> {
     let made = with(req, object, |_, udatf| {
         Ok(df::php_intl_datefmt_calendar(udatf))
     })?;
@@ -553,7 +553,7 @@ fn set_pattern(req: &mut Request, object: PhpObject, pattern: PhpString) -> Answ
 
 /// `datefmt_get_pattern`: `udat_toPattern` into sixty-four units, and on
 /// an overflow the full length and one more.
-fn get_pattern(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
+fn get_pattern(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
     with(req, object, |req, udatf| {
         let mut buffer = vec![0u16; 64];
         let mut status = Code::ZERO;
@@ -573,7 +573,7 @@ fn get_pattern(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
 }
 
 /// `datefmt_get_locale`.
-fn get_locale(req: &mut Request, object: PhpObject, kind: i64) -> Answer<PhpString> {
+fn get_locale(req: &mut Request, object: PhpObject, kind: i64) -> Answer<Owner<PhpString>> {
     with(req, object, |req, udatf| {
         let mut status = Code::ZERO;
         #[allow(
@@ -660,7 +660,7 @@ fn array_millis(req: &mut Request, object: PhpObject, array: PhpArray) -> Result
 
 /// `datefmt_format`: an array of `localtime()`'s fields, or any value
 /// `intl_zval_to_millis` reads, formatted.
-fn format(req: &mut Request, object: PhpObject, datetime: Value) -> Answer<PhpString> {
+fn format(req: &mut Request, object: PhpObject, datetime: Value) -> Answer<Owner<PhpString>> {
     fetch(req, object)?;
     let datetime = datetime.deref();
     let millis = if let ValueRef::Array(array) = datetime.as_ref() {
@@ -779,10 +779,12 @@ fn format_styles(
         _ => {
             let text = to_string(req, &format.deref())?;
             if text.is_empty() {
+                text.give_up(req);
                 error::set(req, Code::ILLEGAL_ARGUMENT, "the format is empty")?;
                 return Ok(None);
             }
             pattern = Some(c_string(text.as_bytes()));
+            text.give_up(req);
         }
     }
     if time_style != -1 {
@@ -799,7 +801,7 @@ fn format_object(
     object: PhpObject,
     format: Value,
     locale: Option<PhpString>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     let locale = match locale {
         Some(locale) => c_string(locale.as_bytes()),
         None => c_string(&crate::default_locale(req)),
@@ -896,7 +898,7 @@ const LOCALTIME: [(i32, &str); 8] = [
 ];
 
 /// A parse's answer: an instant in seconds, or `localtime()`'s fields.
-type Parsed = Union<Union<i64, f64>, PhpArray>;
+type Parsed = Union<Union<i64, f64>, Owner<PhpArray>>;
 
 /// `datefmt_parse`, `datefmt_localtime` and
 /// `IntlDateFormatter::parseToCalendar`: the offset read, checked
@@ -954,7 +956,9 @@ fn try_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
         return Err(argument_error(req, "TypeError", 2, &tail));
     }
     let read = binary_op(req, BinaryOp::BitwiseOr, &value, &Value::int(0))?;
-    Ok(read.as_int().unwrap_or(0))
+    let n = read.as_int().unwrap_or(0);
+    read.give_up(req);
+    Ok(n)
 }
 
 /// Whether a string opens with a number, as `is_numeric_string_ex`
@@ -1022,7 +1026,7 @@ fn parse_text(
         let value = i64::from(udatf.calendar_field(Some(field), &mut status));
         let message = "Date parsing - localtime failed : could not get a field from calendar";
         if let Err(stop) = check(req, object, status, message) {
-            req.release(Value::array(table));
+            table.give_up(req);
             return or_false(Err(stop));
         }
         let value = match key {
@@ -1030,17 +1034,17 @@ fn parse_text(
             "tm_wday" => value - 1,
             _ => value,
         };
-        let key = Key::from_string(PhpString::new(req, key.as_bytes())?);
+        let key = Key::from_string(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
         table.set(req, key, Value::int(value))?;
     }
     let mut status = Code::ZERO;
     let dst = udatf.calendar_field(None, &mut status);
     let message = "Date parsing - localtime failed : while checking if currently in DST.";
     if let Err(stop) = check(req, object, status, message) {
-        req.release(Value::array(table));
+        table.give_up(req);
         return or_false(Err(stop));
     }
-    let key = Key::from_string(PhpString::new(req, b"tm_isdst")?);
+    let key = Key::from_string(PhpString::new(req, b"tm_isdst")?.hand_on_unmigrated());
     table.set(req, key, Value::int(i64::from(dst == 1)))?;
     Ok(OrFalse::Value(Union::B(table)))
 }
@@ -1052,22 +1056,26 @@ fn error_code(req: &mut Request, object: PhpObject) -> i64 {
 }
 
 /// `datefmt_get_error_message`: the object's.
-fn error_message(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
+fn error_message(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
     error::reset(req);
     let message = error::object_message::<DateFormatObject>(req, object);
     PhpString::new(req, &message)
 }
 
 /// `int|float|false`, of a parse's answer.
-fn instant(parsed: OrFalse<Parsed>) -> OrFalse<Union<i64, f64>> {
+fn instant(req: &mut Request, parsed: OrFalse<Parsed>) -> OrFalse<Union<i64, f64>> {
     match parsed {
         OrFalse::Value(Union::A(n)) => OrFalse::Value(n),
-        _ => OrFalse::False,
+        OrFalse::Value(Union::B(table)) => {
+            table.give_up(req);
+            OrFalse::False
+        }
+        OrFalse::False => OrFalse::False,
     }
 }
 
 /// `array|false`, of a parse's answer.
-fn fields(parsed: OrFalse<Parsed>) -> OrFalse<PhpArray> {
+fn fields(parsed: OrFalse<Parsed>) -> OrFalse<Owner<PhpArray>> {
     match parsed {
         OrFalse::Value(Union::B(table)) => OrFalse::Value(table),
         _ => OrFalse::False,
@@ -1181,7 +1189,7 @@ impl IntlDateFormatter {
         #[php(default = null)] timezone: ZoneRaw,
         #[php(default = null)] calendar: Raw<CalArg>,
         #[php(default = null)] pattern: Raw<Option<PhpString>>,
-    ) -> Result<Option<Fmt>, Thrown> {
+    ) -> Result<Option<Owner<Fmt>>, Thrown> {
         let raw = RawArgs {
             locale,
             date_type: dateType,
@@ -1215,7 +1223,7 @@ impl IntlDateFormatter {
     }
 
     #[php(tentative)]
-    fn getTimeZoneId(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn getTimeZoneId(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         get_timezone_id(req, this.object())
     }
 
@@ -1223,12 +1231,12 @@ impl IntlDateFormatter {
     fn getCalendarObject(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<OrFalse<Instance<IntlCalendar>>>, Thrown> {
+    ) -> Result<Option<OrFalse<Owner<Instance<IntlCalendar>>>>, Thrown> {
         get_calendar_object(req, this.object())
     }
 
     #[php(tentative)]
-    fn getTimeZone(req: &mut Request, this: This<Self>) -> Answer<Instance<IntlTimeZone>> {
+    fn getTimeZone(req: &mut Request, this: This<Self>) -> Answer<Owner<Instance<IntlTimeZone>>> {
         get_timezone(req, this.object())
     }
 
@@ -1244,7 +1252,7 @@ impl IntlDateFormatter {
     }
 
     #[php(tentative)]
-    fn getPattern(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn getPattern(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         get_pattern(req, this.object())
     }
 
@@ -1253,7 +1261,7 @@ impl IntlDateFormatter {
         req: &mut Request,
         this: This<Self>,
         #[php(default = ULOC_ACTUAL_LOCALE)] r#type: i64,
-    ) -> Answer<PhpString> {
+    ) -> Answer<Owner<PhpString>> {
         get_locale(req, this.object(), r#type)
     }
 
@@ -1268,7 +1276,11 @@ impl IntlDateFormatter {
     }
 
     #[php(tentative)]
-    fn format(req: &mut Request, this: This<Self>, datetime: Untyped<Value>) -> Answer<PhpString> {
+    fn format(
+        req: &mut Request,
+        this: This<Self>,
+        datetime: Untyped<Value>,
+    ) -> Answer<Owner<PhpString>> {
         format(req, this.object(), datetime.0)
     }
 
@@ -1278,7 +1290,7 @@ impl IntlDateFormatter {
         datetime: Untyped<PhpObject>,
         #[php(default = null)] format: Untyped<Value>,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<PhpString> {
+    ) -> Answer<Owner<PhpString>> {
         format_object(req, datetime.0, format.0, locale)
     }
 
@@ -1289,7 +1301,8 @@ impl IntlDateFormatter {
         string: PhpString,
         #[php(default = null)] offset: Ref<Untyped<Value>>,
     ) -> Result<OrFalse<Union<i64, f64>>, Thrown> {
-        parse(req, this.object(), string, &offset, Parse::Instant).map(instant)
+        parse(req, this.object(), string, &offset, Parse::Instant)
+            .map(|parsed| instant(req, parsed))
     }
 
     fn parseToCalendar(
@@ -1298,7 +1311,8 @@ impl IntlDateFormatter {
         string: PhpString,
         #[php(default = null)] offset: Ref<Untyped<Value>>,
     ) -> Result<OrFalse<Union<i64, f64>>, Thrown> {
-        parse(req, this.object(), string, &offset, Parse::Calendar).map(instant)
+        parse(req, this.object(), string, &offset, Parse::Calendar)
+            .map(|parsed| instant(req, parsed))
     }
 
     #[php(tentative)]
@@ -1307,7 +1321,7 @@ impl IntlDateFormatter {
         this: This<Self>,
         string: PhpString,
         #[php(default = null)] offset: Ref<Untyped<Value>>,
-    ) -> Result<OrFalse<PhpArray>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         parse(req, this.object(), string, &offset, Parse::Fields).map(fields)
     }
 
@@ -1317,7 +1331,7 @@ impl IntlDateFormatter {
     }
 
     #[php(tentative)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         error_message(req, this.object())
     }
 }
@@ -1342,7 +1356,7 @@ fn datefmt_create(
     #[php(default = null)] timezone: ZoneRaw,
     #[php(default = null)] calendar: Raw<CalArg>,
     #[php(default = null)] pattern: Raw<Option<PhpString>>,
-) -> Result<Option<Fmt>, Thrown> {
+) -> Result<Option<Owner<Fmt>>, Thrown> {
     let raw = RawArgs {
         locale,
         date_type: dateType,
@@ -1433,7 +1447,7 @@ fn datefmt_set_calendar(
 /// string(13) "Europe/Lisbon"
 /// ```
 #[php_function]
-fn datefmt_get_timezone_id(req: &mut Request, formatter: Fmt) -> Answer<PhpString> {
+fn datefmt_get_timezone_id(req: &mut Request, formatter: Fmt) -> Answer<Owner<PhpString>> {
     get_timezone_id(req, formatter.object())
 }
 
@@ -1452,7 +1466,7 @@ fn datefmt_get_timezone_id(req: &mut Request, formatter: Fmt) -> Answer<PhpStrin
 fn datefmt_get_calendar_object(
     req: &mut Request,
     formatter: Fmt,
-) -> Result<Option<OrFalse<Instance<IntlCalendar>>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<Instance<IntlCalendar>>>>, Thrown> {
     get_calendar_object(req, formatter.object())
 }
 
@@ -1465,7 +1479,10 @@ fn datefmt_get_calendar_object(
 /// string(10) "Asia/Tokyo"
 /// ```
 #[php_function]
-fn datefmt_get_timezone(req: &mut Request, formatter: Fmt) -> Answer<Instance<IntlTimeZone>> {
+fn datefmt_get_timezone(
+    req: &mut Request,
+    formatter: Fmt,
+) -> Answer<Owner<Instance<IntlTimeZone>>> {
     get_timezone(req, formatter.object())
 }
 
@@ -1527,7 +1544,7 @@ fn datefmt_set_pattern(
 /// string(7) "dd.MM.y"
 /// ```
 #[php_function]
-fn datefmt_get_pattern(req: &mut Request, formatter: Fmt) -> Answer<PhpString> {
+fn datefmt_get_pattern(req: &mut Request, formatter: Fmt) -> Answer<Owner<PhpString>> {
     get_pattern(req, formatter.object())
 }
 
@@ -1548,7 +1565,7 @@ fn datefmt_get_locale(
     req: &mut Request,
     formatter: Fmt,
     #[php(default = ULOC_ACTUAL_LOCALE)] r#type: i64,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     get_locale(req, formatter.object(), r#type)
 }
 
@@ -1613,7 +1630,7 @@ fn datefmt_format(
     req: &mut Request,
     formatter: Fmt,
     datetime: Untyped<Value>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     format(req, formatter.object(), datetime.0)
 }
 
@@ -1644,7 +1661,7 @@ fn datefmt_format_object(
     datetime: Untyped<PhpObject>,
     #[php(default = null)] format: Untyped<Value>,
     #[php(default = null)] locale: Option<PhpString>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     format_object(req, datetime.0, format.0, locale)
 }
 
@@ -1675,7 +1692,8 @@ fn datefmt_parse(
     string: PhpString,
     #[php(default = null)] offset: Ref<Untyped<Value>>,
 ) -> Result<OrFalse<Union<i64, f64>>, Thrown> {
-    parse(req, formatter.object(), string, &offset, Parse::Instant).map(instant)
+    parse(req, formatter.object(), string, &offset, Parse::Instant)
+        .map(|parsed| instant(req, parsed))
 }
 
 /// `datefmt_localtime`: `localtime()`'s fields of what the text names.
@@ -1713,7 +1731,7 @@ fn datefmt_localtime(
     formatter: Fmt,
     string: PhpString,
     #[php(default = null)] offset: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     parse(req, formatter.object(), string, &offset, Parse::Fields).map(fields)
 }
 
@@ -1741,7 +1759,10 @@ fn datefmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
 /// string(12) "U_ZERO_ERROR"
 /// ```
 #[php_function]
-fn datefmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<PhpString, Thrown> {
+fn datefmt_get_error_message(
+    req: &mut Request,
+    formatter: Fmt,
+) -> Result<Owner<PhpString>, Thrown> {
     error_message(req, formatter.object())
 }
 

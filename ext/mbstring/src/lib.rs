@@ -43,7 +43,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OrFa
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 use settings::{Mode, State, Substitute, named_or_pass, settings};
 use tables::{MBFL_VERSION_MAJOR, MBFL_VERSION_MINOR, MBFL_VERSION_TEENY};
 use text::{new_string, value_error};
@@ -298,7 +298,7 @@ fn display_ini_entries(req: &mut Request) {
 fn mb_language(
     req: &mut Request,
     #[php(default = null)] language: Option<PhpString>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let Some(name) = language else {
         let current = settings(req).language;
         return Ok(Union::A(new_string(req, current.name())?));
@@ -330,7 +330,7 @@ fn mb_language(
 fn mb_internal_encoding(
     req: &mut Request,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let Some(name) = encoding else {
         let current = settings(req).current_internal;
         return Ok(Union::A(new_string(req, current.name())?));
@@ -365,7 +365,7 @@ fn mb_internal_encoding(
 fn mb_http_output(
     req: &mut Request,
     #[php(default = null)] encoding: Option<Path>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let Some(Path(name)) = encoding else {
         let current = settings(req).http_output;
         return Ok(Union::A(new_string(req, current.name())?));
@@ -383,11 +383,11 @@ fn mb_http_output(
 }
 
 /// The names of `list` as an array.
-fn names(req: &mut Request, list: &[Encoding]) -> Result<PhpArray, Thrown> {
+fn names(req: &mut Request, list: &[Encoding]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for enc in list {
         let name = new_string(req, enc.name())?;
-        out.append(req, Value::string(name))?;
+        out.append(req, name.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -422,7 +422,7 @@ fn names(req: &mut Request, list: &[Encoding]) -> Result<PhpArray, Thrown> {
 fn mb_detect_order(
     req: &mut Request,
     #[php(default = null)] encoding: Option<Union<PhpArray, PhpString>>,
-) -> Result<Union<PhpArray, bool>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, bool>, Thrown> {
     let Some(given) = encoding else {
         let list = settings(req).detect_order.clone();
         return Ok(Union::A(names(req, &list)?));
@@ -460,7 +460,7 @@ fn is_code_point(cp: i64) -> bool {
 fn mb_substitute_character(
     req: &mut Request,
     #[php(default = null)] substitute_character: Option<Union<PhpString, i64>>,
-) -> Result<Union<PhpString, Union<i64, bool>>, Thrown> {
+) -> Result<Union<Owner<PhpString>, Union<i64, bool>>, Thrown> {
     let current = settings(req).substitute;
     let next = match substitute_character {
         None => {
@@ -507,7 +507,7 @@ fn mb_substitute_character(
 fn mb_preferred_mime_name(
     req: &mut Request,
     encoding: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let text = String::from_utf8_lossy(encoding.as_bytes()).into_owned();
     let Some(enc) = Encoding::named(encoding.as_bytes()) else {
         return Err(value_error(
@@ -529,7 +529,7 @@ fn mb_preferred_mime_name(
 }
 
 /// One of `mb_get_info()`'s answers: a list, a name or a number.
-type Info = Union<PhpArray, Union<PhpString, i64>>;
+type Info = Union<Owner<PhpArray>, Union<Owner<PhpString>, i64>>;
 
 /// `mb_get_info()`'s keys, in the order `"all"` lists them.
 const INFO_KEYS: [&str; 13] = [
@@ -653,12 +653,16 @@ fn mb_get_info(
         for key in INFO_KEYS {
             if let Some(value) = info_entry(req, key, language)? {
                 let value = match value {
-                    Union::A(list) => Value::array(list),
-                    Union::B(Union::A(text)) => Value::string(text),
-                    Union::B(Union::B(n)) => Value::int(n),
+                    Union::A(list) => list.into_value(),
+                    Union::B(Union::A(text)) => text.into_value(),
+                    Union::B(Union::B(n)) => Owner::take(req, Value::int(n)),
                 };
                 let key = PhpString::new(req, key.as_bytes())?;
-                out.set(req, Key::Str(key), value)?;
+                out.set(
+                    req,
+                    Key::Str(key.hand_on_unmigrated()),
+                    value.hand_on_unmigrated(),
+                )?;
             }
         }
         return Ok(Some(OrFalse::Value(Union::A(out))));

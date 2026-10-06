@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object, write_prop};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::transliterator::{Trans, ids};
@@ -119,7 +119,7 @@ impl Transliterator {
         req: &mut Request,
         id: PhpString,
         #[php(default = Transliterator::FORWARD)] direction: i64,
-    ) -> Answer<Option<Instance<Transliterator>>> {
+    ) -> Answer<Option<Owner<Instance<Transliterator>>>> {
         create(req, id.as_bytes(), direction)
     }
 
@@ -128,7 +128,7 @@ impl Transliterator {
         req: &mut Request,
         rules: PhpString,
         #[php(default = Transliterator::FORWARD)] direction: i64,
-    ) -> Answer<Option<Instance<Transliterator>>> {
+    ) -> Answer<Option<Owner<Instance<Transliterator>>>> {
         create_from_rules(req, rules.as_bytes(), direction)
     }
 
@@ -136,12 +136,12 @@ impl Transliterator {
     fn createInverse(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<Option<Instance<Transliterator>>> {
+    ) -> Answer<Option<Owner<Instance<Transliterator>>>> {
         create_inverse(req, this.object())
     }
 
     #[php(tentative)]
-    fn listIDs(req: &mut Request) -> Answer<OrFalse<PhpArray>> {
+    fn listIDs(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
         list_ids(req)
     }
 
@@ -152,7 +152,7 @@ impl Transliterator {
         string: PhpString,
         #[php(default = 0)] start: i64,
         #[php(default = -1)] end: i64,
-    ) -> Answer<OrFalse<PhpString>> {
+    ) -> Answer<OrFalse<Owner<PhpString>>> {
         error::reset(req);
         transliterate(req, this.object(), string.as_bytes(), start, end, 0)
     }
@@ -163,7 +163,7 @@ impl Transliterator {
     }
 
     #[php(tentative)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         error_message(req, this.object())
     }
 }
@@ -183,7 +183,7 @@ fn transliterator_create(
     req: &mut Request,
     id: PhpString,
     #[php(default = Transliterator::FORWARD)] direction: i64,
-) -> Answer<Option<Instance<Transliterator>>> {
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     create(req, id.as_bytes(), direction)
 }
 
@@ -204,7 +204,7 @@ fn transliterator_create_from_rules(
     req: &mut Request,
     rules: PhpString,
     #[php(default = Transliterator::FORWARD)] direction: i64,
-) -> Answer<Option<Instance<Transliterator>>> {
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     create_from_rules(req, rules.as_bytes(), direction)
 }
 
@@ -218,7 +218,7 @@ fn transliterator_create_from_rules(
 /// int(0)
 /// ```
 #[php_function]
-fn transliterator_list_ids(req: &mut Request) -> Answer<OrFalse<PhpArray>> {
+fn transliterator_list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
     list_ids(req)
 }
 
@@ -234,7 +234,7 @@ fn transliterator_list_ids(req: &mut Request) -> Answer<OrFalse<PhpArray>> {
 fn transliterator_create_inverse(
     req: &mut Request,
     transliterator: Instance<Transliterator>,
-) -> Answer<Option<Instance<Transliterator>>> {
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     create_inverse(req, transliterator.object())
 }
 
@@ -263,7 +263,7 @@ fn transliterator_transliterate(
     string: PhpString,
     #[php(default = 0)] start: i64,
     #[php(default = -1)] end: i64,
-) -> Answer<OrFalse<PhpString>> {
+) -> Answer<OrFalse<Owner<PhpString>>> {
     error::reset(req);
     let id = match transliterator {
         Union::A(object) => {
@@ -280,7 +280,7 @@ fn transliterator_transliterate(
     };
     let object = made.object();
     let answer = transliterate(req, object, string.as_bytes(), start, end, 1);
-    req.release(object.as_value());
+    made.give_up(req);
     answer
 }
 
@@ -319,7 +319,7 @@ fn transliterator_get_error_code(
 fn transliterator_get_error_message(
     req: &mut Request,
     transliterator: Instance<Transliterator>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     error_message(req, transliterator.object())
 }
 
@@ -356,7 +356,11 @@ fn direction(req: &mut Request, direction: i64) -> Answer<i32> {
 
 /// `create_transliterator`: ICU's transliterator by id, or null with the
 /// request's error set.
-fn create(req: &mut Request, id: &[u8], dir: i64) -> Answer<Option<Instance<Transliterator>>> {
+fn create(
+    req: &mut Request,
+    id: &[u8],
+    dir: i64,
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     error::reset(req);
     let dir = direction(req, dir)?;
     let uid = match to_utf16(id) {
@@ -385,7 +389,7 @@ fn create_from_rules(
     req: &mut Request,
     rules: &[u8],
     dir: i64,
-) -> Answer<Option<Instance<Transliterator>>> {
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     error::reset(req);
     let dir = direction(req, dir)?;
     let urules = match to_utf16(rules) {
@@ -414,7 +418,7 @@ fn create_from_rules(
 fn create_inverse(
     req: &mut Request,
     object: PhpObject,
-) -> Answer<Option<Instance<Transliterator>>> {
+) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     error::reset(req);
     match with(req, object, Trans::inverse)? {
         Ok(utrans) => made(req, utrans),
@@ -427,7 +431,7 @@ fn create_inverse(
 }
 
 /// `transliterator_list_ids`: every id ICU registers.
-fn list_ids(req: &mut Request) -> Answer<OrFalse<PhpArray>> {
+fn list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
     error::reset(req);
     let mut all = match ids() {
         Ok(all) => all,
@@ -441,11 +445,11 @@ fn list_ids(req: &mut Request) -> Answer<OrFalse<PhpArray>> {
     let mut status = Code::ZERO;
     while let Some(id) = all.next(&mut status) {
         let id = PhpString::new(req, &id)?;
-        array.append(req, Value::string(id))?;
+        array.append(req, Value::string(id.hand_on_unmigrated()))?;
     }
     error::set_code(req, status);
     if status.is_failure() {
-        req.release(Value::array(array));
+        array.give_up(req);
         error::set_custom_msg(req, "Failed to build array of registered transliterators")?;
         return Ok(OrFalse::False);
     }
@@ -461,7 +465,7 @@ fn transliterate(
     start: i64,
     end: i64,
     shift: u32,
-) -> Answer<OrFalse<PhpString>> {
+) -> Answer<OrFalse<Owner<PhpString>>> {
     if end < -1 {
         let tail = "be greater than or equal to -1";
         return Err(arg_value_error(req, 3 + shift, tail));
@@ -531,7 +535,7 @@ fn fail(
     object: PhpObject,
     code: Code,
     message: &str,
-) -> Answer<OrFalse<PhpString>> {
+) -> Answer<OrFalse<Owner<PhpString>>> {
     error::errors_set::<TransObject>(req, object, code, message)?;
     Ok(OrFalse::False)
 }
@@ -544,7 +548,7 @@ fn error_code(req: &mut Request, object: PhpObject) -> i64 {
 
 /// `transliterator_get_error_message`: the object's message, its error
 /// kept.
-fn error_message(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
+fn error_message(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
     error::reset(req);
     let message = error::object_message::<TransObject>(req, object);
     PhpString::new(req, &message)
@@ -552,7 +556,7 @@ fn error_message(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
 
 /// `transliterator_object_construct` over a new object: the
 /// transliterator held and `id` written.
-fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Instance<Transliterator>>> {
+fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Owner<Instance<Transliterator>>>> {
     let id = to_utf8(&utrans.id());
     let Some(class) = lookup_class(req, b"Transliterator")? else {
         return Err(fatal(req, "InternalError: Transliterator is not linked"));
@@ -563,7 +567,7 @@ fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Instance<Transliterat
     }
     let written = match id {
         Ok(id) => PhpString::new(req, &id)
-            .and_then(|id| write_prop(req, &object, b"id", Value::string(id)))
+            .and_then(|id| write_prop(req, &object, b"id", Value::string(id.hand_on_unmigrated())))
             .map(|()| true),
         Err(code) => {
             error::set_code(req, code);
@@ -571,13 +575,13 @@ fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Instance<Transliterat
         }
     };
     match written {
-        Ok(true) => Ok(Some(Instance::of(object))),
+        Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Ok(None)
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -623,5 +627,5 @@ fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
         error: IntlError::default(),
         utrans: Some(copy),
     };
-    clone_with(req, &object, payload)
+    clone_with(req, &object, payload).map(Owner::hand_on_unmigrated)
 }

@@ -23,7 +23,7 @@ use php_ext::raising::{
     throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::common_date::{
     DateTime, ZoneArg, convert_datetimezone, convert_to_datetimezone, gmt, now,
@@ -225,17 +225,20 @@ fn day_of_week(req: &mut Request, value: i64, position: u32) -> Result<i32, Thro
 /// `calendar_object_create`: a new `IntlGregorianCalendar` for a
 /// Gregorian calendar and an `IntlCalendar` for any other, holding
 /// `calendar`.
-pub(crate) fn made(req: &mut Request, mut calendar: Cal) -> Result<Instance<IntlCalendar>, Thrown> {
+pub(crate) fn made(
+    req: &mut Request,
+    mut calendar: Cal,
+) -> Result<Owner<Instance<IntlCalendar>>, Thrown> {
     let name: &[u8] = if cal::php_intl_cal_is_gregorian(&mut calendar) {
         b"IntlGregorianCalendar"
     } else {
         b"IntlCalendar"
     };
-    store(req, name, calendar).map(Instance::of)
+    store(req, name, calendar).map(Owner::into_instance)
 }
 
 /// A new object of the class `name` holding `calendar`.
-fn store(req: &mut Request, name: &[u8], calendar: Cal) -> Result<PhpObject, Thrown> {
+fn store(req: &mut Request, name: &[u8], calendar: Cal) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, name)? else {
         return Err(fatal(req, "InternalError: IntlCalendar is not linked"));
     };
@@ -289,24 +292,46 @@ impl ObjectHandlers for Handlers {
             });
         set(req, &mut table, b"valid", Value::bool(calendar.is_some()))?;
         let Some((kind, zone, locale, fields)) = calendar else {
-            return Ok(Some(table.into()));
+            return Ok(Some(table.hand_on_unmigrated().into()));
         };
-        let kind = Value::string(PhpString::new(req, kind.as_bytes())?);
-        set(req, &mut table, b"type", kind)?;
+        let kind = PhpString::new(req, kind.as_bytes())?;
+        set(
+            req,
+            &mut table,
+            b"type",
+            Value::string(kind.hand_on_unmigrated()),
+        )?;
         let zone = timezone::debug_table(req, zone)?;
-        set(req, &mut table, b"timeZone", Value::array(zone))?;
-        let locale = Value::string(PhpString::new(req, &locale)?);
-        set(req, &mut table, b"locale", locale)?;
+        set(
+            req,
+            &mut table,
+            b"timeZone",
+            Value::array(zone.hand_on_unmigrated()),
+        )?;
+        let locale = PhpString::new(req, &locale)?;
+        set(
+            req,
+            &mut table,
+            b"locale",
+            Value::string(locale.hand_on_unmigrated()),
+        )?;
         let mut rows = PhpArray::new(req)?;
         for (name, value) in fields {
             let value = match value {
                 Ok(n) => Value::int(i64::from(n)),
-                Err(code) => Value::string(PhpString::new(req, code.name().as_bytes())?),
+                Err(code) => {
+                    Value::string(PhpString::new(req, code.name().as_bytes())?.hand_on_unmigrated())
+                }
             };
             set(req, &mut rows, name.as_bytes(), value)?;
         }
-        set(req, &mut table, b"fields", Value::array(rows))?;
-        Ok(Some(table.into()))
+        set(
+            req,
+            &mut table,
+            b"fields",
+            Value::array(rows.hand_on_unmigrated()),
+        )?;
+        Ok(Some(table.hand_on_unmigrated().into()))
     }
 }
 
@@ -340,9 +365,9 @@ fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
     let ok = payload.cal.is_some();
     let copy = clone_with(req, &object, payload)?;
     if ok {
-        return Ok(copy);
+        return Ok(copy.hand_on_unmigrated());
     }
-    req.release(copy.as_value());
+    copy.give_up(req);
     let message = if constructed {
         "Failed to clone IntlCalendar"
     } else {
@@ -504,7 +529,7 @@ impl IntlCalendar {
         req: &mut Request,
         #[php(default = null)] timezone: Raw<ZoneArg>,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
         let timezone = zone_raw(req, &timezone, 1)?;
         create_instance(req, timezone, locale)
     }
@@ -567,7 +592,7 @@ impl IntlCalendar {
         req: &mut Request,
         datetime: php_ext::abi::Union<Instance<DateTime>, PhpString>,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
         from_date_time(req, datetime, locale)
     }
 
@@ -590,7 +615,7 @@ impl IntlCalendar {
 
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn getAvailableLocales(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn getAvailableLocales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         available_locales(req)
     }
 
@@ -608,7 +633,7 @@ impl IntlCalendar {
 
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         error_message(req, this.object())
     }
 
@@ -631,7 +656,7 @@ impl IntlCalendar {
         keyword: PhpString,
         locale: PhpString,
         onlyCommon: bool,
-    ) -> Answer<Instance<iterator::IntlIterator>> {
+    ) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
         keyword_values(req, keyword, locale, onlyCommon)
     }
 
@@ -643,7 +668,7 @@ impl IntlCalendar {
 
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn getLocale(req: &mut Request, this: This<Self>, r#type: i64) -> Answer<PhpString> {
+    fn getLocale(req: &mut Request, this: This<Self>, r#type: i64) -> Answer<Owner<PhpString>> {
         get_locale(req, Of::method(this), r#type)
     }
 
@@ -705,13 +730,13 @@ impl IntlCalendar {
     fn getTimeZone(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<Instance<timezone::IntlTimeZone>> {
+    ) -> Answer<Owner<Instance<timezone::IntlTimeZone>>> {
         get_time_zone(req, Of::method(this))
     }
 
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn getType(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getType(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         get_type(req, Of::method(this))
     }
 
@@ -956,7 +981,7 @@ impl IntlCalendar {
 
     #[php(tentative)]
     #[allow(non_snake_case)]
-    fn toDateTime(req: &mut Request, this: This<Self>) -> Answer<Instance<DateTime>> {
+    fn toDateTime(req: &mut Request, this: This<Self>) -> Answer<Owner<Instance<DateTime>>> {
         to_date_time(req, Of::method(this))
     }
 }
@@ -967,7 +992,7 @@ fn create_instance(
     req: &mut Request,
     zone: ZoneArg,
     locale: Option<PhpString>,
-) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
     error::reset(req);
     let Some(zone) = process_timezone_argument(req, zone, &mut Outside::Request)? else {
         return Ok(None);
@@ -989,7 +1014,7 @@ fn keyword_values(
     key: PhpString,
     locale: PhpString,
     common: bool,
-) -> Answer<Instance<iterator::IntlIterator>> {
+) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
     error::reset(req);
     let (key, locale) = (c_string(key.as_bytes()), c_string(locale.as_bytes()));
     let mut status = Code::ZERO;
@@ -1001,7 +1026,7 @@ fn keyword_values(
     );
     match values {
         Some(values) => {
-            iterator::from_enumeration(req, values).map(|o| OrFalse::Value(Instance::of(o)))
+            iterator::from_enumeration(req, values).map(|o| OrFalse::Value(o.into_instance()))
         }
         None => or_false(Err(error::set(
             req,
@@ -1013,11 +1038,11 @@ fn keyword_values(
 }
 
 /// `intlcal_get_available_locales`.
-fn available_locales(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     error::reset(req);
     let mut list = PhpArray::new(req)?;
     for name in cal::available_locales() {
-        let name = Value::string(PhpString::new(req, name.as_bytes())?);
+        let name = Value::string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         list.append(req, name)?;
     }
     Ok(list)
@@ -1339,7 +1364,7 @@ fn compare(
 }
 
 /// `intlcal_get_locale`: the actual or the valid locale.
-fn get_locale(req: &mut Request, o: Of, kind: i64) -> Answer<PhpString> {
+fn get_locale(req: &mut Request, o: Of, kind: i64) -> Answer<Owner<PhpString>> {
     error::reset(req);
     if kind != 0 && kind != 1 {
         let message = "be either Locale::ACTUAL_LOCALE or Locale::VALID_LOCALE";
@@ -1357,7 +1382,7 @@ fn get_locale(req: &mut Request, o: Of, kind: i64) -> Answer<PhpString> {
 }
 
 /// `intlcal_get_time_zone`: a clone of the calendar's zone.
-fn get_time_zone(req: &mut Request, o: Of) -> Answer<Instance<timezone::IntlTimeZone>> {
+fn get_time_zone(req: &mut Request, o: Of) -> Answer<Owner<Instance<timezone::IntlTimeZone>>> {
     error::reset(req);
     if let Some(zone) = with(req, o, |c| cal::php_intl_cal_zone(c))? {
         return timezone::construct(req, zone).map(OrFalse::Value);
@@ -1368,7 +1393,7 @@ fn get_time_zone(req: &mut Request, o: Of) -> Answer<Instance<timezone::IntlTime
 }
 
 /// `intlcal_get_type`.
-fn get_type(req: &mut Request, o: Of) -> Result<PhpString, Thrown> {
+fn get_type(req: &mut Request, o: Of) -> Result<Owner<PhpString>, Thrown> {
     error::reset(req);
     let kind = with(req, o, |c| cal::kind(c))?;
     PhpString::new(req, kind.as_bytes())
@@ -1383,7 +1408,7 @@ fn error_code(req: &mut Request, object: PhpObject) -> OrFalse<i64> {
 }
 
 /// `intlcal_get_error_message`.
-fn error_message(req: &mut Request, object: PhpObject) -> Answer<PhpString> {
+fn error_message(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
     error::reset(req);
     let message = error::object_message::<CalendarObject>(req, object);
     PhpString::new(req, &message).map(OrFalse::Value)
@@ -1396,20 +1421,21 @@ fn from_date_time(
     req: &mut Request,
     datetime: php_ext::abi::Union<Instance<DateTime>, PhpString>,
     locale: Option<PhpString>,
-) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
     error::reset(req);
     let (object, owned) = match datetime {
-        php_ext::abi::Union::A(date) => (date.object(), false),
+        php_ext::abi::Union::A(date) => (date.object(), None),
         php_ext::abi::Union::B(text) => {
             let Some(class) = lookup_class(req, b"DateTime")? else {
                 return Err(fatal(req, "InternalError: DateTime is not linked"));
             };
-            (instantiate(req, class, &[Value::string(text)])?, true)
+            let made = instantiate(req, class, &[Value::string(text)])?;
+            (*made, Some(made))
         }
     };
     let made = from_date_object(req, object, locale);
-    if owned {
-        req.release(object.as_value());
+    if let Some(owned) = owned {
+        owned.give_up(req);
     }
     made
 }
@@ -1419,7 +1445,7 @@ fn from_date_object(
     req: &mut Request,
     object: PhpObject,
     locale: Option<PhpString>,
-) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
     let Some(parts) = php_ext_date::date_obj(req, object) else {
         error::set(
             req,
@@ -1430,11 +1456,12 @@ fn from_date_object(
     };
     let stamp = call_method(req, &object, b"getTimestamp", &[])?;
     let Some(seconds) = stamp.as_int() else {
-        req.release(stamp);
+        stamp.give_up(req);
         let message = "bad DateTime; call to DateTime::getTimestamp() failed";
         error::set(req, Code::ILLEGAL_ARGUMENT, message)?;
         return Ok(None);
     };
+    stamp.give_up(req);
     let zone = match &parts.zone {
         None => gmt(),
         Some(kind) => convert_datetimezone(req, Some(kind), &mut Outside::Request)?,
@@ -1462,7 +1489,7 @@ fn from_date_object(
 /// `intlcal_to_date_time`: a `DateTime` at the calendar's second in its
 /// zone, through the constructor with `@<seconds>` and then
 /// `setTimeZone()`, as php works around bug #40743.
-fn to_date_time(req: &mut Request, o: Of) -> Answer<Instance<DateTime>> {
+fn to_date_time(req: &mut Request, o: Of) -> Answer<Owner<Instance<DateTime>>> {
     error::reset(req);
     let (millis, status, zone) = with(req, o, |c| {
         let mut status = Code::ZERO;
@@ -1492,8 +1519,8 @@ fn to_date_time(req: &mut Request, o: Of) -> Answer<Instance<DateTime>> {
     else {
         return Ok(OrFalse::False);
     };
-    let made = date_time_at(req, o, seconds, tz_object);
-    req.release(tz_object.as_value());
+    let made = date_time_at(req, o, seconds, *tz_object);
+    tz_object.give_up(req);
     made
 }
 
@@ -1503,13 +1530,13 @@ fn date_time_at(
     o: Of,
     seconds: i64,
     zone: PhpObject,
-) -> Answer<Instance<DateTime>> {
+) -> Answer<Owner<Instance<DateTime>>> {
     let Some(class) = lookup_class(req, b"DateTime")? else {
         return Err(fatal(req, "InternalError: DateTime is not linked"));
     };
-    let stamp = Value::string(PhpString::new(req, format!("@{seconds}").as_bytes())?);
-    let made = instantiate(req, class, &[stamp, Value::object(zone)]);
-    req.release(stamp);
+    let stamp = PhpString::new(req, format!("@{seconds}").as_bytes())?;
+    let made = instantiate(req, class, &[Value::string(*stamp), Value::object(zone)]);
+    stamp.give_up(req);
     let date = made?;
     let answer = call_method(req, &date, b"setTimeZone", &[Value::object(zone)]);
     let failed = match &answer {
@@ -1517,18 +1544,18 @@ fn date_time_at(
         Err(_) => true,
     };
     if let Ok(value) = answer {
-        req.release(value);
+        value.give_up(req);
     } else if let Err(thrown) = answer {
-        req.release(date.as_value());
+        date.give_up(req);
         return Err(thrown);
     }
     if failed {
-        req.release(date.as_value());
+        date.give_up(req);
         let message = "call to DateTime::setTimeZone has failed";
         error::errors_set::<CalendarObject>(req, o.object, Code::ILLEGAL_ARGUMENT, message)?;
         return Ok(OrFalse::False);
     }
-    Ok(OrFalse::Value(Instance::of(date)))
+    Ok(OrFalse::Value(date.into_instance()))
 }
 
 /// `class IntlGregorianCalendar`: a Gregorian calendar, made by `new` or
@@ -1571,7 +1598,7 @@ impl IntlGregorianCalendar {
         year: i64,
         month: i64,
         dayOfMonth: i64,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         create_from(req, &[year, month, dayOfMonth])
     }
 
@@ -1584,7 +1611,7 @@ impl IntlGregorianCalendar {
         hour: i64,
         minute: i64,
         #[php(default = null)] second: Option<i64>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         match second {
             None => create_from(req, &[year, month, dayOfMonth, hour, minute]),
             Some(second) => create_from(req, &[year, month, dayOfMonth, hour, minute, second]),
@@ -1788,7 +1815,7 @@ fn gregorian_from_fields(req: &mut Request, n: i32, f: &[i32; 6]) -> Result<Opti
 }
 
 /// `IntlGregorianCalendar::createFromDate` and `createFromDateTime`.
-fn create_from(req: &mut Request, fields: &[i64]) -> Result<Static, Thrown> {
+fn create_from(req: &mut Request, fields: &[i64]) -> Result<Owner<Static>, Thrown> {
     error::reset(req);
     let mut f = [0; 6];
     for (i, v) in fields.iter().enumerate() {
@@ -1798,7 +1825,7 @@ fn create_from(req: &mut Request, fields: &[i64]) -> Result<Static, Thrown> {
     let Some(calendar) = gregorian_from_fields(req, n, &f)? else {
         return Err(fatal(req, "InternalError: ICU made no GregorianCalendar"));
     };
-    store(req, b"IntlGregorianCalendar", calendar).map(Static)
+    store(req, b"IntlGregorianCalendar", calendar).map(Owner::into_static)
 }
 
 /// `intlgregcal_set_gregorian_change`.
@@ -1834,7 +1861,7 @@ fn is_leap_year(req: &mut Request, o: Of, year: i64) -> Result<bool, Thrown> {
 /// `IntlGregorianCalendar`, null where it made none.
 fn gregorian_create_instance(
     req: &mut Request,
-) -> Result<Option<Instance<IntlGregorianCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlGregorianCalendar>>>, Thrown> {
     let Some(class) = lookup_class(req, b"IntlGregorianCalendar")? else {
         return Err(fatal(
             req,
@@ -1842,14 +1869,14 @@ fn gregorian_create_instance(
         ));
     };
     let object = new_object(req, class)?;
-    match gregorian_body(req, object, false) {
-        Ok(true) => Ok(Some(Instance::of(object))),
+    match gregorian_body(req, *object, false) {
+        Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Ok(None)
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -1871,7 +1898,7 @@ fn intlcal_create_instance(
     req: &mut Request,
     #[php(default = null)] timezone: Raw<ZoneArg>,
     #[php(default = null)] locale: Option<PhpString>,
-) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
     let timezone = zone_raw(req, &timezone, 1)?;
     create_instance(req, timezone, locale)
 }
@@ -1894,7 +1921,7 @@ fn intlcal_get_keyword_values_for_locale(
     keyword: PhpString,
     locale: PhpString,
     onlyCommon: bool,
-) -> Answer<Instance<iterator::IntlIterator>> {
+) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
     keyword_values(req, keyword, locale, onlyCommon)
 }
 
@@ -1921,7 +1948,7 @@ fn intlcal_get_now(req: &mut Request) -> f64 {
 /// bool(true)
 /// ```
 #[php_function]
-fn intlcal_get_available_locales(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn intlcal_get_available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     available_locales(req)
 }
 
@@ -2297,7 +2324,7 @@ fn intlcal_get_locale(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
     r#type: i64,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     get_locale(req, Of::function(calendar), r#type)
 }
 
@@ -2393,7 +2420,7 @@ fn intlcal_get_minimum(
 fn intlcal_get_time_zone(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
-) -> Answer<Instance<timezone::IntlTimeZone>> {
+) -> Answer<Owner<Instance<timezone::IntlTimeZone>>> {
     get_time_zone(req, Of::function(calendar))
 }
 
@@ -2410,7 +2437,7 @@ fn intlcal_get_time_zone(
 fn intlcal_get_type(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     get_type(req, Of::function(calendar))
 }
 
@@ -2672,7 +2699,7 @@ fn intlcal_from_date_time(
     req: &mut Request,
     datetime: php_ext::abi::Union<Instance<DateTime>, PhpString>,
     #[php(default = null)] locale: Option<PhpString>,
-) -> Result<Option<Instance<IntlCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
     from_date_time(req, datetime, locale)
 }
 
@@ -2689,7 +2716,7 @@ fn intlcal_from_date_time(
 fn intlcal_to_date_time(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
-) -> Answer<Instance<DateTime>> {
+) -> Answer<Owner<Instance<DateTime>>> {
     to_date_time(req, Of::function(calendar))
 }
 
@@ -2720,7 +2747,7 @@ fn intlcal_get_error_code(req: &mut Request, calendar: Instance<IntlCalendar>) -
 fn intlcal_get_error_message(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     error_message(req, calendar.object())
 }
 
@@ -2743,7 +2770,7 @@ fn intlgregcal_create_instance(
     hour: Passed<Untyped<Value>>,
     minute: Passed<Untyped<Value>>,
     second: Passed<Untyped<Value>>,
-) -> Result<Option<Instance<IntlGregorianCalendar>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlGregorianCalendar>>>, Thrown> {
     let _ = (timezoneOrYear, localeOrMonth, day, hour, minute, second);
     gregorian_create_instance(req)
 }

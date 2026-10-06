@@ -8,7 +8,7 @@ use php_ext::abi::{ExtensionBuilder, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::collator::Collator;
@@ -52,7 +52,7 @@ fn utf16(req: &mut Request, text: &[u8], message: &str) -> Result<Option<Vec<u16
 
 /// `intl_convert_utf16_to_utf8` of what php answers, its conversion
 /// error set where it fails.
-fn utf8_out(req: &mut Request, text: &[u16]) -> Result<OrFalse<PhpString>, Thrown> {
+fn utf8_out(req: &mut Request, text: &[u16]) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match ffi::to_utf8(text) {
         Ok(bytes) => Ok(OrFalse::Value(PhpString::new(req, &bytes)?)),
         Err(code) => {
@@ -63,7 +63,7 @@ fn utf8_out(req: &mut Request, text: &[u16]) -> Result<OrFalse<PhpString>, Throw
 }
 
 /// A byte string answered.
-fn bytes(req: &mut Request, text: &[u8]) -> Result<OrFalse<PhpString>, Thrown> {
+fn bytes(req: &mut Request, text: &[u8]) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     PhpString::new(req, text).map(OrFalse::Value)
 }
 
@@ -508,7 +508,7 @@ fn grapheme_substr(
     offset: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = "")] locale: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let _ = locale;
     let text = string.as_bytes();
     let Ok(mut start) = i32::try_from(offset) else {
@@ -608,7 +608,7 @@ fn grapheme_strstr(
     needle: PhpString,
     #[php(default = false)] beforeNeedle: bool,
     #[php(default = "")] locale: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr(req, haystack, needle, beforeNeedle, false, locale)
 }
 
@@ -630,7 +630,7 @@ fn grapheme_stristr(
     needle: PhpString,
     #[php(default = false)] beforeNeedle: bool,
     #[php(default = "")] locale: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr(req, haystack, needle, beforeNeedle, true, locale)
 }
 
@@ -642,7 +642,7 @@ fn strstr(
     before: bool,
     ignore_case: bool,
     locale: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (hay, nee) = (haystack.as_bytes(), needle.as_bytes());
     if !ignore_case {
         let Some(found) = memnstr(hay, nee, 0) else {
@@ -693,7 +693,7 @@ fn grapheme_str_split(
     req: &mut Request,
     string: PhpString,
     #[php(default = 1)] length: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if length <= 0 || length > QUARTER {
         return Err(arg_value_error(
             req,
@@ -742,7 +742,7 @@ fn grapheme_str_split(
     drop(breaks);
     for chunk in chunks {
         let chunk = PhpString::new(req, chunk)?;
-        parts.append(req, Value::string(chunk))?;
+        parts.append(req, Value::string(chunk.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(parts))
 }
@@ -885,7 +885,7 @@ fn grapheme_extract(
     #[php(default = GRAPHEME_EXTR_COUNT)] r#type: i64,
     #[php(default = 0)] offset: i64,
     #[php(default = null)] next: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let text = haystack.as_bytes();
     let mut start = offset;
     if start < 0 {

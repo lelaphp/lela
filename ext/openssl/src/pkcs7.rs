@@ -6,7 +6,7 @@ use php_ext::abi::{Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::config::{as_int, cipher_of};
 use crate::constants::PKCS7_DETACHED;
@@ -131,12 +131,16 @@ pub(crate) fn write_signers(req: &mut Request, out: &Bio<'_>, pems: Pems) -> boo
 /// The certificates, then the CRLs, of a structure as PEM into an array
 /// under their positions, a CRL taking the key of the certificate at
 /// the same position as php's loops give it.
-pub(crate) fn pem_list(req: &mut Request, certs: Pems, crls: Pems) -> Result<PhpArray, Thrown> {
+pub(crate) fn pem_list(
+    req: &mut Request,
+    certs: Pems,
+    crls: Pems,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for list in [certs, crls] {
         for (i, pem) in list.into_iter().enumerate() {
             if let Some(pem) = pem {
-                let pem = Value::string(PhpString::new(req, &pem)?);
+                let pem = Value::string(PhpString::new(req, &pem)?.hand_on_unmigrated());
                 out.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), pem)?;
             }
         }
@@ -348,7 +352,7 @@ fn openssl_pkcs7_read(
         };
         let (certs, crls) = p7.certs_and_crls();
         let list = pem_list(req, certs, crls)?;
-        certificates.set(req, Untyped(Value::array(list)))?;
+        certificates.set(req, Untyped(list.into_value()))?;
         Ok(true)
     })
 }

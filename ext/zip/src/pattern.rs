@@ -7,7 +7,7 @@ use php_ext::abi::OrFalse;
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::object::{Intern, basedir_refuses};
 
@@ -193,10 +193,20 @@ fn pcre(req: &mut Request, regexp: &[u8], path: &[u8]) -> Result<Found, Thrown> 
         return Ok(None);
     };
     let mut names: Vec<Vec<u8>> = Vec::new();
-    while let Some(name) = dir.read_dir(req)? {
+    loop {
+        let name = match dir.read_dir(req) {
+            Ok(Some(name)) => name,
+            Ok(None) => break,
+            Err(thrown) => {
+                dir.close(req);
+                dir.give_up(req);
+                return Err(thrown);
+            }
+        };
         names.push(name);
     }
-    dir.free(req);
+    dir.close(req);
+    dir.give_up(req);
     names.sort();
     if names.is_empty() {
         return Ok(Some(Vec::new()));
@@ -247,7 +257,7 @@ pub(crate) fn add_from_pattern(
     pattern: &[u8],
     kind: &Kind,
     options: PhpArray,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if pattern.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -290,24 +300,31 @@ pub(crate) fn add_from_pattern(
                     add.len() + stripped.len()
                 );
                 docref(req, Level::Warning, &message);
-                req.release(Value::array(out));
+                out.give_up(req);
                 return Ok(OrFalse::False);
             }
             entry.extend_from_slice(add);
         }
         entry.extend_from_slice(stripped);
         entry.truncate(MAXPATHLEN - 1);
-        let added = crate::object::add_file_for_pattern(req, object, file, &entry, opts.flags)?;
+        let added = match crate::object::add_file_for_pattern(req, object, file, &entry, opts.flags)
+        {
+            Ok(added) => added,
+            Err(thrown) => {
+                out.give_up(req);
+                return Err(thrown);
+            }
+        };
         if !added {
-            req.release(Value::array(out));
+            out.give_up(req);
             return Ok(OrFalse::False);
         }
         if !settle(req, object, &opts) {
-            req.release(Value::array(out));
+            out.give_up(req);
             return Ok(OrFalse::False);
         }
-        let v = Value::string(PhpString::new(req, file)?);
-        out.append(req, v)?;
+        let v = PhpString::new(req, file)?.into_value();
+        out.append(req, v.hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(out))
 }

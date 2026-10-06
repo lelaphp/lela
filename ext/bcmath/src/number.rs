@@ -18,7 +18,9 @@ use php_ext::raising::{
     Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{
+    Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+};
 
 use crate::num;
 use crate::{Decimal, INT_MAX, RoundingMode, value_error};
@@ -272,7 +274,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, num, scale, Calc::Add)
     }
 
@@ -292,7 +294,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, num, scale, Calc::Sub)
     }
 
@@ -313,7 +315,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, num, scale, Calc::Mul)
     }
 
@@ -336,7 +338,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, num, scale, Calc::Div)
     }
 
@@ -357,7 +359,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, num, scale, Calc::Mod)
     }
 
@@ -380,7 +382,7 @@ impl Number {
         this: This<Self>,
         num: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let divisor = method_operand(req, num, 1)?;
         let given = given_scale(req, scale, 2)?;
         let dividend = held(req, this.object())?;
@@ -398,7 +400,7 @@ impl Number {
             },
         )?;
         let rem = made(req, Decimal { num: rem, scale })?;
-        crate::pair(req, quot.object().as_value(), rem.object().as_value())
+        crate::pair(req, quot.into_value(), rem.into_value())
     }
 
     /// `powmod(Number|string|int $exponent, Number|string|int $modulus,
@@ -421,7 +423,7 @@ impl Number {
         exponent: Operand,
         modulus: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         let exponent = method_operand(req, exponent, 1)?;
         let modulus = method_operand(req, modulus, 2)?;
         let scale = crate::check_scale(req, scale.unwrap_or(0), 3)?;
@@ -458,7 +460,7 @@ impl Number {
         this: This<Self>,
         exponent: Operand,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         method_calc(req, this, exponent, scale, Calc::Pow)
     }
 
@@ -479,7 +481,7 @@ impl Number {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] scale: Option<i64>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         let given = given_scale(req, scale, 1)?;
         let base = held(req, this.object())?;
         let mut scale = match given {
@@ -510,7 +512,7 @@ impl Number {
     /// string(2) "-2"
     /// int(0)
     /// ```
-    fn floor(req: &mut Request, this: This<Self>) -> Result<Instance<Number>, Thrown> {
+    fn floor(req: &mut Request, this: This<Self>) -> Result<Owner<Instance<Number>>, Thrown> {
         let base = held(req, this.object())?;
         let num = num::floor_or_ceil(&base.num, true);
         made(req, Decimal { num, scale: 0 })
@@ -525,7 +527,7 @@ impl Number {
     /// string(2) "-1"
     /// string(1) "2"
     /// ```
-    fn ceil(req: &mut Request, this: This<Self>) -> Result<Instance<Number>, Thrown> {
+    fn ceil(req: &mut Request, this: This<Self>) -> Result<Owner<Instance<Number>>, Thrown> {
         let base = held(req, this.object())?;
         let num = num::floor_or_ceil(&base.num, false);
         made(req, Decimal { num, scale: 0 })
@@ -550,7 +552,7 @@ impl Number {
         this: This<Self>,
         #[php(default = 0)] precision: i64,
         #[php(default = RoundingMode::HalfAwayFromZero)] mode: Instance<RoundingMode>,
-    ) -> Result<Instance<Number>, Thrown> {
+    ) -> Result<Owner<Instance<Number>>, Thrown> {
         crate::check_precision(req, precision, 1)?;
         let mode = crate::rounding(req, mode, 2)?;
         let base = held(req, this.object())?;
@@ -599,9 +601,7 @@ impl Number {
     /// -0.50|7
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let value = rendered(req, this.object())?;
-        req.addref(&Value::string(value));
-        Ok(value)
+        rendered(req, this.object())
     }
 
     /// `__serialize(): array`: `['value' => string]`.
@@ -619,12 +619,16 @@ impl Number {
     ///   int(2)
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let value = rendered(req, this.object())?;
         req.addref(&Value::string(value));
         let key = PhpString::new(req, b"value")?;
         let mut array = PhpArray::new(req)?;
-        array.set(req, Key::Str(key), Value::string(value))?;
+        array.set(
+            req,
+            Key::Str(key.hand_on_unmigrated()),
+            Value::string(value),
+        )?;
         Ok(array)
     }
 
@@ -732,13 +736,13 @@ fn release_kept(req: &mut Request, kept: Option<Kept>) {
 }
 
 /// `bcmath_number_new_obj`: a fresh number holding `decimal`.
-fn made(req: &mut Request, decimal: Decimal) -> Result<Instance<Number>, Thrown> {
+fn made(req: &mut Request, decimal: Decimal) -> Result<Owner<Instance<Number>>, Thrown> {
     let Some(class) = lookup_class(req, CLASS.as_bytes())? else {
         return Err(fatal(req, "InternalError: BcMath\\Number is not linked"));
     };
     let object = new_object(req, class)?;
-    set(req, object, decimal)?;
-    Ok(Instance::of(object))
+    set(req, *object, decimal)?;
+    Ok(object.into_instance())
 }
 
 /// What the object keeps for its readers, made on the first read:
@@ -763,7 +767,8 @@ fn kept(req: &mut Request, object: PhpObject) -> Result<Kept, Thrown> {
     let kept = Kept {
         value: PhpString::filled(req, rendered.len(), |bytes| {
             bytes.copy_from_slice(&rendered);
-        })?,
+        })?
+        .hand_on_unmigrated(),
         value_name: PhpString::interned(req, b"value")?,
         scale_name: PhpString::interned(req, b"scale")?,
     };
@@ -855,7 +860,7 @@ fn has_to_string(req: &Request, object: PhpObject) -> bool {
 fn stringified(req: &mut Request, value: &Value, position: u32) -> Result<Decimal, Thrown> {
     let text = to_string(req, value)?;
     let decimal = crate::operand(req, text.as_bytes(), position);
-    req.release(Value::string(text));
+    text.give_up(req);
     decimal
 }
 
@@ -1085,7 +1090,7 @@ fn method_calc(
     num: Operand,
     scale: Option<i64>,
     calc_of: Calc,
-) -> Result<Instance<Number>, Thrown> {
+) -> Result<Owner<Instance<Number>>, Thrown> {
     let operand = method_operand(req, num, 1)?;
     let scale = match given_scale(req, scale, 2)? {
         Some(scale) => ScaleOf::Given(scale),
@@ -1353,7 +1358,7 @@ impl ObjectHandlers for Handlers {
             return Err(throw_error(req, "ValueError", &text));
         }
         let result = calc(req, calc_op, &n1, &n2, ScaleOf::Auto, Site::Operator)?;
-        Ok(Some(made(req, result)?.object().as_value()))
+        Ok(Some(made(req, result)?.into_value().hand_on_unmigrated()))
     }
 
     /// `bcmath_number_compare`: the two over the wider of their digits;
@@ -1466,7 +1471,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             table.set(req, key, value)?;
         }
-        Ok(Some(table.into()))
+        Ok(Some(table.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1510,7 +1515,7 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         (held, slot.kept)
     });
     let Some((held, kept)) = taken else {
-        return clone_with(req, &object, Slot::default());
+        return clone_with(req, &object, Slot::default()).map(Owner::hand_on_unmigrated);
     };
     // `bc_copy_num(original->num)`: the clone one more holder of the
     // original's `bc_num`.
@@ -1533,5 +1538,5 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             req.addref(&Value::string(text));
         }
     }
-    clone_with(req, &object, Box::new(SlotState { held, kept }))
+    clone_with(req, &object, Box::new(SlotState { held, kept })).map(Owner::hand_on_unmigrated)
 }

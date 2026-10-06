@@ -23,7 +23,7 @@ use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::Streams;
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
 
@@ -81,11 +81,12 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
     let lowered = name.to_ascii_lowercase();
     let served = if let Some(function) = req.method_named(class, &lowered) {
         req.serve_method(function, Some(object), class, args, &[])
+            .map(Owner::hand_on_unmigrated)
     } else if let Some(function) = req.method_named(class, b"__call") {
-        let Ok(called) = PhpString::new(req, name) else {
+        let Ok(called) = PhpString::new(req, name).map(Owner::hand_on_unmigrated) else {
             return Called::Threw;
         };
-        let Ok(mut list) = PhpArray::new(req) else {
+        let Ok(mut list) = PhpArray::new(req).map(Owner::hand_on_unmigrated) else {
             return Called::Threw;
         };
         for arg in args {
@@ -95,7 +96,9 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
             }
         }
         let magic = [Value::string(called), Value::array(list)];
-        let served = req.serve_method(function, Some(object), class, &magic, &[]);
+        let served = req
+            .serve_method(function, Some(object), class, &magic, &[])
+            .map(Owner::hand_on_unmigrated);
         for value in magic {
             req.release(value);
         }
@@ -127,7 +130,9 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
 
 /// A string argument of the request's.
 fn string_arg(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+    Ok(PhpString::new(req, bytes)?
+        .into_value()
+        .hand_on_unmigrated())
 }
 
 /// `zend_is_true`.
@@ -147,8 +152,8 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
         }
         return Ok(None);
     }
-    let object = crate::api::call::new_object(req, user.class)?;
-    let name = PhpString::new(req, b"context")?;
+    let object = crate::api::call::new_object(req, user.class)?.hand_on_unmigrated();
+    let name = PhpString::new(req, b"context")?.hand_on_unmigrated();
     let context = match req.streams().stream_ctx {
         Some(context) => {
             let value = context.resource().as_value();
@@ -163,7 +168,7 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
     }
     if let Some(constructor) = req.method_named(user.class, b"__construct") {
         match req.serve_method(constructor, Some(object), user.class, &[], &[]) {
-            Ok(value) => req.release(value),
+            Ok(value) => value.give_up(req),
             Err(thrown) => defer(req, thrown),
         }
     }
@@ -263,7 +268,7 @@ fn open_with(
     let Some(object) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
-    let opened_path = PhpRef::new(req, Value::null())?;
+    let opened_path = PhpRef::new(req, Value::null())?.hand_on_unmigrated();
     let args = [
         string_arg(req, path)?,
         string_arg(req, mode)?,
@@ -482,7 +487,7 @@ impl UserStream {
             didread = buf.len();
         }
         buf[..didread].copy_from_slice(&text.as_bytes()[..didread]);
-        req.release(Value::string(text));
+        text.give_up(req);
         match call(req, self.object, b"stream_eof", &[]) {
             Called::Missing => {
                 let text = format!(
@@ -956,9 +961,14 @@ impl Ops for UserDir {
         if matches!(value.as_ref(), ValueRef::Bool(_)) {
             return None;
         }
-        let name = crate::api::coerce::to_string(req, &value)
-            .ok()
-            .map(|s| s.as_bytes().to_vec());
+        let name = match crate::api::coerce::to_string(req, &value) {
+            Ok(text) => {
+                let bytes = text.as_bytes().to_vec();
+                text.give_up(req);
+                Some(bytes)
+            }
+            Err(_) => None,
+        };
         req.release(value);
         name
     }
@@ -1064,7 +1074,7 @@ pub(crate) fn path_op(
         ),
         WrapperOp::Rmdir => (b"rmdir", vec![url_arg, Value::int(REPORT_ERRORS)]),
         WrapperOp::Touch(times) => {
-            let mut array = PhpArray::new(req)?;
+            let mut array = PhpArray::new(req)?.hand_on_unmigrated();
             if let Some((mtime, atime)) = times {
                 array.append(req, Value::int(mtime))?;
                 array.append(req, Value::int(atime))?;

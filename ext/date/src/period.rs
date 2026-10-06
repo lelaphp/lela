@@ -7,7 +7,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
@@ -318,7 +318,7 @@ pub(super) fn iterator_element(
     };
     let date = new_date(req, base, current)?;
     let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
-    Ok(Some((key, date.as_value())))
+    Ok(Some((key, date.into_value().hand_on_unmigrated())))
 }
 
 /// `php_date_period_initialize_from_hash`: every field required, of the
@@ -461,12 +461,13 @@ impl DatePeriod {
         req: &mut Request,
         specification: PhpString,
         #[php(default = 0)] options: i64,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         let class = match req.called_scope() {
             Some(class) => class,
             None => class_id(req, "DatePeriod")?,
         };
         let object = new_object(req, class)?;
+        let view = *object;
         let built = (|| {
             let func = "DatePeriod::createFromISO8601String";
             let iso = from_iso(req, func, specification.as_bytes())?;
@@ -477,12 +478,12 @@ impl DatePeriod {
             period.end = iso.end;
             period.interval = iso.interval;
             finish(req, func, &mut period, options, iso.recurrences)?;
-            store(req, object, period)
+            store(req, view, period)
         })();
         match built {
-            Ok(()) => Ok(Static(object)),
+            Ok(()) => Ok(object.into_static()),
             Err(thrown) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 Err(thrown)
             }
         }
@@ -633,7 +634,7 @@ impl DatePeriod {
     fn getStartDate(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<DateTimeInterface>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeInterface>>, Thrown> {
         let object = this.object();
         let state = object
             .native::<PeriodObj>(req)
@@ -641,7 +642,7 @@ impl DatePeriod {
         let Some((start, class)) = state else {
             return Err(uninitialized(req, object.class()));
         };
-        new_date(req, class, start).map(Instance::of)
+        new_date(req, class, start).map(Owner::into_instance)
     }
 
     /// `DatePeriod::getEndDate(): ?DateTimeInterface`.
@@ -658,13 +659,13 @@ impl DatePeriod {
     fn getEndDate(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<DateTimeInterface>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<DateTimeInterface>>>, Thrown> {
         let state = this
             .object()
             .native::<PeriodObj>(req)
             .and_then(|p| p.end.clone().zip(p.start_ce));
         match state {
-            Some((end, class)) => new_date(req, class, end).map(|date| Some(Instance::of(date))),
+            Some((end, class)) => new_date(req, class, end).map(|date| Some(date.into_instance())),
             None => Ok(None),
         }
     }
@@ -702,7 +703,7 @@ impl DatePeriod {
     fn getDateInterval(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<DateInterval>, Thrown> {
+    ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let object = this.object();
         let diff = object.native::<PeriodObj>(req).and_then(|p| p.interval);
         match diff {
@@ -782,7 +783,7 @@ impl DatePeriod {
     ///   bool(false)
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         if object
             .native::<PeriodObj>(req)
@@ -842,8 +843,8 @@ impl DatePeriod {
         let own = std_rows(req, object)?;
         let hash = rows_array(req, &own, Vec::new(), false)?;
         let mut period = copied(req, object);
-        let taken = from_hash(req, hash, &mut period);
-        req.release(Value::array(hash));
+        let taken = from_hash(req, *hash, &mut period);
+        hash.give_up(req);
         store(req, object, period)?;
         if !taken? {
             return Err(invalid(req));
@@ -864,21 +865,24 @@ impl DatePeriod {
     /// Invalid serialization data for DatePeriod object
     /// ```
     #[php(tentative)]
-    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DatePeriod>, Thrown> {
+    fn __set_state(
+        req: &mut Request,
+        array: PhpArray,
+    ) -> Result<Owner<Instance<DatePeriod>>, Thrown> {
         let class = class_id(req, "DatePeriod")?;
         let object = new_object(req, class)?;
         let mut period = PeriodObj::default();
         match from_hash(req, array, &mut period) {
             Ok(true) => {
-                store(req, object, period)?;
-                Ok(Instance::of(object))
+                store(req, *object, period)?;
+                Ok(object.into_instance())
             }
             Ok(false) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 Err(invalid(req))
             }
             Err(thrown) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 Err(thrown)
             }
         }
@@ -909,7 +913,10 @@ impl DatePeriod {
     /// 0=7
     /// An iterator cannot be used with foreach by reference
     /// ```
-    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
-        internal_iterator(req, &this.object()).map(Instance::of)
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<Iterator>>, Thrown> {
+        internal_iterator(req, &this.object()).map(Owner::into_instance)
     }
 }

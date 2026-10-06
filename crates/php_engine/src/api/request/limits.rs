@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use php_compile::StackLimit;
 
-use crate::api::values::Value;
-
 use super::{Forked, Periodic, Receiving, Request};
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
@@ -432,8 +430,8 @@ impl Request {
         let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
             return false;
         };
-        let set = self.ini_set_string(b"max_execution_time", string);
-        self.release(Value::string(string));
+        let set = self.ini_set_string(b"max_execution_time", *string);
+        string.give_up(self);
         set.is_ok_and(|previous| previous.is_some())
     }
 

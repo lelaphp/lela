@@ -39,7 +39,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_pdo::connector::Connector;
 
 use ffi::{Function, Handler};
@@ -291,7 +291,7 @@ impl Sqlite {
         rowid: Raw<i64>,
         #[php(default = "main")] dbname: Raw<Option<PhpString>>,
         #[php(default = Pdo::Sqlite::OPEN_READONLY)] flags: Raw<i64>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         blob::open_blob(req, this.object(), [table, column], rowid, dbname, flags).map(Untyped)
     }
 

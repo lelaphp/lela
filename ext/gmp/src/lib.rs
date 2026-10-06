@@ -30,7 +30,7 @@ use php_ext::raising::{
     Thrown, arg_null_deprecated, argument_error, deprecated, pending, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use ffi::{Mpz, RandState, Round};
 use object::{GMP, made};
@@ -337,12 +337,12 @@ fn value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 }
 
 /// `zend_new_pair` of two fresh numbers.
-fn pair(req: &mut Request, a: Mpz, b: Mpz) -> Result<PhpArray, Thrown> {
+fn pair(req: &mut Request, a: Mpz, b: Mpz) -> Result<Owner<PhpArray>, Thrown> {
     let a = made(req, a)?;
     let b = made(req, b)?;
     let mut array = PhpArray::new(req)?;
-    array.set(req, Key::Int(0), a.object().as_value())?;
-    array.set(req, Key::Int(1), b.object().as_value())?;
+    array.set(req, Key::Int(0), a.into_value().hand_on_unmigrated())?;
+    array.set(req, Key::Int(1), b.into_value().hand_on_unmigrated())?;
     Ok(array)
 }
 
@@ -390,7 +390,7 @@ fn gmp_init(
     req: &mut Request,
     num: Union<PhpString, i64>,
     #[php(default = 0)] base: i64,
-) -> Result<Instance<GMP>, Thrown> {
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     verify_base(req, base, 2)?;
     let n = initialized(req, num, base)?;
     made(req, n)
@@ -443,7 +443,7 @@ fn gmp_import(
     data: PhpString,
     #[php(default = 1)] word_size: i64,
     #[php(default = GMP_MSW_FIRST | GMP_NATIVE_ENDIAN)] flags: i64,
-) -> Result<Instance<GMP>, Thrown> {
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (order, endian) = order_and_endian(req, word_size, flags)?;
     let size = usize::try_from(word_size).unwrap_or(usize::MAX);
     if !data.len().is_multiple_of(size) {
@@ -474,7 +474,7 @@ fn gmp_export(
     num: Number,
     #[php(default = 1)] word_size: Raw<i64>,
     #[php(default = GMP_MSW_FIRST | GMP_NATIVE_ENDIAN)] flags: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let n = number(req, &num, 1)?;
     let size = long(req, &word_size)?;
     let flags = long(req, &flags)?;
@@ -528,7 +528,7 @@ fn gmp_strval(
     req: &mut Request,
     num: Number,
     #[php(default = 10)] base: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let n = number(req, &num, 1)?;
     let base = long(req, &base)?;
     if (-1..=1).contains(&base) || !(-36..=MAX_BASE).contains(&base) {
@@ -552,7 +552,7 @@ fn gmp_strval(
 /// gmp_add(): Argument #2 ($num2) is not an integer string
 /// ```
 #[php_function]
-fn gmp_add(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_add(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.add(&b))
 }
@@ -567,7 +567,7 @@ fn gmp_add(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP
 /// string(3) "255"
 /// ```
 #[php_function]
-fn gmp_sub(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_sub(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.sub(&b))
 }
@@ -582,7 +582,7 @@ fn gmp_sub(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP
 /// string(3) "-12"
 /// ```
 #[php_function]
-fn gmp_mul(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_mul(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.mul(&b))
 }
@@ -649,7 +649,7 @@ fn gmp_div_qr(
     num1: Number,
     num2: Number,
     #[php(default = GMP_ROUND_ZERO)] rounding_mode: Raw<i64>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (a, b, round) = division(req, &num1, &num2, Some(&rounding_mode), "Division by zero")?;
     let round = rounding(req, round)?;
     let (q, r) = a.div_qr(&b, round);
@@ -674,7 +674,7 @@ fn gmp_div_q(
     num1: Number,
     num2: Number,
     #[php(default = GMP_ROUND_ZERO)] rounding_mode: Raw<i64>,
-) -> Result<Instance<GMP>, Thrown> {
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b, round) = division(req, &num1, &num2, Some(&rounding_mode), "Division by zero")?;
     let q = match rounding(req, round)? {
         Round::Zero => a.tdiv_q(&b),
@@ -701,7 +701,7 @@ fn gmp_div_r(
     num1: Number,
     num2: Number,
     #[php(default = GMP_ROUND_ZERO)] rounding_mode: Raw<i64>,
-) -> Result<Instance<GMP>, Thrown> {
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b, round) = division(req, &num1, &num2, Some(&rounding_mode), "Division by zero")?;
     let r = match rounding(req, round)? {
         Round::Zero => a.tdiv_r(&b),
@@ -724,7 +724,7 @@ fn gmp_div_r(
 /// gmp_mod(): Argument #2 ($num2) Modulo by zero
 /// ```
 #[php_function]
-fn gmp_mod(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_mod(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b, _) = division(req, &num1, &num2, None, "Modulo by zero")?;
     made(req, a.modulo(&b))
 }
@@ -740,7 +740,11 @@ fn gmp_mod(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP
 /// gmp_divexact(): Argument #2 ($num2) Division by zero
 /// ```
 #[php_function]
-fn gmp_divexact(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_divexact(
+    req: &mut Request,
+    num1: Number,
+    num2: Number,
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b, _) = division(req, &num1, &num2, None, "Division by zero")?;
     made(req, a.divexact(&b))
 }
@@ -755,7 +759,7 @@ fn gmp_divexact(req: &mut Request, num1: Number, num2: Number) -> Result<Instanc
 /// string(2) "16"
 /// ```
 #[php_function]
-fn gmp_neg(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_neg(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &num, 1)?;
     made(req, n.neg())
 }
@@ -782,7 +786,7 @@ fn gmp_neg(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
 /// gmp_abs(): Argument #1 ($num) must be of type GMP|string|int, stdClass given
 /// ```
 #[php_function]
-fn gmp_abs(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_abs(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &num, 1)?;
     made(req, n.abs())
 }
@@ -799,7 +803,7 @@ fn gmp_abs(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
 /// gmp_fact(): Argument #1 ($num) must be greater than or equal to 0
 /// ```
 #[php_function]
-fn gmp_fact(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_fact(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = not_negative(req, &num)?;
     made(req, Mpz::factorial(n.to_ulong()))
 }
@@ -825,7 +829,7 @@ fn not_negative(req: &mut Request, num: &Number) -> Result<Mpz, Thrown> {
 /// gmp_sqrt(): Argument #1 ($num) must be greater than or equal to 0
 /// ```
 #[php_function]
-fn gmp_sqrt(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_sqrt(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = not_negative(req, &num)?;
     made(req, n.sqrt())
 }
@@ -846,7 +850,7 @@ fn gmp_sqrt(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
 /// gmp_sqrtrem(): Argument #1 ($num) must be greater than or equal to 0
 /// ```
 #[php_function]
-fn gmp_sqrtrem(req: &mut Request, num: Number) -> Result<PhpArray, Thrown> {
+fn gmp_sqrtrem(req: &mut Request, num: Number) -> Result<Owner<PhpArray>, Thrown> {
     let n = not_negative(req, &num)?;
     let (s, r) = n.sqrtrem();
     pair(req, s, r)
@@ -886,7 +890,7 @@ fn root_of(
 /// gmp_root(): Argument #2 ($nth) must be odd if argument #1 ($a) is negative
 /// ```
 #[php_function]
-fn gmp_root(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<Instance<GMP>, Thrown> {
+fn gmp_root(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (n, nth) = root_of(req, &num, &nth, "must be greater than 0")?;
     made(req, n.root(nth))
 }
@@ -907,7 +911,7 @@ fn gmp_root(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<Instance<GM
 /// gmp_rootrem(): Argument #2 ($nth) must be greater than or equal to 1
 /// ```
 #[php_function]
-fn gmp_rootrem(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<PhpArray, Thrown> {
+fn gmp_rootrem(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<Owner<PhpArray>, Thrown> {
     let (n, nth) = root_of(req, &num, &nth, "must be greater than or equal to 1")?;
     let (s, r) = n.rootrem(nth);
     pair(req, s, r)
@@ -926,7 +930,11 @@ fn gmp_rootrem(req: &mut Request, num: Number, nth: Raw<i64>) -> Result<PhpArray
 /// gmp_pow(): Argument #2 ($exponent) must be greater than or equal to 0
 /// ```
 #[php_function]
-fn gmp_pow(req: &mut Request, num: Number, exponent: Raw<i64>) -> Result<Instance<GMP>, Thrown> {
+fn gmp_pow(
+    req: &mut Request,
+    num: Number,
+    exponent: Raw<i64>,
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &num, 1)?;
     let exponent = long(req, &exponent)?;
     let Ok(exponent) = u64::try_from(exponent) else {
@@ -955,7 +963,7 @@ fn gmp_powm(
     num: Number,
     exponent: Number,
     modulus: Number,
-) -> Result<Instance<GMP>, Thrown> {
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let base = number(req, &num, 1)?;
     let exp = number(req, &exponent, 2)?;
     let modulus = number(req, &modulus, 3)?;
@@ -1031,7 +1039,7 @@ fn gmp_prob_prime(
 /// string(1) "0"
 /// ```
 #[php_function]
-fn gmp_gcd(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_gcd(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.gcd(&b))
 }
@@ -1053,14 +1061,14 @@ fn gmp_gcd(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP
 /// }
 /// ```
 #[php_function]
-fn gmp_gcdext(req: &mut Request, num1: Number, num2: Number) -> Result<PhpArray, Thrown> {
+fn gmp_gcdext(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<PhpArray>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     let (gcd, s, t) = a.gcdext(&b);
     let mut array = PhpArray::new(req)?;
     for (name, n) in [(b"g", gcd), (b"s", s), (b"t", t)] {
-        let value = made(req, n)?.object().as_value();
+        let value = made(req, n)?.into_value().hand_on_unmigrated();
         let key = PhpString::new(req, name)?;
-        array.set(req, Key::Str(key), value)?;
+        array.set(req, Key::Str(key.hand_on_unmigrated()), value)?;
     }
     Ok(array)
 }
@@ -1074,7 +1082,7 @@ fn gmp_gcdext(req: &mut Request, num1: Number, num2: Number) -> Result<PhpArray,
 /// string(2) "12"
 /// ```
 #[php_function]
-fn gmp_lcm(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_lcm(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.lcm(&b))
 }
@@ -1095,7 +1103,7 @@ fn gmp_invert(
     req: &mut Request,
     num1: Number,
     num2: Number,
-) -> Result<OrFalse<Instance<GMP>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GMP>>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     if b.sign() == 0 {
         return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
@@ -1233,7 +1241,7 @@ fn gmp_random_seed(req: &mut Request, seed: Number) -> Result<(), Thrown> {
 /// gmp_random_bits(): Argument #1 ($bits) must be between 1 and 2147483647
 /// ```
 #[php_function]
-fn gmp_random_bits(req: &mut Request, bits: i64) -> Result<Instance<GMP>, Thrown> {
+fn gmp_random_bits(req: &mut Request, bits: i64) -> Result<Owner<Instance<GMP>>, Thrown> {
     if !(1..=INT_MAX).contains(&bits) {
         let tail = format!("must be between 1 and {INT_MAX}");
         return Err(value_error(req, 1, &tail));
@@ -1256,7 +1264,11 @@ fn gmp_random_bits(req: &mut Request, bits: i64) -> Result<Instance<GMP>, Thrown
 /// gmp_random_range(): Argument #1 ($min) must be less than argument #2 ($maximum)
 /// ```
 #[php_function]
-fn gmp_random_range(req: &mut Request, min: Number, max: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_random_range(
+    req: &mut Request,
+    min: Number,
+    max: Number,
+) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (min, max) = numbers(req, &min, &max)?;
     random(req);
     if max.cmp(&min).is_le() {
@@ -1278,7 +1290,7 @@ fn gmp_random_range(req: &mut Request, min: Number, max: Number) -> Result<Insta
 /// string(3) "255"
 /// ```
 #[php_function]
-fn gmp_and(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_and(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.and(&b))
 }
@@ -1293,7 +1305,7 @@ fn gmp_and(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP
 /// string(2) "-7"
 /// ```
 #[php_function]
-fn gmp_or(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_or(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.ior(&b))
 }
@@ -1308,7 +1320,7 @@ fn gmp_or(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>
 /// string(1) "0"
 /// ```
 #[php_function]
-fn gmp_com(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_com(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &num, 1)?;
     made(req, n.com())
 }
@@ -1323,7 +1335,7 @@ fn gmp_com(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
 /// string(2) "-2"
 /// ```
 #[php_function]
-fn gmp_xor(req: &mut Request, num1: Number, num2: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_xor(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let (a, b) = numbers(req, &num1, &num2)?;
     made(req, a.xor(&b))
 }
@@ -1481,7 +1493,7 @@ fn gmp_hamdist(req: &mut Request, num1: Number, num2: Number) -> Result<i64, Thr
 /// string(1) "2"
 /// ```
 #[php_function]
-fn gmp_nextprime(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown> {
+fn gmp_nextprime(req: &mut Request, num: Number) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &num, 1)?;
     made(req, n.nextprime())
 }
@@ -1498,7 +1510,7 @@ fn gmp_nextprime(req: &mut Request, num: Number) -> Result<Instance<GMP>, Thrown
 /// gmp_binomial(): Argument #2 ($k) must be greater than or equal to 0
 /// ```
 #[php_function]
-fn gmp_binomial(req: &mut Request, n: Number, k: Raw<i64>) -> Result<Instance<GMP>, Thrown> {
+fn gmp_binomial(req: &mut Request, n: Number, k: Raw<i64>) -> Result<Owner<Instance<GMP>>, Thrown> {
     let n = number(req, &n, 1)?;
     let k = long(req, &k)?;
     let Ok(k) = u64::try_from(k) else {

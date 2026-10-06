@@ -13,7 +13,7 @@ use php_ext::raising::{
 };
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _};
 use php_ext::values::{
-    Emalloc, FreshString, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+    Emalloc, FreshString, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
 };
 
 use crate::algos::{self, ALGOS, Algo, Options, Refusal, State};
@@ -220,7 +220,7 @@ fn rendered(
     held: [Option<Emalloc>; 2],
     digest: &[u8],
     binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let raw = match raw {
         Some(raw) => Ok(raw),
         None => FreshString::new(req, digest.len()),
@@ -234,7 +234,7 @@ fn rendered(
     }
     let raw = raw?;
     if binary {
-        return Ok(raw.finish());
+        return Ok(raw.finish(req));
     }
     let hexed = PhpString::new(req, &hex(digest));
     raw.free(req);
@@ -252,7 +252,11 @@ fn context(req: &mut Request, algo: &Algo, stream: Option<Stream>) -> Result<Ema
     })
 }
 
-fn digest_value(req: &mut Request, digest: &[u8], binary: bool) -> Result<PhpString, Thrown> {
+fn digest_value(
+    req: &mut Request,
+    digest: &[u8],
+    binary: bool,
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = if binary { digest.to_vec() } else { hex(digest) };
     PhpString::new(req, &bytes)
 }
@@ -296,7 +300,11 @@ fn open(req: &mut Request, path: &[u8], position: u32) -> Result<Option<Stream>,
     if path.contains(&0) {
         return Err(arg_value_error(req, position, "not contain any null bytes"));
     }
-    req.open_stream(path, b"rb", false)
+    // The stream is the native's own while it runs: its helpers lend it
+    // and the one that ends with it frees it.
+    Ok(req
+        .open_stream(path, b"rb", false)?
+        .map(Owner::hand_on_unmigrated))
 }
 
 /// The loop of 1024-byte `php_stream_read`s into `state`, and the
@@ -356,7 +364,7 @@ fn hash(
     data: PhpString,
     #[php(default = false)] binary: bool,
     #[php(default = [])] options: PhpArray,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), false)?;
     let held = context(req, algo, None)?;
     let mut state = match (algo.init)(req, Options(Some(options))) {
@@ -423,7 +431,7 @@ fn hash_file(
     filename: PhpString,
     #[php(default = false)] binary: bool,
     #[php(default = [])] options: PhpArray,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), false)?;
     let Some(stream) = open(req, filename.as_bytes(), 1)? else {
         return Ok(OrFalse::False);
@@ -479,7 +487,7 @@ fn hash_hmac(
     data: PhpString,
     #[php(sensitive)] key: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), true)?;
     let (held, raw) = hmac_held(req, algo, None)?;
     let k = hmac_key(req, algo, key.as_bytes())?;
@@ -571,7 +579,7 @@ fn hash_hmac_file(
     filename: PhpString,
     #[php(sensitive)] key: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), true)?;
     let Some(stream) = open(req, filename.as_bytes(), 2)? else {
         return Ok(OrFalse::False);
@@ -714,7 +722,7 @@ fn hash_init(
     #[php(default = 0)] flags: i64,
     #[php(sensitive, default = "")] key: PhpString,
     #[php(default = [])] options: PhpArray,
-) -> Result<Instance<HashContext>, Thrown> {
+) -> Result<Owner<Instance<HashContext>>, Thrown> {
     let flags = Flags(flags);
     let key = key.as_bytes().to_vec();
     let options = Options(Some(options));
@@ -765,7 +773,7 @@ fn hash_init(
         context.running = Some(Running { state, allocation });
         context.flags = flags;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// The running state, taken out for the length of a call, and put
@@ -997,7 +1005,7 @@ fn hash_file_into(
         Some(ctx) => req.with_stream_ctx(Some(ctx), |req| req.open_stream(filename, b"rb", false)),
         None => req.open_stream(filename, b"rb", false),
     };
-    let Some(stream) = opened? else {
+    let Some(stream) = opened?.map(Owner::hand_on_unmigrated) else {
         return Ok(false);
     };
     let Some(mut running) = take(req, object) else {
@@ -1027,7 +1035,7 @@ fn hash_final(
     req: &mut Request,
     context: Instance<HashContext>,
     #[php(default = false)] binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let object = verify(req, context.object(), 1)?;
     // The key is php's to give back here only under HMAC; a copy's
     // key without it stays with the object until it is freed.
@@ -1076,7 +1084,7 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     let copy = new_object(req, object.class())?;
     let Some((Some(algo), Some(state), flags, key)) = forked else {
         let thrown = throw(req, "ValueError", "Cannot clone a finalized HashContext");
-        req.release(copy.as_value());
+        copy.give_up(req);
         return Err(thrown);
     };
     for (key, value) in object.props(req)? {
@@ -1100,7 +1108,8 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         context.flags = flags;
         context.key = Some(kept);
     }
-    Ok(copy)
+    // The `clone_obj` slot's return, the one owner the copy was made with.
+    Ok(copy.hand_on_unmigrated())
 }
 
 /// `hash_copy(HashContext $context): HashContext`.
@@ -1125,17 +1134,21 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 fn hash_copy(
     req: &mut Request,
     context: Instance<HashContext>,
-) -> Result<Instance<HashContext>, Thrown> {
+) -> Result<Owner<Instance<HashContext>>, Thrown> {
     let object = verify(req, context.object(), 1)?;
-    clone_context(req, object).map(Instance::of)
+    // The slot's copy is the one owner it was made with.
+    let copy = clone_context(req, object)?;
+    let owner = Owner::take(req, copy);
+    req.release(copy.as_value());
+    Ok(owner.into_instance())
 }
 
 /// The table's names, all or the cryptographic ones.
-fn names(req: &mut Request, crypto: bool) -> Result<PhpArray, Thrown> {
+fn names(req: &mut Request, crypto: bool) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for algo in ALGOS.iter().filter(|a| !crypto || a.crypto) {
         let name = PhpString::new(req, algo.name.as_bytes())?;
-        out.append(req, Value::string(name))?;
+        out.append(req, name.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -1149,7 +1162,7 @@ fn names(req: &mut Request, crypto: bool) -> Result<PhpArray, Thrown> {
 /// 60 md2 md4 md5 sha1 sha224 sha256 sha384 sha512/224 sha512/256 sha512 sha3-224 sha3-256 sha3-384 sha3-512 ripemd128 ripemd160 ripemd256 ripemd320 whirlpool tiger128,3 tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto adler32 crc32 crc32b crc32c fnv132 fnv1a32 fnv164 fnv1a64 joaat murmur3a murmur3c murmur3f xxh32 xxh64 xxh3 xxh128 haval128,3 haval160,3 haval192,3 haval224,3 haval256,3 haval128,4 haval160,4 haval192,4 haval224,4 haval256,4 haval128,5 haval160,5 haval192,5 haval224,5 haval256,5
 /// ```
 #[php_function]
-fn hash_algos(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn hash_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     names(req, false)
 }
 
@@ -1162,7 +1175,7 @@ fn hash_algos(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// 44 tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto haval128,3 haval160,3 haval192,3 haval224,3 haval256,3 haval128,4 haval160,4 haval192,4 haval224,4 haval256,4 haval128,5 haval160,5 haval192,5 haval224,5 haval256,5 -
 /// ```
 #[php_function]
-fn hash_hmac_algos(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn hash_hmac_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     names(req, true)
 }
 
@@ -1197,7 +1210,7 @@ fn hash_pbkdf2(
     #[php(default = 0)] length: i64,
     #[php(default = false)] binary: bool,
     #[php(default = [])] options: PhpArray,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut length = length;
     let (password, salt) = (password.as_bytes(), salt.as_bytes().to_vec());
     let algo = fetch(req, algo.as_bytes(), true)?;
@@ -1313,7 +1326,7 @@ fn hash_hkdf(
     #[php(default = 0)] length: i64,
     #[php(default = "")] info: PhpString,
     #[php(default = "")] salt: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (ikm, info, salt) = (key.as_bytes(), info.as_bytes(), salt.as_bytes());
     let algo = fetch(req, algo.as_bytes(), true)?;
     if ikm.is_empty() {
@@ -1396,7 +1409,7 @@ fn mhash(
     algo: i64,
     data: PhpString,
     #[php(default = null)] key: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some((_, name)) = mhash_entry(algo) else {
         return Ok(OrFalse::False);
     };
@@ -1422,7 +1435,7 @@ fn mhash(
 /// bool(false)
 /// ```
 #[php_function(deprecated(since = "8.1"))]
-fn mhash_get_hash_name(req: &mut Request, algo: i64) -> Result<OrFalse<PhpString>, Thrown> {
+fn mhash_get_hash_name(req: &mut Request, algo: i64) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match mhash_entry(algo) {
         Some((name, _)) => PhpString::new(req, name.as_bytes()).map(OrFalse::Value),
         None => Ok(OrFalse::False),
@@ -1483,7 +1496,7 @@ fn mhash_keygen_s2k(
     password: PhpString,
     salt: PhpString,
     length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (number, password, salt) = (algo, password.as_bytes(), salt.as_bytes());
     #[allow(clippy::cast_possible_truncation)]
     let bytes = length as i32;
@@ -1639,7 +1652,7 @@ impl HashContext {
     /// bool(true)
     /// HashContext with HASH_HMAC option cannot be serialized
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let (algo, flags) = this
             .native::<Context>(req)
@@ -1670,9 +1683,9 @@ impl HashContext {
         let fields = fields?;
         let mut out = PhpArray::new(req)?;
         let algo_name = PhpString::new(req, name.as_bytes())?;
-        out.append(req, Value::string(algo_name))?;
+        out.append(req, algo_name.into_value().hand_on_unmigrated())?;
         out.append(req, Value::int(flags.0))?;
-        out.append(req, Value::array(fields))?;
+        out.append(req, fields.into_value().hand_on_unmigrated())?;
         out.append(req, Value::int(magic))?;
         let mut members = PhpArray::new(req)?;
         for (key, value) in this.props(req)? {
@@ -1686,7 +1699,7 @@ impl HashContext {
             };
             members.set(req, key, value)?;
         }
-        out.append(req, Value::array(members))?;
+        out.append(req, members.into_value().hand_on_unmigrated())?;
         Ok(out)
     }
 
@@ -1780,7 +1793,7 @@ impl HashContext {
         for (key, value) in members.snapshot() {
             let name = key.to_prop_name(req)?;
             req.addref(&value);
-            this.set_prop(req, name, value)?;
+            this.set_prop(req, name.hand_on_unmigrated(), value)?;
         }
         Ok(())
     }
@@ -1797,12 +1810,16 @@ impl HashContext {
     ///   string(6) "snefru"
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let algo = this.object().native::<Context>(req).and_then(|c| c.algo);
         let mut out = PhpArray::new(req)?;
         let key = PhpString::new(req, b"algo")?;
         let name = PhpString::new(req, algo.map_or("", |a| a.label).as_bytes())?;
-        out.set(req, Key::Str(key), Value::string(name))?;
+        out.set(
+            req,
+            Key::Str(key.hand_on_unmigrated()),
+            name.into_value().hand_on_unmigrated(),
+        )?;
         Ok(out)
     }
 }

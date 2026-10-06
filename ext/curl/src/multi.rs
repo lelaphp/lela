@@ -6,7 +6,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{callable_checked, to_long};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::State;
 use crate::constants as c;
@@ -139,11 +139,11 @@ fn multi_of(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<Multi
 /// bool(true)
 /// ```
 #[php_function]
-fn curl_multi_init(req: &mut Request) -> Result<Instance<CurlMultiHandle>, Thrown> {
+fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>, Thrown> {
     let object = made(req, b"CurlMultiHandle")?;
     let session = req.state::<State>().session.clone();
-    let Some(multi) = Multi::init(session, object) else {
-        req.release(object.as_value());
+    let Some(multi) = Multi::init(session, *object) else {
+        object.give_up(req);
         return Err(throw_error(
             req,
             "Error",
@@ -153,7 +153,7 @@ fn curl_multi_init(req: &mut Request) -> Result<Instance<CurlMultiHandle>, Throw
     if let Some(mh) = object.native_mut::<Mh>(req) {
         mh.multi = Some(multi);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `curl_multi_add_handle(CurlMultiHandle $multi_handle, CurlHandle $handle): int`.
@@ -240,7 +240,7 @@ fn curl_multi_remove_handle(
 fn curl_multi_get_handles(
     req: &mut Request,
     multi_handle: Instance<CurlMultiHandle>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let handles = mh(req, multi_handle)?.easy.clone();
     let mut array = PhpArray::new(req)?;
     for handle in handles {
@@ -352,14 +352,23 @@ fn curl_multi_exec(
 fn curl_multi_getcontent(
     req: &mut Request,
     handle: Instance<CurlHandle>,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let held = curl(req, handle)?;
     if held.write.to != WriteTo::Return {
         return Ok(None);
     }
     let body = std::mem::take(&mut held.returned);
     let string = PhpString::new(req, &body);
-    curl(req, handle)?.returned = body;
+    let held = match curl(req, handle) {
+        Ok(held) => held,
+        Err(thrown) => {
+            if let Ok(string) = string {
+                string.give_up(req);
+            }
+            return Err(thrown);
+        }
+    };
+    held.returned = body;
     string.map(Some)
 }
 
@@ -409,7 +418,7 @@ fn curl_multi_info_read(
 }
 
 /// `array|false`.
-type Union2 = php_ext::abi::OrFalse<PhpArray>;
+type Union2 = php_ext::abi::OrFalse<Owner<PhpArray>>;
 
 /// `_php_curl_multi_find_easy_handle`.
 fn find(req: &mut Request, multi: PhpObject, easy: EasyId) -> Option<PhpObject> {
@@ -479,7 +488,10 @@ fn curl_multi_errno(
 /// string(13) "Unknown error"
 /// ```
 #[php_function]
-fn curl_multi_strerror(req: &mut Request, error_code: i64) -> Result<Option<PhpString>, Thrown> {
+fn curl_multi_strerror(
+    req: &mut Request,
+    error_code: i64,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     match multi_strerror(error_code) {
         Some(text) => PhpString::new(req, &text).map(Some),
         None => Ok(None),
@@ -586,6 +598,7 @@ pub(crate) fn push(
     let Ok(pushed) = made(cx.req, b"CurlHandle") else {
         return false;
     };
+    let pushed = pushed.hand_on_unmigrated();
     let Some(easy) = made_easy(pushed) else {
         cx.req.release(pushed.as_value());
         return false;
@@ -599,12 +612,12 @@ pub(crate) fn push(
         cx.req.release(pushed.as_value());
         return false;
     };
-    let returned = cx.call(&callable, &[parent.as_value(), pushed.as_value(), list]);
-    cx.req.release(list);
+    let returned = cx.call(&callable, &[parent.as_value(), pushed.as_value(), *list]);
+    list.give_up(cx.req);
     let accepted = match returned {
         Some(value) => {
             let n = to_long(cx.req, &value).unwrap_or(c::CURL_PUSH_DENY);
-            cx.req.release(value);
+            value.give_up(cx.req);
             n != c::CURL_PUSH_DENY
         }
         None => false,

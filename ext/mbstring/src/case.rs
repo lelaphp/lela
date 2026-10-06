@@ -13,7 +13,7 @@ use crate::text::{new_string, substitute, value_error};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// `php_case_mode`, in its order, which is `MB_CASE_*`'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,7 +341,7 @@ fn mb_convert_case(
     string: PhpString,
     mode: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 3)?;
     let Some(mode) = usize::try_from(mode)
         .ok()
@@ -373,7 +373,7 @@ fn mb_strtoupper(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
     let out = convert(CaseMode::Upper, string.as_bytes(), enc, enc, sub);
@@ -394,7 +394,7 @@ fn mb_strtolower(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
     let out = convert(CaseMode::Lower, string.as_bytes(), enc, enc, sub);

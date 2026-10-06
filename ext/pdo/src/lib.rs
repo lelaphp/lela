@@ -38,7 +38,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Unty
 use php_ext::attr::{php_class, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use connector::Connector;
 use dbh::PDO;
@@ -112,12 +112,12 @@ fn drivers(req: &Request) -> impl Iterator<Item = &'static dyn Connector> + '_ {
 
 /// The registered connectors' names, one string each, in `MINIT` order:
 /// what `pdo_drivers()` and `PDO::getAvailableDrivers()` answer.
-fn driver_names(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn driver_names(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let names: Vec<&'static str> = drivers(req).map(connector::Connector::name).collect();
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, name.as_bytes())?;
-        out.append(req, Value::string(name))?;
+        out.append(req, Value::string(name.hand_on_unmigrated()))?;
     }
     Ok(out)
 }
@@ -142,7 +142,7 @@ fn driver_names(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// array 0 PDO
 /// ```
 #[php_function]
-fn pdo_drivers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn pdo_drivers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     driver_names(req)
 }
 
@@ -160,9 +160,17 @@ fn copied(req: &Request, value: Value) -> Value {
     value
 }
 
+/// A value the fetch engine or a `pdo_*` extension answers with its one
+/// owner, the caller's, as the owner it is: what a native returns of it.
+pub(crate) fn owned(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
+}
+
 /// A string value of `bytes`, one owner the caller's.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `ce->name`.

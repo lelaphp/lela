@@ -95,18 +95,6 @@ fn trigger_error(
     Ok(True)
 }
 
-/// A handler's value as `RETURN_COPY` hands it back, one more owner,
-/// and `null` for none.
-fn copied(req: &mut Request, handler: Option<Value>) -> Value {
-    match handler {
-        Some(value) => {
-            req.addref(&value);
-            value
-        }
-        None => Value::null(),
-    }
-}
-
 /// `set_error_handler(?callable $callback, int $error_levels = E_ALL)`,
 /// php's `ZEND_FUNCTION(set_error_handler)`
 /// (`Z/Zend/zend_builtin_functions.c:1306`): the handler standing is
@@ -192,7 +180,7 @@ fn set_error_handler(
     #[php(default = E_ALL)] error_levels: i64,
 ) -> Untyped<Value> {
     let previous = req.set_error_handler(callback, error_levels);
-    Untyped(copied(req, previous))
+    Untyped(previous.unwrap_or_default())
 }
 
 /// `restore_error_handler(): true`, php's
@@ -235,8 +223,7 @@ fn restore_error_handler(req: &mut Request) -> True {
 #[php_function]
 fn get_error_handler(req: &mut Request) -> Result<Raw<Option<Callable>>, Thrown> {
     let handler = req.error_handler();
-    let handler = copied(req, handler);
-    Raw::from_value(req, handler)
+    Raw::from_value(req, handler.unwrap_or_default())
 }
 
 /// `set_exception_handler(?callable $callback)`, php's
@@ -292,7 +279,7 @@ fn get_error_handler(req: &mut Request) -> Result<Raw<Option<Callable>>, Thrown>
 #[php_function]
 fn set_exception_handler(req: &mut Request, callback: Option<Callable>) -> Untyped<Value> {
     let previous = req.set_exception_handler(callback);
-    Untyped(copied(req, previous))
+    Untyped(previous.unwrap_or_default())
 }
 
 /// `restore_exception_handler(): true`, php's
@@ -333,6 +320,5 @@ fn restore_exception_handler(req: &mut Request) -> True {
 #[php_function]
 fn get_exception_handler(req: &mut Request) -> Result<Raw<Option<Callable>>, Thrown> {
     let handler = req.exception_handler();
-    let handler = copied(req, handler);
-    Raw::from_value(req, handler)
+    Raw::from_value(req, handler.unwrap_or_default())
 }

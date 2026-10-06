@@ -5,7 +5,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::formatter::iso3_language;
@@ -94,7 +94,7 @@ fn format(
     req: &mut Request,
     object: PhpObject,
     strings: PhpArray,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     error::errors_reset::<ListFormatterObject>(req, object);
     if strings.is_empty() {
         return PhpString::new(req, b"").map(Some);
@@ -102,7 +102,9 @@ fn format(
     let mut items = Vec::with_capacity(strings.len());
     for (_, value) in &strings {
         let text = to_string(req, &value)?;
-        match ffi::to_utf16(text.as_bytes()) {
+        let converted = ffi::to_utf16(text.as_bytes());
+        text.give_up(req);
+        match converted {
             Ok(units) => items.push(units),
             Err(code) => {
                 let message = "Failed to convert string to UTF-16";
@@ -212,7 +214,7 @@ impl IntlListFormatter {
         req: &mut Request,
         this: This<Self>,
         strings: PhpArray,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         format(req, this.object(), strings).map(|s| s.map_or(OrFalse::False, OrFalse::Value))
     }
 
@@ -220,7 +222,7 @@ impl IntlListFormatter {
         i64::from(error::object_code::<ListFormatterObject>(req, this.object()).0)
     }
 
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let message = error::object_message::<ListFormatterObject>(req, this.object());
         PhpString::new(req, &message)
     }

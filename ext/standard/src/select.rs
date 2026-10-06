@@ -39,7 +39,7 @@ use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
-use php_ext::values::{Key, PhpArray, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
 
 /// `?array &$read` and its two siblings: the caller's array, or `null`,
 /// by reference.
@@ -109,7 +109,12 @@ fn from_fd_set(
 
 /// One element copied into the array written back, key and value one
 /// more owner each, as `zend_hash_update` and `zval_add_ref` take them.
-fn keep(req: &mut Request, out: &mut PhpArray, key: &Key, element: Value) -> Result<(), Thrown> {
+fn keep(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    key: &Key,
+    element: Value,
+) -> Result<(), Thrown> {
     req.addref(&element);
     let key = match key {
         Key::Str(s) => {
@@ -141,7 +146,7 @@ fn emulate_read_fd_set(
     if ret > 0 {
         target.set(req, Some(out))?;
     } else {
-        req.release(Value::array(out));
+        out.give_up(req);
     }
     Ok(ret)
 }
@@ -267,10 +272,10 @@ fn stream_select(
         let ready = emulate_read_fd_set(req, &read, array)?;
         if ready > 0 {
             if w_array.is_some() {
-                write.set(req, Some(PhpArray::empty()))?;
+                write.set(req, Some(Owner::take(req, PhpArray::empty())))?;
             }
             if e_array.is_some() {
-                except.set(req, Some(PhpArray::empty()))?;
+                except.set(req, Some(Owner::take(req, PhpArray::empty())))?;
             }
             return Ok(OrFalse::Value(i64::try_from(ready).unwrap_or(i64::MAX)));
         }

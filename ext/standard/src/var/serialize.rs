@@ -15,7 +15,7 @@ use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Reached};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
     Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum,
@@ -122,7 +122,7 @@ impl VarHash {
 /// E:21:"RoundingMode:HalfEven";
 /// ```
 #[php_function]
-fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn serialize(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     let mut serializer = Serializer::new(req);
     let mut out = Vec::new();
     let written = serializer.write(req, &mut out, &value);
@@ -464,7 +464,7 @@ fn serialize_method(
 ) -> Result<(), Thrown> {
     let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
     let Some(array) = data.as_array().copied() else {
-        req.release(data);
+        data.give_up(req);
         let shown = String::from_utf8_lossy(name).into_owned();
         return Err(throw_error(
             req,
@@ -486,7 +486,7 @@ fn serialize_method(
         shared,
         false,
     );
-    req.release(data);
+    data.give_up(req);
     written
 }
 
@@ -528,7 +528,7 @@ fn object_value(
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
         let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
         let Some(list) = names.as_array().copied() else {
-            req.release(names);
+            names.give_up(req);
             let shown = String::from_utf8_lossy(&name).into_owned();
             docref(
                 req,
@@ -540,19 +540,20 @@ fn object_value(
             out.extend_from_slice(b"N;");
             return Ok(());
         };
-        let table = sleep_props(req, object, &name, list)?;
-        req.release(names);
+        let table = sleep_props(req, object, &name, list);
+        names.give_up(req);
+        let table = table?;
         write_class_name(req, out, object);
         let written = nested(
             req,
             out,
             &object.as_value(),
-            Reached::Held(table),
+            Reached::Held(*table),
             hash,
             false,
             false,
         );
-        req.release(table.to_value());
+        table.give_up(req);
         return written;
     }
     let incomplete = write_class_name(req, out, object);
@@ -569,12 +570,12 @@ fn object_value(
         req,
         out,
         &object.as_value(),
-        Reached::Held(table),
+        Reached::Held(*table),
         hash,
         false,
         incomplete,
     );
-    req.release(table.to_value());
+    table.give_up(req);
     if written.is_err() {
         hash.fail(object);
     }
@@ -672,7 +673,7 @@ fn custom(
         }
     };
     if let Some(payload) = answered.as_str_bytes().map(<[u8]>::to_vec) {
-        req.release(answered);
+        answered.give_up(req);
         out.extend_from_slice(b"C:");
         out.extend_from_slice(name.len().to_string().as_bytes());
         out.extend_from_slice(b":\"");
@@ -685,7 +686,7 @@ fn custom(
         return Ok(());
     }
     let null = matches!(answered.as_ref(), ValueRef::Null);
-    req.release(answered);
+    answered.give_up(req);
     hash.fail(object);
     out.extend_from_slice(b"N;");
     if null {
@@ -708,7 +709,7 @@ fn sleep_props(
     object: PhpObject,
     class: &[u8],
     list: PhpArray,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let props = object.props_for(req, PropertyPurpose::Serialize)?;
     let shown_class = String::from_utf8_lossy(class).into_owned();
     let mut out = PhpArray::new(req)?;
@@ -724,7 +725,9 @@ fn sleep_props(
                 ),
             );
         }
-        let text = to_string(req, &name)?.as_bytes().to_vec();
+        let named = to_string(req, &name)?;
+        let text = named.as_bytes().to_vec();
+        named.give_up(req);
         let mut private = vec![0];
         private.extend_from_slice(class);
         private.push(0);

@@ -769,11 +769,12 @@ pub fn option_string(
     attr: i64,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     match options.and_then(|options| options.get(&Key::Int(attr))) {
-        Some(value) => Ok(Some(
-            php_ext::coerce::to_string(req, &value.deref())?
-                .as_bytes()
-                .to_vec(),
-        )),
+        Some(value) => {
+            let text = php_ext::coerce::to_string(req, &value.deref())?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            Ok(Some(bytes))
+        }
         None => Ok(None),
     }
 }

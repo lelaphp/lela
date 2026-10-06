@@ -17,11 +17,11 @@ use std::collections::HashSet;
 use php_ext::abi::{Callable, FromArgument, Raw, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::to_long;
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef, walk, zend_sort};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
 use super::{copied, key_copy, user_compare};
@@ -104,7 +104,7 @@ fn array_at(req: &mut Request, position: u32, value: &Value) -> Result<PhpArray,
     let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
     match held.as_array() {
         Some(array) => Ok(*array),
-        None => PhpArray::new(req),
+        None => Ok(PhpArray::empty()),
     }
 }
 
@@ -202,18 +202,9 @@ impl Compare {
 /// conversion given up after the comparison, as php's
 /// `zend_tmp_string_release` gives up what `zval_get_tmp_string` made.
 fn string_compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
-    let x = to_string(req, a)?;
-    let y = match to_string(req, b) {
-        Ok(y) => y,
-        Err(thrown) => {
-            req.release(Value::string(x));
-            return Err(thrown);
-        }
-    };
-    let order = x.as_bytes().cmp(y.as_bytes());
-    req.release(Value::string(x));
-    req.release(Value::string(y));
-    Ok(order)
+    let x = crate::string::string_bytes(req, a)?;
+    let y = crate::string::string_bytes(req, b)?;
+    Ok(x.cmp(&y))
 }
 
 /// A key's text, as `zend_print_long_to_buf` prints an integer key.
@@ -235,7 +226,7 @@ fn plain_user(
 ) -> Result<Ordering, Thrown> {
     let answer = call(req, callback, &[*a, *b])?;
     let long = to_long(req, &answer);
-    req.release(answer);
+    answer.give_up(req);
     Ok(long?.cmp(&0))
 }
 
@@ -261,7 +252,12 @@ fn rested(array: Raw<PhpArray>, rest: Variadic<Untyped<Value>>) -> Vec<Value> {
         .collect()
 }
 
-fn by_key(req: &mut Request, values: &[Value], data: Data, diff: bool) -> Result<PhpArray, Thrown> {
+fn by_key(
+    req: &mut Request,
+    values: &[Value],
+    data: Data,
+    diff: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
     let parsed = parse(req, values, usize::from(data == Data::User))?;
     let arrays = arrays_of(req, &parsed.arrays)?;
     let callback = parsed.callbacks.into_iter().next();
@@ -284,7 +280,7 @@ fn by_key(req: &mut Request, values: &[Value], data: Data, diff: bool) -> Result
                     match ordering {
                         Ok(ordering) => ordering == Ordering::Equal,
                         Err(thrown) => {
-                            req.release(out.to_value());
+                            out.give_up(req);
                             return Err(thrown);
                         }
                     }
@@ -376,7 +372,7 @@ fn intersect_sorted(
     behavior: Behavior,
     data: Data,
     keys: Keys,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (arrays, mut compare, lists) = sorted(req, values, behavior, data, keys)?;
     let mut out = arrays[0].copy(req)?;
     let deleted = intersect_walk(req, behavior, &mut compare, &lists);
@@ -384,7 +380,7 @@ fn intersect_sorted(
         out.unset(req, &key)?;
     }
     if let Some(thrown) = compare.pending.take() {
-        req.release(out.to_value());
+        out.give_up(req);
         return Err(thrown);
     }
     Ok(out)
@@ -495,7 +491,7 @@ fn diff_sorted(
     behavior: Behavior,
     data: Data,
     keys: Keys,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (arrays, mut compare, lists) = sorted(req, values, behavior, data, keys)?;
     let mut out = arrays[0].copy(req)?;
     let deleted = diff_walk(req, behavior, &mut compare, &lists);
@@ -503,7 +499,7 @@ fn diff_sorted(
         out.unset(req, &key)?;
     }
     if let Some(thrown) = compare.pending.take() {
-        req.release(out.to_value());
+        out.give_up(req);
         return Err(thrown);
     }
     Ok(out)
@@ -669,7 +665,7 @@ fn array_diff(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let parsed = parse(req, &listed(array, &arrays), 0)?;
     let values = parsed.arrays;
     let first = array_at(req, 1, &values[0])?;
@@ -683,7 +679,7 @@ fn array_diff(
     };
     if first.is_empty() {
         check_rest(req)?;
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let only = if first.len() == 1 {
         walk::rows(req, first).next()
@@ -707,15 +703,13 @@ fn array_diff(
             }
         }
         if found {
-            return Ok(PhpArray::empty());
+            return Ok(Owner::take(req, PhpArray::empty()));
         }
-        req.addref(&Value::array(first));
-        return Ok(first);
+        return Ok(Owner::take(req, first));
     }
     let rest = check_rest(req)?;
     if rest.iter().all(PhpArray::is_empty) {
-        req.addref(&Value::array(first));
-        return Ok(first);
+        return Ok(Owner::take(req, first));
     }
     let mut exclude: HashSet<Vec<u8>> = HashSet::new();
     for other in &rest {
@@ -758,7 +752,7 @@ fn array_diff_key(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &listed(array, &arrays), Data::None, true)
 }
 
@@ -791,7 +785,7 @@ fn array_diff_assoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &listed(array, &arrays), Data::Internal, true)
 }
 
@@ -820,7 +814,7 @@ fn array_udiff_assoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &rested(array, rest), Data::User, true)
 }
 
@@ -857,7 +851,7 @@ fn array_intersect_key(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &listed(array, &arrays), Data::None, false)
 }
 
@@ -879,7 +873,7 @@ fn array_intersect_assoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &listed(array, &arrays), Data::Internal, false)
 }
 
@@ -901,7 +895,7 @@ fn array_uintersect_assoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     by_key(req, &rested(array, rest), Data::User, false)
 }
 
@@ -941,7 +935,7 @@ fn array_udiff(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     diff_sorted(
         req,
         &rested(array, rest),
@@ -971,7 +965,7 @@ fn array_diff_ukey(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     diff_sorted(
         req,
         &rested(array, rest),
@@ -1003,7 +997,7 @@ fn array_diff_uassoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     diff_sorted(
         req,
         &rested(array, rest),
@@ -1033,7 +1027,7 @@ fn array_udiff_uassoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     diff_sorted(
         req,
         &rested(array, rest),
@@ -1074,7 +1068,7 @@ fn array_intersect(
     req: &mut Request,
     array: Raw<PhpArray>,
     arrays: Variadic<Raw<PhpArray>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
         &listed(array, &arrays),
@@ -1104,7 +1098,7 @@ fn array_uintersect(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
         &rested(array, rest),
@@ -1134,7 +1128,7 @@ fn array_intersect_ukey(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
         &rested(array, rest),
@@ -1162,7 +1156,7 @@ fn array_intersect_uassoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
         &rested(array, rest),
@@ -1202,7 +1196,7 @@ fn array_uintersect_uassoc(
     req: &mut Request,
     array: Raw<PhpArray>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     intersect_sorted(
         req,
         &rested(array, rest),

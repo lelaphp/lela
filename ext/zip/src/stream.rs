@@ -5,6 +5,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence};
+use php_ext::values::Owner;
 
 use crate::archive::{Archive, CREATE};
 use crate::object::{basedir_refuses, expand};
@@ -190,7 +191,7 @@ pub(crate) fn open_entry(
     mode: &[u8],
     stat: Option<(u64, i64, bool)>,
     file: Option<Stdio>,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     if mode.first() != Some(&b'r') {
         return Ok(None);
     }
@@ -201,8 +202,12 @@ pub(crate) fn open_entry(
         file,
     };
     let stream = req.new_stream(Box::new(kind), mode)?;
-    if let Some((name, _)) = orig {
-        stream.set_orig_path(req, name)?;
+    if let Some((name, _)) = orig
+        && let Err(thrown) = stream.set_orig_path(req, name)
+    {
+        stream.close(req);
+        stream.give_up(req);
+        return Err(thrown);
     }
     Ok(Some(stream))
 }
@@ -265,7 +270,10 @@ fn open(
     };
     let dir = path.last() == Some(&b'/');
     let file = archive.data.as_mut().and_then(|d| d.stdio.take());
-    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)
+    Ok(
+        open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)?
+            .map(Owner::hand_on_unmigrated),
+    )
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

@@ -122,7 +122,7 @@ impl Emit<'_> {
             let callee = Callee::of(parameters);
             let plan = Plan::of(&arguments, Some(&callee));
             let name = self.string(b"assert")?;
-            let op2 = self.constant(name);
+            let op2 = self.literal(name);
             let out = self.cache_slot();
             self.push(Opline {
                 opcode: Opcode::InitFcall,

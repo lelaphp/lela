@@ -5,7 +5,7 @@ use php_ext::abi::{ObjectHandlers, OrFalse, Refusals, This, True};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject};
 use php_ext_pdo_sqlite::ffi::{SQLITE_OK, Stmt};
 
 use crate::conn::{Taken, column_key, column_value, fail, give_back, not_ready, remove_stmt, take};
@@ -92,13 +92,13 @@ fn fetch_one(
     stmt: &Stmt,
     count: usize,
     mode: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let names = result(req, object)
         .and_then(|r| r.names.clone())
         .unwrap_or_default();
     let mut row = PhpArray::new(req)?;
     for column in 0..count {
-        let value = column_value(req, stmt, column)?;
+        let value = column_value(req, stmt, column)?.hand_on_unmigrated();
         if mode & NUM != 0 {
             let at = i64::try_from(column).unwrap_or(i64::MAX);
             row.set(req, php_ext::values::Key::Int(at), value)?;
@@ -218,7 +218,7 @@ impl SQLite3Result {
         req: &mut Request,
         this: This<Self>,
         column: i64,
-    ) -> Answer<OrFalse<php_ext::values::PhpString>> {
+    ) -> Answer<OrFalse<Owner<php_ext::values::PhpString>>> {
         let taken = held(req, this.object())?;
         let name = match (taken.stmt.as_ref(), usize::try_from(column)) {
             (Some(stmt), Ok(column)) => stmt.column_name(column),
@@ -282,7 +282,7 @@ impl SQLite3Result {
         req: &mut Request,
         this: This<Self>,
         #[php(default = SQLITE3_BOTH)] mode: i64,
-    ) -> Answer<OrFalse<PhpArray>> {
+    ) -> Answer<OrFalse<Owner<PhpArray>>> {
         let object = this.object();
         let taken = held(req, object)?;
         let fetched = fetch_array(req, object, &taken, mode);
@@ -314,7 +314,7 @@ impl SQLite3Result {
         req: &mut Request,
         this: This<Self>,
         #[php(default = SQLITE3_BOTH)] mode: i64,
-    ) -> Answer<OrFalse<PhpArray>> {
+    ) -> Answer<OrFalse<Owner<PhpArray>>> {
         let object = this.object();
         let taken = held(req, object)?;
         let fetched = fetch_all(req, object, &taken, mode);
@@ -387,7 +387,7 @@ fn fetch_array(
     object: PhpObject,
     taken: &Taken,
     mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (step, thrown) = stmt::step(req, taken.stmt.as_ref());
     match (step, taken.stmt.as_ref()) {
         (Step::Row, Some(stmt)) => {
@@ -420,7 +420,7 @@ fn fetch_all(
     object: PhpObject,
     taken: &Taken,
     mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let count = taken.stmt.as_ref().map_or(0, Stmt::column_count);
     if let Some(stmt) = taken.stmt.as_ref() {
         cache_names(req, object, stmt, count, mode);
@@ -434,21 +434,21 @@ fn fetch_all(
         match (step, taken.stmt.as_ref()) {
             (Step::Row, Some(stmt)) => {
                 let row = fetch_one(req, object, stmt, count, mode)?;
-                rows.append(req, Value::array(row))?;
+                rows.append(req, row.into_value().hand_on_unmigrated())?;
                 if let Some(thrown) = thrown {
-                    req.release(Value::array(rows));
+                    rows.give_up(req);
                     return Err(thrown);
                 }
             }
             (Step::Done, _) => {
                 if let Some(thrown) = thrown {
-                    req.release(Value::array(rows));
+                    rows.give_up(req);
                     return Err(thrown);
                 }
                 return Ok(OrFalse::Value(rows));
             }
             _ => {
-                req.release(Value::array(rows));
+                rows.give_up(req);
                 if let Some(thrown) = thrown {
                     return Err(thrown);
                 }

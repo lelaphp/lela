@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpString, Resource, Value};
+use php_ext::values::{Owner, PhpString, Resource, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::Emitter;
 
@@ -45,7 +45,7 @@ use crate::{
 fn xmlwriter_open_uri(
     req: &mut Request,
     uri: Path,
-) -> Result<OrFalse<Instance<XMLWriter>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<XMLWriter>>>, Thrown> {
     match open_warned(req, uri)? {
         Some(writer) => new_writer(req, writer).map(OrFalse::Value),
         None => Ok(OrFalse::False),
@@ -63,7 +63,7 @@ fn xmlwriter_open_uri(
 /// string(3) "a&b"
 /// ```
 #[php_function]
-fn xmlwriter_open_memory(req: &mut Request) -> Result<OrFalse<Instance<XMLWriter>>, Thrown> {
+fn xmlwriter_open_memory(req: &mut Request) -> Result<OrFalse<Owner<Instance<XMLWriter>>>, Thrown> {
     match Emitter::memory() {
         Some(writer) => new_writer(req, writer).map(OrFalse::Value),
         None => Ok(OrFalse::False),
@@ -759,7 +759,7 @@ fn xmlwriter_output_memory(
     req: &mut Request,
     writer: Instance<XMLWriter>,
     #[php(default = true)] flush: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     output_memory(req, writer.object(), flush)
 }
 
@@ -781,7 +781,7 @@ fn xmlwriter_flush(
     req: &mut Request,
     writer: Instance<XMLWriter>,
     #[php(default = true)] empty: bool,
-) -> Result<Union<PhpString, i64>, Thrown> {
+) -> Result<Union<Owner<PhpString>, i64>, Thrown> {
     flush(req, writer.object(), empty, false)
 }
 
@@ -827,7 +827,7 @@ impl XMLWriter {
     /// XMLWriter::toUri(): Argument #1 ($uri) must resolve to a valid file path
     /// XMLWriter::toUri(): Argument #1 ($uri) must not be empty
     /// ```
-    fn toUri(req: &mut Request, uri: Path) -> Result<Static, Thrown> {
+    fn toUri(req: &mut Request, uri: Path) -> Result<Owner<Static>, Thrown> {
         if uri.0.is_empty() {
             return Err(arg_value_error(req, 1, "not be empty"));
         }
@@ -870,7 +870,7 @@ impl XMLWriter {
     /// string(1) "W"
     /// string(1) "a"
     /// ```
-    fn toMemory(req: &mut Request) -> Result<Static, Thrown> {
+    fn toMemory(req: &mut Request) -> Result<Owner<Static>, Thrown> {
         match Emitter::memory() {
             Some(writer) => create_static(req, writer),
             None => Err(throw_error(req, "Error", UNCONSTRUCTED)),
@@ -893,7 +893,7 @@ impl XMLWriter {
     /// XMLWriter::toStream(): Argument #1 ($stream) must be of type resource, false given
     /// int(1)
     /// ```
-    fn toStream(req: &mut Request, stream: Resource) -> Result<Static, Thrown> {
+    fn toStream(req: &mut Request, stream: Resource) -> Result<Owner<Static>, Thrown> {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message = "XMLWriter::toStream(): supplied resource is not a valid stream resource";
             return Err(throw_error(req, "TypeError", message));
@@ -1173,7 +1173,7 @@ impl XMLWriter {
         req: &mut Request,
         this: This<Self>,
         #[php(default = true)] flush: bool,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         output_memory(req, this.object(), flush)
     }
 
@@ -1182,7 +1182,7 @@ impl XMLWriter {
         req: &mut Request,
         this: This<Self>,
         #[php(default = true)] empty: bool,
-    ) -> Result<Union<PhpString, i64>, Thrown> {
+    ) -> Result<Union<Owner<PhpString>, i64>, Thrown> {
         flush(req, this.object(), empty, false)
     }
 }

@@ -10,7 +10,7 @@ use php_ext::call::call;
 use php_ext::decl::{ClassConstDecl, Name, Visibility};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::uchar::{self as icu, char_from_name, char_name, char_names, char_types};
@@ -21,7 +21,7 @@ use crate::utf8;
 type Codepoint = Union<PhpString, i64>;
 
 /// A code point or the string it was handed as, `int|string|null`.
-type Mapped = Result<Option<Union<PhpString, i64>>, Thrown>;
+type Mapped = Result<Option<Union<Owner<PhpString>, i64>>, Thrown>;
 
 /// `class IntlChar`: its constants in the stub's order, laid down by
 /// [`constants`], and its static methods.
@@ -122,7 +122,7 @@ impl IntlChar {
     }
 
     #[php(tentative)]
-    fn charAge(req: &mut Request, codepoint: Codepoint) -> Result<Option<PhpArray>, Thrown> {
+    fn charAge(req: &mut Request, codepoint: Codepoint) -> Result<Option<Owner<PhpArray>>, Thrown> {
         error::reset(req);
         match convert(req, &codepoint)? {
             Some(c) => version(req, Some(c)).map(Some),
@@ -163,7 +163,7 @@ impl IntlChar {
         req: &mut Request,
         codepoint: Codepoint,
         #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: i64,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         error::reset(req);
         let Some(c) = convert(req, &codepoint)? else {
             return Ok(None);
@@ -183,7 +183,7 @@ impl IntlChar {
     }
 
     #[php(tentative)]
-    fn chr(req: &mut Request, codepoint: Codepoint) -> Result<Option<PhpString>, Thrown> {
+    fn chr(req: &mut Request, codepoint: Codepoint) -> Result<Option<Owner<PhpString>>, Thrown> {
         error::reset(req);
         match convert(req, &codepoint)? {
             Some(c) => PhpString::new(req, &utf8::encode(c)).map(Some),
@@ -227,15 +227,15 @@ impl IntlChar {
         let choice = int(r#type);
         let (names, status) = char_names(start, limit, choice);
         for (c, name) in names {
-            let name = Value::string(PhpString::new(req, &name)?);
+            let name = PhpString::new(req, &name)?;
             let args = [
                 Value::int(i64::from(c)),
                 Value::int(i64::from(choice)),
-                name,
+                Value::string(*name),
             ];
             let answer = call(req, &callback, &args);
-            req.release(name);
-            req.release(answer?);
+            name.give_up(req);
+            answer?.give_up(req);
         }
         error::set_code(req, status);
         Ok(!status.is_failure())
@@ -247,7 +247,7 @@ impl IntlChar {
         for range in char_types() {
             let args = range.map(|n| Value::int(i64::from(n)));
             let answer = call(req, &callback, &args)?;
-            req.release(answer);
+            answer.give_up(req);
         }
         Ok(())
     }
@@ -289,7 +289,7 @@ impl IntlChar {
     fn getFC_NFKC_Closure(
         req: &mut Request,
         codepoint: Codepoint,
-    ) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+    ) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
         error::reset(req);
         let Some(c) = convert(req, &codepoint)? else {
             return Ok(None);
@@ -351,7 +351,7 @@ impl IntlChar {
         req: &mut Request,
         property: i64,
         #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         error::reset(req);
         property_name(req, icu::property_name(int(property), None, int(r#type)))
     }
@@ -368,14 +368,14 @@ impl IntlChar {
         property: i64,
         value: i64,
         #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         error::reset(req);
         let name = icu::property_name(int(property), Some(int(value)), int(r#type));
         property_name(req, name)
     }
 
     #[php(tentative)]
-    fn getUnicodeVersion(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn getUnicodeVersion(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         error::reset(req);
         version(req, None)
     }
@@ -617,7 +617,7 @@ fn mapped(req: &mut Request, codepoint: Codepoint, f: impl Fn(i32) -> i32) -> Ma
 }
 
 /// `u_charAge` or `u_getUnicodeVersion` as php's list of four ints.
-fn version(req: &mut Request, c: Option<i32>) -> Result<PhpArray, Thrown> {
+fn version(req: &mut Request, c: Option<i32>) -> Result<Owner<PhpArray>, Thrown> {
     let mut list = PhpArray::new(req)?;
     for part in icu::version(c) {
         list.append(req, Value::int(i64::from(part)))?;
@@ -626,7 +626,10 @@ fn version(req: &mut Request, c: Option<i32>) -> Result<PhpArray, Thrown> {
 }
 
 /// A property's or a value's name, or `false` with php's error.
-fn property_name(req: &mut Request, name: Option<&str>) -> Result<OrFalse<PhpString>, Thrown> {
+fn property_name(
+    req: &mut Request,
+    name: Option<&str>,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(name) = name else {
         error::set(req, Code::ILLEGAL_ARGUMENT, "Failed to get property name")?;
         return Ok(OrFalse::False);

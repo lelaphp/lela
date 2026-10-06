@@ -16,7 +16,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arg_value_error, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::breakiterator::{Breaker, Step};
@@ -223,23 +223,25 @@ impl IntlBreakIterator {
     fn createCharacterInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<Option<Instance<IntlBreakIterator>>> {
+    ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
         factory(req, 0, locale)
     }
 
     #[php(tentative)]
-    fn createCodePointInstance(req: &mut Request) -> Answer<Instance<IntlCodePointBreakIterator>> {
+    fn createCodePointInstance(
+        req: &mut Request,
+    ) -> Answer<Owner<Instance<IntlCodePointBreakIterator>>> {
         error::reset(req);
         let made = Breaker::open(5, c"")
             .map_err(|_| fatal(req, "InternalError: IntlCodePointBreakIterator"))?;
-        made_object(req, made).map(|o| Instance::of(o.object()))
+        made_object(req, made).map(Owner::into_instance)
     }
 
     #[php(tentative)]
     fn createLineInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<Option<Instance<IntlBreakIterator>>> {
+    ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
         factory(req, 2, locale)
     }
 
@@ -247,7 +249,7 @@ impl IntlBreakIterator {
     fn createSentenceInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<Option<Instance<IntlBreakIterator>>> {
+    ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
         factory(req, 3, locale)
     }
 
@@ -255,7 +257,7 @@ impl IntlBreakIterator {
     fn createTitleInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<Option<Instance<IntlBreakIterator>>> {
+    ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
         factory(req, 4, locale)
     }
 
@@ -263,7 +265,7 @@ impl IntlBreakIterator {
     fn createWordInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
-    ) -> Answer<Option<Instance<IntlBreakIterator>>> {
+    ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
         factory(req, 1, locale)
     }
 
@@ -298,13 +300,17 @@ impl IntlBreakIterator {
     }
 
     #[php(tentative)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let message = error::object_message::<BreakObject>(req, this.object());
         PhpString::new(req, &message)
     }
 
     #[php(tentative)]
-    fn getLocale(req: &mut Request, this: This<Self>, r#type: i64) -> Answer<OrFalse<PhpString>> {
+    fn getLocale(
+        req: &mut Request,
+        this: This<Self>,
+        r#type: i64,
+    ) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         error::reset(req);
         if r#type != 0 && r#type != 1 {
@@ -325,7 +331,7 @@ impl IntlBreakIterator {
         req: &mut Request,
         this: This<Self>,
         #[php(default = IntlPartsIterator::KEY_SEQUENTIAL)] r#type: Raw<PhpString>,
-    ) -> Answer<Instance<IntlPartsIterator>> {
+    ) -> Answer<Owner<Instance<IntlPartsIterator>>> {
         let object = this.object();
         error::reset(req);
         let key = coerce_param(req, &r#type.value(), &Type::Int, 1)?
@@ -342,7 +348,7 @@ impl IntlBreakIterator {
             key,
             right: 0,
         };
-        iterator::made(req, b"IntlPartsIterator", Box::new(walk)).map(Instance::of)
+        iterator::made(req, b"IntlPartsIterator", Box::new(walk)).map(Owner::into_instance)
     }
 
     #[php(tentative)]
@@ -354,7 +360,6 @@ impl IntlBreakIterator {
             .native::<BreakObject>(req)
             .map(|o| o.text)
             .unwrap_or_default();
-        req.addref(&text);
         Ok(text.as_php_string().copied())
     }
 
@@ -417,8 +422,8 @@ impl IntlBreakIterator {
     fn getIterator(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<Instance<crate::iterator::Iterator>> {
-        internal_iterator(req, &this.object()).map(Instance::of)
+    ) -> Answer<Owner<Instance<crate::iterator::Iterator>>> {
+        internal_iterator(req, &this.object()).map(Owner::into_instance)
     }
 }
 
@@ -476,7 +481,7 @@ impl IntlRuleBasedBreakIterator {
     }
 
     #[php(tentative)]
-    fn getBinaryRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<PhpString>> {
+    fn getBinaryRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         let rules = with(req, object, Breaker::binary_rules)?;
         if rules.len() > i32::MAX as usize - 1 {
@@ -488,7 +493,7 @@ impl IntlRuleBasedBreakIterator {
     }
 
     #[php(tentative)]
-    fn getRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<PhpString>> {
+    fn getRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         let (rules, _) = with(req, object, Breaker::rules)?;
         match to_utf8(&rules) {
@@ -511,7 +516,7 @@ impl IntlRuleBasedBreakIterator {
     }
 
     #[php(tentative)]
-    fn getRuleStatusVec(req: &mut Request, this: This<Self>) -> Answer<OrFalse<PhpArray>> {
+    fn getRuleStatusVec(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpArray>>> {
         let object = this.object();
         match with(req, object, Breaker::rule_status_vec)? {
             Ok(all) => {
@@ -555,10 +560,7 @@ impl IntlPartsIterator {
     ) -> Answer<Instance<IntlBreakIterator>> {
         let data = iterator::data(req, this.object())?;
         match data.and_then(|v| v.as_object().copied()) {
-            Some(object) => {
-                req.addref(&object.as_value());
-                Ok(Instance::of(object))
-            }
+            Some(object) => Ok(Instance::of(object)),
             None => Err(fatal(
                 req,
                 "InternalError: IntlPartsIterator holds no break iterator",
@@ -577,7 +579,7 @@ impl IntlPartsIterator {
         };
         let status = call_method(req, &object, b"getrulestatus", &[])?;
         let n = status.as_int().unwrap_or(0);
-        req.release(status);
+        status.give_up(req);
         Ok(n)
     }
 }
@@ -588,7 +590,7 @@ fn factory(
     req: &mut Request,
     kind: i32,
     locale: Option<PhpString>,
-) -> Answer<Option<Instance<IntlBreakIterator>>> {
+) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
     error::reset(req);
     let locale = match locale {
         Some(l) => c_string(l.as_bytes()),
@@ -597,7 +599,7 @@ fn factory(
     let made = Breaker::open(kind, &locale);
     error::set_code(req, made.as_ref().err().copied().unwrap_or(Code::ZERO));
     if let Ok(biter) = made {
-        return made_object(req, biter).map(Some);
+        return made_object(req, biter).map(|o| Some(o.into_instance()));
     }
     error::set_custom_msg(req, "error creating BreakIterator")?;
     Ok(None)
@@ -605,7 +607,7 @@ fn factory(
 
 /// `breakiterator_object_create`: a new object of the class the
 /// iterator's dynamic class picks, holding it.
-fn made_object(req: &mut Request, biter: Breaker) -> Answer<Instance<IntlBreakIterator>> {
+fn made_object(req: &mut Request, biter: Breaker) -> Answer<Owner<PhpObject>> {
     let class: &[u8] = match biter.kind() {
         1 => b"IntlRuleBasedBreakIterator",
         2 => b"IntlCodePointBreakIterator",
@@ -618,7 +620,7 @@ fn made_object(req: &mut Request, biter: Breaker) -> Answer<Instance<IntlBreakIt
     if let Some(o) = object.native_mut::<BreakObject>(req) {
         o.biter = Some(biter);
     }
-    Ok(Instance::of(object))
+    Ok(object)
 }
 
 /// `BREAKITER_METHOD_FETCH_OBJECT`, then `f` over the iterator: the
@@ -732,7 +734,9 @@ impl Walk for Parts {
             usize::try_from(next).unwrap_or(0),
         );
         let part = text.get(from..to.max(from)).unwrap_or_default().to_vec();
-        Ok(Some(Value::string(PhpString::new(req, &part)?)))
+        Ok(Some(Value::string(
+            PhpString::new(req, &part)?.hand_on_unmigrated(),
+        )))
     }
 
     /// `_breakiterator_parts_rewind`: back to the first boundary.
@@ -866,17 +870,17 @@ impl ObjectHandlers for Handlers {
             _ => (false, Value::null(), ""),
         };
         let mut table = PhpArray::new(req)?;
-        let key = Key::Str(PhpString::new(req, b"valid")?);
+        let key = Key::Str(PhpString::new(req, b"valid")?.hand_on_unmigrated());
         table.set(req, key, Value::bool(valid))?;
         if valid {
             req.addref(&text);
-            let key = Key::Str(PhpString::new(req, b"text")?);
+            let key = Key::Str(PhpString::new(req, b"text")?.hand_on_unmigrated());
             table.set(req, key, text)?;
-            let kind = Value::string(PhpString::new(req, kind.as_bytes())?);
-            let key = Key::Str(PhpString::new(req, b"type")?);
+            let kind = Value::string(PhpString::new(req, kind.as_bytes())?.hand_on_unmigrated());
+            let key = Key::Str(PhpString::new(req, b"type")?.hand_on_unmigrated());
             table.set(req, key, kind)?;
         }
-        Ok(Some(DebugInfo::from(table)))
+        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
     }
 
     /// `BreakIterator_objects_free`.
@@ -947,5 +951,5 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
         biter: Some(copy),
         text,
     };
-    clone_with(req, &object, payload)
+    clone_with(req, &object, payload).map(Owner::hand_on_unmigrated)
 }

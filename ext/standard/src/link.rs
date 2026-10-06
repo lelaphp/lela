@@ -59,7 +59,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::filestat::strerror;
 use crate::string::path::zend_dirname;
@@ -118,7 +118,7 @@ fn failed(req: &mut Request, error: &std::io::Error) -> bool {
 /// readlink(): Argument #1 ($path) must not contain any null bytes
 /// ```
 #[php_function]
-fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn readlink(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Ok(path) = req.check_open_basedir(path.0.as_bytes(), true) else {
         return Ok(OrFalse::False);
     };

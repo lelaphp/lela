@@ -17,7 +17,7 @@ use super::{
 };
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpString, Value, adopted_some};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -747,7 +747,14 @@ impl Request {
     /// bool(false)
     /// bool(false)
     /// ```
-    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Value>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
+        let made = self.cfg_entry_made(name);
+        adopted_some(self, made)
+    }
+
+    /// What [`cfg_entry`](Self::cfg_entry) makes, its one owner not yet named.
+    pub(crate) fn cfg_entry_made(&mut self, name: &[u8]) -> Result<Option<Value>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let Some(entry) = shared.configured(name) else {
             return Ok(None);
@@ -759,13 +766,13 @@ impl Request {
     /// request, an array's arrays copied as deep as they go.
     fn configured_value(&mut self, entry: &Configured) -> Result<Value, Thrown> {
         Ok(match entry {
-            Configured::Str(bytes) => Value::string(PhpString::new(self, bytes)?),
+            Configured::Str(bytes) => Value::string(self.string(bytes)?),
             Configured::Array(rows) => {
-                let mut array = PhpArray::new(self)?;
+                let mut array = self.array()?;
                 for (key, entry) in rows {
                     let key = match key {
                         ConfiguredKey::Index(n) => Key::Int(*n),
-                        ConfiguredKey::Name(name) => Key::Str(PhpString::new(self, name)?),
+                        ConfiguredKey::Name(name) => Key::Str(self.string(name)?),
                     };
                     let value = self.configured_value(entry)?;
                     array.set(self, key, value)?;

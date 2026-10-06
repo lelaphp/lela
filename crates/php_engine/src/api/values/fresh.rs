@@ -5,7 +5,7 @@ use php_heap::FreshStr;
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::PhpString;
+use crate::api::values::{Owner, PhpString};
 
 /// `zend_string_alloc(len, 0)` before the string is handed out: `len`
 /// zero bytes on the request's heap, the holder's alone, written in place
@@ -89,9 +89,9 @@ impl FreshString {
     }
 
     /// The string handed out, `RETURN_STR(s)`: one owner, the caller's.
-    #[must_use]
-    pub fn finish(self) -> PhpString {
-        PhpString::of(self.0.finish())
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn finish(self, req: &Request) -> Owner<PhpString> {
+        Owner::adopt(req, PhpString::of(self.0.finish()))
     }
 
     /// `zend_string_efree(s)`: the allocation back to the heap.

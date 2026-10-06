@@ -14,7 +14,7 @@ use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{Countable, Iterator};
 
@@ -117,7 +117,7 @@ impl SplHeap {
     /// Can't peek at an empty heap
     /// ```
     #[php(tentative)]
-    fn extract(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn extract(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         consistent(req, this, true)?;
         let Some(top) = delete_top(req, this)? else {
@@ -129,7 +129,10 @@ impl SplHeap {
         };
         let (queue, flags) = read(req, this, |h| (h.queue, h.flags))?;
         if !queue {
-            return Ok(top.0);
+            // The element is the one owner the heap held of it.
+            let owner = Owner::take(req, top.0);
+            release(req, top);
+            return Ok(owner);
         }
         let out = extracted(req, top, flags);
         release(req, top);
@@ -160,7 +163,7 @@ impl SplHeap {
 
     /// `top(): mixed`: the top, left in place.
     #[php(tentative)]
-    fn top(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn top(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         consistent(req, this, false)?;
         let (queue, flags, top) = read(req, this, |h| {
@@ -176,7 +179,7 @@ impl SplHeap {
         if queue {
             extracted(req, top, flags)
         } else {
-            Ok(crate::copied(req, top.0))
+            Ok(Owner::take(req, top.0.deref()))
         }
     }
 
@@ -211,14 +214,14 @@ impl SplHeap {
 
     /// `current(): mixed`: the top, `null` for an empty heap.
     #[php(tentative)]
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let (queue, flags, top) = read(req, this.object(), |h| {
             (h.queue, h.flags, h.elements.first().copied())
         })?;
         match top {
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
             Some(top) if queue => extracted(req, top, flags),
-            Some(top) => Ok(crate::copied(req, top.0)),
+            Some(top) => Ok(Owner::take(req, top.0.deref())),
         }
     }
 
@@ -318,7 +321,7 @@ impl SplHeap {
     /// }
     /// ```
     #[php(tentative)]
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         heap_debug_info(req, this.object())
     }
 
@@ -351,7 +354,7 @@ impl SplHeap {
     /// int(1)
     /// ```
     #[php(tentative)]
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         serialize(req, this.object())
     }
 
@@ -682,7 +685,7 @@ fn cmp(
     let answer = if overridden_compare(req, object) {
         call_method(req, &object, b"compare", &[first, second]).and_then(|answered| {
             let n = to_long(req, &answered);
-            req.release(answered);
+            answered.give_up(req);
             n
         })
     } else if min && !queue {
@@ -818,19 +821,27 @@ fn release(req: &mut Request, elem: (Value, Value)) {
 
 /// `spl_pqueue_extract_helper`: the data, the priority or both, one
 /// more owner each.
-fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Value, Thrown> {
+fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Owner<Value>, Thrown> {
     if flags & SplPriorityQueue::EXTR_BOTH == SplPriorityQueue::EXTR_BOTH {
         let mut out = PhpArray::new(req)?;
         let data = PhpString::new(req, b"data")?;
-        out.set(req, Key::Str(data), crate::copied(req, elem.0))?;
+        out.set(
+            req,
+            Key::Str(data.hand_on_unmigrated()),
+            crate::copied(req, elem.0),
+        )?;
         let priority = PhpString::new(req, b"priority")?;
-        out.set(req, Key::Str(priority), crate::copied(req, elem.1))?;
-        return Ok(Value::array(out));
+        out.set(
+            req,
+            Key::Str(priority.hand_on_unmigrated()),
+            crate::copied(req, elem.1),
+        )?;
+        return Ok(out.into_value());
     }
     if flags & SplPriorityQueue::EXTR_PRIORITY != 0 {
-        return Ok(crate::copied(req, elem.1));
+        return Ok(Owner::take(req, elem.1.deref()));
     }
-    Ok(crate::copied(req, elem.0))
+    Ok(Owner::take(req, elem.0.deref()))
 }
 
 impl ObjectHandlers for Handlers {
@@ -861,8 +872,9 @@ impl ObjectHandlers for Handlers {
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         if crate::overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
-            let n = to_long(req, &answered)?;
-            req.release(answered);
+            let n = to_long(req, &answered);
+            answered.give_up(req);
+            let n = n?;
             return Ok(Some(n));
         }
         let n = read(req, object, |h| h.elements.len())?;
@@ -886,13 +898,13 @@ fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         req.addref(a);
         req.addref(b);
     }
-    clone_with(req, &object, Box::new(copy))
+    clone_with(req, &object, Box::new(copy)).map(Owner::hand_on_unmigrated)
 }
 
 /// `spl_heap_object_get_debug_info`: the properties, then `flags`,
 /// `isCorrupted` and `heap` under the private names of `SplHeap` or
 /// `SplPriorityQueue`.
-fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let (queue, flags, corrupted, elements) = read(req, object, |h| {
         (h.queue, h.flags, h.corrupted, h.elements.clone())
     })?;
@@ -908,45 +920,57 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     };
     let mangled = |field: &[u8]| [b"\0".as_slice(), base, b"\0", field].concat();
     let name = PhpString::new(req, &mangled(b"flags"))?;
-    out.set(req, Key::Str(name), Value::int(flags))?;
+    out.set(req, Key::Str(name.hand_on_unmigrated()), Value::int(flags))?;
     let name = PhpString::new(req, &mangled(b"isCorrupted"))?;
-    out.set(req, Key::Str(name), Value::bool(corrupted))?;
+    out.set(
+        req,
+        Key::Str(name.hand_on_unmigrated()),
+        Value::bool(corrupted),
+    )?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?.hand_on_unmigrated()
         } else {
             crate::copied(req, elem.0)
         };
         heap.append(req, value)?;
     }
     let name = PhpString::new(req, &mangled(b"heap"))?;
-    out.set(req, Key::Str(name), Value::array(heap))?;
+    out.set(
+        req,
+        Key::Str(name.hand_on_unmigrated()),
+        heap.into_value().hand_on_unmigrated(),
+    )?;
     Ok(out)
 }
 
 /// The array `__serialize` answers for a heap or a queue.
-fn serialize(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     consistent(req, this, false)?;
     let (queue, flags, elements) = read(req, this, |h| (h.queue, h.flags, h.elements.clone()))?;
     let mut out = PhpArray::new(req)?;
     let props = crate::members(req, this)?;
-    out.append(req, Value::array(props))?;
+    out.append(req, props.into_value().hand_on_unmigrated())?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, b"flags")?;
-    state.set(req, Key::Str(key), Value::int(flags))?;
+    state.set(req, Key::Str(key.hand_on_unmigrated()), Value::int(flags))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?.hand_on_unmigrated()
         } else {
             crate::copied(req, elem.0)
         };
         heap.append(req, value)?;
     }
     let key = PhpString::new(req, b"heap_elements")?;
-    state.set(req, Key::Str(key), Value::array(heap))?;
-    out.append(req, Value::array(state))?;
+    state.set(
+        req,
+        Key::Str(key.hand_on_unmigrated()),
+        heap.into_value().hand_on_unmigrated(),
+    )?;
+    out.append(req, state.into_value().hand_on_unmigrated())?;
     Ok(out)
 }
 

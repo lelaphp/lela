@@ -587,7 +587,7 @@ fn string_option(
     };
     let text = to_string(req, &value)?;
     let bytes = text.as_bytes().to_vec();
-    req.release(Value::string(text));
+    text.give_up(req);
     Ok(Some(bytes))
 }
 

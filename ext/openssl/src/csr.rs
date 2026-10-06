@@ -10,7 +10,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::config::{Settings, parse};
 use crate::decode::{
@@ -66,7 +66,7 @@ pub(crate) const HANDLERS: Refusals = crate::refusals("openssl_csr_new()");
 fn object_of(
     req: &mut Request,
     csr: Csr,
-) -> Result<Instance<OpenSSLCertificateSigningRequest>, Thrown> {
+) -> Result<Owner<Instance<OpenSSLCertificateSigningRequest>>, Thrown> {
     let Some(class) = lookup_class(req, b"OpenSSLCertificateSigningRequest")? else {
         return Err(fatal(
             req,
@@ -77,7 +77,7 @@ fn object_of(
     if let Some(payload) = object.native_mut::<Req>(req) {
         payload.csr = Some(csr);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// The warning every native raises for a request it cannot read.
@@ -320,7 +320,7 @@ fn openssl_csr_new(
     #[php(sensitive)] private_key: Ref<Untyped<Value>>,
     #[php(default = null)] options: Option<PhpArray>,
     #[php(default = null)] extra_attributes: Option<PhpArray>,
-) -> Result<Union<Instance<OpenSSLCertificateSigningRequest>, bool>, Thrown> {
+) -> Result<Union<Owner<Instance<OpenSSLCertificateSigningRequest>>, bool>, Thrown> {
     finish(req, move |req| {
         let Some(settings) = parse(req, options) else {
             return Ok(Union::B(false));
@@ -378,8 +378,14 @@ fn openssl_csr_new(
             Union::B(true)
         };
         if made {
-            let object = key_object(req, key, true)?;
-            private_key.set(req, Untyped(Value::object(object.object())))?;
+            let written =
+                key_object(req, key, true).and_then(|object| private_key.set(req, object));
+            if let Err(thrown) = written {
+                if let Union::A(object) = out {
+                    object.give_up(req);
+                }
+                return Err(thrown);
+            }
         }
         Ok(out)
     })
@@ -486,7 +492,7 @@ fn openssl_csr_export(
         match export_into(req, &csr, &out, no_text) {
             Some(true) => {
                 let pem = PhpString::new(req, &out.contents())?;
-                output.set(req, Untyped(Value::string(pem)))?;
+                output.set(req, Untyped(pem.into_value()))?;
                 Ok(true)
             }
             Some(false) => {
@@ -599,7 +605,7 @@ fn openssl_csr_sign(
     #[php(default = null)] options: Option<PhpArray>,
     #[php(default = 0)] serial: i64,
     #[php(default = null)] serial_hex: Option<PhpString>,
-) -> Result<OrFalse<Instance<OpenSSLCertificate>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLCertificate>>>, Thrown> {
     finish(req, move |req| {
         let Some(csr) = csr_from_param(req, &csr, Arg::new(1, "csr"))? else {
             no_csr(req);
@@ -732,7 +738,7 @@ fn openssl_csr_get_subject(
     req: &mut Request,
     csr: CsrParam,
     #[php(default = true)] short_names: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     finish(req, move |req| {
         let Some(csr) = csr_from_param(req, &csr, Arg::new(1, "csr"))? else {
             return Ok(OrFalse::False);
@@ -764,7 +770,7 @@ fn openssl_csr_get_public_key(
     req: &mut Request,
     csr: CsrParam,
     #[php(default = true)] short_names: bool,
-) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLAsymmetricKey>>>, Thrown> {
     finish(req, move |req| {
         let _ = short_names;
         let Some(csr) = csr_from_param(req, &csr, Arg::new(1, "csr"))? else {

@@ -14,7 +14,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::string::{next_utf8_char, str_copy};
 use tables::Row;
@@ -624,7 +624,7 @@ fn unescape(
     all: bool,
     flags: i64,
     hint: Option<&[u8]>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     if !s.contains(&b'&') {
         return Ok(str_copy(req, string));
@@ -829,7 +829,7 @@ fn entities(
     req: &mut Request,
     (string, flags, hint, double_encode): (PhpString, i64, Option<PhpString>, bool),
     all: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     if string.is_empty() {
         return PhpString::new(req, b"");
     }
@@ -930,7 +930,7 @@ fn htmlspecialchars(
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = true)] double_encode: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     entities(req, (string, flags, encoding, double_encode), false)
 }
 
@@ -961,7 +961,7 @@ fn htmlentities(
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = true)] double_encode: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     entities(req, (string, flags, encoding, double_encode), true)
 }
 
@@ -984,7 +984,7 @@ fn htmlspecialchars_decode(
     req: &mut Request,
     string: PhpString,
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     unescape(req, string, false, flags, None)
 }
 
@@ -1011,7 +1011,7 @@ fn html_entity_decode(
     string: PhpString,
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     unescape(
         req,
         string,
@@ -1026,7 +1026,7 @@ fn html_entity_decode(
 /// each pair the charset can write.
 fn write_row(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     row: &Row,
     key: &[u8],
     charset: Charset,
@@ -1036,8 +1036,8 @@ fn write_row(
         entity.push(b'&');
         entity.extend_from_slice(name.as_bytes());
         entity.push(b';');
-        let key = php_ext::values::Key::from_string(PhpString::new(req, key)?);
-        let value = Value::string(PhpString::new(req, &entity)?);
+        let key = php_ext::values::Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
+        let value = Value::string(PhpString::new(req, &entity)?.hand_on_unmigrated());
         array.set(req, key, value)
     };
     match row {
@@ -1112,7 +1112,7 @@ fn get_html_translation_table(
     #[php(default = HTML_SPECIALCHARS)] table: i64,
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
     #[php(default = "UTF-8")] encoding: Passed<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let all = table;
     // php's `charset_hint` stays NULL where the call gave no `$encoding`,
     // so the ini's charset and not the shown default is what it reads.

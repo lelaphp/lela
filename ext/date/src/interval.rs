@@ -8,7 +8,7 @@ use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time, UNSET};
@@ -92,7 +92,7 @@ fn from_date_string(text: &[u8]) -> Result<(RelTime, bool), (i32, char, String)>
 fn date_interval_create_from_date_string(
     req: &mut Request,
     datetime: PhpString,
-) -> Result<OrFalse<Instance<DateInterval>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateInterval>>>, Thrown> {
     let text = datetime.as_bytes();
     let shown = String::from_utf8_lossy(text).into_owned();
     match from_date_string(text) {
@@ -170,7 +170,11 @@ fn interval_format(format: &[u8], t: &RelTime) -> Vec<u8> {
 }
 
 /// `date_interval_format` and `DateInterval::format`.
-fn format_of(req: &mut Request, object: PhpObject, format: PhpString) -> Result<PhpString, Thrown> {
+fn format_of(
+    req: &mut Request,
+    object: PhpObject,
+    format: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let (diff, _) = interval_of(req, object)?;
     PhpString::new(req, &interval_format(format.as_bytes(), &diff))
 }
@@ -195,7 +199,7 @@ fn date_interval_format(
     req: &mut Request,
     object: Instance<DateInterval>,
     format: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     format_of(req, object.object(), format)
 }
 
@@ -221,7 +225,7 @@ fn scalar(value: &Value) -> bool {
 fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
     let s = to_string(req, value)?;
     let text = String::from_utf8_lossy(s.as_bytes()).into_owned();
-    req.release(Value::string(s));
+    s.give_up(req);
     let t = text.trim_start();
     let (sign, digits) = match t.as_bytes().first() {
         Some(b'-') => (-1i64, &t[1..]),
@@ -456,7 +460,7 @@ impl DateInterval {
     fn createFromDateString(
         req: &mut Request,
         datetime: PhpString,
-    ) -> Result<Instance<DateInterval>, Thrown> {
+    ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let text = datetime.as_bytes();
         let shown = String::from_utf8_lossy(text).into_owned();
         match from_date_string(text) {
@@ -477,7 +481,11 @@ impl DateInterval {
     /// `DateInterval::format(string $format): string`,
     /// `date_interval_format`'s body.
     #[php(tentative)]
-    fn format(req: &mut Request, this: This<Self>, format: PhpString) -> Result<PhpString, Thrown> {
+    fn format(
+        req: &mut Request,
+        this: This<Self>,
+        format: PhpString,
+    ) -> Result<Owner<PhpString>, Thrown> {
         format_of(req, this.object(), format)
     }
 
@@ -516,7 +524,7 @@ impl DateInterval {
     ///   string(11) "next monday"
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let (diff, _) = interval_of(req, object)?;
         let text = object
@@ -597,8 +605,8 @@ impl DateInterval {
             None => Vec::new(),
         };
         let hash = rows_array(req, &own, fields, false)?;
-        let done = from_hash(req, object, hash);
-        req.release(Value::array(hash));
+        let done = from_hash(req, object, *hash);
+        hash.give_up(req);
         done
     }
 
@@ -651,13 +659,16 @@ impl DateInterval {
     /// ))
     /// ```
     #[php(tentative)]
-    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DateInterval>, Thrown> {
+    fn __set_state(
+        req: &mut Request,
+        array: PhpArray,
+    ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let class = class_id(req, "DateInterval")?;
         let object = new_object(req, class)?;
-        if let Err(thrown) = from_hash(req, object, array) {
-            req.release(object.as_value());
+        if let Err(thrown) = from_hash(req, *object, array) {
+            object.give_up(req);
             return Err(thrown);
         }
-        Ok(Instance::of(object))
+        Ok(object.into_instance())
     }
 }

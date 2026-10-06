@@ -36,7 +36,9 @@ use php_ext::call::{Function, instantiate, lookup_class};
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Resolve, Stream};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Expanded, Library, Raised, RelaxNg, TextReader};
 
@@ -207,7 +209,7 @@ impl ObjectHandlers for Handlers {
         for (name, p) in Property::ALL {
             match p.read(req, object) {
                 Ok(Some(value)) => {
-                    let key = Key::Str(PhpString::new(req, name)?);
+                    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                     table.set(req, key, value)?;
                 }
                 Ok(None) => {}
@@ -219,7 +221,10 @@ impl ObjectHandlers for Handlers {
                 }
             }
         }
-        Ok(Some(DebugInfo { table, thrown }))
+        Ok(Some(DebugInfo {
+            table: table.hand_on_unmigrated(),
+            thrown,
+        }))
     }
 
     /// `xmlreader_get_method`: `open` and `XML`, the two static natives
@@ -311,7 +316,7 @@ fn quiet<R>(
         .map(f)
 }
 
-fn string(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<Option<PhpString>, Thrown> {
+fn string(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<Option<Owner<PhpString>>, Thrown> {
     bytes.map(|b| PhpString::new(req, &b)).transpose()
 }
 
@@ -373,16 +378,16 @@ pub(crate) enum Target {
 
 impl Target {
     /// The loaded reader on the object, or a new object with it.
-    fn land(self, req: &mut Request, reader: TextReader) -> Result<Value, Thrown> {
+    fn land(self, req: &mut Request, reader: TextReader) -> Result<Owner<Value>, Thrown> {
         match self {
             Target::This(object) => {
                 put(req, object, reader);
-                Ok(Value::bool(true))
+                Ok(Owner::take(req, Value::bool(true)))
             }
             Target::New(class) => match instantiate(req, class, &[]) {
                 Ok(object) => {
-                    put(req, object, reader);
-                    Ok(Value::object(object))
+                    put(req, *object, reader);
+                    Ok(object.into_value())
                 }
                 Err(thrown) => {
                     let raised = reader.close(req);
@@ -395,11 +400,11 @@ impl Target {
 }
 
 /// `Unable to open source data` or its kin, as the call refuses.
-fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Value, Thrown> {
+fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Owner<Value>, Thrown> {
     match failure {
         Failure::Warn => {
             docref(req, Level::Warning, message);
-            Ok(Value::bool(false))
+            Ok(Owner::take(req, Value::bool(false)))
         }
         Failure::Throw => Err(throw_error(req, "Error", message)),
     }
@@ -413,7 +418,7 @@ pub(crate) fn from_uri(
     uri: Path,
     encoding: Option<&Path>,
     flags: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if let Target::This(object) = into {
         free_resources(req, object);
     }
@@ -440,7 +445,7 @@ pub(crate) fn from_string(
     source: PhpString,
     encoding: Option<&Path>,
     flags: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if let Target::This(object) = into {
         free_resources(req, object);
     }
@@ -572,14 +577,16 @@ impl Property {
             Some(Read::Number(n, false)) => Ok(Some(Value::int(i64::from(n)))),
             Some(Read::Text(t)) => {
                 let s = PhpString::new(req, t.as_deref().unwrap_or_default())?;
-                Ok(Some(Value::string(s)))
+                Ok(Some(Value::string(s.hand_on_unmigrated())))
             }
             None if boolean => Ok(Some(Value::bool(false))),
             None => match self {
                 Property::AttributeCount | Property::Depth | Property::NodeType => {
                     Ok(Some(Value::int(0)))
                 }
-                _ => Ok(Some(Value::string(PhpString::new(req, b"")?))),
+                _ => Ok(Some(Value::string(
+                    PhpString::new(req, b"")?.hand_on_unmigrated(),
+                ))),
             },
         }
     }
@@ -705,7 +712,7 @@ impl XMLReader {
         req: &mut Request,
         this: This<Self>,
         name: PhpString,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         not_empty(req, 1, name.as_bytes())?;
         let found = quiet(req, this.object(), |r| r.attribute(name.as_bytes())).flatten();
         string(req, found)
@@ -716,7 +723,7 @@ impl XMLReader {
         req: &mut Request,
         this: This<Self>,
         index: i64,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let found = quiet(req, this.object(), |r| r.attribute_no(flags_int(index))).flatten();
         string(req, found)
     }
@@ -739,7 +746,7 @@ impl XMLReader {
         this: This<Self>,
         name: PhpString,
         namespace: PhpString,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         not_empty(req, 1, name.as_bytes())?;
         not_empty(req, 2, namespace.as_bytes())?;
         let found = quiet(req, this.object(), |r| {
@@ -775,7 +782,7 @@ impl XMLReader {
         req: &mut Request,
         this: This<Self>,
         prefix: PhpString,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         not_empty(req, 1, prefix.as_bytes())?;
         let found = quiet(req, this.object(), |r| {
             r.lookup_namespace(prefix.as_bytes())
@@ -918,7 +925,7 @@ impl XMLReader {
         uri: Path,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let class = reader_class(req)?;
         from_uri(
             req,
@@ -951,7 +958,7 @@ impl XMLReader {
         uri: Path,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         let class = called(req)?;
         let made = from_uri(
             req,
@@ -986,7 +993,7 @@ impl XMLReader {
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
         #[php(default = null)] documentUri: Option<Path>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message =
                 "XMLReader::fromStream(): supplied resource is not a valid stream resource";
@@ -1012,19 +1019,19 @@ impl XMLReader {
     }
 
     #[php(tentative)]
-    fn readInnerXml(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn readInnerXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_inner_xml)?.flatten();
         PhpString::new(req, read.as_deref().unwrap_or_default())
     }
 
     #[php(tentative)]
-    fn readOuterXml(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn readOuterXml(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_outer_xml)?.flatten();
         PhpString::new(req, read.as_deref().unwrap_or_default())
     }
 
     #[php(tentative)]
-    fn readString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn readString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let read = with(req, this.object(), TextReader::read_string)?.flatten();
         PhpString::new(req, read.as_deref().unwrap_or_default())
     }
@@ -1135,7 +1142,7 @@ impl XMLReader {
         source: PhpString,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let class = reader_class(req)?;
         from_string(
             req,
@@ -1167,7 +1174,7 @@ impl XMLReader {
         source: PhpString,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         let class = called(req)?;
         let made = from_string(
             req,
@@ -1199,7 +1206,7 @@ impl XMLReader {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] baseNode: Option<Instance<DOMNode>>,
-    ) -> Result<OrFalse<Instance<DOMNode>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<DOMNode>>>, Thrown> {
         let base = baseNode.map(|b| b.object());
         let mut doc = None;
         if let Some(object) = base {
@@ -1228,19 +1235,25 @@ impl XMLReader {
             }
             Expanded::Copy(node) => {
                 let made = php_ext_dom::create_object(req, node, base)?;
-                match made.as_object() {
-                    Some(object) => Ok(OrFalse::Value(Instance::of(*object))),
-                    None => Ok(OrFalse::False),
-                }
+                let object = made.as_object().copied();
+                let answer = match object {
+                    Some(object) => OrFalse::Value(Owner::take(req, Instance::of(object))),
+                    None => OrFalse::False,
+                };
+                made.give_up(req);
+                Ok(answer)
             }
         }
     }
 }
 
 /// A new object a factory made, as `static`.
-fn static_of(req: &mut Request, made: Value) -> Result<Static, Thrown> {
-    match made.as_object() {
-        Some(object) => Ok(Static(*object)),
+fn static_of(req: &mut Request, made: Owner<Value>) -> Result<Owner<Static>, Thrown> {
+    let object = made.as_object().copied();
+    let made_static = object.map(|object| Owner::take(req, Static(object)));
+    made.give_up(req);
+    match made_static {
+        Some(object) => Ok(object),
         None => Err(fatal(
             req,
             "InternalError: XMLReader factory made no object",

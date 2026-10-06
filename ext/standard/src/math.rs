@@ -4,13 +4,13 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
-use php_ext::abi::{FromArgument, Passed, Raw, Union};
+use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 pub(crate) use constants::{
     PHP_ROUND_HALF_DOWN, PHP_ROUND_HALF_EVEN, PHP_ROUND_HALF_ODD, PHP_ROUND_HALF_UP,
@@ -719,9 +719,9 @@ fn pow(
     req: &mut Request,
     num: Value,
     exponent: Value,
-) -> Result<Raw<Union<Number, PhpObject>>, Thrown> {
+) -> Result<Owner<Raw<Union<Number, PhpObject>>>, Thrown> {
     let power = binary_op(req, BinaryOp::Pow, &num, &exponent)?;
-    <Raw<Union<Number, PhpObject>> as FromArgument>::from_value(req, power)
+    Ok(power.into_raw())
 }
 
 /// `exp(float $num): float`.
@@ -990,7 +990,7 @@ fn octdec(req: &mut Request, octal_string: PhpString) -> Number {
 /// `_php_math_longtobase_pwr2`: the long's bits, unsigned, in the digits
 /// of `2^bits`.
 /// `_php_math_longtobase_pwr2` as the string it builds.
-fn to_pwr2(req: &mut Request, num: i64, bits: u32) -> Result<PhpString, Thrown> {
+fn to_pwr2(req: &mut Request, num: i64, bits: u32) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, &long_to_pwr2(num, bits))
 }
 
@@ -1023,7 +1023,7 @@ fn long_to_pwr2(value: i64, bits: u32) -> Vec<u8> {
 /// string(4) "1100"
 /// ```
 #[php_function]
-fn decbin(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+fn decbin(req: &mut Request, num: i64) -> Result<Owner<PhpString>, Thrown> {
     to_pwr2(req, num, 1)
 }
 
@@ -1038,7 +1038,7 @@ fn decbin(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
 /// string(1) "0"
 /// ```
 #[php_function]
-fn decoct(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+fn decoct(req: &mut Request, num: i64) -> Result<Owner<PhpString>, Thrown> {
     to_pwr2(req, num, 3)
 }
 
@@ -1055,7 +1055,7 @@ fn decoct(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
 /// string(1) "0"
 /// ```
 #[php_function(frameless(1))]
-fn dechex(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+fn dechex(req: &mut Request, num: i64) -> Result<Owner<PhpString>, Thrown> {
     to_pwr2(req, num, 4)
 }
 
@@ -1132,7 +1132,7 @@ fn base_convert(
     num: PhpString,
     from_base: i64,
     to_base: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let number = num.as_bytes().to_vec();
     let (from, to) = (from_base, to_base);
     if !(2..=36).contains(&from) {
@@ -1181,7 +1181,7 @@ fn number_format(
     #[php(default = 0)] decimals: Raw<i64>,
     #[php(default = ".")] decimal_separator: Raw<Option<PhpString>>,
     #[php(default = ",")] thousands_separator: Raw<Option<PhpString>>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     // `Z_PARAM_NUMBER` under the stub's `float`, then the rest in order.
     let num = coerce_param(
         req,

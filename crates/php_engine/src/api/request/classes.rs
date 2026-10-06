@@ -14,7 +14,7 @@ use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value};
+use crate::api::values::{ClassId, Key, Owner, PhpArray, Value, adopted};
 use crate::engine::Shared;
 use crate::exec;
 use crate::observer::LinkedAtLoad;
@@ -1514,7 +1514,14 @@ impl Request {
     /// lowered name the table is keyed by and in the order the table
     /// took them. A closure is no row, since php never adds one to the
     /// table; a method is none either, being its class's.
-    pub fn defined_functions(&mut self) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn defined_functions(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.defined_functions_made();
+        adopted(self, made)
+    }
+
+    /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
+    pub(crate) fn defined_functions_made(&mut self) -> Result<PhpArray, Thrown> {
         let internal: Vec<Vec<u8>> = self
             .shared
             .functions
@@ -1528,14 +1535,14 @@ impl Request {
             .map(|decl| decl.name.0.to_ascii_lowercase())
             .filter(|name| !name.starts_with(b"{"))
             .collect();
-        let mut array = PhpArray::new(self)?;
+        let mut array = self.array()?;
         for (list, names) in [(&b"internal"[..], internal), (b"user", user)] {
-            let mut rows = PhpArray::new(self)?;
+            let mut rows = self.array()?;
             for name in names {
-                let name = Value::string(PhpString::new(self, &name)?);
+                let name = Value::string(self.string(&name)?);
                 rows.append(self, name)?;
             }
-            let key = Key::Str(PhpString::new(self, list)?);
+            let key = Key::Str(self.string(list)?);
             array.set(self, key, Value::array(rows))?;
         }
         Ok(array)

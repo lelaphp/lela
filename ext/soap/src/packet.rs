@@ -55,7 +55,7 @@ fn decode_string(req: &mut Request, cx: &mut Cx, node: Node) -> Res<Vec<u8>> {
     let v = decode(req, cx, get_conversion(ty::IS_STRING), node)?;
     let s = to_string(req, &v)?;
     let bytes = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     req.release(v);
     Ok(bytes)
 }
@@ -423,10 +423,16 @@ fn read_body(
                     }
                     let tmp = match val {
                         None => Value::null(),
-                        Some(v) => decode(req, cx, param.encode, v)?,
+                        Some(v) => match decode(req, cx, param.encode, v) {
+                            Ok(tmp) => tmp,
+                            Err(err) => {
+                                return_value.give_up(req);
+                                return Err(err);
+                            }
+                        },
                     };
                     let key = PhpString::new(req, param.param_name.as_deref().unwrap_or_default())?;
-                    return_value.set(req, PhpKey::from_string(key), tmp)?;
+                    return_value.set(req, PhpKey::from_string(key.hand_on_unmigrated()), tmp)?;
                     param_count += 1;
                 }
             }
@@ -436,7 +442,13 @@ fn read_body(
                 val = next_element(val);
                 let Some(v) = val else { break };
                 if !node_is_equal(v, Some(b"result"), Some(RPC_SOAP12_NAMESPACE)) {
-                    let tmp = decode(req, cx, None, v)?;
+                    let tmp = match decode(req, cx, None, v) {
+                        Ok(tmp) => tmp,
+                        Err(err) => {
+                            return_value.give_up(req);
+                            return Err(err);
+                        }
+                    };
                     if v.has_name() {
                         let name = v.name();
                         if let Some(existing) = return_value.find(&name) {
@@ -444,7 +456,9 @@ fn read_body(
                                 req.addref(&Value::array(arr));
                                 arr.separate(req)?;
                                 arr.append(req, tmp)?;
-                                let key = PhpKey::from_string(PhpString::new(req, &name)?);
+                                let key = PhpKey::from_string(
+                                    PhpString::new(req, &name)?.hand_on_unmigrated(),
+                                );
                                 return_value.set(req, key, Value::array(arr))?;
                             } else {
                                 req.release(tmp);
@@ -452,10 +466,14 @@ fn read_body(
                         } else if v.next().is_some() && get_node(v.next(), &name, None).is_some() {
                             let mut arr = PhpArray::new(req)?;
                             arr.append(req, tmp)?;
-                            let key = PhpKey::from_string(PhpString::new(req, &name)?);
-                            return_value.set(req, key, Value::array(arr))?;
+                            let key = PhpKey::from_string(
+                                PhpString::new(req, &name)?.hand_on_unmigrated(),
+                            );
+                            return_value.set(req, key, arr.into_value().hand_on_unmigrated())?;
                         } else {
-                            let key = PhpKey::from_string(PhpString::new(req, &name)?);
+                            let key = PhpKey::from_string(
+                                PhpString::new(req, &name)?.hand_on_unmigrated(),
+                            );
                             return_value.set(req, key, tmp)?;
                         }
                     } else {
@@ -468,10 +486,12 @@ fn read_body(
         }
     }
     let result = if param_count == 0 {
-        req.release(Value::array(return_value));
+        return_value.give_up(req);
         Value::null()
     } else if param_count == 1 {
-        let first = walk::rows(req, return_value).next().map(|(_, v)| v.deref());
+        let first = walk::rows(req, *return_value)
+            .next()
+            .map(|(_, v)| v.deref());
         let out = match first {
             Some(v) => {
                 req.addref(&v);
@@ -479,10 +499,10 @@ fn read_body(
             }
             None => Value::null(),
         };
-        req.release(Value::array(return_value));
+        return_value.give_up(req);
         out
     } else {
-        Value::array(return_value)
+        return_value.into_value().hand_on_unmigrated()
     };
     if let (Some(out), Some(head)) = (soap_headers, head) {
         let mut headers = PhpArray::new(req)?;
@@ -501,13 +521,19 @@ fn read_body(
                         enc = h.encode;
                     }
                 }
-                let val = decode(req, cx, enc, t)?;
-                let key = PhpKey::from_string(PhpString::new(req, &t.name())?);
+                let val = match decode(req, cx, enc, t) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        headers.give_up(req);
+                        return Err(err);
+                    }
+                };
+                let key = PhpKey::from_string(PhpString::new(req, &t.name())?.hand_on_unmigrated());
                 headers.set(req, key, val)?;
             }
             trav = t.next();
         }
-        out.set(req, Untyped(Value::array(headers)))?;
+        out.set(req, Untyped(headers.into_value()))?;
     }
     Ok(result)
 }

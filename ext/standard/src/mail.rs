@@ -305,7 +305,7 @@ pub fn php_mail(
             };
             if let Some(stream) = req.open_stream_with(&log, b"a", opening)? {
                 stream.write(req, &entry);
-                stream.free(req);
+                stream.hand_on_unmigrated().free(req);
             }
         }
     }

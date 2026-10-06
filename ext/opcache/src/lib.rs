@@ -43,7 +43,7 @@ use php_ext::raising::{Thrown, notice, warning};
 use php_ext::request::{
     CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::blacklist::Blacklist;
 use crate::ini::{Log, Stored, accel_log, flag, long, value};
@@ -387,14 +387,19 @@ fn opcache_reset(req: &mut Request) -> bool {
 }
 
 /// `add_assoc_*`: `value` under `name`.
-fn put(req: &mut Request, array: &mut PhpArray, name: &str, value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+fn put(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &str,
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// A string of the request's as a value.
-fn text(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn text(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// Signed from unsigned, saturating.
@@ -423,13 +428,17 @@ fn consumption(req: &Request) -> i64 {
 /// not loaded.
 fn formatted(req: &mut Request, format: &str, at: i64) -> Result<String, Thrown> {
     let named = text(req, b"date")?;
-    let Ok(date) = to_callable(req, &named) else {
+    let date = to_callable(req, &named);
+    named.give_up(req);
+    let Ok(date) = date else {
         return Ok(at.to_string());
     };
     let format = text(req, format.as_bytes())?;
-    let shown = php_ext::call::call(req, &date, &[format, Value::int(at)])?;
+    let shown = php_ext::call::call(req, &date, &[*format, Value::int(at)]);
+    format.give_up(req);
+    let shown = shown?;
     let bytes = shown.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
-    req.release(shown);
+    shown.give_up(req);
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -488,7 +497,7 @@ pub(crate) fn now() -> i64 {
 fn opcache_get_status(
     req: &mut Request,
     #[php(default = true)] include_scripts: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !api_allowed(req) {
         return Ok(OrFalse::False);
     }
@@ -501,7 +510,7 @@ fn opcache_get_status(
     put(req, &mut out, "opcache_enabled", Value::bool(enabled))?;
     let file_cache = value(req, "opcache.file_cache").to_vec();
     if !file_cache.is_empty() {
-        let shown = text(req, &file_cache)?;
+        let shown = text(req, &file_cache)?.hand_on_unmigrated();
         put(req, &mut out, "file_cache", shown)?;
     }
     if flag(req, "opcache.file_cache_only") {
@@ -518,13 +527,18 @@ fn opcache_get_status(
     put(req, &mut out, "restart_in_progress", Value::bool(false))?;
 
     let memory = memory_usage(req, &status)?;
-    put(req, &mut out, "memory_usage", Value::array(memory))?;
+    put(
+        req,
+        &mut out,
+        "memory_usage",
+        memory.into_value().hand_on_unmigrated(),
+    )?;
     if let Some(interned) = interned_strings_usage(req, &status)? {
         put(
             req,
             &mut out,
             "interned_strings_usage",
-            Value::array(interned),
+            interned.into_value().hand_on_unmigrated(),
         )?;
     }
     let statistics = statistics(req, &status)?;
@@ -532,23 +546,33 @@ fn opcache_get_status(
         req,
         &mut out,
         "opcache_statistics",
-        Value::array(statistics),
+        statistics.into_value().hand_on_unmigrated(),
     )?;
     if let Some(preload) = &status.preload {
         let preloaded = preload_statistics(req, preload)?;
-        put(req, &mut out, "preload_statistics", Value::array(preloaded))?;
+        put(
+            req,
+            &mut out,
+            "preload_statistics",
+            preloaded.into_value().hand_on_unmigrated(),
+        )?;
     }
     if include_scripts && enabled {
         let listed = scripts(req, &status)?;
-        put(req, &mut out, "scripts", Value::array(listed))?;
+        put(
+            req,
+            &mut out,
+            "scripts",
+            listed.into_value().hand_on_unmigrated(),
+        )?;
     }
     let jit = jit_status(req)?;
-    put(req, &mut out, "jit", Value::array(jit))?;
+    put(req, &mut out, "jit", jit.into_value().hand_on_unmigrated())?;
     Ok(OrFalse::Value(out))
 }
 
 /// An array of the request's with `rows` under their names, in order.
-fn assoc(req: &mut Request, rows: Vec<(&str, Value)>) -> Result<PhpArray, Thrown> {
+fn assoc(req: &mut Request, rows: Vec<(&str, Value)>) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, value) in rows {
         put(req, &mut array, name, value)?;
@@ -567,7 +591,7 @@ fn used_memory(status: &CacheStatus) -> i64 {
 
 /// `memory_usage`: the configured memory less what the files held weigh,
 /// nothing wasted.
-fn memory_usage(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> {
+fn memory_usage(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
     let used = used_memory(status);
     let free = consumption(req).saturating_sub(used);
     assoc(
@@ -587,7 +611,7 @@ fn memory_usage(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thr
 fn interned_strings_usage(
     req: &mut Request,
     status: &CacheStatus,
-) -> Result<Option<PhpArray>, Thrown> {
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let buffer = long(req, "opcache.interned_strings_buffer").saturating_mul(1 << 20);
     if buffer <= 0 {
         return Ok(None);
@@ -620,7 +644,7 @@ fn percent(part: u64, whole: u64) -> f64 {
 
 /// `opcache_statistics`: the counters, one key per file held, and the
 /// two ratios over every file asked for.
-fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> {
+fn statistics(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
     let scripts = u64::try_from(status.files.len()).unwrap_or(u64::MAX);
     let asked = status
         .hits
@@ -655,7 +679,10 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Throw
 
 /// `preload_statistics`: what the preload weighs, then its functions and
 /// its classes where it has any, and its scripts.
-fn preload_statistics(req: &mut Request, preload: &PreloadStatistics) -> Result<PhpArray, Thrown> {
+fn preload_statistics(
+    req: &mut Request,
+    preload: &PreloadStatistics,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     put(
         req,
@@ -673,21 +700,26 @@ fn preload_statistics(req: &mut Request, preload: &PreloadStatistics) -> Result<
         }
         let mut listed = PhpArray::new(req)?;
         for each in names {
-            let each = text(req, each)?;
+            let each = text(req, each)?.hand_on_unmigrated();
             listed.append(req, each)?;
         }
-        put(req, &mut out, name, Value::array(listed))?;
+        put(
+            req,
+            &mut out,
+            name,
+            listed.into_value().hand_on_unmigrated(),
+        )?;
     }
     Ok(out)
 }
 
 /// `accelerator_get_scripts`: each file held under its full path.
-fn scripts(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> {
+fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
     let validated = flag(req, "opcache.validate_timestamps");
     let mut listed = PhpArray::new(req)?;
     for script in &status.files {
-        let path = text(req, &script.path)?;
-        let when = text(req, ini::asctime(script.last_used).as_bytes())?;
+        let path = text(req, &script.path)?.hand_on_unmigrated();
+        let when = text(req, ini::asctime(script.last_used).as_bytes())?.hand_on_unmigrated();
         let mut rows = vec![
             ("full_path", path),
             ("hits", int(script.hits)),
@@ -700,14 +732,14 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<PhpArray, Thrown> 
         }
         rows.push(("revalidate", Value::int(script.revalidate)));
         let row = assoc(req, rows)?;
-        let at = Key::Str(PhpString::new(req, &script.path)?);
-        listed.set(req, at, Value::array(row))?;
+        let at = Key::Str(PhpString::new(req, &script.path)?.hand_on_unmigrated());
+        listed.set(req, at, row.into_value().hand_on_unmigrated())?;
     }
     Ok(listed)
 }
 
 /// `zend_jit_status` for a tier that compiles nothing.
-fn jit_status(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn jit_status(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     assoc(
         req,
         vec![
@@ -908,7 +940,7 @@ fn opcache_jit_blacklist(closure: Instance<Closure>) {
 /// /q
 /// ```
 #[php_function]
-fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !api_allowed(req) {
         return Ok(OrFalse::False);
     }
@@ -921,18 +953,28 @@ fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<PhpArray>, Thr
             Stored::Bool(b) => Value::bool(b),
             Stored::Long(n) => Value::int(n),
             Stored::Double(f) => Value::float(f),
-            Stored::Text(bytes) => text(req, &bytes)?,
+            Stored::Text(bytes) => text(req, &bytes)?.hand_on_unmigrated(),
         };
         put(req, &mut directives, name, stored)?;
     }
     let mut out = PhpArray::new(req)?;
-    put(req, &mut out, "directives", Value::array(directives))?;
+    put(
+        req,
+        &mut out,
+        "directives",
+        directives.into_value().hand_on_unmigrated(),
+    )?;
     let mut version = PhpArray::new(req)?;
-    let shown = text(req, PHP_VERSION.as_bytes())?;
+    let shown = text(req, PHP_VERSION.as_bytes())?.hand_on_unmigrated();
     put(req, &mut version, "version", shown)?;
-    let product = text(req, PRODUCT.as_bytes())?;
+    let product = text(req, PRODUCT.as_bytes())?.hand_on_unmigrated();
     put(req, &mut version, "opcache_product_name", product)?;
-    put(req, &mut out, "version", Value::array(version))?;
+    put(
+        req,
+        &mut out,
+        "version",
+        version.into_value().hand_on_unmigrated(),
+    )?;
     let (startup, _) = state(req);
     let entries: Vec<Vec<u8>> = if startup == Startup::Ok {
         req.engine::<Accelerator>()
@@ -943,10 +985,15 @@ fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<PhpArray>, Thr
     };
     let mut blacklist = PhpArray::new(req)?;
     for entry in entries {
-        let entry = text(req, &entry)?;
+        let entry = text(req, &entry)?.hand_on_unmigrated();
         blacklist.append(req, entry)?;
     }
-    put(req, &mut out, "blacklist", Value::array(blacklist))?;
+    put(
+        req,
+        &mut out,
+        "blacklist",
+        blacklist.into_value().hand_on_unmigrated(),
+    )?;
     Ok(OrFalse::Value(out))
 }
 

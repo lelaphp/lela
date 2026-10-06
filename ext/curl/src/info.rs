@@ -5,14 +5,14 @@ use php_ext::abi::Instance;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::constants as c;
 use crate::ffi::{Easy, Info};
 use crate::handle::{CurlHandle, curl, easy_of};
 
 /// An array of the request's being filled with `add_assoc_*`.
-pub(crate) struct Assoc(pub(crate) PhpArray);
+pub(crate) struct Assoc(pub(crate) Owner<PhpArray>);
 
 impl Assoc {
     pub(crate) fn new(req: &mut Request) -> Result<Assoc, Thrown> {
@@ -21,7 +21,7 @@ impl Assoc {
 
     /// `add_assoc_zval`: `value` is the array's from here.
     pub(crate) fn add(&mut self, req: &mut Request, key: &str, value: Value) -> Result<(), Thrown> {
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
         self.0.set(req, key, value)
     }
 
@@ -32,28 +32,32 @@ impl Assoc {
         key: &str,
         bytes: &[u8],
     ) -> Result<(), Thrown> {
-        let value = Value::string(PhpString::new(req, bytes)?);
+        let value = Value::string(PhpString::new(req, bytes)?.hand_on_unmigrated());
         self.add(req, key, value)
     }
 
-    pub(crate) fn value(self) -> Value {
-        Value::array(self.0)
+    pub(crate) fn value(self) -> Owner<Value> {
+        self.0.into_value()
     }
 }
 
 /// A list of strings, `add_next_index_string` each.
-pub(crate) fn list(req: &mut Request, items: &[Vec<u8>]) -> Result<Value, Thrown> {
+pub(crate) fn list(req: &mut Request, items: &[Vec<u8>]) -> Result<Owner<Value>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for item in items {
-        let value = Value::string(PhpString::new(req, item)?);
+        let value = Value::string(PhpString::new(req, item)?.hand_on_unmigrated());
         array.append(req, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array.into_value())
 }
 
 /// `create_certinfo`: each certificate an array of its `key:value`
 /// lines, the key cut at the first colon of the line's first 63 bytes.
-fn certinfo(req: &mut Request, certs: &[Vec<Vec<u8>>], into: &mut PhpArray) -> Result<(), Thrown> {
+fn certinfo(
+    req: &mut Request,
+    certs: &[Vec<Vec<u8>>],
+    into: &mut Owner<PhpArray>,
+) -> Result<(), Thrown> {
     for cert in certs {
         let mut hash = Assoc::new(req)?;
         for line in cert {
@@ -70,7 +74,7 @@ fn certinfo(req: &mut Request, certs: &[Vec<Vec<u8>>], into: &mut PhpArray) -> R
                 ),
             }
         }
-        into.append(req, hash.value())?;
+        into.append(req, hash.value().hand_on_unmigrated())?;
     }
     Ok(())
 }
@@ -198,7 +202,7 @@ fn rows(
         let value = match (easy.info(*info), row) {
             (Some(Info::Str(None)), Row::OrNull) => Value::null(),
             (Some(Info::Str(text)), _) => {
-                Value::string(PhpString::new(req, &text.unwrap_or_default())?)
+                Value::string(PhpString::new(req, &text.unwrap_or_default())?.hand_on_unmigrated())
             }
             (Some(Info::Long(n) | Info::OffT(n)), _) => Value::int(n),
             (Some(Info::Double(f)), _) => Value::float(f),
@@ -235,7 +239,7 @@ fn curl_getinfo(
     req: &mut Request,
     handle: Instance<CurlHandle>,
     #[php(default = null)] option: Option<i64>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let object = handle.object();
     let easy = easy_of(req, object)?;
     let Some(option) = option else {
@@ -244,7 +248,7 @@ fn curl_getinfo(
         if let Some(Info::Certs(certs)) = easy.info(c::CURLINFO_CERTINFO) {
             let mut array = PhpArray::new(req)?;
             certinfo(req, &certs, &mut array)?;
-            out.add(req, "certinfo", Value::array(array))?;
+            out.add(req, "certinfo", array.into_value().hand_on_unmigrated())?;
         }
         rows(req, &easy, &mut out, MIDDLE)?;
         if let Some(header) = curl(req, handle)?.header_out.clone() {
@@ -255,27 +259,24 @@ fn curl_getinfo(
     };
     let value = match option {
         c::CURLINFO_HEADER_OUT => match curl(req, handle)?.header_out.clone() {
-            Some(header) => Value::string(PhpString::new(req, &header)?),
-            None => Value::bool(false),
+            Some(header) => PhpString::new(req, &header)?.into_value(),
+            None => Owner::take(req, Value::bool(false)),
         },
         c::CURLINFO_PRIVATE => match curl(req, handle)?.private {
-            Some(private) => {
-                req.addref(&private);
-                private
-            }
-            None => Value::bool(false),
+            Some(private) => Owner::take(req, private),
+            None => Owner::take(req, Value::bool(false)),
         },
         _ => match easy.info(option) {
-            Some(Info::Str(Some(text))) => Value::string(PhpString::new(req, &text)?),
-            Some(Info::Long(n) | Info::OffT(n)) => Value::int(n),
-            Some(Info::Double(f)) => Value::float(f),
+            Some(Info::Str(Some(text))) => PhpString::new(req, &text)?.into_value(),
+            Some(Info::Long(n) | Info::OffT(n)) => Owner::take(req, Value::int(n)),
+            Some(Info::Double(f)) => Owner::take(req, Value::float(f)),
             Some(Info::List(lines)) => list(req, &lines)?,
             Some(Info::Certs(certs)) => {
                 let mut array = PhpArray::new(req)?;
                 certinfo(req, &certs, &mut array)?;
-                Value::array(array)
+                array.into_value()
             }
-            Some(Info::Str(None)) | None => Value::bool(false),
+            Some(Info::Str(None)) | None => Owner::take(req, Value::bool(false)),
         },
     };
     Ok(value)

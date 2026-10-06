@@ -9,10 +9,10 @@
 
 use std::ffi::{CStr, CString};
 
-use php_ext::abi::{Instance, Union};
+use php_ext::abi::{Instance, OrFalse, Union};
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
 use php_ext::request::{Request, Resolve};
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpString, Value, ValueRef, View};
 
 use crate::csr::OpenSSLCertificateSigningRequest;
 use crate::ffi::x509::{CertStack, Csr, read_all_certs};
@@ -69,19 +69,59 @@ pub(crate) fn raised(req: &mut Request) -> bool {
 
 /// A native's body, and what [`defer`] held thrown when it returns,
 /// whatever it answered: php's return with `EG(exception)` set.
-pub(crate) fn finish<T>(
+pub(crate) fn finish<T: Answer>(
     req: &mut Request,
     body: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
     let out = body(req);
     match req.state::<State>().thrown.take() {
         Some(thrown) => {
-            if let Err(other) = out {
-                php_ext::raising::clear(req, other).ok();
+            match out {
+                Ok(answer) => answer.discard(req),
+                Err(other) => {
+                    php_ext::raising::clear(req, other).ok();
+                }
             }
             Err(thrown)
         }
         None => out,
+    }
+}
+
+/// What a native answers through [`finish`], thrown away where the
+/// deferred error wins: an owner given up, a scalar dropped.
+pub(crate) trait Answer {
+    fn discard(self, req: &mut Request);
+}
+
+impl Answer for bool {
+    fn discard(self, _: &mut Request) {}
+}
+
+impl Answer for i64 {
+    fn discard(self, _: &mut Request) {}
+}
+
+impl<T: Answer> Answer for OrFalse<T> {
+    fn discard(self, req: &mut Request) {
+        if let OrFalse::Value(answer) = self {
+            answer.discard(req);
+        }
+    }
+}
+
+impl<A: Answer, B: Answer> Answer for Union<A, B> {
+    fn discard(self, req: &mut Request) {
+        match self {
+            Union::A(answer) => answer.discard(req),
+            Union::B(answer) => answer.discard(req),
+        }
+    }
+}
+
+impl<T: View> Answer for Owner<T> {
+    fn discard(self, req: &mut Request) {
+        self.give_up(req);
     }
 }
 

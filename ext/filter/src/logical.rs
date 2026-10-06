@@ -8,7 +8,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, numeric_string, to_double, to_long};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 use php_ext_pcre::Regex;
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
@@ -178,7 +178,7 @@ pub(crate) fn int(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
     };
     match parsed {
         Some(n) if min.is_none_or(|m| n >= m) && max.is_none_or(|m| n <= m) => {
-            Ok(Outcome::Value(Value::int(n)))
+            Ok(Outcome::Value(Owner::take(req, Value::int(n))))
         }
         _ => Ok(Outcome::Failed),
     }
@@ -210,14 +210,14 @@ pub(crate) fn int(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
 /// string(1) "d"
 /// ```
 #[allow(clippy::unnecessary_wraps)] // the shape every entry of `filter_list` has
-pub(crate) fn boolean(_: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
+pub(crate) fn boolean(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let p = trim(s);
     let is = |word: &[u8]| p.eq_ignore_ascii_case(word);
     Ok(
         if p.is_empty() || is(b"0") || is(b"no") || is(b"off") || is(b"false") {
-            Outcome::Value(Value::bool(false))
+            Outcome::Value(Owner::take(req, Value::bool(false)))
         } else if is(b"1") || is(b"on") || is(b"yes") || is(b"true") {
-            Outcome::Value(Value::bool(true))
+            Outcome::Value(Owner::take(req, Value::bool(true)))
         } else {
             Outcome::Failed
         },
@@ -345,7 +345,9 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
     if pos != end {
         return Ok(Outcome::Failed);
     }
-    Ok(numeric(&num, min, max).map_or(Outcome::Failed, |f| Outcome::Value(Value::float(f))))
+    Ok(numeric(&num, min, max).map_or(Outcome::Failed, |f| {
+        Outcome::Value(Owner::take(req, Value::float(f)))
+    }))
 }
 
 /// The tail of `php_filter_float`: what `is_numeric_string` reads the
@@ -744,7 +746,7 @@ pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
 fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
     let name = string_value(req, b"parse_url")?;
     let parse_url = callable_checked(req, &name);
-    req.release(name);
+    name.give_up(req);
     let Ok(parse_url) = parse_url else {
         return Err(fatal(
             req,
@@ -752,11 +754,11 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         ));
     };
     let subject = string_value(req, s)?;
-    let parts = call(req, &parse_url, &[subject]);
-    req.release(subject);
+    let parts = call(req, &parse_url, &[*subject]);
+    subject.give_up(req);
     let parts = parts?;
     let Some(array) = parts.as_array().copied() else {
-        req.release(parts);
+        parts.give_up(req);
         return Ok(None);
     };
     let part = |name: &[u8]| {
@@ -774,7 +776,7 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         query: part(b"query"),
         fragment: part(b"fragment"),
     };
-    req.release(parts);
+    parts.give_up(req);
     Ok(Some(uri))
 }
 

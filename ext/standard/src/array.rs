@@ -14,7 +14,7 @@ use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
 
 use constants::{
     COUNT_NORMAL, COUNT_RECURSIVE, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
@@ -112,8 +112,8 @@ fn merge_total(req: &mut Request, arrays: &[PhpArray]) -> Result<(), Thrown> {
 
 /// The value a body built, returned under `T`'s declaration as it is:
 /// php verifies an internal return only in debug builds.
-fn returned<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
-    <Raw<T> as FromArgument>::from_value(req, value)
+fn returned<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
+    value.into_raw()
 }
 
 /// `zval_add_ref` on an element being copied into a new array: a
@@ -229,10 +229,13 @@ fn key_copy(req: &mut Request, key: &Key) -> Key {
 /// The total number of elements must be lower than 1073741824
 /// ```
 #[php_function]
-fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpArray>, Thrown> {
+fn array_merge(
+    req: &mut Request,
+    arrays: Variadic<PhpArray>,
+) -> Result<Owner<Raw<PhpArray>>, Thrown> {
     let arrays = arrays.0;
     if arrays.is_empty() {
-        return returned(req, Value::array(PhpArray::empty()));
+        return Ok(returned(Owner::take(req, Value::array(PhpArray::empty()))));
     }
     merge_total(req, &arrays)?;
     if let [first, second] = arrays[..] {
@@ -248,9 +251,7 @@ fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpA
         if let Some(kept) = kept
             && (kept.is_list() || kept.iter().all(|(key, _)| matches!(key, Key::Str(_))))
         {
-            let value = Value::array(kept);
-            req.addref(&value);
-            return returned(req, value);
+            return Ok(returned(Owner::take(req, Value::array(kept))));
         }
     }
     let mut merged = PhpArray::new(req)?;
@@ -271,7 +272,7 @@ fn array_merge(req: &mut Request, arrays: Variadic<PhpArray>) -> Result<Raw<PhpA
             }
         }
     }
-    returned(req, Value::array(merged))
+    Ok(returned(merged.into_value()))
 }
 
 /// `php_array_user_compare_unstable` (`Z/ext/standard/array.c:826`):
@@ -299,6 +300,7 @@ fn user_compare(
             *deprecated = true;
         }
         if !truth {
+            answer.give_up(req);
             let swapped = call(req, callback, &[*b, *a])?;
             let sign = answer_sign(req, swapped)?;
             return Ok(sign.reverse());
@@ -308,9 +310,9 @@ fn user_compare(
 }
 
 /// `ZEND_NORMALIZE_BOOL(php_get_long(&retval))`, the answer given up.
-fn answer_sign(req: &mut Request, answer: Value) -> Result<Ordering, Thrown> {
+fn answer_sign(req: &mut Request, answer: Owner<Value>) -> Result<Ordering, Thrown> {
     let long = to_long(req, &answer);
-    req.release(answer);
+    answer.give_up(req);
     Ok(long?.cmp(&0))
 }
 
@@ -348,8 +350,8 @@ fn array_by_reference(req: &mut Request, given: &Ref<PhpArray>) -> Result<SortTa
         });
     }
     let array = match given.get() {
-        Some(array) => array.copy(req)?,
-        None => PhpArray::new(req)?,
+        Some(array) => array.copy(req)?.hand_on_unmigrated(),
+        None => PhpArray::new(req)?.hand_on_unmigrated(),
     };
     Ok(SortTarget {
         array,
@@ -513,10 +515,9 @@ fn array_unique(
     req: &mut Request,
     array: PhpArray,
     #[php(default = SORT_STRING)] flags: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if array.len() <= 1 {
-        req.addref(&Value::array(array));
-        return Ok(array);
+        return Ok(Owner::take(req, array));
     }
     if flags == SORT_STRING {
         return unique_by_string(req, array);
@@ -538,13 +539,20 @@ fn array_unique(
         }
     });
     if let Some(thrown) = pending {
-        req.release(Value::array(copy));
+        copy.give_up(req);
         return Err(thrown);
     }
     let mut kept = 0;
     for at in 1..order.len() {
         let (last, this) = (order[kept], order[at]);
-        if compared(req, flags, &entries[last].1, &entries[this].1)? != Ordering::Equal {
+        let ordering = match compared(req, flags, &entries[last].1, &entries[this].1) {
+            Ok(ordering) => ordering,
+            Err(thrown) => {
+                copy.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if ordering != Ordering::Equal {
             kept = at;
             continue;
         }
@@ -563,13 +571,17 @@ fn array_unique(
 /// the first element to spell each, under its own key. A reference
 /// with one owner is followed to its value, as `ZVAL_DEREF` follows it
 /// there; every other value is written as it is, one more owner.
-fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut seen = std::collections::HashSet::new();
     let mut out = PhpArray::new(req)?;
     for (key, value) in array.snapshot_refs() {
-        let text = to_string(req, &value)?;
-        let bytes = text.as_bytes().to_vec();
-        req.release(Value::string(text));
+        let bytes = match crate::string::string_bytes(req, &value) {
+            Ok(bytes) => bytes,
+            Err(thrown) => {
+                out.give_up(req);
+                return Err(thrown);
+            }
+        };
         if !seen.insert(bytes) {
             continue;
         }
@@ -655,13 +667,13 @@ fn as_strings(
     let y = match to_string(req, b) {
         Ok(y) => y,
         Err(thrown) => {
-            req.release(Value::string(x));
+            x.give_up(req);
             return Err(thrown);
         }
     };
     let ordering = by(x.as_bytes(), y.as_bytes());
-    req.release(Value::string(x));
-    req.release(Value::string(y));
+    x.give_up(req);
+    y.give_up(req);
     Ok(ordering)
 }
 

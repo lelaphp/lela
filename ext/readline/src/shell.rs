@@ -398,7 +398,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
     } else {
         let lowered = text.to_ascii_lowercase();
         if let Ok(functions) = req.defined_functions() {
-            for (_, group) in &functions {
+            for (_, group) in &*functions {
                 let group = group.deref();
                 let Some(group) = group.as_array() else {
                     continue;
@@ -414,7 +414,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
                     }
                 }
             }
-            req.release(Value::array(functions));
+            functions.give_up(req);
         }
         for name in constant_names(req) {
             if name.starts_with(text) {
@@ -446,10 +446,10 @@ fn constant_names(req: &mut Request) -> Vec<Vec<u8>> {
     let Ok(name) = PhpString::new(req, b"get_defined_constants") else {
         return Vec::new();
     };
-    let Ok(callable) = to_callable(req, &Value::string(name)) else {
-        return Vec::new();
-    };
-    let Ok(all) = call(req, &callable, &[]) else {
+    let called =
+        to_callable(req, &Value::string(*name)).and_then(|callable| call(req, &callable, &[]));
+    name.give_up(req);
+    let Ok(all) = called else {
         return Vec::new();
     };
     let held = all.deref();
@@ -462,7 +462,7 @@ fn constant_names(req: &mut Request) -> Vec<Vec<u8>> {
             })
             .collect()
     });
-    req.release(all);
+    all.give_up(req);
     names
 }
 

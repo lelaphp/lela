@@ -7,7 +7,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{Emalloc, PhpObject};
+use php_ext::values::{Emalloc, Owner, PhpObject};
 
 use crate::ffi::{self, Font, Glyphs, Im, Image, Reported};
 
@@ -143,18 +143,18 @@ pub(crate) fn im(req: &mut Request, image: Instance<GdImage>) -> Result<Im, Thro
 pub(crate) fn wrap(
     req: &mut Request,
     image: Option<Image>,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let Some(image) = image else {
         return Ok(OrFalse::False);
     };
     let object = object_of(req, b"GdImage")?;
-    let made = Instance::<GdImage>::of(object);
+    let made = object.into_instance::<GdImage>();
     *made.payload_mut(req)? = Some(image);
     Ok(OrFalse::Value(made))
 }
 
 /// `object_init_ex` of one of the two classes.
-fn object_of(req: &mut Request, name: &[u8]) -> Result<PhpObject, Thrown> {
+fn object_of(req: &mut Request, name: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, name)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
         return Err(throw_error(req, "Error", &text));
@@ -270,7 +270,7 @@ fn imagecreatetruecolor(
     req: &mut Request,
     width: i64,
     height: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let (w, h) = sizes(req, width, height)?;
     let image = gd(req, || Image::create_true_color(w, h))?;
     wrap(req, image)
@@ -328,7 +328,7 @@ fn imagecreate(
     req: &mut Request,
     width: i64,
     height: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let (w, h) = sizes(req, width, height)?;
     let image = gd(req, || Image::create(w, h))?;
     wrap(req, image)
@@ -373,13 +373,14 @@ const fn flip(word: i32) -> i32 {
 fn imageloadfont(
     req: &mut Request,
     filename: php_ext::abi::Path,
-) -> Result<OrFalse<Instance<GdFont>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdFont>>>, Thrown> {
     let Some(stream) = req.open_stream(filename.0.as_bytes(), b"rb", false)? else {
         return Ok(OrFalse::False);
     };
     let header = Emalloc::new(req, 24)?;
-    let read = load(req, stream);
-    stream.free(req);
+    let read = load(req, *stream);
+    stream.close(req);
+    stream.give_up(req);
     let glyphs = match read? {
         Ok((nchars, offset, w, h, data)) => Glyphs {
             nchars,
@@ -398,7 +399,7 @@ fn imageloadfont(
         }
     };
     let object = object_of(req, b"GdFont")?;
-    let font = Instance::<GdFont>::of(object);
+    let font = object.into_instance::<GdFont>();
     *font.payload_mut(req)? = Some(Box::new(glyphs));
     Ok(OrFalse::Value(font))
 }

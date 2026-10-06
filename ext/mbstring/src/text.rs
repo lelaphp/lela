@@ -20,7 +20,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `MBFL_SUBSTR_UNTIL_END`.
 pub(crate) const UNTIL_END: usize = usize::MAX;
@@ -142,7 +142,7 @@ impl Substr {
 
     /// The string php hands out: a cut through [`cut_string`], an
     /// encoding through [`new_string`].
-    pub(crate) fn into_string(self, req: &mut Request) -> Result<PhpString, Thrown> {
+    pub(crate) fn into_string(self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self {
             Substr::Cut(b) => cut_string(req, &b),
             Substr::Encoded(b) => new_string(req, &b),
@@ -342,21 +342,20 @@ fn int(n: usize) -> i64 {
 /// A string of these bytes allocated as its own, `zend_string_init`,
 /// `RETVAL_STRINGL` and what `mb_convert_buf` answers: nothing and one
 /// byte are strings of the request's too, as every converter's are.
-pub(crate) fn new_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+pub(crate) fn new_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))
 }
 
 /// A string of these bytes as `zend_string_init_fast` and
 /// `ZVAL_STRINGL_FAST` make it: nothing and one byte are the process's
 /// interned strings, what php's cuts and `ZSTR_CHAR` answer.
-pub(crate) fn cut_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+pub(crate) fn cut_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
 /// An argument handed back as the return, one more owner taken.
-pub(crate) fn same(req: &mut Request, s: PhpString) -> PhpString {
-    req.addref(&Value::string(s));
-    s
+pub(crate) fn same(req: &mut Request, s: PhpString) -> Owner<PhpString> {
+    Owner::take(req, s)
 }
 
 /// The request's substitute character and its kind.
@@ -403,7 +402,7 @@ fn mb_str_split(
     string: PhpString,
     #[php(default = 1)] length: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if length <= 0 {
         return Err(value_error(req, 2, "must be greater than 0"));
     }
@@ -412,7 +411,7 @@ fn mb_str_split(
     }
     let enc = self::encoding(req, encoding, 3)?;
     if string.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
     let bytes = string.as_bytes();
@@ -471,7 +470,7 @@ fn mb_str_split(
     }
     for chunk in chunks {
         let s = new_string(req, &chunk)?;
-        out.append(req, Value::string(s))?;
+        out.append(req, s.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -643,7 +642,7 @@ fn strstr_variant(
     encoding: Option<PhpString>,
     reverse: bool,
     folded: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     let at = if folded {
@@ -681,7 +680,7 @@ fn mb_strstr(
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr_variant(req, haystack, needle, before_needle, encoding, false, false)
 }
 
@@ -702,7 +701,7 @@ fn mb_strrchr(
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr_variant(req, haystack, needle, before_needle, encoding, true, false)
 }
 
@@ -723,7 +722,7 @@ fn mb_stristr(
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr_variant(req, haystack, needle, before_needle, encoding, false, true)
 }
 
@@ -744,7 +743,7 @@ fn mb_strrichr(
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     strstr_variant(req, haystack, needle, before_needle, encoding, true, true)
 }
 
@@ -832,7 +831,7 @@ fn mb_substr(
     start: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let range = format!("must be between {} and {}", i64::MIN + 1, i64::MAX);
     if start == i64::MIN {
         return Err(value_error(req, 2, &range));
@@ -891,7 +890,7 @@ fn mb_strcut(
     start: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
     let bytes = string.as_bytes();
     let total = int(bytes.len());
@@ -1100,7 +1099,7 @@ fn mb_strimwidth(
     width: i64,
     #[php(default = "")] trim_marker: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 5)?;
     let bytes = string.as_bytes();
     let mut from = start;
@@ -1147,7 +1146,7 @@ fn ulcfirst(
     string: PhpString,
     encoding: Option<PhpString>,
     mode: CaseMode,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
     let bytes = string.as_bytes();
@@ -1177,7 +1176,7 @@ fn mb_ucfirst(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ulcfirst(req, string, encoding, CaseMode::Title)
 }
 
@@ -1195,7 +1194,7 @@ fn mb_lcfirst(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ulcfirst(req, string, encoding, CaseMode::Lower)
 }
 
@@ -1253,7 +1252,7 @@ fn do_trim(
     characters: Option<PhpString>,
     encoding: Option<PhpString>,
     mode: Trim,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 3)?;
     let what: Vec<u32> = match characters {
         None => TRIM_DEFAULT.to_vec(),
@@ -1304,7 +1303,7 @@ fn mb_trim(
     string: PhpString,
     #[php(default = null)] characters: Option<PhpString>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     do_trim(req, string, characters, encoding, Trim::Both)
 }
 
@@ -1323,7 +1322,7 @@ fn mb_ltrim(
     string: PhpString,
     #[php(default = null)] characters: Option<PhpString>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     do_trim(req, string, characters, encoding, Trim::Left)
 }
 
@@ -1342,7 +1341,7 @@ fn mb_rtrim(
     string: PhpString,
     #[php(default = null)] characters: Option<PhpString>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     do_trim(req, string, characters, encoding, Trim::Right)
 }
 
@@ -1409,7 +1408,7 @@ fn mb_chr(
     req: &mut Request,
     codepoint: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
@@ -1466,7 +1465,7 @@ fn mb_str_pad(
     #[php(default = " ")] pad_string: PhpString,
     #[php(default = STR_PAD_RIGHT)] pad_type: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 5)?;
     let input_length = strlen(string, enc);
     let Some(target) = usize::try_from(length).ok().filter(|&l| l > input_length) else {
@@ -1527,7 +1526,7 @@ fn mb_scrub(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     if enc == Encoding::utf8()
         && (string.is_valid_utf8() || std::str::from_utf8(string.as_bytes()).is_ok())

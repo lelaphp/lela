@@ -19,7 +19,7 @@ use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 use php_sapi::EngineBuilder;
 
 /// The memory `ps` shows a process's command line from, which php's CLI
@@ -207,7 +207,7 @@ fn cli_set_process_title(req: &mut Request, title: PhpString) -> bool {
 /// string(5) "again"
 /// ```
 #[php_function]
-fn cli_get_process_title(req: &mut Request) -> Result<Option<PhpString>, Thrown> {
+fn cli_get_process_title(req: &mut Request) -> Result<Option<Owner<PhpString>>, Thrown> {
     let Some(title) = crate::process_title().map(ProcessTitle::get) else {
         docref(
             req,
@@ -296,7 +296,7 @@ fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
 /// bool(false)
 /// ```
 #[php_function(aliases(getallheaders))]
-fn apache_request_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.request_headers()
 }
 
@@ -311,6 +311,6 @@ fn apache_request_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn apache_response_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.response_headers()
 }

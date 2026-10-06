@@ -32,7 +32,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_dom::XPathCallbacks;
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
@@ -197,7 +197,7 @@ impl ObjectHandlers for Handlers {
             (b"maxTemplateVars", vars),
         ] {
             let name = PhpString::new(req, name)?;
-            Std.write_property(req, object, name, Value::int(n))?;
+            Std.write_property(req, object, name.hand_on_unmigrated(), Value::int(n))?;
         }
         Ok(())
     }
@@ -247,14 +247,24 @@ impl ObjectHandlers for Handlers {
         let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
         let old = read_int(req, object, name.as_bytes())?;
         let again = PhpString::new(req, name.as_bytes())?;
-        Std.write_property(req, object, name, value)?;
-        if read_int(req, object, again.as_bytes())? < 0 {
-            Std.write_property(req, object, again, Value::int(old))?;
+        let now = match Std.write_property(req, object, name, value) {
+            Ok(()) => read_int(req, object, again.as_bytes()),
+            Err(thrown) => Err(thrown),
+        };
+        let now = match now {
+            Ok(now) => now,
+            Err(thrown) => {
+                again.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if now < 0 {
+            Std.write_property(req, object, again.hand_on_unmigrated(), Value::int(old))?;
             let class = class_name(req, object.class());
             let message = format!("{class}::${shown} must be greater than or equal to 0");
             return Err(throw_error(req, "ValueError", &message));
         }
-        req.release(Value::string(again));
+        again.give_up(req);
         Ok(())
     }
 
@@ -681,7 +691,7 @@ impl XSLTProcessor {
         this: This<Self>,
         document: PhpObject,
         #[php(default = null)] returnClass: Option<PhpString>,
-    ) -> Result<OrFalse<PhpObject>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
         let this = this.object();
         let class = match returnClass {
             Some(name) => {
@@ -702,10 +712,10 @@ impl XSLTProcessor {
         };
         let Some(class) = class else {
             let value = php_ext_dom::create_object(req, result, None)?;
-            return Ok(value
-                .as_object()
-                .copied()
-                .map_or(OrFalse::False, OrFalse::Value));
+            let object = value.as_object().copied();
+            let answer = object.map_or(OrFalse::False, |o| OrFalse::Value(Owner::take(req, o)));
+            value.give_up(req);
+            return Ok(answer);
         };
         if !compatible(req, class, document.class())? {
             result.free_document();
@@ -714,7 +724,7 @@ impl XSLTProcessor {
             return Err(arg_type_error(req, 2, &tail));
         }
         let object = new_object(req, class)?;
-        if let Some(mut half) = php_ext_libxml::node_object(req, object) {
+        if let Some(mut half) = php_ext_libxml::node_object(req, *object) {
             half.adopt_document(req, result);
             half.take_node(req, result);
         }
@@ -788,7 +798,7 @@ impl XSLTProcessor {
         req: &mut Request,
         this: This<Self>,
         document: PhpObject,
-    ) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+    ) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
         let this = this.object();
         let (sheet, result) = apply(req, this, document, "transformToXml")?;
         let saved = result.map(|r| {
@@ -871,7 +881,9 @@ impl XSLTProcessor {
                 return Err(arg_value_error(req, 3, tail));
             }
             let key = parameter_key(req, namespace, key.as_bytes())?;
-            let entry = to_string(req, &entry)?.as_bytes().to_vec();
+            let text = to_string(req, &entry)?;
+            let entry = text.as_bytes().to_vec();
+            text.give_up(req);
             if entry.contains(&0) {
                 let tail = "not contain values with any null bytes";
                 return Err(arg_value_error(req, 3, tail));
@@ -900,7 +912,7 @@ impl XSLTProcessor {
         this: This<Self>,
         namespace: Path,
         name: Path,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let key = parameter_key(req, namespace.0.as_bytes(), name.0.as_bytes())?;
         let found = intern(req, this.object()).and_then(|i| {
             i.params

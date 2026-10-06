@@ -16,7 +16,7 @@ use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializable};
 
@@ -269,7 +269,7 @@ impl SplFixedArray {
     ///   int(9)
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let elements = with(req, this, |a| a.elements.clone())?;
         let mut out = PhpArray::new(req)?;
@@ -315,8 +315,8 @@ impl SplFixedArray {
         }
         let allocation = laid(req, elements.len())?;
         lay(req, this, elements, allocation)?;
-        let loaded = crate::load_members(req, this, &Value::array(members));
-        req.release(Value::array(members));
+        let loaded = crate::load_members(req, this, &Value::array(*members));
+        members.give_up(req);
         loaded
     }
 
@@ -344,10 +344,10 @@ impl SplFixedArray {
     /// [null,"b"]
     /// ```
     #[php(tentative)]
-    fn toArray(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn toArray(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let elements = with(req, this.object(), |a| a.elements.clone())?;
         if elements.is_empty() {
-            return Ok(PhpArray::empty());
+            return Ok(Owner::take(req, PhpArray::empty()));
         }
         let mut out = PhpArray::new(req)?;
         for value in elements {
@@ -389,7 +389,7 @@ impl SplFixedArray {
         req: &mut Request,
         array: PhpArray,
         #[php(default = true)] preserveKeys: bool,
-    ) -> Result<Instance<Self>, Thrown> {
+    ) -> Result<Owner<Instance<Self>>, Thrown> {
         let rows = array.snapshot();
         let mut elements: Vec<Value>;
         let allocation;
@@ -440,8 +440,8 @@ impl SplFixedArray {
             ));
         };
         let object = new_object(req, class)?;
-        lay(req, object, elements, allocation)?;
-        Ok(Instance::of(object))
+        lay(req, *object, elements, allocation)?;
+        Ok(object.into_instance())
     }
 
     #[php(tentative, implementation = SplFixedArray::count)]
@@ -538,8 +538,11 @@ impl SplFixedArray {
 
     /// `getIterator(): Iterator`, an `InternalIterator` over the elements;
     /// the witness is the class's.
-    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
-        Ok(Instance::of(internal_iterator(req, &this.object())?))
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<Iterator>>, Thrown> {
+        Ok(internal_iterator(req, &this.object())?.into_instance())
     }
 
     #[php(implementation = SplFixedArray::toArray)]
@@ -635,8 +638,7 @@ fn read(req: &mut Request, object: PhpObject, offset: Option<&Value>) -> Result<
         ));
     };
     let at = inside(req, object, offset)?;
-    let value = with(req, object, |a| a.elements[at])?;
-    Ok(crate::copied(req, value))
+    with(req, object, |a| a.elements[at])
 }
 
 fn write(
@@ -719,9 +721,11 @@ impl ObjectHandlers for Handlers {
         }
         if crate::overridden(req, object, b"offsetget") {
             let offset = offset.copied().unwrap_or_default();
-            return call_method(req, &object, b"offsetGet", &[offset]);
+            return call_method(req, &object, b"offsetGet", &[offset])
+                .map(Owner::hand_on_unmigrated);
         }
-        read(req, object, offset)
+        // The slot hands the engine an owner of what it read.
+        read(req, object, offset).map(|v| crate::copied(req, v))
     }
 
     fn write_dimension(
@@ -735,7 +739,7 @@ impl ObjectHandlers for Handlers {
             let offset = offset.copied().unwrap_or_default();
             let answered = call_method(req, &object, b"offsetSet", &[offset, value]);
             req.release(value);
-            req.release(answered?);
+            answered?.give_up(req);
             return Ok(());
         }
         let written = write(req, object, offset, value);
@@ -753,7 +757,7 @@ impl ObjectHandlers for Handlers {
         if crate::overridden(req, object, b"offsetexists") {
             let answered = call_method(req, &object, b"offsetExists", &[*offset])?;
             let answer = truthy(req, &answered);
-            req.release(answered);
+            answered.give_up(req);
             return Ok(answer);
         }
         has(req, object, offset, not_empty)
@@ -767,7 +771,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         if crate::overridden(req, object, b"offsetunset") {
             let answered = call_method(req, &object, b"offsetUnset", &[*offset])?;
-            req.release(answered);
+            answered.give_up(req);
             return Ok(());
         }
         unset(req, object, offset)
@@ -776,8 +780,9 @@ impl ObjectHandlers for Handlers {
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         if crate::overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
-            let n = to_long(req, &answered)?;
-            req.release(answered);
+            let n = to_long(req, &answered);
+            answered.give_up(req);
+            let n = n?;
             return Ok(Some(n));
         }
         let n = with(req, object, |a| a.elements.len())?;
@@ -904,7 +909,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             out.set(req, key, value)?;
         }
-        Ok(Some(out.into()))
+        Ok(Some(out.hand_on_unmigrated().into()))
     }
 
     fn iterator_element(
@@ -1003,4 +1008,5 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             resizing: None,
         }),
     )
+    .map(Owner::hand_on_unmigrated)
 }

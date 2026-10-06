@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Raw, Ref, True};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants::SODIUM_CRYPTO_PWHASH_ALG_DEFAULT;
 use crate::ffi::{self, GenericHash, Stream};
@@ -109,11 +109,11 @@ fn filled(
     req: &mut Request,
     len: usize,
     write: impl FnOnce(&mut [u8]) -> Result<(), ffi::Failed>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut done = Err(ffi::Failed);
     let string = PhpString::filled(req, len, |out| done = write(out))?;
     if done.is_err() {
-        req.release(Value::string(string));
+        string.give_up(req);
         return Err(internal(req));
     }
     Ok(string)
@@ -135,7 +135,7 @@ pub(crate) fn sodium_crypto_auth(
     req: &mut Request,
     message: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, key) = two(req, message, key)?;
     sized(req, key, AUTH, 2, "SODIUM_CRYPTO_AUTH_KEYBYTES")?;
     filled(req, AUTH, |out| {
@@ -152,7 +152,7 @@ pub(crate) fn sodium_crypto_auth(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_auth_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_auth_keygen(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, AUTH)
 }
 
@@ -194,7 +194,7 @@ fn ristretto_unary(
     in_len: usize,
     constant: &str,
     op: fn(&mut [u8], &[u8]) -> Result<(), ffi::Failed>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let s = one(req, s)?;
     sized(req, s, in_len, 1, constant)?;
     let mut r = [0u8; RISTRETTO];
@@ -210,7 +210,7 @@ fn ristretto_binary(
     (p, q): (Raw<PhpString>, Raw<PhpString>),
     constant: &str,
     op: Binary,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (p, q) = two(req, p, q)?;
     sized(req, p, RISTRETTO, 1, constant)?;
     sized(req, q, RISTRETTO, 2, constant)?;
@@ -239,7 +239,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_add(
     req: &mut Request,
     p: Raw<PhpString>,
     q: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_binary(
         req,
         (p, q),
@@ -262,7 +262,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_add(
 pub(crate) fn sodium_crypto_core_ristretto255_from_hash(
     req: &mut Request,
     s: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_unary(
         req,
         s,
@@ -310,7 +310,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_is_valid_point(
 #[php_function]
 pub(crate) fn sodium_crypto_core_ristretto255_random(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     filled(req, RISTRETTO, |out| ffi::ristretto255_random(out, false))
 }
 
@@ -330,7 +330,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_add(
     req: &mut Request,
     x: Raw<PhpString>,
     y: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_binary(
         req,
         (x, y),
@@ -354,7 +354,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_add(
 pub(crate) fn sodium_crypto_core_ristretto255_scalar_complement(
     req: &mut Request,
     s: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_unary(
         req,
         s,
@@ -378,7 +378,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_complement(
 pub(crate) fn sodium_crypto_core_ristretto255_scalar_invert(
     req: &mut Request,
     s: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_unary(
         req,
         s,
@@ -404,7 +404,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_mul(
     req: &mut Request,
     x: Raw<PhpString>,
     y: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_binary(
         req,
         (x, y),
@@ -427,7 +427,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_mul(
 pub(crate) fn sodium_crypto_core_ristretto255_scalar_negate(
     req: &mut Request,
     s: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_unary(
         req,
         s,
@@ -448,7 +448,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_negate(
 #[php_function]
 pub(crate) fn sodium_crypto_core_ristretto255_scalar_random(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     filled(req, RISTRETTO, |out| ffi::ristretto255_random(out, true))
 }
 
@@ -467,7 +467,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_random(
 pub(crate) fn sodium_crypto_core_ristretto255_scalar_reduce(
     req: &mut Request,
     s: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_unary(
         req,
         s,
@@ -493,7 +493,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_scalar_sub(
     req: &mut Request,
     x: Raw<PhpString>,
     y: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_binary(
         req,
         (x, y),
@@ -518,7 +518,7 @@ pub(crate) fn sodium_crypto_core_ristretto255_sub(
     req: &mut Request,
     p: Raw<PhpString>,
     q: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     ristretto_binary(
         req,
         (p, q),
@@ -559,7 +559,7 @@ pub(crate) fn sodium_crypto_generichash(
     message: Raw<PhpString>,
     #[php(sensitive, default = "")] key: Raw<PhpString>,
     #[php(default = SODIUM_CRYPTO_GENERICHASH_BYTES)] length: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, key, length) = parsed(req, 1, 3, |req| {
         Ok((message.hold(req)?, key.hold(req)?, length.hold(req)?))
     })?;
@@ -578,7 +578,9 @@ pub(crate) fn sodium_crypto_generichash(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_generichash_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_generichash_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, GENERICHASH_KEY)
 }
 
@@ -600,7 +602,7 @@ pub(crate) fn sodium_crypto_generichash_init(
     req: &mut Request,
     #[php(sensitive, default = "")] key: Raw<PhpString>,
     #[php(default = SODIUM_CRYPTO_GENERICHASH_BYTES)] length: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (key, length) = parsed(req, 0, 2, |req| Ok((key.hold(req)?, length.hold(req)?)))?;
     let len = generichash_bounds(req, length, key.as_bytes())?;
     let Ok(state) = GenericHash::init(key.as_bytes(), len) else {
@@ -674,7 +676,7 @@ pub(crate) fn sodium_crypto_generichash_final(
     req: &mut Request,
     state: Ref<Raw<PhpString>>,
     #[php(default = SODIUM_CRYPTO_GENERICHASH_BYTES)] length: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let length = parsed(req, 1, 2, |req| length.hold(req))?;
     let mut hash = generichash_state(req, &state)?;
     if !(GENERICHASH_MIN..=GENERICHASH_MAX).contains(&length) {
@@ -712,7 +714,7 @@ pub(crate) fn sodium_crypto_kdf_derive_from_key(
     subkey_id: Raw<i64>,
     context: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (len, id, ctx, key) = parsed(req, 4, 4, |req| {
         Ok((
             subkey_length.hold(req)?,
@@ -754,7 +756,7 @@ pub(crate) fn sodium_crypto_kdf_derive_from_key(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_kdf_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_kdf_keygen(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, KDF_KEY)
 }
 
@@ -802,7 +804,7 @@ pub(crate) fn sodium_crypto_pwhash(
     opslimit: Raw<i64>,
     memlimit: Raw<i64>,
     #[php(default = SODIUM_CRYPTO_PWHASH_ALG_DEFAULT)] algo: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (len, passwd, salt, ops, mem, alg) = parsed(req, 5, 6, |req| {
         Ok((
             length.hold(req)?,
@@ -879,7 +881,7 @@ pub(crate) fn sodium_crypto_pwhash_str(
     #[php(sensitive)] password: Raw<PhpString>,
     opslimit: Raw<i64>,
     memlimit: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (passwd, ops, mem) = parsed(req, 3, 3, |req| {
         Ok((
             password.hold(req)?,
@@ -1013,7 +1015,7 @@ pub(crate) fn sodium_crypto_pwhash_scryptsalsa208sha256(
     salt: Raw<PhpString>,
     opslimit: Raw<i64>,
     memlimit: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (len, passwd, salt, ops, mem) = parsed(req, 5, 5, |req| {
         Ok((
             length.hold(req)?,
@@ -1088,7 +1090,7 @@ pub(crate) fn sodium_crypto_pwhash_scryptsalsa208sha256_str(
     #[php(sensitive)] password: Raw<PhpString>,
     opslimit: Raw<i64>,
     memlimit: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (passwd, ops, mem) = parsed(req, 3, 3, |req| {
         Ok((
             password.hold(req)?,
@@ -1167,7 +1169,7 @@ pub(crate) fn sodium_crypto_pwhash_scryptsalsa208sha256_str_verify(
 #[php_function]
 pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_keygen(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, SECRETSTREAM_KEY)
 }
 
@@ -1188,7 +1190,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_keygen(
 pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_init_push(
     req: &mut Request,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let key = one(req, key)?;
     sized(
         req,
@@ -1205,7 +1207,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_init_push(
     let mut pair = PhpArray::new(req)?;
     for bytes in [&state[..], &header[..]] {
         let string = made(req, bytes)?;
-        pair.append(req, Value::string(string))?;
+        pair.append(req, Value::string(string.hand_on_unmigrated()))?;
     }
     state.fill(0);
     Ok(pair)
@@ -1240,7 +1242,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_push(
     #[php(sensitive)] message: Raw<PhpString>,
     #[php(default = "")] additional_data: Raw<PhpString>,
     #[php(default = SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_MESSAGE)] tag: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, ad, tag) = parsed(req, 2, 4, |req| {
         Ok((
             message.hold(req)?,
@@ -1293,7 +1295,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_init_pull(
     req: &mut Request,
     header: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (header, key) = two(req, header, key)?;
     sized(
         req,
@@ -1348,7 +1350,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_pull(
     state: Ref<Raw<PhpString>>,
     ciphertext: Raw<PhpString>,
     #[php(default = "")] additional_data: Raw<PhpString>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (c, ad) = parsed(req, 2, 3, |req| {
         Ok((ciphertext.hold(req)?, additional_data.hold(req)?))
     })?;
@@ -1375,7 +1377,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_pull(
     let mut pair = PhpArray::new(req)?;
     let string = made(req, &msg[..real])?;
     msg.fill(0);
-    pair.append(req, Value::string(string))?;
+    pair.append(req, Value::string(string.hand_on_unmigrated()))?;
     pair.append(req, Value::int(i64::from(tag)))?;
     Ok(OrFalse::Value(pair))
 }
@@ -1427,7 +1429,7 @@ pub(crate) fn sodium_crypto_shorthash(
     req: &mut Request,
     message: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, key) = two(req, message, key)?;
     sized(
         req,
@@ -1450,7 +1452,9 @@ pub(crate) fn sodium_crypto_shorthash(
 /// int(16)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_shorthash_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_shorthash_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, SHORTHASH_KEY)
 }
 
@@ -1461,7 +1465,7 @@ fn keystream(
     req: &mut Request,
     which: Stream,
     (length, nonce, key): (Raw<i64>, Raw<PhpString>, Raw<PhpString>),
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (len, nonce, key) = parsed(req, 3, 3, |req| {
         Ok((length.hold(req)?, nonce.hold(req)?, key.hold(req)?))
     })?;
@@ -1501,7 +1505,7 @@ fn xored(
     which: Stream,
     (msg, nonce, key): (PhpString, PhpString, PhpString),
     counter: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let infix = match which {
         Stream::XSalsa20 => "",
         Stream::XChaCha20 => "_XCHACHA20",
@@ -1552,7 +1556,7 @@ pub(crate) fn sodium_crypto_stream(
     length: Raw<i64>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     keystream(req, Stream::XSalsa20, (length, nonce, key))
 }
 
@@ -1565,7 +1569,7 @@ pub(crate) fn sodium_crypto_stream(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_stream_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_stream_keygen(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, STREAM_KEY)
 }
 
@@ -1588,7 +1592,7 @@ pub(crate) fn sodium_crypto_stream_xor(
     #[php(sensitive)] message: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let held = parsed(req, 3, 3, |req| {
         Ok((message.hold(req)?, nonce.hold(req)?, key.hold(req)?))
     })?;
@@ -1614,7 +1618,7 @@ pub(crate) fn sodium_crypto_stream_xchacha20(
     length: Raw<i64>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     keystream(req, Stream::XChaCha20, (length, nonce, key))
 }
 
@@ -1629,7 +1633,7 @@ pub(crate) fn sodium_crypto_stream_xchacha20(
 #[php_function]
 pub(crate) fn sodium_crypto_stream_xchacha20_keygen(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, STREAM_KEY)
 }
 
@@ -1651,7 +1655,7 @@ pub(crate) fn sodium_crypto_stream_xchacha20_xor(
     #[php(sensitive)] message: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let held = parsed(req, 3, 3, |req| {
         Ok((message.hold(req)?, nonce.hold(req)?, key.hold(req)?))
     })?;
@@ -1678,7 +1682,7 @@ pub(crate) fn sodium_crypto_stream_xchacha20_xor_ic(
     nonce: Raw<PhpString>,
     counter: Raw<i64>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, nonce, ic, key) = parsed(req, 4, 4, |req| {
         Ok((
             message.hold(req)?,

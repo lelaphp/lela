@@ -21,7 +21,7 @@ use php_ext::coerce::{coerce_param, compare, to_array, value_name};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
 
 use super::keys::key_return;
 
@@ -72,7 +72,7 @@ fn move_name(how: PointerMove) -> &'static str {
 /// end(): Argument #1 ($array) must be of type array, int given
 /// ```
 #[php_function]
-fn end(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
+fn end(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Owner<Value>, Thrown> {
     moved(req, &array, PointerMove::End)
 }
 
@@ -126,7 +126,7 @@ fn end(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// string(1) "a"
 /// ```
 #[php_function]
-fn prev(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
+fn prev(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Owner<Value>, Thrown> {
     moved(req, &array, PointerMove::Backward)
 }
 
@@ -152,7 +152,7 @@ fn prev(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// int(2)
 /// ```
 #[php_function]
-fn next(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
+fn next(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Owner<Value>, Thrown> {
     moved(req, &array, PointerMove::Forward)
 }
 
@@ -175,7 +175,7 @@ fn next(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn reset(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> {
+fn reset(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Owner<Value>, Thrown> {
     moved(req, &array, PointerMove::Reset)
 }
 
@@ -231,12 +231,12 @@ fn reset(req: &mut Request, array: Ref<ArrayOrObject>) -> Result<Value, Thrown> 
 /// int(7)
 /// ```
 #[php_function(aliases(pos))]
-fn current(req: &mut Request, array: ArrayOrObject) -> Result<Value, Thrown> {
+fn current(req: &mut Request, array: ArrayOrObject) -> Result<Owner<Value>, Thrown> {
     let name = req.active_function_name();
     read_current(req, array.value(), &name)
 }
 
-fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Thrown> {
+fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Owner<Value>, Thrown> {
     let pointed = pointed(req, &given, name)?;
     let current = match &pointed {
         Pointed::Array(array) | Pointed::Built(array) => array.cursor_current(),
@@ -249,15 +249,9 @@ fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Th
 
 /// What `php_array_iter_return_current` answers: the value, a
 /// reference followed, one more owner, or `false`.
-fn owned_current(req: &mut Request, current: Option<Value>) -> Value {
-    match current {
-        Some(value) => {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }
-        None => Value::bool(false),
-    }
+fn owned_current(req: &mut Request, current: Option<Value>) -> Owner<Value> {
+    let value = current.map_or(Value::bool(false), |value| value.deref());
+    Owner::take(req, value)
 }
 
 /// `key(array|object $array): int|string|null`, php's
@@ -276,7 +270,10 @@ fn owned_current(req: &mut Request, current: Option<Value>) -> Value {
 /// key(): Argument #1 ($array) must be of type array, string given
 /// ```
 #[php_function]
-fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString, i64>>, Thrown> {
+fn key(
+    req: &mut Request,
+    array: ArrayOrObject,
+) -> Result<Option<Union<Owner<PhpString>, i64>>, Thrown> {
     let pointed = pointed(req, &array.value(), "key")?;
     let key = match &pointed {
         Pointed::Array(array) | Pointed::Built(array) => array.cursor_key(),
@@ -324,7 +321,9 @@ fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thro
                 &format!("Calling {name}() on an object is deprecated"),
             );
             if object.handlers(req).answers_properties() {
-                return to_array(req, given).map(Pointed::Built);
+                // The cast's table, the read's to give up.
+                return to_array(req, given)
+                    .map(|array| Pointed::Built(array.hand_on_unmigrated()));
             }
             Ok(Pointed::Object(*object))
         }
@@ -346,7 +345,11 @@ fn not_an_array(req: &mut Request, given: &Value) -> Thrown {
 /// object steps over a slot nothing holds and so moves the pointer
 /// again, and which php reads only where the caller reads the return
 /// (`USED_RET()`).
-fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Result<Value, Thrown> {
+fn moved(
+    req: &mut Request,
+    given: &Ref<ArrayOrObject>,
+    how: PointerMove,
+) -> Result<Owner<Value>, Thrown> {
     let target = given.get().map_or_else(Value::null, Raw::value);
     let pointed = match target.as_ref() {
         ValueRef::Array(array) => match given.separated(req)? {
@@ -354,7 +357,7 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
             // A value sent where a reference was asked for, past the
             // notice: php separates the argument slot, which nobody
             // reads after, so the move is over a copy.
-            _ => Pointed::Built(array.copy(req)?),
+            _ => Pointed::Built(array.copy(req)?.hand_on_unmigrated()),
         },
         _ => pointed(req, &target, move_name(how))?,
     };
@@ -362,17 +365,17 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
         Pointed::Array(array) | Pointed::Built(array) => *array,
         Pointed::Object(object) => {
             if !object.pointer_move(req, how)? {
-                return Ok(Value::bool(false));
+                return Ok(Owner::take(req, Value::bool(false)));
             }
             if !req.return_value_used() {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
             let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
             return Ok(owned_current(req, current));
         }
     };
     let current = if array.is_empty() {
-        Value::bool(false)
+        Owner::take(req, Value::bool(false))
     } else {
         match how {
             PointerMove::Reset => array.cursor_reset(),
@@ -568,7 +571,6 @@ fn extreme(
         let Some(best) = best else {
             return Err(arg_value_error(req, 1, "contain at least one element"));
         };
-        req.addref(&best);
         return Ok(best);
     }
     let values: Vec<Value> = std::iter::once(value).chain(values.0).collect();
@@ -581,7 +583,6 @@ fn extreme(
             best = *value;
         }
     }
-    req.addref(&best);
     Ok(best)
 }
 
@@ -658,7 +659,5 @@ fn frameless_extreme(
     } else {
         matches!(ordering, Some(Ordering::Greater | Ordering::Equal))
     };
-    let chosen = if left { lhs } else { rhs };
-    req.addref(&chosen);
-    Ok(chosen)
+    Ok(if left { lhs } else { rhs })
 }

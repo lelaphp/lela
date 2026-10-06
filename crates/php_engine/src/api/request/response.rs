@@ -10,7 +10,7 @@ use php_heap::Heap;
 
 use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted, adopted_some};
 use crate::engine::{Aborted, OutputSink, ResponseHead};
 use crate::output::Output;
 
@@ -324,7 +324,14 @@ impl Request {
     /// `fpm_get_status()` answers from the process manager's shared table
     /// (`Z/sapi/fpm/fpm/fpm_status.c` `fpm_status_export_to_zval`);
     /// `None` where the host says nothing.
-    pub fn host_status(&mut self) -> Result<Option<PhpArray>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn host_status(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.host_status_made();
+        adopted_some(self, made)
+    }
+
+    /// What [`host_status`](Self::host_status) makes, its one owner not yet named.
+    pub(crate) fn host_status_made(&mut self) -> Result<Option<PhpArray>, Thrown> {
         match self.response.sink.get().status() {
             Some(status) => host_value(self, status).map(Some),
             None => Ok(None),
@@ -524,8 +531,10 @@ impl Request {
     /// bodies of `Z/main/output.c:1373-1591` over the layer in
     /// `crate::output`; the notices are theirs, raised through the
     /// native being served.
-    pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Value, Thrown> {
-        crate::output::buffer_op(self, op)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
+        let made = crate::output::buffer_op(self, op);
+        adopted(self, made)
     }
 
     /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
@@ -555,11 +564,13 @@ impl Request {
     ///
     /// Fatal error: highlight_string(): Cannot use output buffering in output buffering display handlers in %s on line 3
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn captured(
         &mut self,
         body: impl FnOnce(&mut Request),
-    ) -> Result<Option<PhpString>, Thrown> {
-        crate::output::captured(self, body)
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
+        let made = crate::output::captured(self, body);
+        adopted_some(self, made)
     }
 
     /// Where the first byte reached the host, `php_output_get_start_filename`
@@ -699,9 +710,16 @@ impl Request {
     /// its colon, the name with its trailing blanks off and the value with
     /// its leading blanks off; a line with no colon or an empty name is
     /// passed over.
-    pub fn response_headers(&mut self) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn response_headers(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.response_headers_made();
+        adopted(self, made)
+    }
+
+    /// What [`response_headers`](Self::response_headers) makes, its one owner not yet named.
+    pub(crate) fn response_headers_made(&mut self) -> Result<PhpArray, Thrown> {
         let lines = self.response.output.headers().to_vec();
-        let mut array = PhpArray::new(self)?;
+        let mut array = self.array()?;
         for line in lines {
             let Some(colon) = line.iter().position(|&b| b == b':') else {
                 continue;
@@ -717,8 +735,8 @@ impl Request {
             while matches!(line.get(start), Some(b' ' | b'\t')) {
                 start += 1;
             }
-            let key = Key::from_string(PhpString::new(self, &line[..end])?);
-            let value = Value::string(PhpString::new(self, &line[start..])?);
+            let key = Key::from_string(self.string(&line[..end])?);
+            let value = Value::string(self.string(&line[start..])?);
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -729,7 +747,7 @@ impl Request {
 /// list's the next index ([`Request::host_status`]).
 fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpArray, Thrown> {
     use crate::engine::HostValue;
-    let mut array = PhpArray::new(req)?;
+    let mut array = req.array()?;
     let rows: Vec<(Option<Vec<u8>>, HostValue)> = match value {
         HostValue::Map(rows) => rows.into_iter().map(|(k, v)| (Some(k), v)).collect(),
         HostValue::List(rows) => rows.into_iter().map(|v| (None, v)).collect(),
@@ -739,12 +757,12 @@ fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpA
         let value = match row {
             HostValue::Int(n) => Value::int(n),
             HostValue::Float(f) => Value::float(f),
-            HostValue::Str(s) => Value::string(PhpString::new(req, &s)?),
+            HostValue::Str(s) => Value::string(req.string(&s)?),
             nested => Value::array(host_value(req, nested)?),
         };
         match key {
             Some(key) => {
-                let key = Key::from_string(PhpString::new(req, &key)?);
+                let key = Key::from_string(req.string(&key)?);
                 array.set(req, key, value)?;
             }
             None => array.append(req, value)?,

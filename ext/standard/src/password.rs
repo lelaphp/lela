@@ -13,7 +13,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use constants::PASSWORD_BCRYPT_DEFAULT_COST as BCRYPT_COST;
 
@@ -226,7 +226,7 @@ fn password_hash(
     #[php(sensitive)] password: PhpString,
     algo: Option<Union<PhpString, i64>>,
     #[php(default = [])] options: PhpArray,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let options = Some(options);
     let Some(algo) = algo_of(algo) else {
         return Err(arg_value_error(
@@ -425,21 +425,22 @@ fn password_verify(#[php(sensitive)] password: PhpString, hash: PhpString) -> bo
 /// }
 /// ```
 #[php_function]
-fn password_get_info(req: &mut Request, hash: PhpString) -> Result<PhpArray, Thrown> {
+fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let hash = hash.as_bytes();
     let mut array = PhpArray::new(req)?;
     let mut options = PhpArray::new(req)?;
     let ident = extract_ident(hash);
     let algo = ident.and_then(Algo::find).filter(|algo| algo.valid(hash));
-    let set = |req: &mut Request, array: &mut PhpArray, name: &str, value: Value| {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+    let set = |req: &mut Request, array: &mut Owner<PhpArray>, name: &str, value: Value| {
+        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         array.set(req, key, value)
     };
     if let (Some(algo), Some(ident)) = (algo, ident) {
         {
-            let ident = Value::string(PhpString::new(req, ident)?);
+            let ident = Value::string(PhpString::new(req, ident)?.hand_on_unmigrated());
             set(req, &mut array, "algo", ident)?;
-            let name = Value::string(PhpString::new(req, algo.name().as_bytes())?);
+            let name =
+                Value::string(PhpString::new(req, algo.name().as_bytes())?.hand_on_unmigrated());
             set(req, &mut array, "algoName", name)?;
             match algo {
                 Algo::Bcrypt => {
@@ -462,10 +463,15 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<PhpArray, Thr
         }
     } else {
         set(req, &mut array, "algo", Value::null())?;
-        let unknown = Value::string(PhpString::new(req, b"unknown")?);
+        let unknown = Value::string(PhpString::new(req, b"unknown")?.hand_on_unmigrated());
         set(req, &mut array, "algoName", unknown)?;
     }
-    set(req, &mut array, "options", Value::array(options))?;
+    set(
+        req,
+        &mut array,
+        "options",
+        Value::array(options.hand_on_unmigrated()),
+    )?;
     Ok(array)
 }
 
@@ -540,10 +546,10 @@ fn password_needs_rehash(
 /// }
 /// ```
 #[php_function]
-fn password_algos(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn password_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for ident in IDENTS {
-        let ident = Value::string(PhpString::new(req, ident.as_bytes())?);
+        let ident = Value::string(PhpString::new(req, ident.as_bytes())?.hand_on_unmigrated());
         array.append(req, ident)?;
     }
     Ok(array)

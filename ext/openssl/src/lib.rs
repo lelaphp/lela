@@ -57,7 +57,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
@@ -180,22 +180,22 @@ pub(crate) const fn refusals(instead: &'static str) -> Refusals {
 /// the integer, as `zend_symtable_str_update` takes it.
 pub(crate) fn put(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let key = Key::from_string(PhpString::new(req, name)?);
+    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// `add_assoc_stringl`: bytes as a string under a string key.
 pub(crate) fn put_bytes(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &[u8],
     bytes: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, bytes)?);
+    let value = Value::string(PhpString::new(req, bytes)?.hand_on_unmigrated());
     put(req, array, name, value)
 }
 
@@ -304,7 +304,7 @@ pub(crate) fn errors_restore_mark(req: &mut Request) {
 /// bool(false)
 /// ```
 #[php_function]
-fn openssl_error_string(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn openssl_error_string(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     store_errors(req);
     let Some(errors) = req.state::<State>().errors.as_mut() else {
         return Ok(OrFalse::False);

@@ -18,7 +18,7 @@ use php_unit::decl::{ClassConstDecl, ClassKind};
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Owner, PhpObject, Value};
+use crate::api::values::{ClassId, PhpObject, Value};
 
 /// One class's row of [`Request`]'s `class_data`.
 #[derive(Debug, Default)]
@@ -450,7 +450,6 @@ impl Request {
             return Ok(value);
         }
         let evaluated = crate::api::call::eval_declared(self, &constant.value, Some(declaring))?;
-        let evaluated = Owner::adopt(self, evaluated);
         let value = match &constant.ty {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
                 match crate::ops::verify_class_constant_type(self, *evaluated, ty, declaring, name)
@@ -716,7 +715,7 @@ impl Request {
         for (declaring, property) in &rows {
             let value = match &property.default {
                 Some(expr) => {
-                    let value = crate::api::call::eval_declared(self, expr, Some(*declaring))?;
+                    let value = crate::api::call::eval_declared_made(self, expr, Some(*declaring))?;
                     Some(self.strictly_held(value, property, *declaring)?)
                 }
                 None if property.ty.is_some() => None,

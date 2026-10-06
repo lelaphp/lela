@@ -16,7 +16,7 @@ use super::Request;
 use super::variables::BodyLimits;
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::TemporaryGuard;
-use crate::api::values::PhpArray;
+use crate::api::values::{Owner, PhpArray, adopted};
 use crate::engine::{Body, Method};
 
 /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the form reader
@@ -321,7 +321,18 @@ impl Request {
     /// `$_POST` and `$_FILES` it would have made, which the request's own
     /// are not; a request with no content type, or one no handler reads,
     /// is php's `RequestParseBodyException`.
-    pub fn parse_body(&mut self, limits: &BodyLimits) -> Result<(PhpArray, PhpArray), Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn parse_body(
+        &mut self,
+        limits: &BodyLimits,
+    ) -> Result<(Owner<PhpArray>, Owner<PhpArray>), Thrown> {
+        let (post, files) = self.parse_body_made(limits)?;
+        Ok((Owner::adopt(self, post), Owner::adopt(self, files)))
+    }
+
+    /// What [`parse_body`](Self::parse_body) makes, the two owners not
+    /// yet named.
+    fn parse_body_made(&mut self, limits: &BodyLimits) -> Result<(PhpArray, PhpArray), Thrown> {
         let Some(content_type) = self.web().and_then(|web| web.content_type.clone()) else {
             return Err(throw_error(
                 self,
@@ -337,8 +348,8 @@ impl Request {
             );
             return Err(throw_error(self, "RequestParseBodyException", &text));
         }
-        let post = PhpArray::new(self)?;
-        let files = PhpArray::new(self)?;
+        let post = self.array()?;
+        let files = self.array()?;
         let kept = self.http_globals.files.replace(files);
         let throwing = std::mem::replace(&mut self.post.throwing, true);
         let handled = self.handle_post(post, limits);
@@ -432,12 +443,20 @@ impl Request {
     /// afresh by `php_default_treat_data` into an array of their own, as
     /// `session.upload_progress` asks `sapi_module.treat_data` for them
     /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
-    pub fn input_variables(&mut self, input: super::Input) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn input_variables(&mut self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.input_variables_made(input);
+        adopted(self, made)
+    }
+
+    /// What [`input_variables`](Self::input_variables) makes, its one owner not yet named.
+    pub(crate) fn input_variables_made(&mut self, input: super::Input) -> Result<PhpArray, Thrown> {
         let source = match input {
             super::Input::Get => self.web().and_then(|web| web.query.clone()),
             super::Input::Cookie => self.web().and_then(|web| web.cookies.clone()),
             _ => None,
         };
         self.treat_data(input, source.as_deref())
+            .map(Owner::hand_on)
     }
 }

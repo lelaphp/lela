@@ -15,7 +15,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Emalloc, FreshString, PhpArray, PhpString, Value};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpArray, PhpString, Value};
 
 /// `sprintf(string $format, mixed ...$values): string`, php's
 /// `PHP_FUNCTION(sprintf)`: the format and every argument after it
@@ -299,7 +299,7 @@ fn sprintf(
     req: &mut Request,
     format: PhpString,
     values: Variadic<Value>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     formatted(req, format.as_bytes(), &values.0, Some(1))
 }
 
@@ -349,7 +349,11 @@ fn printf(req: &mut Request, format: PhpString, values: Variadic<Value>) -> Resu
 /// vsprintf() expects exactly 2 arguments, 1 given
 /// ```
 #[php_function]
-fn vsprintf(req: &mut Request, format: PhpString, values: PhpArray) -> Result<PhpString, Thrown> {
+fn vsprintf(
+    req: &mut Request,
+    format: PhpString,
+    values: PhpArray,
+) -> Result<Owner<PhpString>, Thrown> {
     let (arguments, args) = values_of(req, values)?;
     let formatted = formatted(req, format.as_bytes(), &arguments, None);
     args.free(req);
@@ -368,9 +372,9 @@ fn values_of(req: &mut Request, array: PhpArray) -> Result<(Vec<Value>, Emalloc)
 
 /// `zend_string_efree(result)` after a printing caller wrote it: the
 /// count it answers, `ZSTR_LEN(result)`.
-fn efree(req: &mut Request, result: PhpString) -> i64 {
+fn efree(req: &mut Request, result: Owner<PhpString>) -> i64 {
     let len = i64::try_from(result.len()).unwrap_or(i64::MAX);
-    req.release(Value::string(result));
+    result.give_up(req);
     len
 }
 
@@ -553,7 +557,7 @@ fn formatted(
     format: &[u8],
     args: &[Value],
     additional: Option<usize>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut out = Buffer::alloc(req)?;
     match format_into(req, &mut out, format, args, additional) {
         Ok(()) => out.finish(req),
@@ -778,7 +782,7 @@ fn convert(
                 Sign::None,
                 spec.expprec,
             );
-            req.release(Value::string(string));
+            string.give_up(req);
             appended
         }
         b'd' => {
@@ -1034,11 +1038,11 @@ impl Buffer {
 
     /// `ZSTR_LEN(result) = outpos` and the string handed out; one an
     /// extension lost to the memory limit never reaches here.
-    fn finish(self, req: &mut Request) -> Result<PhpString, Thrown> {
+    fn finish(self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self.result {
             Some(mut result) => {
                 result.set_len(self.pos);
-                Ok(result.finish())
+                Ok(result.finish(req))
             }
             None => PhpString::new(req, b""),
         }

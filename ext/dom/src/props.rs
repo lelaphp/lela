@@ -6,7 +6,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{Owner, PhpObject, Value};
 
 use crate::map::MapKind;
 use crate::modern::follows_spec;
@@ -343,11 +343,13 @@ pub(crate) const MODERN_ELEMENT: &[Prop] = &[
 /// ```
 fn class_list(req: &mut Request, object: PhpObject) -> Read {
     if let Some(kept) = crate::modern::cached(req, object, b"classList") {
-        req.addref(&kept);
-        return some(kept);
+        return some(Owner::take(req, kept));
     }
     let list = crate::token_list::create(req, object)?;
-    crate::modern::keep(req, object, b"classList", &list)?;
+    if let Err(thrown) = crate::modern::keep(req, object, b"classList", &list) {
+        list.give_up(req);
+        return Err(thrown);
+    }
     some(list)
 }
 
@@ -367,11 +369,13 @@ fn class_list(req: &mut Request, object: PhpObject) -> Read {
 /// ```
 pub(crate) fn children(req: &mut Request, object: PhpObject) -> Read {
     if let Some(kept) = crate::modern::cached(req, object, b"children") {
-        req.addref(&kept);
-        return some(kept);
+        return some(Owner::take(req, kept));
     }
     let list = crate::create(req, object, "Dom\\HTMLCollection", MapKind::ChildElements)?;
-    crate::modern::keep(req, object, b"children", &list)?;
+    if let Err(thrown) = crate::modern::keep(req, object, b"children", &list) {
+        list.give_up(req);
+        return Err(thrown);
+    }
     some(list)
 }
 
@@ -429,7 +433,7 @@ fn set_content_len(req: &mut Request, node: Node, bytes: &[u8]) {
 // ---- the helpers every reader shares
 
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
-fn some(value: Value) -> Read {
+fn some(value: Owner<Value>) -> Read {
     Ok(Some(value))
 }
 
@@ -446,8 +450,8 @@ fn string_or_empty(req: &mut Request, bytes: Option<Vec<u8>>) -> Read {
     }
 }
 
-fn null_read(_req: &mut Request, _object: PhpObject) -> Read {
-    some(Value::null())
+fn null_read(req: &mut Request, _object: PhpObject) -> Read {
+    some(Owner::take(req, Value::null()))
 }
 
 /// A written value as bytes, `null` as the empty string: the property's
@@ -516,7 +520,7 @@ fn node_name(req: &mut Request, object: PhpObject) -> Read {
 fn node_value(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     match node.kind() {
-        Kind::Element if follows_spec(req, object) => some(Value::null()),
+        Kind::Element if follows_spec(req, object) => some(Owner::take(req, Value::null())),
         Kind::Element | Kind::Attribute | Kind::Text | Kind::Comment | Kind::CData | Kind::Pi => {
             some(content_value(req, node, true)?)
         }
@@ -524,7 +528,7 @@ fn node_value(req: &mut Request, object: PhpObject) -> Read {
             let content = node.children().and_then(Node::get_content);
             string_or_null(req, content.as_deref())
         }
-        _ => some(Value::null()),
+        _ => some(Owner::take(req, Value::null())),
     }
 }
 
@@ -574,7 +578,7 @@ fn node_type(req: &mut Request, object: PhpObject) -> Read {
     } else {
         node.kind()
     };
-    some(Value::int(kind.number()))
+    some(Owner::take(req, Value::int(kind.number())))
 }
 
 fn parent_of(req: &mut Request, object: PhpObject, only_element: bool) -> Read {
@@ -770,7 +774,7 @@ fn next_element_sibling(req: &mut Request, object: PhpObject) -> Read {
 fn attributes(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     if node.kind() != Kind::Element {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     }
     let class = if follows_spec(req, object) {
         "Dom\\NamedNodeMap"
@@ -793,7 +797,7 @@ fn attributes(req: &mut Request, object: PhpObject) -> Read {
 /// ```
 fn is_connected_read(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
-    some(Value::bool(is_connected(node)))
+    some(Owner::take(req, Value::bool(is_connected(node))))
 }
 
 /// `dom_node_owner_document_read`: `null` for a document, nothing for a
@@ -812,7 +816,7 @@ fn is_connected_read(req: &mut Request, object: PhpObject) -> Read {
 fn owner_document(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     if node.kind().is_document() {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     }
     let Some(doc) = node.doc() else {
         return Ok(None);
@@ -971,7 +975,7 @@ fn local_name(req: &mut Request, object: PhpObject) -> Read {
     ) {
         return some(string(req, &node.name())?);
     }
-    some(Value::null())
+    some(Owner::take(req, Value::null()))
 }
 
 /// `dom_node_base_uri_read`.
@@ -1022,7 +1026,7 @@ fn modern_base_uri(req: &mut Request, object: PhpObject) -> Read {
 fn text_content(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     if skip_text_content(req, object, node) {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     }
     some(content_value(req, node, false)?)
 }
@@ -1137,7 +1141,7 @@ pub(crate) fn child_element_count(req: &mut Request, object: PhpObject) -> Read 
         }
         at = n.next();
     }
-    some(Value::int(count))
+    some(Owner::take(req, Value::int(count)))
 }
 
 // ---- DOMCharacterData, DOMText, DOMProcessingInstruction
@@ -1169,7 +1173,7 @@ fn set_data(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), T
 fn data_length(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let len = node.content().map_or(0, |c| Utf8::len(&c));
-    some(Value::int(len))
+    some(Owner::take(req, Value::int(len)))
 }
 
 /// `dom_text_whole_text_read`: the adjacent text and CDATA joined.
@@ -1242,8 +1246,8 @@ fn attr_name(req: &mut Request, object: PhpObject) -> Read {
     some(string(req, &name)?)
 }
 
-fn attr_specified(_req: &mut Request, _object: PhpObject) -> Read {
-    some(Value::bool(true))
+fn attr_specified(req: &mut Request, _object: PhpObject) -> Read {
+    some(Owner::take(req, Value::bool(true)))
 }
 
 fn attr_value(req: &mut Request, object: PhpObject) -> Read {
@@ -1431,7 +1435,7 @@ fn doctype_system_id(req: &mut Request, object: PhpObject) -> Read {
 fn internal_subset(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let Some(subset) = node.doc().and_then(Node::int_subset) else {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     };
     let mut out: Option<Vec<u8>> = None;
     let mut at = subset.children();
@@ -1443,7 +1447,7 @@ fn internal_subset(req: &mut Request, object: PhpObject) -> Read {
     }
     match out.filter(|o| !o.is_empty()) {
         Some(bytes) => some(string(req, &bytes)?),
-        None => some(Value::null()),
+        None => some(Owner::take(req, Value::null())),
     }
 }
 
@@ -1490,7 +1494,7 @@ fn entity_public_id(req: &mut Request, object: PhpObject) -> Read {
 fn entity_system_id(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     if !unparsed(node) {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     }
     string_or_empty(req, node.entity_system_id())
 }
@@ -1498,24 +1502,24 @@ fn entity_system_id(req: &mut Request, object: PhpObject) -> Read {
 fn entity_notation_name(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     if !unparsed(node) {
-        return some(Value::null());
+        return some(Owner::take(req, Value::null()));
     }
     string_or_empty(req, node.entity_content())
 }
 
 fn entity_actual_encoding(req: &mut Request, _object: PhpObject) -> Read {
     deprecated_property(req, "Property DOMEntity::$actualEncoding is deprecated");
-    some(Value::null())
+    some(Owner::take(req, Value::null()))
 }
 
 fn entity_encoding(req: &mut Request, _object: PhpObject) -> Read {
     deprecated_property(req, "Property DOMEntity::$encoding is deprecated");
-    some(Value::null())
+    some(Owner::take(req, Value::null()))
 }
 
 fn entity_version(req: &mut Request, _object: PhpObject) -> Read {
     deprecated_property(req, "Property DOMEntity::$version is deprecated");
-    some(Value::null())
+    some(Owner::take(req, Value::null()))
 }
 
 /// `dom_entity_reference_child_read`.

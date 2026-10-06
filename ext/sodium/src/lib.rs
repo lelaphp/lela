@@ -51,7 +51,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
 use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 /// `ZSTR_MAX_LEN`: `SIZE_MAX` less a `zend_string`'s 24-byte header and
 /// its NUL, the bound `libsodium.c`'s overflow checks are written over.
@@ -516,15 +516,22 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     for (key, frame) in framed {
         let mut frame = frame.copy(req)?;
         let args = PhpString::new(req, b"args")?;
-        let replaced = frame.replace(req, &Key::Str(args), Value::array(PhpArray::empty()));
-        req.release(Value::string(args));
-        if let Err(thrown) = replaced.and_then(|_| copy.replace(req, &key, Value::array(frame))) {
-            req.release(Value::array(copy));
+        let replaced = frame.replace(req, &Key::Str(*args), Value::array(PhpArray::empty()));
+        args.give_up(req);
+        let replaced = match replaced {
+            Ok(_) => copy.replace(req, &key, frame.into_value().hand_on_unmigrated()),
+            Err(thrown) => {
+                frame.give_up(req);
+                Err(thrown)
+            }
+        };
+        if let Err(thrown) = replaced {
+            copy.give_up(req);
             return Err(thrown);
         }
     }
-    let name = PhpString::new(req, b"trace")?;
-    object.set_prop(req, name, Value::array(copy))
+    let name = PhpString::new(req, b"trace")?.hand_on_unmigrated();
+    object.set_prop(req, name, copy.into_value().hand_on_unmigrated())
 }
 
 /// `zend_throw_exception(sodium_exception_ce, message, 0)`.
@@ -544,13 +551,13 @@ pub(crate) fn internal(req: &mut Request) -> Thrown {
 }
 
 /// A string of these bytes.
-pub(crate) fn made(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+pub(crate) fn made(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
 /// `n` random bytes, `randombytes_buf`, as every `*_keygen` makes its
 /// key.
-pub(crate) fn random_key(req: &mut Request, n: usize) -> Result<PhpString, Thrown> {
+pub(crate) fn random_key(req: &mut Request, n: usize) -> Result<Owner<PhpString>, Thrown> {
     let mut key = vec![0u8; n];
     ffi::random(&mut key);
     let made = made(req, &key);
@@ -586,7 +593,7 @@ pub(crate) fn assign_bytes(
     bytes: &[u8],
 ) -> Result<(), Thrown> {
     let string = made(req, bytes)?;
-    assign(req, cell, Value::string(string))
+    assign(req, cell, Value::string(string.hand_on_unmigrated()))
 }
 
 /// `sodium_add(string &$string1, string $string2): void`: the two as
@@ -768,7 +775,7 @@ fn sodium_pad(
     req: &mut Request,
     #[php(sensitive)] string: Raw<PhpString>,
     block_size: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (unpadded, size) = parsed(req, 2, 2, |req| {
         Ok((string.hold(req)?, block_size.hold(req)?))
     })?;
@@ -812,7 +819,7 @@ fn sodium_unpad(
     req: &mut Request,
     #[php(sensitive)] string: Raw<PhpString>,
     block_size: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (padded, size) = parsed(req, 2, 2, |req| {
         Ok((string.hold(req)?, block_size.hold(req)?))
     })?;
@@ -845,7 +852,7 @@ fn sodium_unpad(
 fn sodium_bin2hex(
     req: &mut Request,
     #[php(sensitive)] string: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bin = parsed(req, 1, 1, |req| string.hold(req))?;
     if bin.len() >= ZSTR_MAX_LEN / 2 {
         return Err(fail(req, "arithmetic overflow"));
@@ -876,7 +883,7 @@ fn sodium_hex2bin(
     req: &mut Request,
     #[php(sensitive)] string: Raw<PhpString>,
     #[php(default = "")] ignore: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (hex, ignore) = parsed(req, 1, 2, |req| Ok((string.hold(req)?, ignore.hold(req)?)))?;
     let mut bin = vec![0u8; hex.len() / 2];
     match ffi::hex2bin(&mut bin, hex.as_bytes(), ignore.as_bytes()) {
@@ -913,7 +920,7 @@ fn sodium_bin2base64(
     req: &mut Request,
     #[php(sensitive)] string: Raw<PhpString>,
     id: Raw<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (bin, id) = parsed(req, 2, 2, |req| Ok((string.hold(req)?, id.hold(req)?)))?;
     let variant = base64_variant(req, id)?;
     if bin.len() >= ZSTR_MAX_LEN / 4 * 3 - 3 - 1 {
@@ -948,7 +955,7 @@ fn sodium_base642bin(
     #[php(sensitive)] string: Raw<PhpString>,
     id: Raw<i64>,
     #[php(default = "")] ignore: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (b64, id, ignore) = parsed(req, 2, 3, |req| {
         Ok((string.hold(req)?, id.hold(req)?, ignore.hold(req)?))
     })?;

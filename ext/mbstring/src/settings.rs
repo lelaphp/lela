@@ -27,7 +27,7 @@ use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `MBFL_OUTPUTFILTER_ILLEGAL_MODE_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ impl Substitute {
     pub(crate) fn shown(
         self,
         req: &mut Request,
-    ) -> Result<php_ext::abi::Union<PhpString, i64>, Thrown> {
+    ) -> Result<php_ext::abi::Union<Owner<PhpString>, i64>, Thrown> {
         let name = match self.mode {
             Mode::Char | Mode::BadUtf8 => return Ok(php_ext::abi::Union::B(i64::from(self.char))),
             Mode::None => "none",
@@ -558,8 +558,8 @@ pub(crate) fn encoding_array(
     let mut list = Vec::new();
     let mut auto = false;
     for (_, value) in array.snapshot() {
-        let name = php_ext::coerce::to_string(req, &value)?;
-        let name = name.as_bytes();
+        let text = php_ext::coerce::to_string(req, &value)?;
+        let name = text.as_bytes();
         if name.eq_ignore_ascii_case(b"auto") {
             if !auto {
                 auto = true;
@@ -569,13 +569,15 @@ pub(crate) fn encoding_array(
             list.push(encoding);
         } else {
             let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-            let name = String::from_utf8_lossy(&name[..end]);
+            let name = String::from_utf8_lossy(&name[..end]).into_owned();
+            text.give_up(req);
             return Err(value_error(
                 req,
                 arg,
                 &format!("contains invalid encoding \"{name}\""),
             ));
         }
+        text.give_up(req);
     }
     Ok(list)
 }

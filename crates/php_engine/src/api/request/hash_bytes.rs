@@ -230,7 +230,7 @@ impl Request {
         if self.included_files.contains(path) {
             return Ok(());
         }
-        let held = PhpString::new(self, path)?;
+        let held = self.string(path)?;
         let mut table = std::mem::take(&mut self.included_files.table);
         let added = table.add(self);
         self.included_files.table = table;

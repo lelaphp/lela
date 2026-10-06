@@ -432,7 +432,7 @@ impl Request {
         if matches!(saved, Saved::TheObject) {
             return;
         }
-        if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[], &[]) {
+        if let Err(thrown) = self.serve_method_made(destructor, Some(object), class, &[], &[]) {
             self.leave_pending(&thrown);
             if !self.executing() {
                 self.end_the_walk();
@@ -889,7 +889,7 @@ impl Request {
         let offset = offset.copied().unwrap_or_else(Value::null);
         self.with_array_access(object, offset, |req, offset| {
             if read == DimensionRead::Silent {
-                let exists = crate::api::call::call_method(
+                let exists = crate::api::call::call_method_made(
                     req,
                     &object,
                     b"offsetExists",
@@ -901,7 +901,7 @@ impl Request {
                     return Ok(Value::null());
                 }
             }
-            crate::api::call::call_method(req, &object, b"offsetGet", &[offset])
+            crate::api::call::call_method_made(req, &object, b"offsetGet", &[offset])
         })
     }
 
@@ -919,7 +919,7 @@ impl Request {
         }
         let offset = offset.copied().unwrap_or_else(Value::null);
         let served = self.with_array_access(object, offset, |req, offset| {
-            crate::api::call::call_method(req, &object, b"offsetSet", &[offset, value])
+            crate::api::call::call_method_made(req, &object, b"offsetSet", &[offset, value])
         });
         self.release(value);
         self.release(served?);
@@ -955,7 +955,7 @@ impl Request {
     ) -> Result<bool, Thrown> {
         self.array_access(object)?;
         self.with_array_access(object, *offset, |req, offset| {
-            let exists = crate::api::call::call_method(
+            let exists = crate::api::call::call_method_made(
                 req,
                 &object,
                 b"offsetExists",
@@ -966,7 +966,7 @@ impl Request {
             if !answer || !not_empty {
                 return Ok(answer);
             }
-            let value = crate::api::call::call_method(
+            let value = crate::api::call::call_method_made(
                 req,
                 &object,
                 b"offsetGet",
@@ -987,7 +987,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         self.array_access(object)?;
         let served = self.with_array_access(object, *offset, |req, offset| {
-            crate::api::call::call_method(
+            crate::api::call::call_method_made(
                 req,
                 &object,
                 b"offsetUnset",
@@ -1051,7 +1051,7 @@ impl Request {
                 if self.method_named(object.class(), b"__tostring").is_none() {
                     return Ok(None);
                 }
-                let value = crate::api::call::call_method(self, &object, b"__toString", &[])?;
+                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
                 let value = self.unwrap_reference(value);
                 if value.as_php_string().is_some() {
                     return Ok(Some(value));
@@ -1139,7 +1139,7 @@ impl Request {
             // members as they stand, neither initialised for it.
             return self.lazy_debug_info(object);
         }
-        let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
+        let value = crate::api::call::call_method_made(self, &object, b"__debugInfo", &[])?;
         let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
@@ -1154,7 +1154,7 @@ impl Request {
                         "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
                     ),
                 );
-                PhpArray::new(self).map(Some)
+                self.array().map(Some)
             }
             None => {
                 self.release(value);
@@ -1522,7 +1522,7 @@ impl Request {
             return Ok(());
         }
         Self::mark_reinitable(copy, true);
-        let served = crate::api::call::call_method(self, &copy, b"__clone", &[]);
+        let served = crate::api::call::call_method_made(self, &copy, b"__clone", &[]);
         Self::mark_reinitable(copy, false);
         served.map(|answered| self.release(answered))
     }
@@ -1674,7 +1674,7 @@ impl Request {
                 Some(_) => value.deref(),
                 None => value,
             };
-            let name = key.to_prop_name(self)?;
+            let name = key.to_prop_name(self)?.hand_on();
             self.addref(&value);
             self.write_cloned_property(new, table, name, value)?;
         }

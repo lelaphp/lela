@@ -32,10 +32,14 @@
 //! release build runs nothing on drop, so what it kept is freed with
 //! the request's memory at its end.
 //!
-//! The constructors and sinks move to [`Owner`] one sink at a time
-//! (#1980): until a constructor returns one, the view it returns is the
-//! one owner the value was made with, and a sink that takes a view, or
-//! a native that returns one, takes that owner with it.
+//! Every constructor of the face returns the [`Owner`] a value is made
+//! with, as does every call that hands its caller a value of its own (a
+//! call's return, a conversion, a copy). A native's return takes either:
+//! an owner is moved to the engine, and a view, an argument or an
+//! element of one as the native reads it, is the engine's to own, which
+//! takes its owner as php's `RETURN_COPY` does. The sinks move to owners
+//! one at a time (#1980): until a sink takes one, a native hands it the
+//! owner with [`Owner::hand_on_unmigrated`], the migration's debt.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -54,7 +58,8 @@ mod smart_str;
 pub mod walk;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
-pub use owner::{Owner, View};
+pub use owner::{Owner, ResourceView, View};
+pub(crate) use owner::{adopted, adopted_some};
 pub use smart_str::SmartStr;
 
 /// The type of a value, php's `zend_zval_type_name` set, and the one
@@ -103,8 +108,10 @@ impl PhpString {
     /// longer is `zend_string_init`, one allocation counted against the
     /// request. The `Err` is the memory limit, recorded on the request as
     /// php's fatal and ending the native as `zend_mm` bails out.
-    pub fn new(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        req.string(bytes)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.string(bytes)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// `zend_string_init_interned`: the one interned string for these
@@ -134,8 +141,10 @@ impl PhpString {
     /// interns nothing new; a new string of the request's otherwise, as
     /// [`PhpString::new`] makes it. What php's unserializer makes of an
     /// array's or an object's key. The `Err` is the memory limit.
-    pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        req.existing_interned(bytes)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.existing_interned(bytes)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// A string of `len` bytes written in place by `fill`, php's
@@ -145,12 +154,14 @@ impl PhpString {
     /// `str_repeat("x", 200000000)` is php's `Allowed memory size` fatal
     /// and not two hundred megabytes built and then refused. `fill` is
     /// given `len` zero bytes to write once.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn filled(
         req: &mut Request,
         len: usize,
         fill: impl FnOnce(&mut [u8]),
-    ) -> Result<PhpString, Thrown> {
-        req.string_with(len, fill)
+    ) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.string_with(len, fill)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// A string of `n * m + l` bytes written in place by `fill`, php's
@@ -167,8 +178,9 @@ impl PhpString {
         m: usize,
         l: usize,
         fill: impl FnOnce(&mut [u8]),
-    ) -> Result<PhpString, Thrown> {
-        req.string_product(n, m, l, fill)
+    ) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.string_product(n, m, l, fill)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// The face over a heap string the engine already holds: a constant
@@ -297,13 +309,11 @@ impl Key {
     /// key with an owner taken, `zend_string_copy`, so either arm can be
     /// handed to [`PhpObject::set_prop`] or a `write_property`, which
     /// give the name up once the object has taken its own.
-    pub fn to_prop_name(&self, req: &mut Request) -> Result<PhpString, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn to_prop_name(&self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self {
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes()),
-            Key::Str(s) => {
-                req.addref(&Value::string(*s));
-                Ok(*s)
-            }
+            Key::Str(s) => Ok(Owner::take(req, *s)),
         }
     }
 }
@@ -348,8 +358,10 @@ impl PhpArray {
     /// fifty-six bytes for the header, nothing for elements until the
     /// first write. The `Err` is the memory limit, ending the native as
     /// `zend_mm` bails out.
-    pub fn new(req: &mut Request) -> Result<PhpArray, Thrown> {
-        req.array()
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn new(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+        let made = req.array()?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// `zend_new_array(size)` and `zend_hash_init(ht, size, ...)`, an
@@ -358,8 +370,10 @@ impl PhpArray {
     /// alone until then, as [`PhpArray::new`] is, where
     /// [`PhpArray::sized`] lays the table down at once. The `Err` is the
     /// memory limit.
-    pub fn init_size(req: &mut Request, size: u32) -> Result<PhpArray, Thrown> {
-        req.array_sized(size, true)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn init_size(req: &mut Request, size: u32) -> Result<Owner<PhpArray>, Thrown> {
+        let made = req.array_sized(size, true)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
@@ -441,12 +455,14 @@ impl PhpArray {
     ///   int(0)
     /// }
     /// ```
-    pub fn sized(req: &mut Request, size: u32, layout: Layout) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn sized(req: &mut Request, size: u32, layout: Layout) -> Result<Owner<PhpArray>, Thrown> {
         let laid = match layout {
             Layout::Packed => req.heap_mut().array_packed(size),
             Layout::Hash => req.heap_mut().array_mixed(size),
         };
-        req.fatal_of(laid).map(PhpArray::of)
+        let made = req.fatal_of(laid).map(PhpArray::of)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// The face over a heap array the engine already holds.
@@ -638,8 +654,10 @@ impl PhpArray {
 
     /// A copy with one owner, `zend_array_dup`: the same elements, each
     /// one more owner, what `array_merge` and `+` build on.
-    pub fn copy(&self, req: &mut Request) -> Result<PhpArray, Thrown> {
-        req.array_dup(self.0).map(PhpArray::of)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn copy(&self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+        let made = req.array_dup(self.0).map(PhpArray::of)?;
+        Ok(Owner::adopt(req, made))
     }
 
     /// An iterator over the elements in order.
@@ -1213,12 +1231,14 @@ impl PhpObject {
     /// string(4) "2000"
     /// int(1)
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn clone_with<T: Any + Send>(
         &self,
         req: &mut Request,
         payload: T,
-    ) -> Result<PhpObject, Thrown> {
-        req.clone_members_payload(*self, payload)
+    ) -> Result<Owner<PhpObject>, Thrown> {
+        let made = req.clone_members_payload(*self, payload);
+        adopted(req, made)
     }
 
     /// What a `Closure` carries, for a closure object: its native
@@ -1238,7 +1258,10 @@ impl PhpObject {
     /// object that is no closure and for a closure that bound nothing.
     /// The values are views, no owner taken; the `Err` is the memory
     /// limit refusing a name.
-    pub fn closure_bound(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    pub fn closure_bound(
+        &self,
+        req: &mut Request,
+    ) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
         let bound = req.closure_bound(*self, true);
         let mut out = Vec::with_capacity(bound.len());
         for (name, value) in bound {
@@ -1638,8 +1661,10 @@ impl PhpObject {
     ///   }
     /// }
     /// ```
-    pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
-        req.table_row_ref(*self, key)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
+        let made = req.table_row_ref(*self, key);
+        adopted(req, made)
     }
 
     /// Where the row `key` stands in the object's property table, the
@@ -1685,8 +1710,10 @@ impl PhpObject {
     ///   &string(1) "5"
     /// }
     /// ```
-    pub fn typed_row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
-        req.table_typed_row_ref(*self, key)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn typed_row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
+        let made = req.table_typed_row_ref(*self, key);
+        adopted(req, made)
     }
 
     /// One property by name, without a handler in the way: a view of
@@ -2015,8 +2042,10 @@ impl PhpRef {
     /// the cell, and `value` the cell's from here, so a caller that
     /// keeps a second name of what `value` names takes its own owner.
     /// The `Err` is the memory limit as the fatal that ends the request.
-    pub fn new(req: &mut Request, value: Value) -> Result<PhpRef, Thrown> {
-        req.reference(value)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn new(req: &mut Request, value: Value) -> Result<Owner<PhpRef>, Thrown> {
+        let made = req.reference(value);
+        adopted(req, made)
     }
 
     /// The value held, `Z_REFVAL`: a view, no owner taken.
@@ -2184,12 +2213,14 @@ impl Resource {
     /// [`Resource::id`] reads, the payload counted with it. The `Err` is
     /// the memory limit as the fatal that ends the request, or php's
     /// `Resource ID space overflow`.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn new<T: Any + Send>(
         req: &mut Request,
         kind: ResourceType,
         payload: T,
-    ) -> Result<Resource, Thrown> {
-        req.new_resource(kind, payload)
+    ) -> Result<Owner<Resource>, Thrown> {
+        let made = req.new_resource(kind, payload);
+        adopted(req, made)
     }
 
     /// [`Resource::new`] with the payload laid inside an allocation of
@@ -2198,20 +2229,29 @@ impl Resource {
     /// `context`), so the request is charged php's size whatever the
     /// payload's is. A payload that does not fit `size` is an internal
     /// error, raised as the fatal it is.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn sized<T: Any + Send>(
         req: &mut Request,
         kind: ResourceType,
         payload: T,
         size: usize,
-    ) -> Result<Resource, Thrown> {
+    ) -> Result<Owner<Resource>, Thrown> {
         let allocated = req.heap_mut().resource_sized(kind, payload, size);
-        req.fatal_of(allocated).map(Resource::of)
+        let made = req.fatal_of(allocated).map(Resource::of);
+        adopted(req, made)
     }
 
     /// `zend_register_resource(NULL, type)`: a resource of `kind` with no
     /// payload, one owner, under the next id; the `Err` is the memory
     /// limit's fatal.
-    pub fn bare(req: &mut Request, kind: ResourceType) -> Result<Resource, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn bare(req: &mut Request, kind: ResourceType) -> Result<Owner<Resource>, Thrown> {
+        let made = Self::bare_made(req, kind);
+        adopted(req, made)
+    }
+
+    /// What [`bare`] makes, its one owner not yet named.
+    pub(crate) fn bare_made(req: &mut Request, kind: ResourceType) -> Result<Resource, Thrown> {
         let allocated = req.heap_mut().resource(kind);
         req.fatal_of(allocated).map(Resource::of)
     }
@@ -2219,7 +2259,19 @@ impl Resource {
     /// [`Resource::sized`] for what php `pemalloc`s persistent, as
     /// `_php_stream_alloc` does a persistent stream: the resource on the
     /// request's heap, the `size` bytes off its count.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn persistent<T: Any + Send>(
+        req: &mut Request,
+        kind: ResourceType,
+        payload: T,
+        size: usize,
+    ) -> Result<Owner<Resource>, Thrown> {
+        let made = Self::persistent_made(req, kind, payload, size);
+        adopted(req, made)
+    }
+
+    /// What [`persistent`] makes, its one owner not yet named.
+    pub(crate) fn persistent_made<T: Any + Send>(
         req: &mut Request,
         kind: ResourceType,
         payload: T,
@@ -2715,7 +2767,7 @@ mod tests {
         assert_eq!(a.unset(&mut req, &Key::Int(5)), Ok(true));
         assert_eq!(a.len(), 2);
         assert_eq!(a.cursor_current(), Some(Value::int(2)));
-        req.release(Value::array(a));
+        a.give_up(&mut req);
     }
 
     /// Copying a `Value` that holds an array names the one array
@@ -2726,7 +2778,7 @@ mod tests {
     fn a_copy_is_a_refcount_and_a_write_separates() {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
-        let Ok(mut a) = PhpArray::new(&mut req) else {
+        let Ok(mut a) = PhpArray::new(&mut req).map(Owner::hand_on) else {
             return;
         };
         assert!(a.append(&mut req, Value::int(1)).is_ok());
@@ -2779,7 +2831,7 @@ mod tests {
                 .and_then(|v| v.as_object().map(PhpObject::index)),
             Some(1)
         );
-        req.release(Value::array(a));
+        a.give_up(&mut req);
         assert_eq!(first.refcount(), 1, "the array gave its owner back");
         req.release(first);
         assert_eq!(req.memory_usage(false), start);
@@ -2800,8 +2852,8 @@ mod tests {
             return;
         };
         let (Ok(name), Ok(text)) = (
-            PhpString::new(&mut req, b"message"),
-            PhpString::new(&mut req, b"a string the object holds"),
+            PhpString::new(&mut req, b"message").map(Owner::hand_on),
+            PhpString::new(&mut req, b"a string the object holds").map(Owner::hand_on),
         ) else {
             return;
         };
@@ -2841,7 +2893,8 @@ mod tests {
         assert_eq!(v.deref().as_int(), Some(3));
         assert_eq!(v.type_name(), "int");
         assert_eq!(v.refcount(), 1);
-        let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
+        let Ok(text) = PhpString::new(&mut req, b"held through the reference").map(Owner::hand_on)
+        else {
             return;
         };
         let Ok(()) = r.set(&mut req, Value::string(text)) else {
@@ -2874,7 +2927,7 @@ mod tests {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
         let kind = req.resources().register_type(b"stream", Some(dtor));
-        let Ok(r) = Resource::new(&mut req, kind, 7u32) else {
+        let Ok(r) = Resource::new(&mut req, kind, 7u32).map(Owner::hand_on) else {
             return;
         };
         // The resource, its payload, and the list's own packed table,
@@ -2905,7 +2958,7 @@ mod tests {
             start + 160,
             "the list's table stays until the request ends"
         );
-        let Ok(next) = Resource::new(&mut req, kind, 0u8) else {
+        let Ok(next) = Resource::new(&mut req, kind, 0u8).map(Owner::hand_on) else {
             return;
         };
         assert_eq!(next.id(), 2, "an id is never given twice");

@@ -7,7 +7,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::{Action, Code, Compress, Decompress};
 
@@ -87,7 +87,7 @@ fn bzcompress(
     data: PhpString,
     #[php(default = 4)] block_size: i64,
     #[php(default = 0)] work_factor: i64,
-) -> Result<Union<PhpString, i64>, Thrown> {
+) -> Result<Union<Owner<PhpString>, i64>, Thrown> {
     if !(1..=9).contains(&block_size) {
         return Err(arg_value_error(req, 2, "be between 1 and 9"));
     }
@@ -174,7 +174,7 @@ fn bzdecompress(
     req: &mut Request,
     data: PhpString,
     #[php(default = false)] use_less_memory: bool,
-) -> Result<Union<PhpString, OrFalse<i64>>, Thrown> {
+) -> Result<Union<Owner<PhpString>, OrFalse<i64>>, Thrown> {
     let Ok(mut stream) = Decompress::new(use_less_memory) else {
         return Ok(Union::B(OrFalse::False));
     };

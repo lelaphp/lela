@@ -14,7 +14,7 @@ use php_ext::request::{
     Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _,
     Xport, XportFailure,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `FTP_BUFSIZE`: the most one read asks for and the longest line.
 pub(crate) const BUFSIZE: usize = 4096;
@@ -255,7 +255,7 @@ fn ran_out(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
     let answer = meta
         .find(b"timed_out")
         .is_some_and(|v| v.as_bool() == Some(true));
-    req.release(Value::array(meta));
+    meta.give_up(req);
     Ok(answer)
 }
 
@@ -268,7 +268,7 @@ fn recv(req: &mut Request, stream: Stream, len: usize, timeout: Duration) -> Res
     let read = stream.read(req, len)?;
     let bytes = read.map(|s| {
         let bytes = s.as_bytes().to_vec();
-        req.release(Value::string(s));
+        s.give_up(req);
         bytes
     });
     match bytes {
@@ -295,7 +295,7 @@ fn send(req: &mut Request, stream: Stream, bytes: &[u8]) -> bool {
 /// `php_stream_context_alloc` with `ssl`'s `verify_peer` and
 /// `verify_peer_name` off and `allow_self_signed` on: the options php's
 /// `SSL_CTX_new` has, which checks no peer; the one owner the caller's.
-fn unverified(req: &mut Request) -> Result<StreamCtx, Thrown> {
+fn unverified(req: &mut Request) -> Result<Owner<StreamCtx>, Thrown> {
     let context = StreamCtx::alloc(req)?;
     for (option, value) in [
         (&b"verify_peer"[..], false),
@@ -303,7 +303,7 @@ fn unverified(req: &mut Request) -> Result<StreamCtx, Thrown> {
         (b"allow_self_signed", true),
     ] {
         if let Err(thrown) = context.set_option(req, b"ssl", option, &Value::bool(value)) {
-            req.release(context.resource().as_value());
+            context.give_up(req);
             return Err(thrown);
         }
     }
@@ -341,19 +341,21 @@ impl Ftp {
             connect: true,
             persistent: None,
             socket: SocketOptions::default(),
-            context,
+            context: context.as_ref().map(|context| **context),
         };
         let Ok(control) = req.xport_create(&name, xport)? else {
             if let Some(context) = context {
-                req.release(context.resource().as_value());
+                context.give_up(req);
             }
             return Ok(None);
         };
+        let control = control.hand_on_unmigrated();
+        let context = context.map(Owner::hand_on_unmigrated);
         let local = control
             .socket_name(req, false)?
             .map(|s| {
                 let host = host_of(s.as_bytes());
-                req.release(Value::string(s));
+                s.give_up(req);
                 host
             })
             .unwrap_or_default();
@@ -679,7 +681,7 @@ impl Ftp {
             return Ok(false);
         };
         let peer_host = host_of(peer.as_bytes());
-        req.release(Value::string(peer));
+        peer.give_up(req);
         if peer_host.contains(':') {
             if !self.putcmd(req, b"EPSV", None) || !self.getresp(req)? {
                 return Ok(false);
@@ -808,7 +810,7 @@ impl Ftp {
                 context,
             };
             return Ok(match req.xport_create(&target, xport)? {
-                Ok(stream) => Some(Data::Connected(stream)),
+                Ok(stream) => Some(Data::Connected(stream.hand_on_unmigrated())),
                 Err(XportFailure { code, text }) => {
                     let text = format!("php_connect_nonb() failed: {text} ({code})");
                     docref(req, Level::Warning, &text);
@@ -831,7 +833,7 @@ impl Ftp {
             context,
         };
         let listener = match req.xport_create(any, xport)? {
-            Ok(stream) => stream,
+            Ok(stream) => stream.hand_on_unmigrated(),
             Err(XportFailure { code, text }) => {
                 docref(
                     req,
@@ -843,7 +845,7 @@ impl Ftp {
         };
         let port = listener.socket_name(req, false)?.map_or(0, |name| {
             let bytes = name.as_bytes().to_vec();
-            req.release(Value::string(name));
+            name.give_up(req);
             let text = String::from_utf8_lossy(&bytes).into_owned();
             text.rsplit_once(':')
                 .and_then(|(_, p)| p.parse().ok())
@@ -878,9 +880,9 @@ impl Ftp {
                     return Ok(None);
                 };
                 if let Some(peer) = peer {
-                    req.release(Value::string(peer));
+                    peer.give_up(req);
                 }
-                stream
+                stream.hand_on_unmigrated()
             }
         };
         if matches!(self.tls, Tls::Up { data: true }) && !secure(req, stream, Some(self.control)) {
@@ -1399,7 +1401,7 @@ fn send_stream(
                     return Ok(false);
                 };
                 let bytes = chunk.as_bytes().to_vec();
-                req.release(Value::string(chunk));
+                chunk.give_up(req);
                 if bytes.is_empty() {
                     break;
                 }
@@ -1418,15 +1420,15 @@ fn send_stream(
 /// `ftp_mlsd_parse_line`: the entry's `name`, then its facts, each
 /// `key=value;` before the blank; the warning and `None` for a line that
 /// breaks the form.
-pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<PhpArray>, Thrown> {
+pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let Some(blank) = line.iter().position(|&b| b == b' ') else {
         docref(req, Level::Warning, "Missing pathname in MLSD response");
         return Ok(None);
     };
     let mut entry = PhpArray::new(req)?;
     let name = PhpString::new(req, &line[blank + 1..])?;
-    let key = Key::Str(PhpString::new(req, b"name")?);
-    entry.set(req, key, Value::string(name))?;
+    let key = Key::Str(PhpString::new(req, b"name")?.hand_on_unmigrated());
+    entry.set(req, key, Value::string(name.hand_on_unmigrated()))?;
     let mut facts = &line[..blank];
     while !facts.is_empty() {
         let fact = facts.iter().position(|&b| b == b';').and_then(|semi| {
@@ -1435,12 +1437,12 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<PhpArra
         });
         let Some((eq, semi)) = fact else {
             docref(req, Level::Warning, "Malformed fact in MLSD response");
-            req.release(Value::array(entry));
+            entry.give_up(req);
             return Ok(None);
         };
-        let key = Key::Str(PhpString::new(req, &facts[..eq])?);
+        let key = Key::Str(PhpString::new(req, &facts[..eq])?.hand_on_unmigrated());
         let value = PhpString::new(req, &facts[eq + 1..semi])?;
-        entry.set(req, key, Value::string(value))?;
+        entry.set(req, key, Value::string(value.hand_on_unmigrated()))?;
         facts = &facts[semi + 1..];
     }
     Ok(Some(entry))

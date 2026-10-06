@@ -876,7 +876,7 @@ fn dump_to_file(
     let saved = match dump_to_string(req, node, 0, format, no_empty, encoding) {
         Ok(saved) => saved,
         Err(thrown) => {
-            stream.free(req);
+            stream.hand_on_unmigrated().free(req);
             return Err(thrown);
         }
     };
@@ -887,7 +887,7 @@ fn dump_to_file(
         }
         None => -1,
     };
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     Ok(written)
 }
 

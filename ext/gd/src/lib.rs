@@ -36,7 +36,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `gd.jpeg_ignore_warning`, `PHP_INI_ALL`, on by default.
 const JPEG_IGNORE_WARNING: &str = "gd.jpeg_ignore_warning";
@@ -424,13 +424,23 @@ fn info(req: &mut Request) {
 /// }
 /// ```
 #[php_function]
-fn gd_info(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn gd_info(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
     let version = PhpString::new(req, constants::GD_VERSION.as_bytes())?;
-    set(req, &mut info, "GD Version", Value::string(version))?;
+    set(
+        req,
+        &mut info,
+        "GD Version",
+        version.into_value().hand_on_unmigrated(),
+    )?;
     set(req, &mut info, "FreeType Support", Value::bool(true))?;
     let linkage = PhpString::new(req, b"with freetype")?;
-    set(req, &mut info, "FreeType Linkage", Value::string(linkage))?;
+    set(
+        req,
+        &mut info,
+        "FreeType Linkage",
+        linkage.into_value().hand_on_unmigrated(),
+    )?;
     for (name, on) in SUPPORT {
         set(req, &mut info, name, Value::bool(on))?;
     }
@@ -440,16 +450,16 @@ fn gd_info(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// `add_assoc_*`: `value` under the string key `name`.
 pub(crate) fn set(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &str,
     value: Value,
 ) -> Result<(), Thrown> {
     let key = PhpString::new(req, name.as_bytes())?;
-    array.set(req, Key::Str(key), value)
+    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
 }
 
 /// A packed array of `values`, `add_index_*` from zero.
-pub(crate) fn list(req: &mut Request, values: &[Value]) -> Result<PhpArray, Thrown> {
+pub(crate) fn list(req: &mut Request, values: &[Value]) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for value in values {
         array.append(req, *value)?;

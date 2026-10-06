@@ -1676,7 +1676,7 @@ impl Request {
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
         let held = Owner::take(self, object.as_value());
-        let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
+        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
         held.give_up(self);
         served
     }

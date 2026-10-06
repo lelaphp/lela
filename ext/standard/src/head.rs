@@ -15,11 +15,11 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `header(string $header, bool $replace = true, int $response_code = 0): void`
 /// (`Z/ext/standard/head.c:32`): `sapi_header_op` under `REPLACE` or
-/// `ADD`, whose answer the native drops. Once the first byte has
+/// `ADD`, whose answer the native drops. After the first byte has
 /// reached the host the line is refused with php's warning naming where
 /// the body started, `SG(headers_sent)` and `OG(output_start_*)`.
 ///
@@ -221,8 +221,8 @@ fn headers_sent(
     let (file, at) = sent.clone().unwrap_or_default();
     line.set(req, Untyped(Value::int(i64::from(at))))?;
     if filename.is_given() {
-        let file = Value::string(PhpString::new(req, &file)?);
-        filename.set(req, Untyped(file))?;
+        let file = PhpString::new(req, &file)?;
+        filename.set(req, Untyped(file.into_value()))?;
     }
     Ok(sent.is_some())
 }
@@ -241,10 +241,10 @@ fn headers_sent(
 /// }
 /// ```
 #[php_function]
-fn headers_list(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn headers_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for line in req.headers_list() {
-        let value = Value::string(PhpString::new(req, &line)?);
+        let value = Value::string(PhpString::new(req, &line)?.hand_on_unmigrated());
         array.append(req, value)?;
     }
     Ok(array)
@@ -420,7 +420,7 @@ fn cookie_options(
         let string = |req: &mut Request| -> Result<Vec<u8>, Thrown> {
             let text = to_string(req, &value)?;
             let bytes = text.as_bytes().to_vec();
-            req.release(Value::string(text));
+            text.give_up(req);
             Ok(bytes)
         };
         match lower.as_slice() {

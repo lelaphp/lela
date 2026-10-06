@@ -1661,7 +1661,7 @@ pub(crate) fn starting_statics(
     if code.bound_vars.is_empty() {
         return Ok(None);
     }
-    let mut table = crate::api::values::PhpArray::new(req)?;
+    let mut table = req.array()?;
     for var in &code.bound_vars {
         let value = if var.lexical {
             Value::null()
@@ -1742,7 +1742,10 @@ pub(crate) fn default_value(
         .and_then(|at| code.const_exprs.get(at as usize));
     if let Some(expr) = unevaluated {
         let scope = req.executed_scope();
-        return Ok((crate::api::call::eval_const_expr(req, expr, scope)?, true));
+        return Ok((
+            crate::api::call::eval_const_expr_made(req, expr, scope)?,
+            true,
+        ));
     }
     let value = constant(code, at);
     req.addref(&value);

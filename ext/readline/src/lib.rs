@@ -36,7 +36,7 @@ use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Completion, Matches};
 
@@ -179,8 +179,8 @@ fn readline_info_table(req: &mut Request) {
 }
 
 /// A string of the request's heap.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `readline(?string $prompt = null): string|false`: a line read with
@@ -196,7 +196,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
 fn readline(
     req: &mut Request,
     #[php(default = null)] prompt: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let prompt = prompt.map(|p| p.as_bytes().to_vec());
     match ffi::readline(req, prompt.as_deref()) {
         Some(line) => Ok(OrFalse::Value(PhpString::new(req, &line)?)),
@@ -241,45 +241,59 @@ fn readline_info(
     req: &mut Request,
     #[php(default = null)] var_name: Option<PhpString>,
     #[php(default = null)] value: Untyped<Value>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let value = (!matches!(value.0.deref().as_ref(), ValueRef::Null)).then_some(value.0);
     let Some(name) = var_name else {
         let mut array = PhpArray::new(req)?;
         let rows = [
             (b"line_buffer".as_slice(), string(req, &ffi::line_buffer())?),
-            (b"point", Value::int(ffi::point())),
-            (b"end", Value::int(ffi::end())),
+            (b"point", Owner::take(req, Value::int(ffi::point()))),
+            (b"end", Owner::take(req, Value::int(ffi::end()))),
             (b"library_version", string(req, &ffi::library_version())?),
             (b"readline_name", string(req, &ffi::readline_name())?),
             (
                 b"attempted_completion_over",
-                Value::int(ffi::attempted_completion_over()),
+                Owner::take(req, Value::int(ffi::attempted_completion_over())),
             ),
         ];
         for (key, row) in rows {
-            let key = Key::Str(PhpString::new(req, key)?);
-            array.set(req, key, row)?;
+            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+            array.set(req, key, row.hand_on_unmigrated())?;
         }
-        return Ok(Value::array(array));
+        return Ok(array.into_value());
     };
     let name = name.as_bytes().to_ascii_lowercase();
     match name.as_slice() {
         b"line_buffer" => {
             let old = string(req, &ffi::line_buffer())?;
             if let Some(value) = value {
-                let value = to_string(req, &value)?;
+                let value = match to_string(req, &value) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        old.give_up(req);
+                        return Err(e);
+                    }
+                };
                 ffi::set_line_buffer(value.as_bytes());
+                value.give_up(req);
             }
             Ok(old)
         }
-        b"point" => Ok(Value::int(ffi::point())),
-        b"end" => Ok(Value::int(ffi::end())),
+        b"point" => Ok(Owner::take(req, Value::int(ffi::point()))),
+        b"end" => Ok(Owner::take(req, Value::int(ffi::end()))),
         b"library_version" => string(req, &ffi::library_version()),
         b"readline_name" => {
             let old = string(req, &ffi::readline_name())?;
             if let Some(value) = value {
-                let value = to_string(req, &value)?;
+                let value = match to_string(req, &value) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        old.give_up(req);
+                        return Err(e);
+                    }
+                };
                 ffi::set_readline_name(value.as_bytes());
+                value.give_up(req);
             }
             Ok(old)
         }
@@ -289,9 +303,9 @@ fn readline_info(
                 let value = to_long(req, &value)?;
                 ffi::set_attempted_completion_over(value);
             }
-            Ok(Value::int(old))
+            Ok(Owner::take(req, Value::int(old)))
         }
-        _ => Ok(Value::null()),
+        _ => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -416,24 +430,27 @@ pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i
     let Ok(word) = string(req, text) else {
         return Matches::None;
     };
-    let Ok(answer) = call(req, &callable, &[word, Value::int(start), Value::int(end)]) else {
+    let called = call(req, &callable, &[*word, Value::int(start), Value::int(end)]);
+    word.give_up(req);
+    let Ok(answer) = called else {
         return Matches::None;
     };
     let held = answer.deref();
     let Some(array) = held.as_array() else {
-        req.release(answer);
+        answer.give_up(req);
         return Matches::None;
     };
     let mut candidates = Vec::new();
     for (_, member) in array {
-        if let Ok(member) = to_string(req, &member)
-            && member.as_bytes().starts_with(text)
-        {
-            candidates.push(member.as_bytes().to_vec());
+        if let Ok(member) = to_string(req, &member) {
+            if member.as_bytes().starts_with(text) {
+                candidates.push(member.as_bytes().to_vec());
+            }
+            member.give_up(req);
         }
     }
     let empty = array.is_empty();
-    req.release(answer);
+    answer.give_up(req);
     if empty {
         Matches::Empty
     } else {
@@ -506,10 +523,12 @@ pub(crate) fn callback_line(req: &mut Request, line: Option<Vec<u8>>) {
             Ok(value) => value,
             Err(_) => return,
         },
-        None => Value::null(),
+        None => Owner::take(req, Value::null()),
     };
-    if let Ok(answer) = call(req, &callable, &[argument]) {
-        req.release(answer);
+    let called = call(req, &callable, &[*argument]);
+    argument.give_up(req);
+    if let Ok(answer) = called {
+        answer.give_up(req);
     }
 }
 

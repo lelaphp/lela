@@ -35,7 +35,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw,
 };
 use php_ext::request::{Cast, Opening, Request, Resolve, Stream, StreamCtx, Streams as _, Whence};
-use php_ext::values::{PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::ffi::{Magic, Read};
 
@@ -139,7 +139,7 @@ mod class {
     use php_ext::attr::php_class;
     use php_ext::raising::{Thrown, throw, throwing_warnings};
     use php_ext::request::Request;
-    use php_ext::values::{PhpString, Resource};
+    use php_ext::values::{Owner, PhpString, Resource};
 
     use crate::ffi::Magic;
     use crate::{buffer, file, open, set_flags};
@@ -212,7 +212,7 @@ mod class {
             filename: Path,
             #[php(default = FILEINFO_NONE)] flags: i64,
             #[php(default = null)] context: Option<Resource>,
-        ) -> Result<OrFalse<PhpString>, Thrown> {
+        ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             file(req, this.object(), filename, flags, context)
         }
 
@@ -233,7 +233,7 @@ mod class {
             string: PhpString,
             #[php(default = FILEINFO_NONE)] flags: i64,
             #[php(default = null)] context: Option<Resource>,
-        ) -> Result<OrFalse<PhpString>, Thrown> {
+        ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             let _ = context;
             let deprecated = req.argument_count() == 3;
             buffer(req, this.object(), string, flags, deprecated)
@@ -345,14 +345,14 @@ fn finfo_open(
     req: &mut Request,
     #[php(default = FILEINFO_NONE)] flags: i64,
     #[php(default = null)] magic_database: Option<Path>,
-) -> Result<OrFalse<Instance<class::finfo>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<class::finfo>>>, Thrown> {
     let Some(magic) = open(req, flags, magic_database)? else {
         return Ok(OrFalse::False);
     };
     let Some(class) = lookup_class(req, b"finfo")? else {
         return Err(throw(req, "Error", "Class \"finfo\" not found"));
     };
-    let object = Instance::<class::finfo>::of(new_object(req, class)?);
+    let object = new_object(req, class)?.into_instance::<class::finfo>();
     *object.payload_mut(req)? = Some(magic);
     Ok(OrFalse::Value(object))
 }
@@ -457,10 +457,11 @@ fn from_path(
     };
     let answer = match stream.stat(req) {
         Some(stat) if stat[2] & S_IFMT == S_IFDIR => Some(b"directory".to_vec()),
-        Some(_) => identify_stream(req, magic, stream),
+        Some(_) => identify_stream(req, magic, *stream),
         None => None,
     };
-    stream.free(req);
+    stream.close(req);
+    stream.give_up(req);
     Ok(answer)
 }
 
@@ -471,7 +472,7 @@ fn file(
     filename: Path,
     flags: i64,
     context: Option<Resource>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let path = filename.0.as_bytes().to_vec();
     let answer = with_magic(req, object, |req, magic| {
         if path.is_empty() {
@@ -518,7 +519,7 @@ fn finfo_file(
     filename: Path,
     #[php(default = FILEINFO_NONE)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     file(req, finfo.object(), filename, flags, context)
 }
 
@@ -531,7 +532,7 @@ fn buffer(
     string: PhpString,
     flags: i64,
     deprecated: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if deprecated {
         let text = "The $context parameter has no effect for finfo_buffer()";
         docref(req, Level::Deprecated, text);
@@ -583,7 +584,7 @@ fn finfo_buffer(
     string: PhpString,
     #[php(default = FILEINFO_NONE)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let _ = context;
     let deprecated = req.argument_count() == 4;
     buffer(req, finfo.object(), string, flags, deprecated)
@@ -649,7 +650,7 @@ fn target(req: &mut Request, value: Value) -> Result<Target, Thrown> {
 fn mime_content_type(
     req: &mut Request,
     filename: Raw<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let target = target(req, filename.value().deref())?;
     // `MAGIC_MIME_TYPE`.
     let Some(mut magic) = Magic::open(0x10) else {

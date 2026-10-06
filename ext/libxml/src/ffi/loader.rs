@@ -405,7 +405,7 @@ unsafe extern "C" fn input_buffer(
     // SAFETY: as above.
     let req = unsafe { request(io) };
     let stream = match Loader::open_input(req, path) {
-        Ok(Some(stream)) => stream,
+        Ok(Some(stream)) => stream.hand_on_unmigrated(),
         Ok(None) => return ptr::null_mut(),
         Err(thrown) => {
             // SAFETY: as above.
@@ -469,7 +469,7 @@ unsafe extern "C" fn output_buffer(
     // SAFETY: as above.
     let req = unsafe { request(io) };
     let stream = match Loader::open_output(req, path) {
-        Ok(Some(stream)) => stream,
+        Ok(Some(stream)) => stream.hand_on_unmigrated(),
         Ok(None) => return failed(),
         Err(thrown) => {
             // SAFETY: as above.

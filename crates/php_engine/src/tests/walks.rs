@@ -14,7 +14,7 @@ use crate::api::call::call;
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Guarded, Reached};
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
 use crate::engine::Engine;
 use crate::test::Capture;
 
@@ -96,7 +96,11 @@ fn guarded(req: &mut Request, array: Ref<PhpArray>) -> Result<bool, Thrown> {
 /// calls `$f` with each row's key and then reads the row's value, which
 /// `$f` may have unset.
 #[php_function]
-fn live_reads(req: &mut Request, array: Ref<PhpArray>, f: Callable) -> Result<PhpString, Thrown> {
+fn live_reads(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    f: Callable,
+) -> Result<Owner<PhpString>, Thrown> {
     let Some(holder) = array.reference() else {
         return Err(throw_error(req, "Exception", "no reference"));
     };
@@ -107,7 +111,7 @@ fn live_reads(req: &mut Request, array: Ref<PhpArray>, f: Callable) -> Result<Ph
             Key::Str(s) => Value::string(*s),
         };
         let answer = call(req, &f, &[key])?;
-        req.release(answer);
+        answer.give_up(req);
         let bytes = row.value().as_str_bytes().unwrap_or_default();
         read.push_str(&String::from_utf8_lossy(bytes));
         read.push(' ');
