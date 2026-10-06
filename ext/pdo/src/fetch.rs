@@ -1509,13 +1509,16 @@ pub(super) fn fetch_all(
     let mut out = PhpArray::new(req)?;
     // What a fetch that throws partway gathered is given up, as the VM
     // frees the return value of a native that threw.
-    match gather_all(req, object, (kind, how, flags), &with, &mut out) {
-        Ok(true) => return Ok(out),
-        Ok(false) => {}
-        Err(thrown) => {
-            req.release(Value::array(out));
-            return Err(thrown);
+    let mut gathered = gather_all(req, object, kind, how, flags, &with, &mut out);
+    if gathered.is_ok() && kind == Some(Kind::KeyPair) {
+        gathered = stmt::handle_error(req, object, false);
+        if gathered.is_ok() {
+            return Ok(out);
         }
+    }
+    if let Err(thrown) = gathered {
+        req.release(Value::array(out));
+        return Err(thrown);
     }
     let state = stmt::read(req, object, |s| s.error_code).flatten();
     if state != Some(SqlState::NONE) {
@@ -1529,19 +1532,19 @@ pub(super) fn fetch_all(
 }
 
 /// `fetchAll()`'s rows gathered into `out` in the shape `kind`, `how`
-/// and `flags` name; `true` where `FETCH_KEY_PAIR` has also handled the
-/// statement's error, so `out` is the answer as it stands.
+/// and `flags` name.
 fn gather_all(
     req: &mut Request,
     object: PhpObject,
-    (kind, how, flags): (Option<Kind>, i64, Flags),
+    kind: Option<Kind>,
+    how: i64,
+    flags: Flags,
     with: &With,
     out: &mut PhpArray,
-) -> Result<bool, Thrown> {
+) -> Result<(), Thrown> {
     if kind == Some(Kind::KeyPair) {
         while key_pair(req, object, Orientation::Forward, 0, out)? {}
-        stmt::handle_error(req, object, false)?;
-        return Ok(true);
+        return Ok(());
     }
     if flags.has(Flag::Group) || flags.has(Flag::Unique) {
         grouped_rows(req, object, how | flags.0, flags, with, out)?;
@@ -1550,7 +1553,7 @@ fn gather_all(
             out.append(req, row)?;
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 /// `fetchAll()` under `FETCH_GROUP` or `FETCH_UNIQUE`: each row under
