@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use php_ext::abi::{
-    Class, CloneObj, Instance, ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose,
-    PropertyRead, PropertyTest, Std,
+    Class, CloneObj, Instance, IteratorElement, ObjectHandlers, PropertiesFor, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
@@ -714,7 +714,7 @@ impl ObjectHandlers for DateHandlers {
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(|req, object| clone_date(req, object).map(Owner::hand_on_unmigrated))
+        Some(clone_date)
     }
 
     fn compare(
@@ -759,7 +759,7 @@ impl ObjectHandlers for DateHandlers {
             Some(t) => date_fields(req, t)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -880,7 +880,7 @@ impl ObjectHandlers for TzHandlers {
             Some(kind) => tz_fields(req, kind)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -914,14 +914,17 @@ impl ObjectHandlers for TzHandlers {
 }
 
 /// `date_object_clone_timezone`.
-fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, TzObj::default())?;
     let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
-    set_tz(req, *copy, kind)?;
-    Ok(copy.hand_on_unmigrated())
+    if let Err(thrown) = set_tz(req, *copy, kind) {
+        copy.give_up(req);
+        return Err(thrown);
+    }
+    Ok(copy)
 }
 
 /// The names `DateInterval` answers from its relative time.
@@ -982,9 +985,9 @@ impl ObjectHandlers for IntervalHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match IntervalHandlers::field(req, object, name) {
-            Some(value) => Ok(value),
+            Some(value) => Ok(Owner::take(req, value)),
             None => Std.read_property(req, object, name, read),
         }
     }
@@ -1089,7 +1092,7 @@ impl ObjectHandlers for IntervalHandlers {
         }
         write_fields(req, object)?;
         let rows = std_rows(req, object)?;
-        rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.hand_on_unmigrated().into()))
+        rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1231,7 +1234,7 @@ fn interval_rows(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown>
 }
 
 /// `date_object_clone_interval`.
-fn clone_interval(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_interval(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
@@ -1252,8 +1255,11 @@ fn clone_interval(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
         payload.from_string = from;
         payload.date_string = text;
     }
-    hold_diff(req, *copy)?;
-    Ok(copy.hand_on_unmigrated())
+    if let Err(thrown) = hold_diff(req, *copy) {
+        copy.give_up(req);
+        return Err(thrown);
+    }
+    Ok(copy)
 }
 
 /// The names `DatePeriod` answers itself, `date_period_is_internal_property`.
@@ -1337,7 +1343,7 @@ impl ObjectHandlers for PeriodHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         if !PERIOD_FIELDS.contains(&name) {
             return Std.read_property(req, object, name, read);
         }
@@ -1352,7 +1358,7 @@ impl ObjectHandlers for PeriodHandlers {
                 value.give_up(req);
             }
         }
-        Ok(found.map_or_else(Value::null, Owner::hand_on_unmigrated))
+        Ok(found.unwrap_or_else(|| Owner::take(req, Value::null())))
     }
 
     fn write_property(
@@ -1407,7 +1413,7 @@ impl ObjectHandlers for PeriodHandlers {
             PropertyTest::NotEmpty => truthy(req, &value),
             _ => !matches!(value.as_ref(), ValueRef::Null),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 
@@ -1446,7 +1452,7 @@ impl ObjectHandlers for PeriodHandlers {
         } else {
             Vec::new()
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1458,7 +1464,7 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
+    ) -> Result<Option<IteratorElement>, Thrown> {
         crate::period::iterator_element(req, object, index)
     }
 
@@ -1547,7 +1553,7 @@ pub(super) fn hold_period(req: &mut Request, object: PhpObject) -> Result<(), Th
 }
 
 /// `date_object_clone_period`.
-fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_period(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
@@ -1558,6 +1564,9 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
         payload.replace(state);
     }
-    hold_period(req, *copy)?;
-    Ok(copy.hand_on_unmigrated())
+    if let Err(thrown) = hold_period(req, *copy) {
+        copy.give_up(req);
+        return Err(thrown);
+    }
+    Ok(copy)
 }

@@ -742,12 +742,9 @@ impl ReflectionProperty {
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
         let handlers = object.handlers(req);
-        let read = req.with_fake_scope(asked, |req| {
+        req.with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
-        })?;
-        let owner = Owner::take(req, read);
-        req.release(read);
-        Ok(owner)
+        })
     }
 
     /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
@@ -967,12 +964,9 @@ impl ReflectionProperty {
         // `read_property` under `EG(fake_scope)`, the class the reflector
         // was asked about.
         let handlers = object.handlers(req);
-        let read = req.with_fake_scope(asked, |req| {
+        req.with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
-        })?;
-        let owner = Owner::take(req, read);
-        req.release(read);
-        Ok(owner)
+        })
     }
 
     /// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the

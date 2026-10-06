@@ -81,18 +81,23 @@ impl Props for DriverProps {
         _: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         Ok(Some(match name {
-            "client_info" => string(req, CLIENT_INFO.as_bytes())?.hand_on_unmigrated(),
-            "client_version" => Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)),
+            "client_info" => string(req, CLIENT_INFO.as_bytes())?,
+            "client_version" => {
+                Owner::take(req, Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)))
+            }
             "driver_version" => {
                 if quiet {
                     return Ok(None);
                 }
                 php_ext::raising::deprecated(req, "The driver_version property is deprecated");
-                Value::int(VERSION_ID)
+                Owner::take(req, Value::int(VERSION_ID))
             }
-            "report_mode" => Value::int(link::read_report_mode(req)),
+            "report_mode" => {
+                let mode = Value::int(link::read_report_mode(req));
+                Owner::take(req, mode)
+            }
             _ => return Ok(None),
         }))
     }
@@ -205,7 +210,7 @@ impl Props for WarningProps {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let at = crate::payload_ref::<Warnings>(req, object)
             .and_then(|w| w.list.get(w.at))
             .map(|w| (w.message.clone(), w.errno));
@@ -213,9 +218,9 @@ impl Props for WarningProps {
             return props::gone(req, object, quiet);
         };
         Ok(Some(match name {
-            "message" => string(req, &message)?.hand_on_unmigrated(),
-            "sqlstate" => string(req, b"HY000")?.hand_on_unmigrated(),
-            _ => Value::int(errno),
+            "message" => string(req, &message)?,
+            "sqlstate" => string(req, b"HY000")?,
+            _ => Owner::take(req, Value::int(errno)),
         }))
     }
 

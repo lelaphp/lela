@@ -15,7 +15,9 @@ use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, adopted, adopted_some,
+};
 
 use methods::visibility_string;
 use pending::Saved;
@@ -884,10 +886,10 @@ impl Request {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
-        self.with_array_access(object, offset, |req, offset| {
+        let read = self.with_array_access(object, offset, |req, offset| {
             if read == DimensionRead::Silent {
                 let exists = crate::api::call::call_method_made(
                     req,
@@ -902,26 +904,28 @@ impl Request {
                 }
             }
             crate::api::call::call_method_made(req, &object, b"offsetGet", &[offset])
-        })
+        });
+        adopted(self, read)
     }
 
     /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
-    /// offset `null` for `$o[] = v`; `value` is given up either way.
+    /// offset `null` for `$o[] = v`; `value`'s owner is given up either
+    /// way, the method having taken its own.
     pub(crate) fn write_dimension(
         &mut self,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if let Err(thrown) = self.array_access(object) {
-            self.release(value);
+            value.give_up(self);
             return Err(thrown);
         }
         let offset = offset.copied().unwrap_or_else(Value::null);
         let served = self.with_array_access(object, offset, |req, offset| {
-            crate::api::call::call_method_made(req, &object, b"offsetSet", &[offset, value])
+            crate::api::call::call_method_made(req, &object, b"offsetSet", &[offset, *value])
         });
-        self.release(value);
+        value.give_up(self);
         self.release(served?);
         Ok(())
     }
@@ -1045,7 +1049,7 @@ impl Request {
         &mut self,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         match to {
             TypeTag::String => {
                 if self.method_named(object.class(), b"__tostring").is_none() {
@@ -1054,7 +1058,7 @@ impl Request {
                 let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
                 let value = self.unwrap_reference(value);
                 if value.as_php_string().is_some() {
-                    return Ok(Some(value));
+                    return Ok(Some(Owner::adopt(self, value)));
                 }
                 self.release(value);
                 let class = self.class_name(object.class());
@@ -1064,7 +1068,7 @@ impl Request {
                     &format!("Method {class}::__toString() must return a string value"),
                 ))
             }
-            TypeTag::Bool => Ok(Some(Value::bool(true))),
+            TypeTag::Bool => Ok(Some(Owner::take(self, Value::bool(true)))),
             _ => Ok(None),
         }
     }
@@ -1132,19 +1136,23 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: __debuginfo() must return an array in %s on line 3
     /// ```
-    pub(crate) fn debug_info(&mut self, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
+    pub(crate) fn debug_info(
+        &mut self,
+        object: PhpObject,
+    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
         if self.method_named(object.class(), b"__debuginfo").is_none() {
             // `zend_lazy_object_debug_info`: a proxy that forwards shows
             // its instance, and a lazy object that waits shows its
             // members as they stand, neither initialised for it.
-            return self.lazy_debug_info(object);
+            let info = self.lazy_debug_info(object);
+            return adopted_some(self, info);
         }
         let value = crate::api::call::call_method_made(self, &object, b"__debugInfo", &[])?;
         let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
             // which is php's `*is_temp = 1` over the same table.
-            Some(array) => Ok(Some(*array)),
+            Some(array) => Ok(Some(Owner::adopt(self, *array))),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
                 let class = self.class_name(object.class());
@@ -1154,7 +1162,8 @@ impl Request {
                         "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
                     ),
                 );
-                self.array().map(Some)
+                let empty = self.array();
+                adopted(self, empty).map(Some)
             }
             None => {
                 self.release(value);
@@ -1417,7 +1426,7 @@ impl Request {
             .object_handlers(object.heap())
             .cast_object(self, object, target)?
         {
-            Some(casted) => casted,
+            Some(casted) => casted.hand_on(),
             None => match target {
                 TypeTag::Int | TypeTag::Float => {
                     let class = self.class_name(object.class());
@@ -1462,7 +1471,7 @@ impl Request {
     /// `clone_obj` to copy, since the heap cannot copy a payload it only
     /// knows how to drop; `Std` reaching one is the internal-error fatal
     /// naming the class.
-    pub(crate) fn clone_members(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
+    pub(crate) fn clone_members(&mut self, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
         if object.heap().laziness() != php_heap::Laziness::Eager {
             return self.lazy_clone(object);
         }
@@ -1480,7 +1489,7 @@ impl Request {
             self.release(new.as_value());
             return Err(thrown);
         }
-        Ok(new)
+        Ok(Owner::adopt(self, new))
     }
 
     /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot
@@ -1633,7 +1642,7 @@ impl Request {
         object: PhpObject,
         scope: Option<ClassId>,
         properties: PhpArray,
-    ) -> Result<PhpObject, Thrown> {
+    ) -> Result<Owner<PhpObject>, Thrown> {
         let table = self.object_handlers(object.heap());
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));
@@ -1642,13 +1651,13 @@ impl Request {
         // "Unlock readonly properties once more" for the writes, and lock
         // them again after, whatever a write threw; `EG(fake_scope) =
         // scope` for the writes and put back after them.
-        Self::mark_reinitable(new, true);
+        Self::mark_reinitable(*new, true);
         let saved = self.replace_fake_scope(scope);
-        let written = self.clone_with_writes(new, table, properties);
+        let written = self.clone_with_writes(*new, table, properties);
         self.replace_fake_scope(saved);
-        Self::mark_reinitable(new, false);
+        Self::mark_reinitable(*new, false);
         if let Err(thrown) = written {
-            self.release(new.as_value());
+            new.give_up(self);
             return Err(thrown);
         }
         Ok(new)
@@ -1754,7 +1763,7 @@ impl Request {
         &mut self,
         object: PhpObject,
         with: Option<PhpArray>,
-    ) -> Result<PhpObject, Thrown> {
+    ) -> Result<Owner<PhpObject>, Thrown> {
         let table = self.object_handlers(object.heap());
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));

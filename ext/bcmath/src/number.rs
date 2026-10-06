@@ -1168,16 +1168,16 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match name {
             b"value" => {
                 let value = Value::string(rendered(req, object)?);
-                req.addref(&value);
-                Ok(value)
+                Ok(Owner::take(req, value))
             }
             b"scale" => {
                 let scale = held(req, object)?.scale;
-                Ok(Value::int(i64::try_from(scale).unwrap_or(i64::MAX)))
+                let scale = Value::int(i64::try_from(scale).unwrap_or(i64::MAX));
+                Ok(Owner::take(req, scale))
             }
             _ => Std.read_property(req, object, name, read),
         }
@@ -1289,10 +1289,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         if to == TypeTag::Bool {
             let zero = held(req, object)?.num.is_zero();
-            return Ok(Some(Value::bool(!zero)));
+            return Ok(Some(Owner::take(req, Value::bool(!zero))));
         }
         Std.cast_object(req, object, to)
     }
@@ -1331,7 +1331,7 @@ impl ObjectHandlers for Handlers {
         op: BinaryOp,
         left: &Value,
         right: Option<&Value>,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let (Some(calc_op), Some(right)) = (calc_of(op), right) else {
             return Ok(None);
         };
@@ -1358,7 +1358,7 @@ impl ObjectHandlers for Handlers {
             return Err(throw_error(req, "ValueError", &text));
         }
         let result = calc(req, calc_op, &n1, &n2, ScaleOf::Auto, Site::Operator)?;
-        Ok(Some(made(req, result)?.into_value().hand_on_unmigrated()))
+        Ok(Some(made(req, result)?.into_value()))
     }
 
     /// `bcmath_number_compare`: the two over the wider of their digits;
@@ -1471,7 +1471,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             table.set(req, key, value)?;
         }
-        Ok(Some(table.hand_on_unmigrated().into()))
+        Ok(Some(table.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1506,7 +1506,7 @@ impl ObjectHandlers for Handlers {
 /// string(3) "1.5"
 /// int(1)
 /// ```
-fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_number(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let taken = object.native_mut::<Slot>(req).map(|slot| {
         let held = slot.held.as_mut().map(|held| {
             let storage = std::mem::replace(&mut held.storage, Storage::Zero);
@@ -1515,7 +1515,7 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         (held, slot.kept)
     });
     let Some((held, kept)) = taken else {
-        return clone_with(req, &object, Slot::default()).map(Owner::hand_on_unmigrated);
+        return clone_with(req, &object, Slot::default());
     };
     // `bc_copy_num(original->num)`: the clone one more holder of the
     // original's `bc_num`.
@@ -1538,5 +1538,5 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             req.addref(&Value::string(text));
         }
     }
-    clone_with(req, &object, Box::new(SlotState { held, kept })).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, Box::new(SlotState { held, kept }))
 }

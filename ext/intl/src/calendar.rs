@@ -292,7 +292,7 @@ impl ObjectHandlers for Handlers {
             });
         set(req, &mut table, b"valid", Value::bool(calendar.is_some()))?;
         let Some((kind, zone, locale, fields)) = calendar else {
-            return Ok(Some(table.hand_on_unmigrated().into()));
+            return Ok(Some(table.into()));
         };
         let kind = PhpString::new(req, kind.as_bytes())?;
         set(
@@ -331,7 +331,7 @@ impl ObjectHandlers for Handlers {
             b"fields",
             Value::array(rows.hand_on_unmigrated()),
         )?;
-        Ok(Some(table.hand_on_unmigrated().into()))
+        Ok(Some(table.into()))
     }
 }
 
@@ -355,7 +355,7 @@ fn c_text(buffer: &[u8]) -> Vec<u8> {
 /// string(21) "IntlGregorianCalendar"
 /// Cannot clone uninitialized IntlCalendar
 /// ```
-fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let calendar = held(req, object).map(|c| cal::php_intl_cal_clone(c));
     let constructed = calendar.is_some();
     let payload = CalendarObject {
@@ -365,7 +365,7 @@ fn clone_calendar(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
     let ok = payload.cal.is_some();
     let copy = clone_with(req, &object, payload)?;
     if ok {
-        return Ok(copy.hand_on_unmigrated());
+        return Ok(copy);
     }
     copy.give_up(req);
     let message = if constructed {

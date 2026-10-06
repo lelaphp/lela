@@ -163,14 +163,15 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(stmt) = statement(req, object) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         if name == b"queryString" {
             return Std.read_property(req, stmt, name, read);
         }
-        Ok(by_key(req, stmt, name)?.unwrap_or_default())
+        let column = by_key(req, stmt, name)?.unwrap_or_default();
+        Ok(crate::owned(req, column))
     }
 
     /// `row_dim_read`: a name is the property of that name, read
@@ -181,15 +182,16 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(offset) = offset else {
             return Err(throw_error(req, "Error", "Cannot append to PDORow offset"));
         };
         let Some(stmt) = statement(req, object) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         if let ValueRef::Int(n) = offset.deref().as_ref() {
-            return Ok(by_number(req, stmt, n)?.unwrap_or_default());
+            let column = by_number(req, stmt, n)?.unwrap_or_default();
+            return Ok(crate::owned(req, column));
         }
         let name = to_string(req, &offset.deref())?;
         let how = if read == DimensionRead::Silent {
@@ -220,10 +222,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let _ = object;
-        req.release(value);
+        value.give_up(req);
         let message = if offset.is_some() {
             "Cannot write to PDORow offset"
         } else {
@@ -338,7 +340,7 @@ impl ObjectHandlers for Handlers {
             out.give_up(req);
             return Err(thrown);
         }
-        Ok(Some(out.hand_on_unmigrated().into()))
+        Ok(Some(out.into()))
     }
 
     fn properties_overloaded(&self) -> bool {

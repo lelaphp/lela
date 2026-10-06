@@ -576,7 +576,7 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         crate::read_property(req, object, name, read)
     }
 
@@ -632,7 +632,7 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
         offset_value: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let isset = read == DimensionRead::Silent;
         let dims = dims(req, object);
         let Some(offset_value) = offset_value else {
@@ -645,7 +645,7 @@ impl ObjectHandlers for MapHandlers {
             return Err(throw_error(req, "Error", &message));
         };
         if dims != Dims::Legacy {
-            let read = match (dims, modern_index(req, offset_value)?) {
+            return match (dims, modern_index(req, offset_value)?) {
                 (_, Index::Long(n)) => item(req, object, n),
                 (Dims::ModernMap, Index::Str(name)) => named(req, object, name.as_bytes(), None),
                 (Dims::Collection, Index::Str(name)) => {
@@ -653,13 +653,12 @@ impl ObjectHandlers for MapHandlers {
                 }
                 _ => Err(illegal_offset(req, object, offset_value, isset)),
             };
-            return read.map(Owner::hand_on_unmigrated);
         }
         let is_list = !named_keys(req, object);
-        let read = match offset(req, offset_value)? {
+        match offset(req, offset_value)? {
             Err(name) if is_list => {
                 let _ = name;
-                return Ok(Value::null());
+                Ok(Owner::take(req, Value::null()))
             }
             Err(name) => named(req, object, name.as_bytes(), None),
             Ok(index) if is_list => item(req, object, index),
@@ -673,8 +672,7 @@ impl ObjectHandlers for MapHandlers {
                 }
                 item(req, object, index)
             }
-        };
-        read.map(Owner::hand_on_unmigrated)
+        }
     }
 
     fn has_dimension(

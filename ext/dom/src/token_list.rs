@@ -660,7 +660,7 @@ impl ObjectHandlers for TokenListHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         crate::read_property(req, object, name, read)
     }
 
@@ -716,12 +716,12 @@ impl ObjectHandlers for TokenListHandlers {
         object: PhpObject,
         offset_value: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(offset_value) = offset_value else {
             return Err(throw_error(req, "Error", "Cannot append to Dom\\TokenList"));
         };
         match offset(req, offset_value)? {
-            Some(index) => item_value(req, object, index).map(Owner::hand_on_unmigrated),
+            Some(index) => item_value(req, object, index),
             None => Err(illegal_offset(
                 req,
                 object,

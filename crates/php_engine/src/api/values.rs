@@ -922,7 +922,7 @@ enum Held {
     Rows,
     /// The class's debug table, one owner of the table, and what the
     /// class left pending while it built it.
-    Table(PhpArray, Option<Thrown>),
+    Table(Owner<PhpArray>, Option<Thrown>),
 }
 
 /// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
@@ -969,7 +969,7 @@ impl HeldProperties {
                 Ok(())
             }
             Held::Table(table, thrown) => {
-                req.release(Value::array(table));
+                table.give_up(req);
                 thrown.map_or(Ok(()), Err)
             }
         }
@@ -1386,7 +1386,7 @@ impl PhpObject {
             // Views of the class's debug table, which the rows hold one
             // owner of until their release.
             Answered::Debug(info) => {
-                let rows = walk::rows(req, info.table)
+                let rows = walk::rows(req, *info.table)
                     .map(|(key, value)| (key, value.deref()))
                     .collect();
                 (rows, Held::Table(info.table, info.thrown))

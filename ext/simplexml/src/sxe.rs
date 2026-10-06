@@ -408,7 +408,7 @@ fn prop_dim_read(
     member: Member,
     mut access: Access,
     fetch: Fetch,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let view = View::of(req, object);
     match member {
         Member::Append if matches!(view.walk, Walk::Attributes(_)) => {
@@ -435,7 +435,7 @@ fn prop_dim_read(
         attr = first_attr;
     }
     let Some(node) = node else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     if access == Access::Attributes {
         let found = match (&member, &view.walk) {
@@ -444,22 +444,16 @@ fn prop_dim_read(
             (Member::Name(name), _) => view.attr_named(attr, name),
         };
         return match found {
-            Some(a) => Ok(wrap(req, object, a, Walk::Node, view.ns.clone())?
-                .into_value()
-                .hand_on_unmigrated()),
-            None => Ok(Value::null()),
+            Some(a) => Ok(wrap(req, object, a, Walk::Node, view.ns.clone())?.into_value()),
+            None => Ok(Owner::take(req, Value::null())),
         };
     }
     match member {
         Member::Name(name) => {
             if fetch == Fetch::Silent && view.find(node.children(), &name).is_none() {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
-            Ok(
-                wrap(req, object, node, Walk::Elements(name), view.ns.clone())?
-                    .into_value()
-                    .hand_on_unmigrated(),
-            )
+            Ok(wrap(req, object, node, Walk::Elements(name), view.ns.clone())?.into_value())
         }
         Member::Append | Member::Index(_) => {
             let mine = node;
@@ -481,12 +475,10 @@ fn prop_dim_read(
                 Member::Append | Member::Name(_) => (None, 0),
             };
             if let Some(n) = found {
-                return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?
-                    .into_value()
-                    .hand_on_unmigrated());
+                return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value());
             }
             if fetch != Fetch::Write {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
             if let Member::Index(i) = member
                 && count < i
@@ -497,10 +489,8 @@ fn prop_dim_read(
                 .parent()
                 .and_then(|p| p.new_text_child(mine.ns(), &mine.name(), None));
             match made {
-                Some(n) => Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?
-                    .into_value()
-                    .hand_on_unmigrated()),
-                None => Ok(Value::null()),
+                Some(n) => Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value()),
+                None => Ok(Owner::take(req, Value::null())),
             }
         }
     }
@@ -1186,7 +1176,7 @@ pub(crate) fn cast_text(req: &mut Request, object: PhpObject) -> Result<Option<V
 }
 
 /// `sxe_object_cast_ex`.
-fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Value>, Thrown> {
+fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Owner<Value>>, Thrown> {
     if to == TypeTag::Bool {
         let view = View::of(req, object);
         let first = match view.walk {
@@ -1197,7 +1187,7 @@ fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Valu
             }
         };
         let truth = first.is_some() || !prop_is_empty(req, object)?;
-        return Ok(Some(Value::bool(truth)));
+        return Ok(Some(Owner::take(req, Value::bool(truth))));
     }
     let text = cast_text(req, object)?;
     let value = match text {
@@ -1205,10 +1195,10 @@ fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Valu
         None => Owner::take(req, Value::null()),
     };
     let converted = match to {
-        TypeTag::String => to_string(req, &value).map(|s| Value::string(s.hand_on_unmigrated())),
-        TypeTag::Int => to_long(req, &value).map(Value::int),
-        TypeTag::Float => to_double(req, &value).map(Value::float),
-        TypeTag::Number => to_number(req, &value),
+        TypeTag::String => to_string(req, &value).map(Owner::into_value),
+        TypeTag::Int => to_long(req, &value).map(|n| Owner::take(req, Value::int(n))),
+        TypeTag::Float => to_double(req, &value).map(|f| Owner::take(req, Value::float(f))),
+        TypeTag::Number => to_number(req, &value).map(|n| Owner::take(req, n)),
         _ => {
             value.give_up(req);
             return Ok(None);
@@ -1329,7 +1319,7 @@ impl ClassIterator for Loop {
 /// `sxe_object_clone`: a root element's clone holds a copy of the whole
 /// document, any other node's a copy of the node in the same document,
 /// standing apart from it.
-fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let view = View::of(req, object);
     let shared = sxe(req, object).and_then(|s| s.obj.shared_doc());
     let doc = sxe(req, object).and_then(|s| s.obj.document_node());
@@ -1337,8 +1327,8 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         .node
         .and_then(Node::parent)
         .is_some_and(|p| p.kind().is_document());
-    let made = new_object(req, object.class())?.hand_on_unmigrated();
-    let Some(mut obj) = libxml_half(req, made) else {
+    let made = new_object(req, object.class())?;
+    let Some(mut obj) = libxml_half(req, *made) else {
         return Ok(made);
     };
     let doc = if root {
@@ -1353,7 +1343,7 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         }
         doc
     };
-    if let Some(s) = sxe_mut(req, made) {
+    if let Some(s) = sxe_mut(req, *made) {
         s.walk = view.walk;
         s.ns = view.ns;
     }
@@ -1413,7 +1403,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let name = c_name(name);
         if read == PropertyRead::Write {
             // `sxe_property_get_adr`: a write through a name no element
@@ -1424,11 +1414,10 @@ impl ObjectHandlers for Handlers {
                 let made =
                     prop_dim_write(req, object, &Member::Name(name), None, Access::Elements)?;
                 let Some(n) = made else {
-                    return Ok(Value::null());
+                    return Ok(Owner::take(req, Value::null()));
                 };
                 let wrapped = wrap(req, object, n, Walk::Node, view.ns)?;
-                let value = wrapped.as_value();
-                req.addref(&value);
+                let value = Owner::take(req, wrapped.as_value());
                 let old = if let Some(s) = sxe_mut(req, object) {
                     s.made.replace(wrapped.hand_on_unmigrated())
                 } else {
@@ -1469,7 +1458,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let member = Member::of(req, offset, false)?;
         let fetch = match read {
             DimensionRead::Silent => Fetch::Silent,
@@ -1484,12 +1473,12 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let written = Member::of(req, offset, true).and_then(|member| {
             prop_dim_write(req, object, &member, Some(&value), Access::Attributes)
         });
-        req.release(value);
+        value.give_up(req);
         written.map(|_| ())
     }
 
@@ -1612,7 +1601,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         if to == TypeTag::String
             && let Some(text) = Std.cast_object(req, object, TypeTag::String)?
         {

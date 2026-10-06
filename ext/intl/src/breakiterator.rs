@@ -880,7 +880,7 @@ impl ObjectHandlers for Handlers {
             let key = Key::Str(PhpString::new(req, b"type")?.hand_on_unmigrated());
             table.set(req, key, kind)?;
         }
-        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
+        Ok(Some(DebugInfo::from(table)))
     }
 
     /// `BreakIterator_objects_free`.
@@ -927,7 +927,7 @@ impl ObjectHandlers for Handlers {
 
 /// `BreakIterator_clone_obj`: a clone of ICU's iterator over the same
 /// text.
-fn clone_break(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
+fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
     let (copy, text) = match object.native::<BreakObject>(req) {
         Some(BreakObject {
             biter: Some(b),
@@ -951,5 +951,5 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
         biter: Some(copy),
         text,
     };
-    clone_with(req, &object, payload).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, payload)
 }

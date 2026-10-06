@@ -32,7 +32,9 @@ use crate::api::abi::{
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
-use crate::api::values::{ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{
+    ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted,
+};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -328,7 +330,7 @@ impl ObjectHandlers for ClosureHandlers {
             return Ok(None);
         };
         let Some(decl) = req.function_decl(closure.function).cloned() else {
-            return PhpArray::new(req).map(|table| Some(table.hand_on_unmigrated().into()));
+            return PhpArray::new(req).map(|table| Some(table.into()));
         };
         let mut out = PhpArray::new(req)?;
         let written = String::from_utf8_lossy(&decl.name.0).into_owned();
@@ -409,7 +411,7 @@ impl ObjectHandlers for ClosureHandlers {
                 parameters.into_value().hand_on_unmigrated(),
             )?;
         }
-        Ok(Some(out.hand_on_unmigrated().into()))
+        Ok(Some(out.into()))
     }
 
     /// `zend_closure_compare` (`Z/Zend/zend_closures.c:446`): two fake
@@ -498,7 +500,7 @@ static CLOSURE: ClosureHandlers = ClosureHandlers;
 /// `zend_closure_clone`: the members copied and the payload's copy in
 /// the new object's slot, with one more owner of the receiver taken
 /// first, as `zend_create_closure` takes it.
-fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let Some(mut closure) = object.closure(req).cloned() else {
         return req.clone_members(object);
     };
@@ -513,7 +515,8 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
     }
-    req.clone_with_payload(object, closure)
+    let made = req.clone_with_payload(object, closure);
+    adopted(req, made)
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and

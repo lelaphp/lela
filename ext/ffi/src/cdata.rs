@@ -934,7 +934,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let v = view(req, object);
         match table(req, &v) {
             Table::Free => Err(use_after_free(req)),
@@ -952,7 +952,6 @@ impl ObjectHandlers for Handlers {
                     false,
                     false,
                 )
-                .map(Owner::hand_on_unmigrated)
             }
             Table::Data => {
                 let (field, ptr) = field_of(req, &v, name, "read")?;
@@ -972,9 +971,9 @@ impl ObjectHandlers for Handlers {
                         false,
                         false,
                     )
-                    .map(Owner::hand_on_unmigrated)
                 } else {
-                    Ok(bit_field_value(req, ptr, &field))
+                    let value = bit_field_value(req, ptr, &field);
+                    Ok(Owner::take(req, value))
                 }
             }
         }
@@ -1050,7 +1049,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let v = view(req, object);
         match table(req, &v) {
             Table::Free => Err(use_after_free(req)),
@@ -1067,7 +1066,6 @@ impl ObjectHandlers for Handlers {
                     Fetch::Place
                 };
                 to_value(req, None, ptr, ty, fetch, is_const, false, false)
-                    .map(Owner::hand_on_unmigrated)
             }
         }
     }
@@ -1078,10 +1076,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let written = write_dimension(req, object, offset, &value);
-        req.release(value);
+        value.give_up(req);
         written
     }
 
@@ -1179,16 +1177,16 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let v = view(req, object);
         match to {
-            TypeTag::Bool => Ok(Some(Value::bool(true))),
+            TypeTag::Bool => Ok(Some(Owner::take(req, Value::bool(true)))),
             TypeTag::String if !v.freed() => {
                 let f = facts(req, v.ty);
                 let value = if let Some(scalar) = f.scalar {
                     let value = read_scalar(req, scalar, v.ptr)?;
                     if scalar == Scalar::Char {
-                        return Ok(Some(value.hand_on_unmigrated()));
+                        return Ok(Some(value));
                     }
                     value
                 } else if let Some(pointee) = f.pointee {
@@ -1198,7 +1196,7 @@ impl ObjectHandlers for Handlers {
                     } else if f.attr & attr::CONST != 0 && is_char(req, pointee) {
                         let text = ffi::c_string(value);
                         let text = PhpString::new(req, &text)?;
-                        return Ok(Some(text.into_value().hand_on_unmigrated()));
+                        return Ok(Some(text.into_value()));
                     } else {
                         return Ok(None);
                     }
@@ -1207,7 +1205,7 @@ impl ObjectHandlers for Handlers {
                 };
                 let text = to_string(req, &value);
                 value.give_up(req);
-                Ok(Some(text?.into_value().hand_on_unmigrated()))
+                Ok(Some(text?.into_value()))
             }
             _ => Ok(None),
         }
@@ -1253,19 +1251,18 @@ impl ObjectHandlers for Handlers {
         if v.freed() {
             let thrown = use_after_free(req);
             return Ok(Some(DebugInfo {
-                table: PhpArray::new(req)?.hand_on_unmigrated(),
+                table: PhpArray::new(req)?,
                 thrown: Some(thrown),
             }));
         }
         if v.ptr == 0 {
             let thrown = ffi_error(req, "NULL pointer dereference");
             return Ok(Some(DebugInfo {
-                table: PhpArray::new(req)?.hand_on_unmigrated(),
+                table: PhpArray::new(req)?,
                 thrown: Some(thrown),
             }));
         }
-        debug_table(req, &v)
-            .map(|table| table.map(|table| DebugInfo::from(table.hand_on_unmigrated())))
+        debug_table(req, &v).map(|table| table.map(DebugInfo::from))
     }
 
     /// `zend_ffi_cdata_get_closure`: a pointer to a C function called as
@@ -1329,7 +1326,7 @@ impl ObjectHandlers for Handlers {
         op: BinaryOp,
         left: &Value,
         right: Option<&Value>,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let Some(right) = right else {
             return Ok(None);
         };
@@ -1342,11 +1339,7 @@ impl ObjectHandlers for Handlers {
             match op {
                 BinaryOp::Add => {
                     let offset = to_long(req, &right)?;
-                    return Ok(Some(
-                        add(req, base, &v, offset)?
-                            .into_value()
-                            .hand_on_unmigrated(),
-                    ));
+                    return Ok(Some(add(req, base, &v, offset)?.into_value()));
                 }
                 BinaryOp::Sub => {
                     if let Some(other) = as_cdata(req, &right)? {
@@ -1357,19 +1350,14 @@ impl ObjectHandlers for Handlers {
                             if types(req).is_same(t1, t2) {
                                 let size = types(req).get(t1).size as i64;
                                 let diff = (p1 as i64).wrapping_sub(p2 as i64);
-                                return Ok(Some(Value::int(if size == 0 {
-                                    0
-                                } else {
-                                    diff / size
-                                })));
+                                let diff = Value::int(if size == 0 { 0 } else { diff / size });
+                                return Ok(Some(Owner::take(req, diff)));
                             }
                         }
                     }
                     let offset = to_long(req, &right)?;
                     return Ok(Some(
-                        add(req, base, &v, offset.wrapping_neg())?
-                            .into_value()
-                            .hand_on_unmigrated(),
+                        add(req, base, &v, offset.wrapping_neg())?.into_value(),
                     ));
                 }
                 _ => return Ok(None),
@@ -1379,11 +1367,7 @@ impl ObjectHandlers for Handlers {
             let v = view(req, base);
             if !v.freed() && is_sequence(req, v.ty) && op == BinaryOp::Add {
                 let offset = to_long(req, &left)?;
-                return Ok(Some(
-                    add(req, base, &v, offset)?
-                        .into_value()
-                        .hand_on_unmigrated(),
-                ));
+                return Ok(Some(add(req, base, &v, offset)?.into_value()));
             }
         }
         Ok(None)
@@ -1555,7 +1539,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
 }
 
 /// `zend_ffi_cdata_clone_obj`, the free table's `Use after free()`.
-fn clone_cdata(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_cdata(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let v = view(req, object);
     if v.freed() {
         return Err(use_after_free(req));
@@ -1573,7 +1557,6 @@ fn clone_cdata(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             held: Box::default(),
         },
     )
-    .map(Owner::hand_on_unmigrated)
 }
 
 /// The write handler's body, its arguments still the caller's.

@@ -1695,19 +1695,25 @@ impl Props for LinkProps {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         match name {
             "client_info" => {
-                return string(req, CLIENT_INFO.as_bytes()).map(|s| Some(s.hand_on_unmigrated()));
+                return string(req, CLIENT_INFO.as_bytes()).map(Some);
             }
             "client_version" => {
-                return Ok(Some(Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0))));
+                return Ok(Some(Owner::take(
+                    req,
+                    Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)),
+                )));
             }
-            "connect_errno" => return Ok(Some(Value::int(req.state::<State>().connect_errno))),
+            "connect_errno" => {
+                let errno = Value::int(req.state::<State>().connect_errno);
+                return Ok(Some(Owner::take(req, errno)));
+            }
             "connect_error" => {
                 return match req.state::<State>().connect_error.clone() {
-                    Some(error) => string(req, &error).map(|s| Some(s.hand_on_unmigrated())),
-                    None => Ok(Some(Value::null())),
+                    Some(error) => string(req, &error).map(Some),
+                    None => Ok(Some(Owner::take(req, Value::null()))),
                 };
             }
             _ => {}
@@ -1733,29 +1739,26 @@ impl Props for LinkProps {
         };
         let s = mysql.status(req);
         let value = match name {
-            "affected_rows" => affected(req, s.affected_rows)?.hand_on_unmigrated(),
-            "errno" => Value::int(i64::from(s.errno)),
-            "error" => string(req, &s.error)?.hand_on_unmigrated(),
-            "error_list" => props::error_list(req, &s.error_list)?
-                .into_value()
-                .hand_on_unmigrated(),
-            "field_count" => Value::int(i64::from(s.field_count)),
-            "host_info" => {
-                string(req, s.host_info.as_deref().unwrap_or_default())?.hand_on_unmigrated()
-            }
+            "affected_rows" => affected(req, s.affected_rows)?,
+            "errno" => Owner::take(req, Value::int(i64::from(s.errno))),
+            "error" => string(req, &s.error)?,
+            "error_list" => props::error_list(req, &s.error_list)?.into_value(),
+            "field_count" => Owner::take(req, Value::int(i64::from(s.field_count))),
+            "host_info" => string(req, s.host_info.as_deref().unwrap_or_default())?,
             "info" => match s.info {
-                Some(info) => string(req, &info)?.hand_on_unmigrated(),
-                None => Value::null(),
+                Some(info) => string(req, &info)?,
+                None => Owner::take(req, Value::null()),
             },
-            "insert_id" => long_or_string(req, s.insert_id)?.hand_on_unmigrated(),
-            "server_info" => {
-                string(req, s.server_info.as_deref().unwrap_or_default())?.hand_on_unmigrated()
-            }
-            "server_version" => Value::int(i64::try_from(s.server_version).unwrap_or(0)),
-            "sqlstate" => string(req, &s.sqlstate)?.hand_on_unmigrated(),
-            "protocol_version" => Value::int(i64::from(s.proto_info)),
-            "thread_id" => Value::int(i64::try_from(s.thread_id).unwrap_or(0)),
-            "warning_count" => Value::int(i64::from(s.warning_count)),
+            "insert_id" => long_or_string(req, s.insert_id)?,
+            "server_info" => string(req, s.server_info.as_deref().unwrap_or_default())?,
+            "server_version" => Owner::take(
+                req,
+                Value::int(i64::try_from(s.server_version).unwrap_or(0)),
+            ),
+            "sqlstate" => string(req, &s.sqlstate)?,
+            "protocol_version" => Owner::take(req, Value::int(i64::from(s.proto_info))),
+            "thread_id" => Owner::take(req, Value::int(i64::try_from(s.thread_id).unwrap_or(0))),
+            "warning_count" => Owner::take(req, Value::int(i64::from(s.warning_count))),
             _ => return Ok(None),
         };
         Ok(Some(value))

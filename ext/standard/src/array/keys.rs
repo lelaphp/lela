@@ -1217,7 +1217,7 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
             || handlers.has_property(req, object, &text, PropertyTest::Isset)?
         {
             let value = handlers.read_property(req, object, &text, PropertyRead::Warning)?;
-            return Ok(Some(value));
+            return Ok(Some(value.hand_on_unmigrated()));
         }
         return Ok(None);
     }
@@ -1322,11 +1322,17 @@ fn binop(
                             return Err(thrown);
                         }
                     };
-                    if let Some(number) =
-                        number.filter(|n| n.as_int().is_some() || n.as_float().is_some())
-                    {
-                        total = step(req, op, total, &number)?;
-                        continue;
+                    match number {
+                        Some(number)
+                            if number.as_int().is_some() || number.as_float().is_some() =>
+                        {
+                            let stepped = step(req, op, total, &number);
+                            number.give_up(req);
+                            total = stepped?;
+                            continue;
+                        }
+                        Some(other) => other.give_up(req),
+                        None => {}
                     }
                 }
                 let type_name = match element.as_object() {

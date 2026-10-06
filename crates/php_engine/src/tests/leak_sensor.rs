@@ -179,3 +179,41 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
         assert_eq!(served.exit_code, 255, "{fatal}");
     }
 }
+
+/// What a handler slot answers is the caller's one owner, and what a
+/// slot takes it keeps or gives up (#2102): `WeakMap`'s `offsetGet`
+/// returns the owner its `read_dimension` answered, where it took a
+/// second one to return and leaked the first, and its `offsetSet`, its
+/// `InternalIterator`, its clone and its dump, a closure's clone and
+/// dump, and an `ArrayAccess` read and written through the standard
+/// slots each leave the heap empty.
+#[test]
+fn what_a_handler_slot_answers_is_the_callers_owner() {
+    let engine = Engine::cli_builder().sense_leaks(LeakSensor::Armed).build();
+    let served = engine.serve_capture(
+        r#"<?php
+$s = 'a'; $s .= 'aaaa';
+$m = new WeakMap; $k = new stdClass; $m[$k] = [$s];
+echo $m->offsetGet($k)[0], ' ', $m[$k][0], "\n";
+$s .= 'b'; $m->offsetSet($k, [$s]);
+foreach ($m->getIterator() as $key => $value) echo get_class($key), ' ', $value[0], "\n";
+$c = clone $m; var_dump($c[$k][0]); unset($c);
+$f = function ($x) use ($s) { return $x; }; $g = clone $f; var_dump($g);
+class A implements ArrayAccess {
+    public $rows = [];
+    function offsetGet($o): mixed { return $this->rows[$o] ?? null; }
+    function offsetSet($o, $v): void { $this->rows[$o] = $v; }
+    function offsetExists($o): bool { return isset($this->rows[$o]); }
+    function offsetUnset($o): void { unset($this->rows[$o]); }
+}
+$a = new A; $a['x'] = $s; $a['x'] .= 'd'; echo $a['x'], ' ', $a['y'] ?? 'none', "\n";
+"#,
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert_eq!(
+        stdout,
+        "aaaaa aaaaa\nstdClass aaaaab\nstring(6) \"aaaaab\"\nobject(Closure)#4 (5) {\n  [\"name\"]=>\n  string(31) \"{closure:Standard input code:8}\"\n  [\"file\"]=>\n  string(19) \"Standard input code\"\n  [\"line\"]=>\n  int(8)\n  [\"static\"]=>\n  array(1) {\n    [\"s\"]=>\n    string(6) \"aaaaab\"\n  }\n  [\"parameter\"]=>\n  array(1) {\n    [\"$x\"]=>\n    string(10) \"<required>\"\n  }\n}\naaaaabd none\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}

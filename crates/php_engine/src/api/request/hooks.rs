@@ -969,7 +969,9 @@ fn trampoline_call(
 fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Get, 0)?;
     let table = req.object_handlers(this.heap());
-    table.read_property(req, this, &name, PropertyRead::Warning)
+    table
+        .read_property(req, this, &name, PropertyRead::Warning)
+        .map(Owner::hand_on)
 }
 
 /// `zend_parent_hook_set_trampoline`: the value written through the

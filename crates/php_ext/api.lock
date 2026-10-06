@@ -161,6 +161,7 @@ abi::IntoReturn::UNDECLARED
 abi::IntoReturn::declared
 abi::IntoReturn::into_return
 abi::Iterable
+abi::IteratorElement
 abi::Lent
 abi::Lent::drain
 abi::Lent::find

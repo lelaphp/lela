@@ -30,7 +30,7 @@ pub(crate) trait Props: 'static {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown>;
+    ) -> Result<Option<Owner<Value>>, Thrown>;
 
     /// The names with a write function, which only `report_mode` has.
     const WRITABLE: &'static [&'static str] = &[];
@@ -81,11 +81,14 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match handled::<P>(name) {
-            Some(name) => {
-                Ok(P::read(req, object, name, read == PropertyRead::Silent)?.unwrap_or_default())
-            }
+            Some(name) => Ok(
+                match P::read(req, object, name, read == PropertyRead::Silent)? {
+                    Some(value) => value,
+                    None => Owner::take(req, Value::null()),
+                },
+            ),
             None => Std.read_property(req, object, name, read),
         }
     }
@@ -150,7 +153,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             PropertyTest::NotEmpty => truthy(req, &value),
             _ => !matches!(value.as_ref(), ValueRef::Null),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 
@@ -165,16 +168,16 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         for name in P::NAMES {
             if let Some(value) = P::read(req, object, name, true)? {
                 let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
-                table.set(req, key, value)?;
+                table.set(req, key, value.hand_on_unmigrated())?;
             }
         }
-        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
+        Ok(Some(DebugInfo::from(table)))
     }
 }
 
 /// `CHECK_STATUS`'s refusal where not quiet: "Property access is not
 /// allowed yet".
-pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Value>, Thrown> {
+pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Owner<Value>>, Thrown> {
     if quiet {
         return Ok(None);
     }
@@ -190,7 +193,7 @@ pub(crate) fn gone(
     req: &mut Request,
     object: PhpObject,
     quiet: bool,
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     if quiet {
         return Ok(None);
     }

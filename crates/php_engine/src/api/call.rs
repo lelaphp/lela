@@ -1349,8 +1349,7 @@ pub(crate) fn new_object_made(req: &mut Request, class: ClassId) -> Result<PhpOb
 /// `zend_bad_method_call`'s. The copy is the caller's, one owner.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn clone(req: &mut Request, object: &PhpObject) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.clone_object(*object, None);
-    adopted(req, made)
+    req.clone_object(*object, None)
 }
 
 /// A class's `clone_obj` over an object with a native payload, php's
@@ -2487,7 +2486,9 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
             "Fetching properties on non-enums in constant expressions is not allowed",
         ));
     }
-    let value = req.read_property(instance, name, PropertyRead::Warning)?;
+    let value = req
+        .read_property(instance, name, PropertyRead::Warning)?
+        .hand_on();
     Ok(Chained {
         value,
         short: false,

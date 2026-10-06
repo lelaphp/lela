@@ -2,7 +2,7 @@
 //! recurrences, read from objects or from an ISO 8601 string, with its
 //! getters and its serialised form.
 
-use php_ext::abi::{Instance, Passed, Raw, Static, This, Untyped};
+use php_ext::abi::{Instance, IteratorElement, Passed, Raw, Static, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw, throw_error};
@@ -273,7 +273,7 @@ pub(super) fn iterator_element(
     req: &mut Request,
     object: PhpObject,
     index: usize,
-) -> Result<Option<(Value, Value)>, Thrown> {
+) -> Result<Option<IteratorElement>, Thrown> {
     let start_ce = object.native::<PeriodObj>(req).and_then(|p| p.start_ce);
     let base = match start_ce {
         Some(class) => Some(base_date_class(req, class)?),
@@ -318,7 +318,7 @@ pub(super) fn iterator_element(
     };
     let date = new_date(req, base, current)?;
     let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
-    Ok(Some((key, date.into_value().hand_on_unmigrated())))
+    Ok(Some((Owner::take(req, key), date.into_value())))
 }
 
 /// `php_date_period_initialize_from_hash`: every field required, of the

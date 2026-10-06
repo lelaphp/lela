@@ -348,10 +348,10 @@ impl ObjectHandlers for Incomplete {
         object: php_ext::values::PhpObject,
         _name: &[u8],
         _read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let message = incomplete_message(req, object, "access a property");
         docref(req, Level::Warning, &message);
-        Ok(Value::null())
+        Ok(Owner::take(req, Value::null()))
     }
 
     fn write_property(

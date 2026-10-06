@@ -984,7 +984,7 @@ impl ClassIterator for ListIterator {
 
 /// `spl_dllist_object_clone`: the list copied, one more owner of each
 /// element, the pointer at the head.
-fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_list(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let (values, flags) = with(req, object, |l| (l.values(), l.flags))?;
     let mut copy = Box::new(LlistState {
         flags,
@@ -996,7 +996,7 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         copy.push(value);
     }
     copy.cursor.pointer = copy.head;
-    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, copy)
 }
 
 /// `spl_dllist_object_get_debug_info`: the properties, then `flags` and

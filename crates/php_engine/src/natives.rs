@@ -503,8 +503,7 @@ fn clone(
         Passed::Given(with) => Some(with),
         Passed::Omitted => None,
     };
-    let made = req.clone_object(object, with);
-    crate::api::values::adopted(req, made)
+    req.clone_object(object, with)
 }
 
 /// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`
@@ -2036,7 +2035,7 @@ fn dump_rows(
     out: &mut Vec<u8>,
     common: &str,
     object: crate::api::values::PhpObject,
-    rows: PhpArray,
+    rows: Owner<PhpArray>,
     level: usize,
 ) {
     out.extend_from_slice(format!("{common}object(").as_bytes());
@@ -2051,7 +2050,7 @@ fn dump_rows(
         dump_row_key(req, out, level, &key);
         dump(req, out, &value, level + 2);
     }
-    req.release(Value::array(rows));
+    rows.give_up(req);
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }

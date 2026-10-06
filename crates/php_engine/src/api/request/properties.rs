@@ -15,7 +15,7 @@ use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
-    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, adopted,
 };
 
 use frames::Link;
@@ -1773,7 +1773,7 @@ impl Request {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let silent = read == PropertyRead::Silent;
         // What nothing holds is `null`, quietly, under `BP_VAR_IS` and
         // `BP_VAR_UNSET`; only the first asks `__isset`.
@@ -1782,7 +1782,7 @@ impl Request {
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(read) = self.read_hooked_arm(object, name, read) {
-            return read;
+            return adopted(self, read);
         }
         // `ZEND_WRONG_PROPERTY_OFFSET`: the placement found a property
         // the scope may not reach and said so quietly, because a
@@ -1795,9 +1795,7 @@ impl Request {
             if self.reaches(&placed) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
-                    let value = Value::of_zval(z).deref();
-                    self.addref(&value);
-                    return Ok(value);
+                    return Ok(Owner::take(self, Value::of_zval(z).deref()));
                 }
                 // `IS_PROP_UNINIT | IS_PROP_LAZY`: a slot that waits for
                 // the initializer skips `__get` too, and the object is
@@ -1815,7 +1813,7 @@ impl Request {
                     || (silent && self.serves_accessor(class, b"__isset"));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
-                        return Ok(Value::null());
+                        return Ok(Owner::take(self, Value::null()));
                     }
                     return Err(self.uninitialized_property(placed.declaring, name));
                 }
@@ -1840,9 +1838,7 @@ impl Request {
                 .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
                 .map(|(_, z)| Value::of_zval(z));
             if let Some(value) = dynamic {
-                let value = value.deref();
-                self.addref(&value);
-                return Ok(value);
+                return Ok(Owner::take(self, value.deref()));
             }
         }
         let getter = self.magic_accessor(class, b"__get");
@@ -1869,13 +1865,14 @@ impl Request {
             let served = self.isset_then_get(object, name, read, issetter, getter);
             held.give_up(self);
             if let Some(served) = served? {
-                return Ok(served);
+                return Ok(Owner::adopt(self, served));
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
                 let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
-                return self.hold_magic_get(class, name, getter, got);
+                let held = self.hold_magic_get(class, name, getter, got);
+                return adopted(self, held);
             }
             // `zend_wrong_offset`: the guard stands and the placement
             // was a wrong offset, so it is made again, loudly, and the
@@ -1902,7 +1899,7 @@ impl Request {
             let class = self.class_name(class);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
-        Ok(Value::null())
+        Ok(Owner::take(self, Value::null()))
     }
 
     /// `zend_std_write_property`'s `found` arm over a slot that holds a

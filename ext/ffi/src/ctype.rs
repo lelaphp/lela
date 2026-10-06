@@ -511,7 +511,7 @@ impl ObjectHandlers for Handlers {
         _: PhpObject,
         _: &[u8],
         _: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         Err(throw_error(
             req,
             "Error",
@@ -538,7 +538,7 @@ impl ObjectHandlers for Handlers {
         _: PhpObject,
         _: Option<&Value>,
         _: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         Err(bad_array_access(req))
     }
 
@@ -547,9 +547,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _: PhpObject,
         _: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.release(value);
+        value.give_up(req);
         Err(bad_array_access(req))
     }
 
@@ -645,11 +645,11 @@ impl ObjectHandlers for Handlers {
     /// `zend_fake_cast_object`.
     fn cast_object(
         &self,
-        _: &mut Request,
+        req: &mut Request,
         _: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
-        Ok((to == TypeTag::Bool).then_some(Value::bool(true)))
+    ) -> Result<Option<Owner<Value>>, Thrown> {
+        Ok((to == TypeTag::Bool).then(|| Owner::take(req, Value::bool(true))))
     }
 
     /// `zend_ffi_ctype_get_debug_info`: nothing to show.
