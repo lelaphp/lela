@@ -136,8 +136,29 @@ fn reassign_this(req: &mut Request) -> Thrown {
 /// 2
 /// ```
 ///
-/// Under `EXTR_REFS` the walk holds nothing, as php's ref helpers hold
-/// nothing: the reference the call passed holds the array, and an
+/// Under `EXTR_REFS` php separates the array first, before it checks
+/// the flags, so a shared array is separated in the caller's variable
+/// even where the flags are refused:
+///
+/// ```php
+/// $a = ['x' => 1]; $a['y'] = 2; $b = $a;
+/// try { extract($a, EXTR_REFS | 99); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// debug_zval_dump($b);
+/// echo extract(array_merge(['p' => 1], ['q' => 2]), EXTR_REFS), ',', $p, $q, "\n";
+/// ```
+/// ```expect
+/// extract(): Argument #2 ($flags) must be a valid extract type
+/// array(2) refcount(2){
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   int(2)
+/// }
+/// 2,12
+/// ```
+///
+/// Under `EXTR_REFS` the walk holds nothing, as php's `php_extract_ref_*`
+/// functions hold nothing: the reference the call passed holds the array, and an
 /// element made a reference over that variable replaces the variable,
 /// not the reference's value.
 ///
@@ -179,29 +200,29 @@ fn extract(
         Passed::Given(prefix) => Some(prefix.as_bytes().to_vec()),
         Passed::Omitted => None,
     };
-    let refs = flags & EXTR_REFS != 0;
+    // `SEPARATE_ARRAY(var_array_param)` (`Z/ext/standard/array.c:2594`),
+    // before php checks the flags.
+    let separated = if flags & EXTR_REFS != 0 {
+        match Separated::of(req, &given)? {
+            Some(separated) => Some(separated),
+            None => return Ok(0),
+        }
+    } else {
+        None
+    };
     let kind = flags & 0xff;
-    if !(EXTR_OVERWRITE..=EXTR_IF_EXISTS).contains(&kind) {
-        return Err(arg_value_error(req, 2, "be a valid extract type"));
-    }
-    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
-        return Err(argument_error(
-            req,
-            "ValueError",
-            3,
-            "is required when using this extract type",
-        ));
-    }
-    if let Some(prefix) = &prefix
-        && !prefix.is_empty()
-        && !valid_var_name(prefix)
-    {
-        return Err(arg_value_error(req, 3, "be a valid identifier"));
-    }
-    req.forbid_dynamic_call()?;
-    let prefix = prefix.unwrap_or_default();
-    if refs {
-        return extracted_refs(req, &given, kind, &prefix);
+    let checked = checked(req, kind, prefix_given, prefix);
+    let prefix = match checked {
+        Ok(prefix) => prefix,
+        Err(thrown) => {
+            if let Some(separated) = separated {
+                separated.give_up(req);
+            }
+            return Err(thrown);
+        }
+    };
+    if let Some(separated) = separated {
+        return extracted_refs(req, separated, kind, &prefix);
     }
     let Some(array) = given.get().copied() else {
         return Ok(0);
@@ -262,29 +283,11 @@ fn extract(
 /// ```
 fn extracted_refs(
     req: &mut Request,
-    given: &Ref<PhpArray>,
+    separated: Separated,
     kind: i64,
     prefix: &[u8],
 ) -> Result<i64, Thrown> {
-    // `SEPARATE_ARRAY(var_array_param)` (`Z/ext/standard/array.c:2594`):
-    // the rows are made references in place, so the array walked is the
-    // reference's alone, or a temporary's copy the call owns.
-    let (table, copy) = if let Some(reference) = given.reference() {
-        let Some(table) = reference.separate_array(req)? else {
-            return Ok(0);
-        };
-        (table, None)
-    } else {
-        let Some(array) = given.get().copied() else {
-            return Ok(0);
-        };
-        let mut copy = Owner::take(req, array);
-        if let Err(thrown) = copy.separate(req) {
-            copy.give_up(req);
-            return Err(thrown);
-        }
-        (*copy, Some(copy))
-    };
+    let table = separated.table;
     let mut count = 0i64;
     // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(arr, ...)` in each of the
     // `php_extract_ref_*` helpers (`php_extract_ref_overwrite`,
@@ -299,10 +302,87 @@ fn extracted_refs(
         }
         Ok(ControlFlow::<()>::Continue(()))
     });
-    if let Some(copy) = copy {
-        copy.give_up(req);
-    }
+    separated.give_up(req);
     walked.map(|_| count)
+}
+
+/// `extract`'s checks of its flags and prefix, php's order, and
+/// `zend_forbid_dynamic_call`: the prefix to put before a name, empty
+/// where none was passed.
+fn checked(
+    req: &mut Request,
+    kind: i64,
+    prefix_given: bool,
+    prefix: Option<Vec<u8>>,
+) -> Result<Vec<u8>, Thrown> {
+    if !(EXTR_OVERWRITE..=EXTR_IF_EXISTS).contains(&kind) {
+        return Err(arg_value_error(req, 2, "be a valid extract type"));
+    }
+    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
+        return Err(argument_error(
+            req,
+            "ValueError",
+            3,
+            "is required when using this extract type",
+        ));
+    }
+    if let Some(prefix) = &prefix
+        && !prefix.is_empty()
+        && !valid_var_name(prefix)
+    {
+        return Err(arg_value_error(req, 3, "be a valid identifier"));
+    }
+    req.forbid_dynamic_call()?;
+    Ok(prefix.unwrap_or_default())
+}
+
+/// The array `extract` under `EXTR_REFS` makes its rows references in,
+/// after php's `SEPARATE_ARRAY`: the array the call's reference holds,
+/// separated in the reference where it was shared, or a temporary as
+/// the call holds it where nothing else does and otherwise a copy of it
+/// the call owns, which nobody reads after.
+struct Separated {
+    table: PhpArray,
+    /// The call's copy of a shared temporary.
+    copy: Option<Owner<PhpArray>>,
+}
+
+impl Separated {
+    /// `SEPARATE_ARRAY(var_array_param)`; `None` where the argument
+    /// holds no array.
+    fn of(req: &mut Request, given: &Ref<PhpArray>) -> Result<Option<Separated>, Thrown> {
+        if let Some(reference) = given.reference() {
+            return Ok(reference
+                .separate_array(req)?
+                .map(|table| Separated { table, copy: None }));
+        }
+        let Some(array) = given.get().copied() else {
+            return Ok(None);
+        };
+        let held = array.to_value();
+        if held.is_refcounted() && held.refcount() == 1 {
+            return Ok(Some(Separated {
+                table: array,
+                copy: None,
+            }));
+        }
+        let mut copy = Owner::take(req, array);
+        if let Err(thrown) = copy.separate(req) {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+        Ok(Some(Separated {
+            table: *copy,
+            copy: Some(copy),
+        }))
+    }
+
+    /// The call's copy given up, where it made one.
+    fn give_up(self, req: &mut Request) {
+        if let Some(copy) = self.copy {
+            copy.give_up(req);
+        }
+    }
 }
 
 /// The variable `extract` writes the element under `key` into, one arm
