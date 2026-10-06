@@ -47,8 +47,8 @@ fn an_html_document_from_a_file_keeps_no_read() {
 
 /// The string an `XPath` PHP function answers, and the name an int-keyed
 /// `registerPhpFunctions` entry is read off, are given up once their
-/// bytes are copied, as php's `zval_ptr_dtor(&retval)` and
-/// `zend_string_release` give them up (#2094).
+/// bytes are copied, as php's `zend_tmp_string_release` gives them up
+/// (#2094).
 #[test]
 fn an_xpath_callback_s_answer_is_given_up() {
     served(
@@ -61,5 +61,24 @@ fn an_xpath_callback_s_answer_is_given_up() {
          $g = 'g'; $h = 'h'; $x->registerPhpFunctions([$g . $h]);\n\
          echo $x->evaluate('php:functionString(\"gh\", //a)'), \"\\n\";\n",
         "x!\nx?\n",
+    );
+}
+
+/// A callback answer whose conversion throws is given up all the same,
+/// as php's `zval_ptr_dtor(&callback_retval)` follows every arm, and the
+/// callbacks a `registerPhpFunctions` array names before a refused one
+/// are given up with the refusal (#2094).
+#[test]
+fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
+    served(
+        "<?php $d = new DOMDocument; $d->loadXML('<r><a>x</a></r>');\n\
+         $x = new DOMXPath($d);\n\
+         $x->registerNamespace('php', 'http://php.net/xpath');\n\
+         $x->registerPhpFunctions(['arr' => fn($s) => [$s]]);\n\
+         set_error_handler(function ($n, $m) { throw new Exception($m); });\n\
+         try { $x->evaluate('php:functionString(\"arr\", //a)'); } catch (Exception $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         restore_error_handler();\n\
+         try { $x->registerPhpFunctions(['f' => fn() => 1, 'g' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), \"\\n\"; }\n",
+        "Array to string conversion\nTypeError\n",
     );
 }

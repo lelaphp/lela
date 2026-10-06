@@ -422,10 +422,10 @@ fn dispatch(
                     state.node_list.push(answer);
                     return Ok(Returned::Node(node));
                 }
-                None => Returned::Sentinel,
+                None => Ok(Returned::Sentinel),
             }
         }
-        ValueRef::Bool(b) => Returned::Bool(b),
+        ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
             req.release(answer);
             return Err(throw_error(
@@ -434,10 +434,10 @@ fn dispatch(
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }
-        _ => Returned::Str(string_bytes(req, &answer)?),
+        _ => string_bytes(req, &answer).map(Returned::Str),
     };
     req.release(answer);
-    Ok(returned)
+    returned
 }
 
 /// `php_xpath_eval`: `query` forces a node set, `evaluate` answers what
@@ -599,20 +599,14 @@ fn callable_of(
     }
 }
 
-/// `php_dom_xpath_callback_ns_update_method_handler`.
-fn register_into(
+/// The names and callbacks `restrict` registers, pushed onto `adding`
+/// one by one, each callback's value an owner [`callable_of`] took; on
+/// the `Err` those already pushed are the caller's to give up.
+fn collect(
     req: &mut Request,
-    mode: &mut Mode,
-    restrict: Option<Value>,
+    restrict: Value,
+    adding: &mut Vec<(Vec<u8>, (Callable, Value))>,
 ) -> Result<(), Thrown> {
-    let restrict = restrict
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
-    let Some(restrict) = restrict else {
-        *mode = Mode::All;
-        return Ok(());
-    };
-    let mut adding = Vec::new();
     if let Some(array) = restrict.as_array().copied() {
         for (key, value) in &array {
             let name = match key {
@@ -637,6 +631,29 @@ fn register_into(
             return Err(arg_value_error(req, 1, "be a valid callback name"));
         }
         adding.push((name, callable_of(req, &restrict, 1, false)?));
+    }
+    Ok(())
+}
+
+/// `php_dom_xpath_callback_ns_update_method_handler`.
+fn register_into(
+    req: &mut Request,
+    mode: &mut Mode,
+    restrict: Option<Value>,
+) -> Result<(), Thrown> {
+    let restrict = restrict
+        .map(|v| v.deref())
+        .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
+    let Some(restrict) = restrict else {
+        *mode = Mode::All;
+        return Ok(());
+    };
+    let mut adding = Vec::new();
+    if let Err(thrown) = collect(req, restrict, &mut adding) {
+        for (_, (_, value)) in adding {
+            req.release(value);
+        }
+        return Err(thrown);
     }
     let mut functions = match std::mem::take(mode) {
         Mode::Set(f) => f,
