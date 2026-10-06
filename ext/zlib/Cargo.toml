@@ -31,4 +31,3 @@ cc = { workspace = true }
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
-php_ext_standard = { path = "../standard" }
