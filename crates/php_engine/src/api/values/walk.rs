@@ -816,23 +816,14 @@ fn foreach_steps<B>(
     let watched = table.heap().map(PhpArray::heap);
     let mut pos = 0;
     while watched.is_none_or(|watched| watch.stands(req, watched)) {
-        let found = match (table, unwritten) {
-            (Table::Object(object), Unwritten::Shown) => object.shown_from(req, pos, end),
-            _ => table
-                .held_from(pos, end)
-                .map(|(found, key, value, at)| (found, key, value, at, None)),
-        };
-        let Some((found, key, value, at, uninitialized)) = found else {
+        // The row is laid out by a call of its own, so what finding it
+        // takes is off the stack while the body runs: a walk the body
+        // re-enters, a nested array compared or dumped, costs a level
+        // only what this loop keeps.
+        let Some((found, mut row)) = next_lent(req, table, (pos, end), watch, unwritten) else {
             break;
         };
         pos = found.saturating_add(1);
-        let mut row = Row {
-            key: Owner::take(req, key),
-            value: Owner::take(req, Value::of_zval(value)),
-            at,
-            watch,
-            uninitialized,
-        };
         let step = body(req, &mut row);
         row.give_up(req);
         if let ControlFlow::Break(broke) = step? {
@@ -840,6 +831,34 @@ fn foreach_steps<B>(
         }
     }
     Ok(None)
+}
+
+/// The row a [`foreach`] walk lends next, at or after `pos` below `end`,
+/// with its position, each of its key and value one owner more for the
+/// step; `None` past the last.
+#[inline(never)]
+fn next_lent(
+    req: &Request,
+    table: &Table,
+    (pos, end): (u32, u32),
+    watch: Watch,
+    unwritten: Unwritten,
+) -> Option<(u32, Row)> {
+    let found = match (table, unwritten) {
+        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, pos, end),
+        _ => table
+            .held_from(pos, end)
+            .map(|(found, key, value, at)| (found, key, value, at, None)),
+    };
+    let (found, key, value, at, uninitialized) = found?;
+    let row = Row {
+        key: Owner::take(req, key),
+        value: Owner::take(req, Value::of_zval(value)),
+        at,
+        watch,
+        uninitialized,
+    };
+    Some((found, row))
 }
 
 /// One row a callback walk lends its body ([`foreach`], [`live`]): the

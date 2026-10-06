@@ -3501,16 +3501,27 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
     if left.len() != right.len() {
         return Ok(left.len().cmp(&right.len()));
     }
-    for (key, value) in left.snapshot() {
-        let Some(other) = right.get(&key) else {
-            return Ok(Ordering::Greater);
-        };
-        let ordering = compare(req, &value, &other)?;
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(Ordering::Equal)
+    // `zend_hash_compare_impl`'s loop over `ht1`'s buckets
+    // (`Z/Zend/zend_hash.c:3115`), which takes no owner of either table:
+    // the operands hold them while `compare` serves `__toString` or a
+    // class's `compare`. The walk fixes the end as it begins where php's
+    // loop reads `nNumUsed` at each step, which only a row appended
+    // mid-compare could tell apart.
+    let decided = crate::api::values::walk::foreach(
+        req,
+        left,
+        crate::api::values::walk::Hold::None,
+        |req, row| -> crate::api::values::walk::Step<Ordering> {
+            let Some(other) = right.get(row.key()) else {
+                return Ok(std::ops::ControlFlow::Break(Ordering::Greater));
+            };
+            match compare(req, &row.value().deref(), &other)? {
+                Ordering::Equal => Ok(std::ops::ControlFlow::Continue(())),
+                ordering => Ok(std::ops::ControlFlow::Break(ordering)),
+            }
+        },
+    )?;
+    Ok(decided.unwrap_or(Ordering::Equal))
 }
 
 /// `increment_function` (`Z/Zend/zend_operators.c:2712`): the value
