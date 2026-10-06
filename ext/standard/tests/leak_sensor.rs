@@ -43,3 +43,18 @@ echo implode('|', file($f)), count(file($f, FILE_IGNORE_NEW_LINES)), "\n"; unlin
     );
     assert_eq!(stdout, "a\n|b\n2\n");
 }
+
+/// `readdir`, `scandir` and `glob` hand each name they read to the
+/// program and keep none of it (#2087).
+#[test]
+fn the_names_a_directory_listing_reads_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+$d = sys_get_temp_dir() . '/leak-sensor-dir-' . getmypid(); @mkdir($d); touch("$d/a.txt"); touch("$d/b.txt");
+$h = opendir($d); $n = 0; while (readdir($h) !== false) $n++; closedir($h);
+echo $n, ' ', implode(',', scandir($d)), ' ', count(glob("$d/*.txt")), "\n";
+unlink("$d/a.txt"); unlink("$d/b.txt"); rmdir($d);
+"#,
+    );
+    assert_eq!(stdout, "4 .,..,a.txt,b.txt 2\n");
+}

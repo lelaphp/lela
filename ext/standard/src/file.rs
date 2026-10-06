@@ -614,7 +614,10 @@ fn readdir(
     #[php(default = null)] dir_handle: Option<Stream>,
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let dir = dir_stream(req, dir_handle)?;
-    Ok(dir.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
+    Ok(match dir.read_dir(req)? {
+        Some(name) => OrFalse::Value(PhpString::new(req, &name)?),
+        None => OrFalse::False,
+    })
 }
 
 /// `rewind($stream): bool`, `PHP_FUNCTION(rewind)`

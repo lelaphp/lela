@@ -2502,7 +2502,7 @@ fn dir_read(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         it.dir.as_ref().map(Open::stream)
     })?;
     let entry = match dir {
-        Some(dir) => dir.read_dir(req)?.map(|s| s.as_bytes().to_vec()),
+        Some(dir) => dir.read_dir(req)?,
         None => None,
     };
     fs(req, this, |it| it.entry = entry.unwrap_or_default())

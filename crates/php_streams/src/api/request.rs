@@ -643,15 +643,15 @@ impl Stream {
     }
 
     /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
-    /// `None` past the last (`readdir` answers `false`).
-    pub fn read_dir(self, req: &mut Request) -> Result<Option<PhpString>, Thrown> {
-        match req
+    /// `None` past the last (`readdir` answers `false`). The name is
+    /// bytes, the `d_name` of the `php_stream_dirent` php fills, and no
+    /// string: a native that lists names for itself holds nothing to
+    /// give up, and one that hands a name to a program, as `readdir`
+    /// does, makes the string.
+    pub fn read_dir(self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+        Ok(req
             .stream_op(self, |req, stream| stream.read_dir(req))
-            .flatten()
-        {
-            Some(name) => Ok(Some(PhpString::new(req, &name)?)),
-            None => Ok(None),
-        }
+            .flatten())
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
