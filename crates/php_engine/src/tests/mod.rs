@@ -9,7 +9,8 @@
 //! them (design §7.1), the statements a Zend extension is told of
 //! under extended info (#1823), and a debug build's freed-use guard
 //! (#1990) and request leak sensor (#1992) as a program meets them,
-//! and the owner type as one meets it (#1995).
+//! the leaks that sensor found in the handlers (#2057), and the owner
+//! type as one meets it (#1995).
 
 use crate::api;
 
@@ -18,6 +19,8 @@ mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]
 mod freed_use;
+#[cfg(debug_assertions)]
+mod leak_causes;
 #[cfg(debug_assertions)]
 mod leak_sensor;
 mod lifecycle;

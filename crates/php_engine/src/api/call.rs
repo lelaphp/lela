@@ -1942,28 +1942,85 @@ fn array_node(
         return Ok(Value::array(crate::api::values::PhpArray::empty()));
     }
     let mut array = crate::api::values::PhpArray::new(req)?;
+    // `zval_ptr_dtor_nogc(result); return FAILURE;`: an element that
+    // threw gives up the array built so far, whichever element it was.
+    match array_elements(req, &mut array, elements, scope) {
+        Ok(()) => Ok(Value::array(array)),
+        Err(thrown) => {
+            req.release_nogc(Value::array(array));
+            Err(thrown)
+        }
+    }
+}
+
+/// [`array_node`]'s elements written into `array`, which stays the
+/// caller's whether they all were or one threw: a spread's operand
+/// given up once spread, as `zend_ast_add_unpacked_element`'s caller
+/// gives it up, and an element's key where its value or its write
+/// threw. An element with no key past the last integer one, or a
+/// spread's, throws php's `Error`, and the array is given up with it:
+///
+/// ```php
+/// function test($x = [PHP_INT_MAX => 42, 'foo']) {}
+/// try { test(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class K { const S = [7 => 1, NOPE]; const U = [PHP_INT_MAX => 1, ...[2]]; }
+/// try { K::S; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { K::U; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// function f($x = [1 => 'c' . 'd', 'e' . 'f' => NOPE]) {}
+/// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot add element to the array as the next element is already occupied
+/// Undefined constant "NOPE"
+/// Cannot add element to the array as the next element is already occupied
+/// Undefined constant "NOPE"
+/// ```
+fn array_elements(
+    req: &mut Request,
+    array: &mut crate::api::values::PhpArray,
+    elements: &[(Option<ConstExpr>, ConstExpr)],
+    scope: Option<ClassId>,
+) -> Result<(), Thrown> {
     for (key, value) in elements {
         if let ConstExpr::Unpack(inner) = value {
             let spread = evaluate(req, inner, scope)?;
-            let added = add_unpacked_element(req, &mut array, &spread);
-            req.release(spread);
+            let added = add_unpacked_element(req, array, &spread);
+            req.release_nogc(spread);
             added?;
             continue;
         }
         // `zend_ast_add_array_element`: the key evaluated before
         // the value, and the two written as `ADD_ARRAY_ELEMENT`
         // writes them, a key's deprecations and refusals its own.
+        let key = match key {
+            Some(key) => Some(evaluate(req, key, scope)?),
+            None => None,
+        };
+        let value = match evaluate(req, value, scope) {
+            Ok(value) => value,
+            Err(thrown) => {
+                if let Some(key) = key {
+                    req.release_nogc(key);
+                }
+                return Err(thrown);
+            }
+        };
         let offset = match key {
             Some(key) => crate::ops::Offset::At {
-                key: evaluate(req, key, scope)?,
+                key,
                 constant: false,
             },
             None => crate::ops::Offset::Next,
         };
-        let value = evaluate(req, value, scope)?;
-        crate::ops::add_array_element(req, array, offset, value)?;
+        // The kernel takes the value and reads the key; where the
+        // write threw, the key is given up with the array.
+        let added = crate::ops::add_array_element(req, *array, offset, value);
+        if let (Err(_), Some(key)) = (&added, key) {
+            req.release_nogc(key);
+        }
+        added?;
     }
-    Ok(Value::array(array))
+    Ok(())
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_CLASS_NAME` arm: `self` the scope's
@@ -2306,34 +2363,10 @@ fn construct(
     let object = new_object(req, id)?;
     let mut positional = Vec::new();
     let mut named = Vec::new();
-    for (name, argument) in arguments {
-        let value = match evaluate(req, argument, scope) {
-            Ok(value) => value,
-            Err(thrown) => {
-                req.release(object.as_value());
-                return Err(thrown);
-            }
-        };
-        match name {
-            Some(name) => named.push((PhpString::new(req, &name.0)?, value)),
-            None => positional.push(value),
-        }
-    }
-    let served = match req.method_named(id, b"__construct") {
-        None => Ok(Value::null()),
-        Some(_) if named.is_empty() => {
-            let constructor = req.method_named(id, b"__construct");
-            match constructor {
-                Some(constructor) => {
-                    req.serve_method(constructor, Some(object), id, &positional, &[])
-                }
-                None => Ok(Value::null()),
-            }
-        }
-        Some(_) => match known_method(req, id, &Name(b"__construct"[..].into()), Some(object)) {
-            Some(callable) => call_named(req, &callable, &positional, &named),
-            None => Ok(Value::null()),
-        },
+    let evaluated = construct_arguments(req, arguments, scope, &mut positional, &mut named);
+    let served = match evaluated {
+        Err(thrown) => Err(thrown),
+        Ok(()) => serve_constructor(req, id, object, &positional, &named),
     };
     for value in positional {
         req.release(value);
@@ -2351,6 +2384,74 @@ fn construct(
             req.release(object.as_value());
             Err(thrown)
         }
+    }
+}
+
+/// [`construct`]'s arguments, each evaluated in written order into
+/// `positional` or `named`, which stay the caller's to give up whether
+/// every argument was or one threw, as `zend_ast_evaluate`'s
+/// `ZEND_AST_NEW` arm gives up the ones before it:
+///
+/// ```php
+/// define('Q', 'x');
+/// class P { function __construct($a, $b = null) {} }
+/// function f($x = new P([Q], NOPE)) {}
+/// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// function g($x = new P(b: [Q], a: NOPE)) {}
+/// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Undefined constant "NOPE"
+/// Undefined constant "NOPE"
+/// ```
+fn construct_arguments(
+    req: &mut Request,
+    arguments: &[(Option<Name>, ConstExpr)],
+    scope: Option<ClassId>,
+    positional: &mut Vec<Value>,
+    named: &mut Vec<(PhpString, Value)>,
+) -> Result<(), Thrown> {
+    for (name, argument) in arguments {
+        let value = evaluate(req, argument, scope)?;
+        match name {
+            Some(name) => match PhpString::new(req, &name.0) {
+                Ok(name) => named.push((name, value)),
+                Err(thrown) => {
+                    req.release(value);
+                    return Err(thrown);
+                }
+            },
+            None => positional.push(value),
+        }
+    }
+    Ok(())
+}
+
+/// [`construct`]'s constructor served over `object` with the arguments
+/// it evaluated, the named ones by their names as `zend_call_function`
+/// places them; what it returned, or `null` where the class has none.
+fn serve_constructor(
+    req: &mut Request,
+    id: ClassId,
+    object: PhpObject,
+    positional: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<Value, Thrown> {
+    match req.method_named(id, b"__construct") {
+        None => Ok(Value::null()),
+        Some(_) if named.is_empty() => {
+            let constructor = req.method_named(id, b"__construct");
+            match constructor {
+                Some(constructor) => {
+                    req.serve_method(constructor, Some(object), id, positional, &[])
+                }
+                None => Ok(Value::null()),
+            }
+        }
+        Some(_) => match known_method(req, id, &Name(b"__construct"[..].into()), Some(object)) {
+            Some(callable) => call_named(req, &callable, positional, named),
+            None => Ok(Value::null()),
+        },
     }
 }
 
