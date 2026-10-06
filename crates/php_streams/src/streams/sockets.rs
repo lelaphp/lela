@@ -30,8 +30,8 @@ use crate::api::values::{Emalloc, Owner};
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
-    BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, Request, SocketOptions, Stream,
-    StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
+    BindTo, Cast, Crypto, CryptoSocket, FreeOwned, Handshake, OptionAnswer, Request, SocketOptions,
+    Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
 };
 use crate::api::values::PhpString;
 use crate::streams::StreamLayer;
@@ -1163,20 +1163,20 @@ pub(crate) enum Found {
 pub(crate) trait Transports {
     fn transport_named(&self, protocol: &[u8]) -> Option<Found>;
     fn make_sock(&mut self, label: &str, rest: &[u8], xport: Xport) -> Result<Sock, XportFailure>;
-    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown>;
-    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown>;
+    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown>;
+    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown>;
     fn xport_stream(
         &mut self,
         fd: OwnedFd,
         name: Option<&str>,
         blocking: bool,
-    ) -> Result<Stream, Thrown>;
+    ) -> Result<Owner<Stream>, Thrown>;
     fn transports(&self) -> Vec<&'static str>;
     fn xport_create(
         &mut self,
         name: &[u8],
         xport: Xport,
-    ) -> Result<Result<Stream, XportFailure>, Thrown>;
+    ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown>;
 }
 
 impl Transports for Request {
@@ -1255,7 +1255,7 @@ impl Transports for Request {
     /// `php_stream_sock_open_from_socket` (`Z/main/network.c:1020`): a
     /// socket the stream is handed, of the `generic_socket` kind, `r+`,
     /// blocking, with `default_socket_timeout` as its read timeout.
-    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+    fn socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown> {
         self.xport_stream(fd, None, true)
     }
 
@@ -1282,9 +1282,9 @@ impl Transports for Request {
     /// "
     /// int(0)
     /// ```
-    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Stream, Thrown> {
+    fn php_socket_stream(&mut self, fd: OwnedFd) -> Result<Owner<Stream>, Thrown> {
         let stream = self.socket_stream(fd)?;
-        self.stream_op(stream, |_, s| {
+        self.stream_op(*stream, |_, s| {
             if let Some(socket) = s.ops.as_socket() {
                 socket.label = "tcp_socket";
             }
@@ -1304,7 +1304,7 @@ impl Transports for Request {
         fd: OwnedFd,
         name: Option<&str>,
         blocking: bool,
-    ) -> Result<Stream, Thrown> {
+    ) -> Result<Owner<Stream>, Thrown> {
         let found = name.and_then(|name| Some((name, self.transport_named(name.as_bytes())?)));
         let mut crypto = None;
         let (sock, label) = match found {
@@ -1333,12 +1333,12 @@ impl Transports for Request {
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.flags.no_seek = true;
         let stream = self.stream_alloc(stream)?;
-        if let Some((name, _)) = found {
-            let path = format!("{name}://").into_bytes();
-            self.stream_op(stream, |req, s| s.set_orig_path(req, &path))
-                .transpose()?;
-        }
-        Ok(stream)
+        let Some((name, _)) = found else {
+            return Ok(stream);
+        };
+        let path = format!("{name}://").into_bytes();
+        let named = self.stream_op(*stream, |req, s| s.set_orig_path(req, &path));
+        Ok(super::kept(self, stream, named.transpose())?.0)
     }
 
     fn transports(&self) -> Vec<&'static str> {
@@ -1355,7 +1355,7 @@ impl Transports for Request {
         &mut self,
         name: &[u8],
         xport: Xport,
-    ) -> Result<Result<Stream, XportFailure>, Thrown> {
+    ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown> {
         let n = name
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -1431,14 +1431,15 @@ impl Transports for Request {
             stream.orig_path = Some(super::OrigPath::Persistent(name.into()));
         }
         let stream = self.stream_alloc_as(stream, persistent.is_some())?;
-        if persistent.is_none() {
-            self.stream_op(stream, |req, s| s.set_orig_path(req, name))
-                .transpose()?;
-        }
+        let named = match persistent {
+            Some(_) => None,
+            None => self.stream_op(*stream, |req, s| s.set_orig_path(req, name)),
+        };
+        let (stream, _) = super::kept(self, stream, named.transpose())?;
         stream.set_ctx(self, context);
         if role == Role::Peer && connected {
             let connected = self
-                .stream_op(stream, |req, s| {
+                .stream_op(*stream, |req, s| {
                     s.ops
                         .as_socket()
                         .map_or(Ok(()), |socket| socket.crypto_connected(req))
@@ -1453,7 +1454,7 @@ impl Transports for Request {
             }
         }
         if let Some(key) = persistent {
-            self.hold_persistent(key, stream);
+            self.hold_persistent(key, *stream);
         }
         Ok(Ok(stream))
     }
@@ -1532,7 +1533,7 @@ impl Stream {
         let context = self.ctx(req);
         client.set_ctx(req, context);
         let connected = req
-            .stream_op(client, |req, s| {
+            .stream_op(*client, |req, s| {
                 s.ops
                     .as_socket()
                     .map_or(Ok(()), |socket| socket.crypto_connected(req))
@@ -1542,11 +1543,8 @@ impl Stream {
             client.free(req);
             return Ok(Err(Some(text)));
         }
-        let peer = match peer {
-            Some(peer) => Some(PhpString::new(req, &peer)?),
-            None => None,
-        };
-        Ok(Ok((crate::api::request::owned(req, client), peer)))
+        let peer = peer.map(|peer| PhpString::new(req, &peer)).transpose();
+        Ok(Ok(super::kept(req, client, peer)?))
     }
 
     /// `php_stream_xport_get_name` (`Z/main/streams/transports.c:327`):

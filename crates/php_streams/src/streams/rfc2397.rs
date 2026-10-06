@@ -8,12 +8,13 @@
 use super::{MetaValue, PhpStream, TempMode, Whence, temp_stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream};
+use crate::api::values::Owner;
 use crate::streams::StreamLayer;
 
 /// What the opener answered: the stream, or the text php's wrapper logs,
 /// which `php_stream_display_wrapper_errors` prints after `Failed to open
 /// stream: `.
-type Opened = Result<Stream, String>;
+type Opened = Result<Owner<Stream>, String>;
 
 /// `php_stream_url_wrap_rfc2397`: the path after `data:` and the `//`
 /// php lets stand after it split at its first comma; before the comma a
@@ -68,7 +69,7 @@ pub(super) fn open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened
         url_decode(data)
     };
     let stream = temp_stream(req, TempMode::Default, usize::MAX, "RFC2397", meta)?;
-    req.stream_op(stream, |req, s: &mut PhpStream| {
+    req.stream_op(*stream, |req, s: &mut PhpStream| {
         let _ = s.ops.write(req, &data);
         let mut at = 0;
         let _ = s.ops.seek(req, 0, Some(Whence::Set), &mut at);

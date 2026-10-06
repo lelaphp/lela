@@ -338,6 +338,17 @@ impl<T: ResourceView> Owner<T> {
     }
 }
 
+impl Owner<Resource> {
+    /// The owner of the resource as the typed view `typed` makes of it,
+    /// the same count: what a facet hands back of a resource it has just
+    /// made, the owner `Resource::sized` gave it as a stream's.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_typed<T: ResourceView>(self, typed: fn(Resource) -> T) -> Owner<T> {
+        let view = typed(self.view);
+        self.recast(view)
+    }
+}
+
 impl Owner<Value> {
     /// The owner of the value returned as it is under `T`'s declaration,
     /// the same count ([`Raw`]).
