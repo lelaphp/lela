@@ -146,7 +146,7 @@ impl ObjectHandlers for ClosureHandlers {
         // `*table`, so the collector walks them as the closure's and
         // counts no node of the table's.
         if let Some(bound) = closure.bound {
-            for (_, value) in bound.snapshot_refs() {
+            for (_, value) in crate::api::values::walk::rows(req, bound) {
                 visit(value);
             }
         }

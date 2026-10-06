@@ -16393,7 +16393,7 @@ fn unpack_binds(req: &Request, array: PhpArray) -> bool {
         .calls()
         .last()
         .map_or(0, |call| call.arguments.len());
-    array.snapshot_refs().into_iter().any(|(key, _)| {
+    crate::api::values::walk::rows(req, array).any(|(key, _)| {
         let number = match key {
             crate::api::values::Key::Str(name) => {
                 crate::api::call::arg_offset_by_name(req, function, name.as_bytes()).number()
