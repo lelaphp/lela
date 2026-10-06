@@ -139,6 +139,29 @@ impl Request {
         }
     }
 
+    /// [`PhpObject::append_row`]: `zend_hash_next_index_insert` over the
+    /// dynamic table, separated first where a cast shares it, at its
+    /// `nNextFreeElement`, which php's declared rows, all string keys,
+    /// never move. `value` is the table's from here, or given up with
+    /// `false` where the next element is taken.
+    pub(crate) fn table_append_row(
+        &mut self,
+        object: PhpObject,
+        value: Value,
+    ) -> Result<bool, Thrown> {
+        let table = match self
+            .table_owner(object)
+            .and_then(|object| self.separated_properties(object.heap()))
+        {
+            Ok(table) => table,
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        };
+        self.array_append(table, value)
+    }
+
     /// [`PhpObject::update_row`]: `zend_hash_update`, a declared row
     /// written raw and marked plain ([`php_heap::PropBit::PlainRow`]),
     /// any other key [`Request::table_set_row`]'s.

@@ -1564,78 +1564,56 @@ pub trait Streams {
     fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown>;
 }
 
-/// The owner a stream of the facet is made with, as the [`Owner`] it
-/// is: the openers below the face keep the [`Stream`] the resource was
-/// made with, so the face takes its own owner and gives that one up,
-/// and the count stands where it stood. Only the face's constructors
-/// call it, each over a stream it has just made.
-#[cfg_attr(debug_assertions, track_caller)]
-pub(crate) fn owned<T: ResourceView>(req: &mut Request, made: T) -> Owner<T> {
-    let owner = Owner::take(req, made);
-    req.release(Value::resource(made.resource()));
-    owner
+/// [`Stream::free`] over the owner an open handed back: the stream
+/// closed and that owner given up, `php_stream_close`.
+pub(crate) trait FreeOwned {
+    fn free(self, req: &mut Request);
 }
 
-/// [`owned`] over what may be nothing.
-// A closure would name its own line as the owner's site.
-#[allow(clippy::manual_map)]
-#[cfg_attr(debug_assertions, track_caller)]
-fn owned_some<T: ResourceView>(req: &mut Request, made: Option<T>) -> Option<Owner<T>> {
-    match made {
-        Some(made) => Some(owned(req, made)),
-        None => None,
+impl FreeOwned for Owner<Stream> {
+    fn free(self, req: &mut Request) {
+        self.close(req);
+        self.give_up(req);
     }
 }
 
 impl Streams for Request {
-    #[cfg_attr(debug_assertions, track_caller)]
     fn stdin(&mut self) -> Result<Option<Owner<Stream>>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn open_stream(
         &mut self,
         path: &[u8],
         mode: &[u8],
         use_include_path: bool,
     ) -> Result<Option<Owner<Stream>>, Thrown> {
-        let opened = self.open_stream_wrapper(path, mode, use_include_path)?;
-        Ok(owned_some(self, opened))
+        self.open_stream_wrapper(path, mode, use_include_path)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn open_stream_with(
         &mut self,
         path: &[u8],
         mode: &[u8],
         opening: Opening,
     ) -> Result<Option<Owner<Stream>>, Thrown> {
-        let opened = self.open_wrapper_with(path, mode, opening)?;
-        Ok(owned_some(self, opened))
+        self.open_wrapper_with(path, mode, opening)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
-        let opened = self.open_url_wrapper(url, mode)?;
-        Ok(owned_some(self, opened))
+        self.open_url_wrapper(url, mode)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn new_stream(
         &mut self,
         ops: Box<dyn StreamOps>,
         mode: &[u8],
     ) -> Result<Owner<Stream>, Thrown> {
-        let stream = crate::streams::of_extension(ops, mode);
-        let opened = self.stream_alloc(stream)?;
-        Ok(owned(self, opened))
+        self.stream_alloc(crate::streams::of_extension(ops, mode))
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn open_dir(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
-        let opened = self.open_dir_wrapper(path)?;
-        Ok(owned_some(self, opened))
+        self.open_dir_wrapper(path)
     }
 
     fn url_stat(&mut self, path: &[u8], link: bool, cached: bool) -> Result<UrlStat, Thrown> {
@@ -1707,10 +1685,8 @@ impl Streams for Request {
         self.streams().opened_path = Some(path.to_vec());
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn tmpfile(&mut self) -> Result<Option<Owner<Stream>>, Thrown> {
-        let opened = crate::streams::temporary_file(self, None, b"php")?;
-        Ok(owned_some(self, opened))
+        crate::streams::temporary_file(self, None, b"php")
     }
 
     fn register_wrapper(&mut self, wrapper: StreamWrapper) -> bool {
@@ -1754,10 +1730,8 @@ impl Streams for Request {
         })
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown> {
-        let opened = StreamLayer::stream_from_fd(self, fd, kind)?;
-        Ok(owned(self, opened))
+        StreamLayer::stream_from_fd(self, fd, kind)
     }
 
     fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
@@ -1780,21 +1754,15 @@ impl Streams for Request {
         Transports::transports(self)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn xport_create(
         &mut self,
         name: &[u8],
         xport: Xport,
     ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown> {
-        Ok(match Transports::xport_create(self, name, xport)? {
-            Ok(opened) => Ok(owned(self, opened)),
-            Err(failure) => Err(failure),
-        })
+        Transports::xport_create(self, name, xport)
     }
 
-    #[cfg_attr(debug_assertions, track_caller)]
     fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown> {
-        let opened = crate::streams::persistent::Persistent::lend(self, key, kept.0)?;
-        Ok(owned(self, opened))
+        crate::streams::persistent::Persistent::lend(self, key, kept.0)
     }
 }

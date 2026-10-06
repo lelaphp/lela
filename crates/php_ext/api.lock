@@ -1118,6 +1118,7 @@ values::Owner::into_instance
 values::Owner::into_raw
 values::Owner::into_resource
 values::Owner::into_static
+values::Owner::into_typed
 values::Owner::into_value
 values::Owner::replace
 values::Owner::separate
@@ -1170,6 +1171,7 @@ values::PhpArray::try_append
 values::PhpArray::unprotect
 values::PhpArray::unset
 values::PhpObject
+values::PhpObject::append_row
 values::PhpObject::as_value
 values::PhpObject::class
 values::PhpObject::clone_with

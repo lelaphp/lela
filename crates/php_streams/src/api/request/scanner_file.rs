@@ -67,7 +67,7 @@ impl ScannerFile {
             },
         );
         Ok(Some(ScannerFile {
-            stream,
+            stream: stream.hand_on_unmigrated(),
             opened_path: opened_path.map(Owner::hand_on_unmigrated),
             buf: None,
         }))

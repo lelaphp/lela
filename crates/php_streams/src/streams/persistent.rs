@@ -24,7 +24,7 @@ use super::sockets::Socket;
 use super::{PhpStream, Request, Stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, StreamOption};
-use crate::api::values::Resource;
+use crate::api::values::{Owner, Resource};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
 
@@ -53,8 +53,8 @@ pub(crate) struct Entry {
 }
 
 pub(crate) trait Persistent {
-    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Stream>, Thrown>;
-    fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Stream, Thrown>;
+    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Owner<Stream>>, Thrown>;
+    fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown>;
     fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream);
     fn drop_persistent(&mut self, res: Resource);
     fn persistent_pool(&mut self) -> Arc<PersistentList>;
@@ -89,7 +89,7 @@ impl Persistent for Request {
     /// string(17) "persistent stream"
     /// bool(true)
     /// ```
-    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Stream>, Thrown> {
+    fn persistent_stream(&mut self, key: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
         let stream = if let Some(at) = self
             .streams()
             .persistent
@@ -101,8 +101,7 @@ impl Persistent for Request {
                 State::InResource(res) => {
                     let state = State::InResource(res);
                     self.streams().persistent.insert(at, Held { key, state });
-                    self.addref(&res.as_value());
-                    Stream::of(res)
+                    Owner::take(self, Stream::of(res))
                 }
                 State::Idle(entry) => self.lend(key, entry)?,
             }
@@ -115,15 +114,15 @@ impl Persistent for Request {
             return Ok(None);
         };
         let alive = self
-            .stream_op(stream, |req, s| s.set_option(req, StreamOption::Liveness))
+            .stream_op(*stream, |req, s| s.set_option(req, StreamOption::Liveness))
             .is_some_and(|answer| answer == OptionAnswer::Ok);
         if alive {
             return Ok(Some(stream));
         }
         // `php_stream_pclose`: the socket closed and the entry dropped,
         // the resource closed and the owner this ask took given up.
-        PhpStream::close_open(self, stream);
-        self.release(stream.as_value());
+        PhpStream::close_open(self, *stream);
+        stream.give_up(self);
         Ok(None)
     }
 
@@ -145,7 +144,7 @@ impl Persistent for Request {
     /// 32
     /// 32 hi
     /// ```
-    fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Stream, Thrown> {
+    fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown> {
         let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
         stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
         stream.flags.no_seek = true;
