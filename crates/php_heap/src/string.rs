@@ -449,7 +449,7 @@ impl Str {
         self.header().h.get()
     }
 
-    /// The hash written to the cache where it is unset, and nothing read:
+    /// The hash written to the cache where it is unset, and none returned:
     /// what php's `zend_add_interned_string` asks of `zend_string_hash_val`
     /// before it publishes a string, so that a string a second thread can
     /// name is never written again.

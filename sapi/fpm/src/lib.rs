@@ -344,7 +344,7 @@ fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
             // would end the master's engine once more in every child.
             #[expect(
                 clippy::mem_forget,
-                reason = "the master's engine, copied by the fork, is let go of without ending it, as the comment above says"
+                reason = "a child serves on an engine of its own, and ending the master's copy would end the master's engine once more in every child"
             )]
             std::mem::forget(fpm.engine.take());
             let worker = worker::init(&mut fpm, pool, slot, (ini, startup), &started);
