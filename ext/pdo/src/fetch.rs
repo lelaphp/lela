@@ -1457,17 +1457,14 @@ pub(super) fn fetch_all(
     }
     stmt::clear_error(req, object);
     let mut out = PhpArray::new(req)?;
-    if kind == Some(Kind::KeyPair) {
-        while key_pair(req, object, Orientation::Forward, 0, &mut out)? {}
-        stmt::handle_error(req, object, false)?;
-        return Ok(out);
-    }
-    if flags.has(Flag::Group) || flags.has(Flag::Unique) {
-        grouped_rows(req, object, how | flags.0, flags, &with, &mut out)?;
-    } else {
-        while let Some((row, _)) = shaped(req, object, how, Orientation::Forward, 0, false, &with)?
-        {
-            out.append(req, row)?;
+    // What a fetch that throws partway gathered is given up, as the VM
+    // frees the return value of a native that threw.
+    match gather_all(req, object, (kind, how, flags), &with, &mut out) {
+        Ok(true) => return Ok(out),
+        Ok(false) => {}
+        Err(thrown) => {
+            req.release(Value::array(out));
+            return Err(thrown);
         }
     }
     let state = stmt::read(req, object, |s| s.error_code).flatten();
@@ -1479,6 +1476,31 @@ pub(super) fn fetch_all(
         return Ok(PhpArray::empty());
     }
     Ok(out)
+}
+
+/// `fetchAll()`'s rows gathered into `out` in the shape `kind`, `how`
+/// and `flags` name; `true` where `FETCH_KEY_PAIR` has also handled the
+/// statement's error, so `out` is the answer as it stands.
+fn gather_all(
+    req: &mut Request,
+    object: PhpObject,
+    (kind, how, flags): (Option<Kind>, i64, Flags),
+    with: &With,
+    out: &mut PhpArray,
+) -> Result<bool, Thrown> {
+    if kind == Some(Kind::KeyPair) {
+        while key_pair(req, object, Orientation::Forward, 0, out)? {}
+        stmt::handle_error(req, object, false)?;
+        return Ok(true);
+    }
+    if flags.has(Flag::Group) || flags.has(Flag::Unique) {
+        grouped_rows(req, object, how | flags.0, flags, with, out)?;
+    } else {
+        while let Some((row, _)) = shaped(req, object, how, Orientation::Forward, 0, false, with)? {
+            out.append(req, row)?;
+        }
+    }
+    Ok(false)
 }
 
 /// `fetchAll()` under `FETCH_GROUP` or `FETCH_UNIQUE`: each row under

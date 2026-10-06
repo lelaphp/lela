@@ -8,8 +8,8 @@
 use php_ext::test::{Capture, Engine, LeakSensor};
 
 /// What one request of an armed engine with PDO, this connector and
-/// standard wrote for `body`, served after `$db` is connected with
-/// exceptions on; `None` where no server answers.
+/// standard wrote for `body`, served after `$db` is connected under
+/// `PDO::ERRMODE_EXCEPTION`; `None` where no server answers.
 fn armed(body: &str) -> Option<String> {
     if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
         eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
@@ -61,4 +61,19 @@ $o = $db->query('SELECT 1 AS a')->fetchObject('R'); echo $o->a, "\n";
         return;
     };
     assert_eq!(stdout, "made\n1\n");
+}
+
+/// `fetchAll` gives up the rows it gathered where a fetch throws
+/// partway, as the VM frees the return value of a native that threw
+/// (#2117).
+#[test]
+fn fetch_all_gives_up_its_rows_where_a_fetch_throws() {
+    let Some(stdout) = armed(
+        r#"function f($a) { if ($a == 2) throw new Exception('two'); return $a; }
+try { $db->query('SELECT 1 UNION SELECT 2')->fetchAll(PDO::FETCH_FUNC, 'f'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(stdout, "two\n");
 }
