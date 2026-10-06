@@ -49,3 +49,15 @@ unlink("$d/sub/b.txt"); unlink("$d/a.txt"); rmdir("$d/sub"); rmdir($d);
     );
     assert_eq!(stdout, "9\n");
 }
+
+/// `spl_autoload_register()` with no callable registers `spl_autoload`
+/// under its name, which the stack keeps its own owner of, so the name
+/// made to resolve it is given up, once registered and once found
+/// registered already (#2075); the leak sensor is armed (#1992).
+#[test]
+fn the_default_autoloader_keeps_no_name() {
+    let stdout = armed(
+        "<?php spl_autoload_register(); spl_autoload_register(); foreach (spl_autoload_functions() as $f) { echo $f, \"\\n\"; }",
+    );
+    assert_eq!(stdout, "spl_autoload\n");
+}

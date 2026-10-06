@@ -11,7 +11,8 @@
 //! (#1990) and request leak sensor (#1992) as a program meets them,
 //! the leaks that sensor found in the engine (#2057), the owner type
 //! as one meets it (#1995), a table copied as php copies it (#2005),
-//! and the callback walks as a native meets them (#1980).
+//! the callback walks as a native meets them (#1980), and the owners
+//! the face takes for a native and gives up (#2059, #2080).
 
 use crate::api;
 
@@ -25,6 +26,8 @@ mod leak_causes;
 #[cfg(debug_assertions)]
 mod leak_sensor;
 mod lifecycle;
+#[cfg(debug_assertions)]
+mod native_owners;
 mod observer;
 mod observer_notices;
 mod op_arrays;

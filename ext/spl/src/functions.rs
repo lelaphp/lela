@@ -411,14 +411,17 @@ fn spl_autoload_register(
             "not be the spl_autoload_call() function",
         ));
     }
-    let loader = if let Some(loader) = loader {
-        loader
-    } else {
+    let Some(loader) = loader else {
+        // `spl_autoload_fn`: the stack takes its own owners of the
+        // name it is registered under, so the one made here is given
+        // up after.
         let name = crate::string_value(req, b"spl_autoload")?;
-        let Ok(loader) = callable_checked(req, &name) else {
-            return Ok(false);
+        let registered = match callable_checked(req, &name) {
+            Ok(loader) => req.autoload_register(loader, prepend).map(|()| true),
+            Err(_) => Ok(false),
         };
-        loader
+        req.release(name);
+        return registered;
     };
     req.autoload_register(loader, prepend)?;
     Ok(true)

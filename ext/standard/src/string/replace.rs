@@ -123,12 +123,26 @@ fn replace_common(
     let result = match subject {
         Union::A(subjects) => {
             let mut out = PhpArray::new(req)?;
-            for (key, entry) in subjects.snapshot() {
-                let subject = to_string(req, &entry.deref())?;
-                let (value, n) = in_subject(req, &search, &replace, subject, case_sensitive)?;
-                count += n;
-                let key = owned_key(req, &key);
-                out.set(req, key, Value::string(value))?;
+            let filled = (|| {
+                for (key, entry) in subjects.snapshot() {
+                    // `zval_try_get_tmp_string` over the row, given up
+                    // after the replacement as `zend_tmp_string_release`
+                    // gives it up.
+                    let subject = to_string(req, &entry.deref())?;
+                    let replaced = in_subject(req, &search, &replace, subject, case_sensitive);
+                    req.release(Value::string(subject));
+                    let (value, n) = replaced?;
+                    count += n;
+                    let key = owned_key(req, &key);
+                    out.set(req, key, Value::string(value))?;
+                }
+                Ok(())
+            })();
+            // The array built so far is given up with the throw, as the
+            // VM frees the return value php's native leaves under one.
+            if let Err(thrown) = filled {
+                req.release(Value::array(out));
+                return Err(thrown);
             }
             Union::A(out)
         }
@@ -138,7 +152,14 @@ fn replace_common(
             Union::B(value)
         }
     };
-    counted.set(req, Untyped(Value::int(count)))?;
+    if let Err(thrown) = counted.set(req, Untyped(Value::int(count))) {
+        let made = match result {
+            Union::A(array) => Value::array(array),
+            Union::B(string) => Value::string(string),
+        };
+        req.release(made);
+        return Err(thrown);
+    }
     Ok(result)
 }
 
@@ -163,21 +184,36 @@ fn in_subject(
                 Union::B(_) => None,
             };
             for (_, entry) in searches.snapshot() {
+                // `zval_get_tmp_string` over the search row and the
+                // replacement row, each given up once it is read, as
+                // `zend_tmp_string_release` gives them up.
                 let needle = to_string(req, &entry.deref())?;
                 let with: Vec<u8> = match (&mut replacements, replace) {
                     (Some(iter), _) => match iter.next() {
-                        Some((_, value)) => to_string(req, &value.deref())?.as_bytes().to_vec(),
+                        Some((_, value)) => match to_string(req, &value.deref()) {
+                            Ok(text) => {
+                                let bytes = text.as_bytes().to_vec();
+                                req.release(Value::string(text));
+                                bytes
+                            }
+                            Err(thrown) => {
+                                req.release(Value::string(needle));
+                                return Err(thrown);
+                            }
+                        },
                         None => Vec::new(),
                     },
                     (None, Union::B(s)) => s.as_bytes().to_vec(),
                     (None, Union::A(_)) => Vec::new(),
                 };
                 if needle.is_empty() {
+                    req.release(Value::string(needle));
                     continue;
                 }
                 let haystack = current.as_deref().unwrap_or(subject.as_bytes());
                 let (replaced, n) =
                     replace_bytes(haystack, needle.as_bytes(), &with, case_sensitive);
+                req.release(Value::string(needle));
                 count += n;
                 if n > 0 {
                     current = Some(replaced);

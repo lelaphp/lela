@@ -1582,7 +1582,9 @@ impl ReflectionFunction {
 
     /// `ReflectionFunction::getClosure()`: the closure a reflector over one
     /// keeps, one more owner, since a closure is immutable; else
-    /// `zend_create_fake_closure` over the function with no scope.
+    /// `zend_create_fake_closure` over the function with no scope, which
+    /// holds the function and not the name it was resolved by, so the
+    /// name is given up once the closure is made.
     ///
     /// ```php
     /// $c = function () { return 1; };
@@ -1600,8 +1602,10 @@ impl ReflectionFunction {
             return Ok(Instance::of(closure));
         }
         let name = Value::string(php_ext::values::PhpString::new(req, &decl.name.0)?);
-        let callable = to_callable(req, &name)?;
-        Ok(Instance::of(closure_from_callable(req, &callable)?))
+        let closure =
+            to_callable(req, &name).and_then(|callable| closure_from_callable(req, &callable));
+        req.release(name);
+        Ok(Instance::of(closure?))
     }
 }
 
