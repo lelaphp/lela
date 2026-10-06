@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::call::write_prop;
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpObject, PhpString, Value, adopted};
 
@@ -770,13 +771,12 @@ fn throwable_at(
     line: u32,
 ) -> Result<PhpObject, Thrown> {
     let object = req.new_object_of(class)?;
-    let message = Value::string(req.string(message.as_bytes())?);
-    let file = Value::string(req.string(file)?);
-    let line = Value::int(i64::from(line));
-    for (name, value) in [(&b"message"[..], message), (b"file", file), (b"line", line)] {
-        let name = req.string(name)?;
-        object.set_prop(req, name, value)?;
-    }
+    let message = PhpString::new(req, message.as_bytes())?;
+    write_prop(req, &object, b"message", message.into_value())?;
+    let file = PhpString::new(req, file)?;
+    write_prop(req, &object, b"file", file.into_value())?;
+    let line = Owner::take(req, Value::int(i64::from(line)));
+    write_prop(req, &object, b"line", line)?;
     Ok(object)
 }
 
@@ -962,8 +962,7 @@ pub(crate) fn new_throwable_made(
             return Err(refused);
         }
     };
-    let name = req.string(b"message")?;
-    object.set_prop(req, name, Value::string(message.hand_on()))?;
+    write_prop(req, &object, b"message", message.into_value())?;
     if !req.records_throw_site(object.class()) {
         req.note_throw_site(object)?;
     }

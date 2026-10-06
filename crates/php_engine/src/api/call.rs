@@ -760,12 +760,12 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
 /// line it records are that opline's.
 fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown {
     if let Some(object) = thrown.exception().copied() {
-        let placed = req
-            .string(b"file")
-            .and_then(|name| Ok((name, req.string(file)?)))
-            .and_then(|(name, file)| object.set_prop(req, name, Value::string(file)))
-            .and_then(|()| req.string(b"line"))
-            .and_then(|name| object.set_prop(req, name, Value::int(i64::from(line))));
+        let placed = PhpString::new(req, file)
+            .and_then(|file| write_prop(req, &object, b"file", file.into_value()))
+            .and_then(|()| {
+                let line = Owner::take(req, Value::int(i64::from(line)));
+                write_prop(req, &object, b"line", line)
+            });
         if let Err(other) = placed {
             return other;
         }
@@ -1012,15 +1012,15 @@ pub fn read_raw_property(
 
 /// A hooked property's backing value written past its hooks, as the
 /// `set` hook itself writes it, `ReflectionProperty::setRawValue`'s
-/// trampoline: a virtual property has none, php's `Error`. `value` and
-/// `name` are given up whatever arm runs.
+/// trampoline: a virtual property has none, php's `Error`. A sink of
+/// both owners, given up whatever arm runs.
 pub fn write_raw_property(
     req: &mut Request,
     object: &PhpObject,
-    name: PhpString,
-    value: Value,
+    name: Owner<PhpString>,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name, value)
+    req.write_raw(*object, name.hand_on(), value.hand_on())
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the
@@ -3034,14 +3034,22 @@ pub fn read_prop(req: &mut Request, object: &PhpObject, name: &[u8]) -> Result<V
 }
 
 /// Write a property through the class's `write_property` (design
-/// §5.4): the value is the object's from here.
+/// §5.4), [`PhpObject::set_prop`] with the name made here: a sink, the
+/// value the object's from here, and given up where the name cannot be
+/// made.
 pub fn write_prop(
     req: &mut Request,
     object: &PhpObject,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?.hand_on_unmigrated();
+    let name = match PhpString::new(req, name) {
+        Ok(name) => name,
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     object.set_prop(req, name, value)
 }
 

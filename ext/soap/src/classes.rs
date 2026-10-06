@@ -446,7 +446,7 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
     let text = string(req, f.string.unwrap_or_default())?;
     set_fault_slot(req, object, FaultSlot::String, text)?;
     let message = string(req, f.string.unwrap_or_default())?;
-    php_ext::call::write_prop(req, &object, b"message", message.hand_on_unmigrated())?;
+    php_ext::call::write_prop(req, &object, b"message", message)?;
     if let Some(code) = f.code {
         let version = req.state::<State>().soap_version;
         let (code, ns): (&[u8], Option<&[u8]>) = if let Some(ns) = f.code_ns {

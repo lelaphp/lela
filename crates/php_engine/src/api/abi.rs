@@ -22,7 +22,7 @@ use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{Request, Unresolved};
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
+    ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
 };
 use crate::supplied::{Keyed, Registered, Supplies};
 
@@ -2194,17 +2194,18 @@ pub trait ObjectHandlers: Send + Sync {
         req.read_property(object, name, read)
     }
 
-    /// `write_property`, `zend_std_write_property` at `Std`: `value` is
-    /// the object's from here and `name` is given up once the object
-    /// has taken its own.
+    /// `write_property`, `zend_std_write_property` at `Std`: a sink of
+    /// both owners, the value's the object's from here and the name's
+    /// given up once the object has taken its own. A table that refuses
+    /// the write gives both up.
     fn write_property(
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.write_property(object, name, value)
+        req.write_property(object, name.hand_on(), value.hand_on())
     }
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:

@@ -358,11 +358,11 @@ impl ObjectHandlers for Incomplete {
         &self,
         req: &mut Request,
         object: php_ext::values::PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.release(value);
-        req.release(Value::string(name));
+        value.give_up(req);
+        name.give_up(req);
         let message = incomplete_message(req, object, "modify a property");
         Err(throw_error(req, "Error", &message))
     }

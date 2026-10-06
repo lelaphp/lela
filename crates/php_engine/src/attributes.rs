@@ -682,7 +682,7 @@ impl SensitiveParameterValue {
     /// }
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         initialise(
             req,
             this.object(),
@@ -783,11 +783,9 @@ impl Deprecated {
         #[php(default = null)] since: Option<PhpString>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        let message = message.map_or_else(Value::null, Value::string);
-        req.addref(&message);
+        let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
         initialise(req, this, "Deprecated", b"message", message)?;
-        let since = since.map_or_else(Value::null, Value::string);
-        req.addref(&since);
+        let since = Owner::take(req, since.map_or_else(Value::null, Value::string));
         initialise(req, this, "Deprecated", b"since", since)
     }
 }
@@ -826,8 +824,7 @@ impl NoDiscard {
         this: This<Self>,
         #[php(default = null)] message: Option<PhpString>,
     ) -> Result<(), Thrown> {
-        let message = message.map_or_else(Value::null, Value::string);
-        req.addref(&message);
+        let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
         initialise(req, this.object(), "NoDiscard", b"message", message)
     }
 }
@@ -852,10 +849,10 @@ fn initialise(
     this: PhpObject,
     class: &str,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     if this.prop(req, name).is_some() {
-        req.release(value);
+        value.give_up(req);
         return Err(throw_error(
             req,
             "Error",
@@ -865,6 +862,5 @@ fn initialise(
             ),
         ));
     }
-    let key = PhpString::new(req, name)?.hand_on_unmigrated();
-    this.set_prop(req, key, value)
+    crate::api::call::write_prop(req, &this, name, value)
 }

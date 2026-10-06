@@ -153,9 +153,8 @@ impl Randomizer {
                 "Cannot modify readonly property Random\\Randomizer::$engine",
             ));
         }
-        let name = PhpString::new(req, b"engine")?.hand_on_unmigrated();
         let view = *engine;
-        this.set_prop(req, name, engine.into_value().hand_on_unmigrated())?;
+        php_ext::call::write_prop(req, &this, b"engine", engine.into_value())?;
         common_init(req, this, view);
         Ok(())
     }

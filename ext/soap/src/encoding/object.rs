@@ -70,7 +70,7 @@ fn set_zval_property(req: &mut Request, object: &Value, name: &[u8], val: Owner<
             return Err(t.into());
         }
     };
-    Ok(o.set_prop(req, name.hand_on_unmigrated(), val.hand_on_unmigrated())?)
+    Ok(o.set_prop(req, name, val)?)
 }
 
 /// `unset_zval_property`.

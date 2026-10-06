@@ -993,8 +993,8 @@ impl ObjectHandlers for IntervalHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let initialized = object
             .native::<IntervalObj>(req)
@@ -1003,14 +1003,14 @@ impl ObjectHandlers for IntervalHandlers {
         if !initialized || !INTERVAL_FIELDS[..8].contains(&field.as_slice()) {
             return Std.write_property(req, object, name, value);
         }
-        req.release(Value::string(name));
+        name.give_up(req);
         let result = if field == b"f" {
             #[allow(clippy::cast_possible_truncation)]
             to_double(req, &value).map(|f| (f * 1_000_000.0) as i64)
         } else {
             to_long(req, &value)
         };
-        req.release(value);
+        value.give_up(req);
         let n = result?;
         if let Some(diff) = object
             .native_mut::<IntervalObj>(req)
@@ -1359,13 +1359,13 @@ impl ObjectHandlers for PeriodHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if PERIOD_FIELDS.contains(&name.as_bytes()) {
-            req.release(value);
+            value.give_up(req);
             let thrown = readonly(req, name.as_bytes());
-            req.release(Value::string(name));
+            name.give_up(req);
             return Err(thrown);
         }
         Std.write_property(req, object, name, value)

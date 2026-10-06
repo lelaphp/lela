@@ -668,8 +668,8 @@ impl ObjectHandlers for TokenListHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         crate::write_property(req, object, name, value)
     }

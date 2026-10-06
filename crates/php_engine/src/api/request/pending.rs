@@ -8,6 +8,7 @@
 
 use php_heap::Fatal;
 
+use crate::api::call::write_prop;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::exec;
@@ -222,10 +223,8 @@ impl Request {
                 Ok(returned) => {
                     let text = returned.deref();
                     if text.as_str_bytes().is_some() {
-                        if let Ok(name) = self.string(b"string") {
-                            self.addref(&text);
-                            throwable.set_prop(self, name, text).ok();
-                        }
+                        let text = Owner::take(self, text);
+                        write_prop(self, &throwable, b"string", text).ok();
                     } else {
                         crate::api::raising::warning(
                             self,
@@ -394,9 +393,11 @@ impl Request {
                 .filter(|previous| !seen.iter().any(|done| done.index() == previous.index()));
         }
         let string = self.string(&text)?;
-        let name = self.string(b"string")?;
-        self.addref(&Value::string(string));
-        this.set_prop(self, name, Value::string(string))?;
+        let kept = Owner::take(self, Value::string(string));
+        if let Err(thrown) = write_prop(self, &this, b"string", kept) {
+            self.release(Value::string(string));
+            return Err(thrown);
+        }
         match raised {
             Some(thrown) => {
                 self.release(Value::string(string));
@@ -441,16 +442,24 @@ impl Request {
                 ),
         };
         let trace = self.debug_backtrace()?;
-        let line = Value::int(i64::from(self.current_line()));
-        for (name, value) in [
-            (&b"file"[..], Value::string(self.string(&file)?)),
-            (b"line", line),
-            (b"trace", Value::array(trace)),
-        ] {
-            let name = self.string(name)?;
-            throwable.set_prop(self, name, value)?;
+        let trace = Owner::adopt(self, trace);
+        let file = match PhpString::new(self, &file) {
+            Ok(file) => file,
+            Err(thrown) => {
+                trace.give_up(self);
+                return Err(thrown);
+            }
+        };
+        if let Err(thrown) = write_prop(self, &throwable, b"file", file.into_value()) {
+            trace.give_up(self);
+            return Err(thrown);
         }
-        Ok(())
+        let line = Owner::take(self, Value::int(i64::from(self.current_line())));
+        if let Err(thrown) = write_prop(self, &throwable, b"line", line) {
+            trace.give_up(self);
+            return Err(thrown);
+        }
+        write_prop(self, &throwable, b"trace", trace.into_value())
     }
 
     /// The first half of `zend_objects_destroy_object`'s protection of
@@ -619,13 +628,10 @@ impl Request {
                 at = next;
                 continue;
             }
-            let Ok(name) = self.string(b"previous") else {
-                return;
-            };
-            if at.set_prop(self, name, previous.as_value()).is_ok() {
-                return;
-            }
-            break;
+            let previous = Owner::adopt(self, previous.as_value());
+            // `write_prop` gives the owner up where it fails.
+            write_prop(self, &at, b"previous", previous).ok();
+            return;
         }
         self.release(previous.as_value());
     }

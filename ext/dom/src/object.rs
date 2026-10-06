@@ -6,7 +6,7 @@
 use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::NodeObject;
 
 use crate::map::Map;
@@ -149,8 +149,8 @@ impl ObjectHandlers for NodeHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         write_property(req, object, name, value)
     }

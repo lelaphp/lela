@@ -9,8 +9,9 @@
 
 use php_unit::decl::{ClassConstDecl, ClassKind, Name, Visibility};
 
+use crate::api::call::write_prop;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, TypeTag, Value};
 
 use super::Request;
 
@@ -403,12 +404,12 @@ impl Request {
         // The case's name is the constant's, an interned string, as
         // `zend_enum_new` copies `case_name`.
         let spelled = self.interned(name)?;
-        let slot = self.string(b"name")?;
-        case.set_prop(self, slot, Value::string(spelled))?;
+        let spelled = Owner::take(self, Value::string(spelled));
+        write_prop(self, &case, b"name", spelled)?;
         if backing != php_unit::decl::EnumBacking::Pure {
             let value = crate::api::call::eval_declared_made(self, &constant.value, Some(class))?;
-            let slot = self.string(b"value")?;
-            case.set_prop(self, slot, value)?;
+            let value = Owner::adopt(self, value);
+            write_prop(self, &case, b"value", value)?;
         }
         self.class_constants
             .enum_cases

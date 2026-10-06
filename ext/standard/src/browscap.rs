@@ -449,8 +449,8 @@ fn get_browser(
     let object = new_object(req, class)?;
     for (key, value) in array.snapshot() {
         if let Key::Str(name) = key {
-            req.addref(&value);
-            req.addref(&Value::string(name));
+            let value = Owner::take(req, value);
+            let name = Owner::take(req, name);
             object.set_prop(req, name, value)?;
         }
     }

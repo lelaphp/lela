@@ -1752,7 +1752,12 @@ impl PhpObject {
     /// released last, after the write, which is where a destructor is
     /// served (`zend_assign_to_variable`). The `Err` is the memory
     /// limit refusing the dynamic table.
-    pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
+    pub fn set_prop(
+        &self,
+        req: &mut Request,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
         req.write_property_as_declared(*self, name, value)
     }
 
@@ -1766,8 +1771,8 @@ impl PhpObject {
         &self,
         req: &mut Request,
         scope: PropertyScope,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         match scope {
             PropertyScope::Declaring => req.write_property_as_declared(*self, name, value),
@@ -2875,12 +2880,14 @@ mod tests {
             return;
         };
         let (Ok(name), Ok(text)) = (
-            PhpString::new(&mut req, b"message").map(Owner::hand_on),
-            PhpString::new(&mut req, b"a string the object holds").map(Owner::hand_on),
+            PhpString::new(&mut req, b"message"),
+            PhpString::new(&mut req, b"a string the object holds"),
         ) else {
             return;
         };
-        assert!(object.set_prop(&mut req, name, Value::string(text)).is_ok());
+        let text_view = *text;
+        assert!(object.set_prop(&mut req, name, text.into_value()).is_ok());
+        let text = text_view;
         assert_eq!(text.heap().refcount(), 1, "the table holds the one owner");
         assert_eq!(
             object

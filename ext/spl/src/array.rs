@@ -2163,12 +2163,25 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        if as_props(req, object, name.as_bytes())? {
-            let member = Value::string(name);
-            return self.write_dimension(req, object, Some(&member), value);
+        let props = match as_props(req, object, name.as_bytes()) {
+            Ok(props) => props,
+            Err(thrown) => {
+                name.give_up(req);
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if props {
+            // The name an `ArrayObject` writes a property under is the
+            // offset's, a view; the slot gives the value up.
+            let member = Value::string(*name);
+            let written =
+                self.write_dimension(req, object, Some(&member), value.hand_on_unmigrated());
+            name.give_up(req);
+            return written;
         }
         Std.write_property(req, object, name, value)
     }
