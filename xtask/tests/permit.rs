@@ -2276,7 +2276,13 @@ fn lay_down(root: &Path, text: &str) {
 /// The reading `xtask witness` writes over the crate, stamped over its
 /// sources as they stand now.
 fn witness_reading(root: &Path) {
-    let mut reading = Reading::stamped_over("witness", CRATE, root, Path::new(CRATE)).unwrap();
+    let mut reading = Reading::stamped_over(
+        "witness",
+        CRATE,
+        &xtask::key::Snapshot::disk(root).unwrap(),
+        Path::new(CRATE),
+    )
+    .unwrap();
     reading.status = Status::Pass;
     reading.message = format!("{CRATE}: measured");
     Store::of_workspace(root).record(&[reading]).unwrap();

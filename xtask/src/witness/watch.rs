@@ -35,6 +35,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{Ask, INSTRUMENT, coverage_rule, fence::Witness, under_rule};
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Status, Store};
 use crate::scratch::Tree;
@@ -258,6 +259,9 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     let Some(crates) = planned(root, manifest, store, ask)? else {
         return Ok(());
     };
+    // The tree before the served run starts: what a crate it died before
+    // sending a reading for is stamped with.
+    let snapshot = Snapshot::disk(root)?;
     let tree = Tree::new("witness-journal")?;
     let journal: PathBuf = tree.join("journal.jsonl");
     let exe = std::env::current_exe().context("locating this binary")?;
@@ -283,7 +287,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
         }
         Ended::Signalled(signal) => {
             let mut readings = kept.readings.clone();
-            readings.extend(died(root, manifest, &crates, &kept, signal)?);
+            readings.extend(died(&snapshot, manifest, &crates, &kept, signal)?);
             eprintln!(
                 "witness: the served run died on {signal}; {}",
                 in_flight(&kept)
@@ -310,7 +314,7 @@ fn in_flight(kept: &Kept) -> String {
 /// A failing reading for every crate of the run that sent none: what died,
 /// on which signal, and what of the crate was being served.
 fn died(
-    root: &Path,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     crates: &[String],
     kept: &Kept,
@@ -337,7 +341,7 @@ fn died(
             "before it reached this crate".to_owned()
         };
         let mut reading =
-            under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule).under(&manifest.pin);
+            under_rule(Reading::for_crate(INSTRUMENT, krate, snapshot)?, rule).under(&manifest.pin);
         reading.status = Status::Fail;
         reading.message = format!(
             "{name}: the witness run died on {signal} {when}; nothing it judged of this crate was written, and this reading stands for the run"

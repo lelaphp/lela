@@ -108,7 +108,7 @@ use crate::carried::Carried;
 use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
-use crate::key;
+use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
 use crate::port_map;
@@ -293,9 +293,10 @@ impl Verdict {
         out
     }
 
-    /// The reading: `done` over `workspace`, stamped over the whole tree.
-    pub(crate) fn reading(&self, manifest: &Manifest, root: &Path) -> Result<Reading> {
-        let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, root)?;
+    /// The reading: `done` over `workspace`, stamped over the whole tree
+    /// as the snapshot the verdict was judged over holds it.
+    pub(crate) fn reading(&self, manifest: &Manifest, snapshot: &Snapshot) -> Result<Reading> {
+        let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
         reading.status = if self.met() {
             Status::Pass
         } else {
@@ -332,14 +333,16 @@ fn names(id: &str, part: &str) -> bool {
 }
 
 /// Judge the changes since the merge base with `base`, `main`
-/// ([`Base::of`]) when none is given.
+/// ([`Base::of`]) when none is given, each key held to the one `snapshot`
+/// gives: the tree is read once, before anything is judged.
 pub fn judge(
-    root: &Path,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     base: Option<&str>,
 ) -> Result<Verdict> {
+    let root = snapshot.root();
     let base = Base::of(root, base)?;
     let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
@@ -354,14 +357,14 @@ pub fn judge(
         fresh_readings(
             store,
             krate,
-            &KeyNow::of(root, krate, &crates)?,
+            &KeyNow::of(snapshot, krate, &crates)?,
             lock_home.as_deref(),
             &carried,
             manifest.pin.digest(),
             &mut unmet,
         )?;
     }
-    locks(root, manifest, store, &changed, &mut unmet)?;
+    locks(snapshot, manifest, store, &changed, &mut unmet)?;
     open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
     over_the_diff(
         root,
@@ -372,7 +375,7 @@ pub fn judge(
         &mut notes,
     )?;
     if let Some(ticket) = ticket {
-        boxes(root, store, manifest.pin.digest(), ticket, &mut unmet)?;
+        boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
     }
 
     Ok(Verdict {
@@ -393,7 +396,7 @@ pub fn judge(
 /// missing or stale one says what to run, and a failing one carries the
 /// instrument's message, which names each unticked box.
 fn boxes(
-    root: &Path,
+    snapshot: &Snapshot,
     store: &Store,
     pin: &str,
     ticket: Ticket,
@@ -404,7 +407,7 @@ fn boxes(
         unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
         return Ok(());
     };
-    let tree = key::of(root, Path::new(ticket::STAMPED_OVER), key::Content::Disk)?;
+    let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
     if !reading.fresh_for(&tree, pin) {
         unmet.push(format!(
             "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
@@ -547,7 +550,7 @@ fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bo
         || porting_meter(krate, instrument)
 }
 
-/// A touched crate's key now ([`key::of`], its tree and its dependency
+/// A touched crate's key now ([`Snapshot::key`], its tree and its dependency
 /// closure's), and what a reading taken over another key names as changed
 /// since: the crate and each other touched crate in that closure, the
 /// crates whose change moves the key, `a or b` where there are several
@@ -558,8 +561,8 @@ struct KeyNow {
 }
 
 impl KeyNow {
-    fn of(root: &Path, krate: &Crate, touched: &[&Crate]) -> Result<KeyNow> {
-        let closure = key::Graph::of(root)?.paths(&krate.path());
+    fn of(snapshot: &Snapshot, krate: &Crate, touched: &[&Crate]) -> Result<KeyNow> {
+        let closure = key::Graph::of(snapshot.root())?.paths(&krate.path());
         let mut names = vec![krate.name.as_str()];
         names.extend(
             touched
@@ -572,7 +575,7 @@ impl KeyNow {
             _ => krate.name.clone(),
         };
         Ok(KeyNow {
-            tree: key::of(root, &krate.path(), key::Content::Disk)?,
+            tree: snapshot.key(&krate.path())?,
             changed,
         })
     }
@@ -670,7 +673,7 @@ pub fn scopes_of(instrument: &str, name: &str) -> Vec<String> {
 /// stale says nothing here: the crate the lock lives with changed, and
 /// condition 1 lists its `api-check` reading as stale.
 fn locks(
-    root: &Path,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     store: &Store,
     changed: &[Change],
@@ -698,7 +701,7 @@ fn locks(
             }
             continue;
         };
-        let tree = key::of(root, &dir, key::Content::Disk)?;
+        let tree = snapshot.key(&dir)?;
         let fresh = reading.fresh_for(&tree, manifest.pin.digest());
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
@@ -810,8 +813,9 @@ pub fn run(
     store: &Store,
     base: Option<&str>,
 ) -> Result<()> {
-    let verdict = judge(root, manifest, registry, store, base)?;
-    let outcome = store.record(&[verdict.reading(manifest, root)?])?;
+    let snapshot = Snapshot::disk(root)?;
+    let verdict = judge(&snapshot, manifest, registry, store, base)?;
+    let outcome = store.record(&[verdict.reading(manifest, &snapshot)?])?;
     print!("{}", verdict.render());
     match outcome {
         Outcome::Met => Ok(()),
@@ -857,7 +861,9 @@ pub(crate) fn hook(
     if stop.stop_hook_active {
         return None;
     }
-    let verdict = match judge(root, manifest, registry, store, None) {
+    let verdict = match Snapshot::disk(root)
+        .and_then(|snapshot| Ok((judge(&snapshot, manifest, registry, store, None)?, snapshot)))
+    {
         Ok(verdict) => verdict,
         Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
     };
@@ -870,13 +876,14 @@ pub(crate) fn hook(
     };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let recorded = verdict.reading(manifest, root).and_then(|mut r| {
+    let (verdict, snapshot) = verdict;
+    let recorded = verdict.reading(manifest, &snapshot).and_then(|mut r| {
         // The Stop's verdict carries the session: what marks a later
         // turn's close as this turn's and not an earlier one's.
         stop.session_id.clone_into(&mut r.session);
         let mut readings = vec![r];
         if let Some(unfiled) = &unfiled {
-            readings.push(unfiled.reading(root, &stop.session_id)?);
+            readings.push(unfiled.reading(&snapshot, &stop.session_id)?);
         }
         store.record(&readings)
     });

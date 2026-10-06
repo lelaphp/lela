@@ -598,7 +598,13 @@ fn a_row_naming_an_api_item_the_lock_does_not_carry_fails_the_instrument() {
 
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
     let krate = super::home_of_the_lock(&manifest).unwrap();
-    let reading = super::reading(&joined, &Ported::default(), krate, workspace()).unwrap();
+    let reading = super::reading(
+        &joined,
+        &Ported::default(),
+        krate,
+        &crate::key::Snapshot::disk(workspace()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(reading.status, crate::reading::Status::Fail, "{reading:?}");
     assert_eq!(reading.numbers["unmatched"], 1.into());
     assert!(

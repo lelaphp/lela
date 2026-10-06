@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use toml::value::{Datetime, Offset, Time};
 
-use crate::git::Stamp;
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::Pin;
 use crate::sources;
@@ -47,7 +47,7 @@ pub struct Reading {
     pub message: String,
     /// From the manifest when the rule names one, else empty.
     pub adr: String,
-    /// The key of the scope's sources at the time, [`crate::key::of`]: the
+    /// The key of the scope's sources at the time, [`crate::key::Snapshot::key`]: the
     /// tree hash of the scope's files and, for a crate, of its workspace
     /// dependency closure's (#1318); what `done` holds against the scope's
     /// key now to call the reading fresh (harness-design.md §4.2, §13 D.18). Private, and set by the
@@ -86,16 +86,16 @@ pub const UNDER_RECIPE: [&str; 3] = ["witness", "phpt", "crosscheck"];
 
 impl Reading {
     /// A reading of `instrument` over a crate, stamped over the crate's
-    /// sources now: the path the manifest maps the crate to
-    /// ([`Crate::path`]), which is the path `done` hashes to call the
-    /// reading fresh (harness-design.md §4.5 condition 1). A crate not yet
-    /// created is measured by nothing and its reading carries no stamp,
-    /// so `done` finds it fresh for nothing.
-    pub fn for_crate(instrument: &str, krate: &Crate, root: &Path) -> Result<Reading> {
-        if !sources::exists(root, krate) {
+    /// sources as `snapshot` holds them: the path the manifest maps the
+    /// crate to ([`Crate::path`]), which is the path `done` hashes to call
+    /// the reading fresh (harness-design.md §4.5 condition 1). A crate not
+    /// yet created is measured by nothing and its reading carries no
+    /// stamp, so `done` finds it fresh for nothing.
+    pub fn for_crate(instrument: &str, krate: &Crate, snapshot: &Snapshot) -> Result<Reading> {
+        if !sources::exists(snapshot.root(), krate) {
             return Ok(Reading::new(instrument, &krate.name));
         }
-        Reading::stamped_over(instrument, &krate.name, root, &krate.path())
+        Reading::stamped_over(instrument, &krate.name, snapshot, &krate.path())
     }
 
     /// A reading of `instrument` over `scope`, stamped over the path the
@@ -109,19 +109,22 @@ impl Reading {
         instrument: &str,
         scope: &str,
         manifest: &Manifest,
-        root: &Path,
+        snapshot: &Snapshot,
     ) -> Result<Reading> {
         let path = manifest.scope_path(scope).with_context(|| {
             format!(
                 "{instrument} over {scope:?}: the manifest names no crate, seam or generated file so called and the pinned corpus has no such directory, so there is no path to stamp the reading over"
             )
         })?;
-        Reading::stamped_over(instrument, scope, root, &path)
+        Reading::stamped_over(instrument, scope, snapshot, &path)
     }
 
     /// A reading of `instrument` over `scope`, stamped over `path`, relative
-    /// to the root, and timed now: the constructor for a scope the manifest
-    /// maps to no sources, which `done` never holds fresh. `permit`'s
+    /// to the root, as `snapshot` holds it, and timed now: the constructor
+    /// for a scope the manifest maps to no sources, which `done` never
+    /// holds fresh. The snapshot is the one the instrument took before it
+    /// measured ([`Snapshot::disk`]), so the key is that of what it
+    /// measured and not of what the tree became while it ran. `permit`'s
     /// readings are one: their scope is the rule that fired and their tree
     /// is the file the call touched, or the manifest for a refusal to judge
     /// (harness-design.md §4.4). The two constructors above come through
@@ -129,10 +132,10 @@ impl Reading {
     pub fn stamped_over(
         instrument: &str,
         scope: &str,
-        root: &Path,
+        snapshot: &Snapshot,
         path: &Path,
     ) -> Result<Reading> {
-        let stamp = Stamp::take(root, path)?;
+        let stamp = snapshot.stamp(path)?;
         let mut reading = Reading::new(instrument, scope);
         reading.tree = stamp.tree;
         reading.commit = stamp.commit;
@@ -174,7 +177,7 @@ impl Reading {
     }
 
     /// Whether the reading was taken over the content `hash` names: the
-    /// scope's key now ([`crate::key::of`]), `done`'s question, or the
+    /// scope's key now ([`crate::key::Snapshot::key`]), `done`'s question, or the
     /// index's key of it, pre-commit's (#1143); and, for an instrument of
     /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin` (#1387).
     /// The one statement of fresh (harness-design.md §4.2, §4.5 condition 1).
@@ -636,7 +639,7 @@ impl Store {
     /// line of the log, where a retired worktree's readings are. What
     /// `permit`'s `unless` reads as evidence that an instrument measured a
     /// commit's content, by the key a commit's objects give
-    /// ([`crate::key::of`] over the commit, #1448). An empty hash names no
+    /// ([`crate::key::Snapshot::commit`], #1448). An empty hash names no
     /// content and is never found.
     pub(crate) fn measured_over(
         &self,

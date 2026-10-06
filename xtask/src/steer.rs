@@ -54,6 +54,7 @@ use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use crate::divergence::{self, Registry};
+use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
 use crate::oracle::Pin;
 use crate::reading::{Reading, Status};
@@ -123,7 +124,12 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
     let proposed = fs::read_to_string(proposal)
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
     let verdict = judge(&tracked, &proposed)?;
-    let mut reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
+    let mut reading = Reading::stamped_over(
+        INSTRUMENT,
+        file,
+        &Snapshot::disk_over(root, Path::new(file))?,
+        Path::new(file),
+    )?;
     if let Err(unread) = loads(file, &tracked, &proposed) {
         reading.status = Status::Fail;
         reading.message = format!(
@@ -151,10 +157,12 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
             if !dry_run {
                 fs::write(&path, &proposed)
                     .with_context(|| format!("writing {}", path.display()))?;
-                // The reading is stamped over what steer left, so the
-                // sensor beside `permit` can tell steer's write from one
-                // made beside it in the same call (#1516).
-                reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
+                // The reading is stamped over what steer left, a snapshot
+                // taken after the write, so the sensor beside `permit` can
+                // tell steer's write from one made beside it in the same
+                // call (#1516).
+                let after = Snapshot::disk_over(root, Path::new(file))?;
+                reading = Reading::stamped_over(INSTRUMENT, file, &after, Path::new(file))?;
             }
             reading.status = Status::Pass;
             reading.count("added", added.len() as u64)?;

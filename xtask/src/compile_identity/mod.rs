@@ -52,6 +52,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::divergence::Registry;
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Linked, Oracle, Runner};
 use crate::phpt::Scope;
@@ -235,7 +236,7 @@ pub(crate) type Tally = tally::Tally<Judgement>;
 /// no denominator says nothing about the compiler's distance.
 pub(crate) fn reading(
     tally: &Tally,
-    root: &Path,
+    snapshot: &Snapshot,
     corpus: &Corpus,
     runner: &Runner,
     regime: Option<&str>,
@@ -303,7 +304,7 @@ pub(crate) fn reading(
     // dump under measurement is a function of is the whole engine, so the
     // reading is stamped over the workspace.
     let mut reading = tally.reading(
-        Reading::stamped_over(INSTRUMENT, &scope, root, Path::new("."))?,
+        Reading::stamped_over(INSTRUMENT, &scope, snapshot, Path::new("."))?,
         &outcome,
         message,
     )?;
@@ -372,6 +373,9 @@ pub fn run(
             .with_context(|| format!("{INSTRUMENT}: `--regime {name}`"))?;
     }
     let regimes = ask.regimes();
+    // The tree before anything is dumped: what the reading is stamped
+    // with, so an edit while the corpus runs stales it.
+    let snapshot = Snapshot::disk(root)?;
     // The rung below the binary is the compiler linked into this process,
     // which the lane needs no binary for (design §6.1). It is built from
     // the tree the reading is stamped with, so a binary the tree has moved
@@ -422,7 +426,7 @@ pub fn run(
     )?;
     Ok(vec![reading(
         &tally,
-        root,
+        &snapshot,
         &corpus,
         &runner,
         ask.regime.as_deref(),

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::{self, Number, Reading};
 
@@ -386,7 +387,8 @@ impl Counts {
 /// row is held to the rule once, as one reason. The counts are the numbers.
 pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<Reading> {
     let rule = manifest.rule_checked_by(INSTRUMENT);
-    let mut reading = Reading::for_scope(INSTRUMENT, "workspace", manifest, root)?;
+    let mut reading =
+        Reading::for_scope(INSTRUMENT, "workspace", manifest, &Snapshot::disk(root)?)?;
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
         reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");

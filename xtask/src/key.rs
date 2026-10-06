@@ -7,11 +7,17 @@
 //! change to one leaf extension marks that extension and the crates that
 //! depend on it, and no other.
 //!
-//! [`of`] is the one function that computes the key, over the working
-//! tree, the index or a commit; the stamp, `done`, pre-commit's standing
-//! readings, `witness --unmeasured` and `permit`'s `unless` all ask it.
-//! The closure is read from `cargo metadata` once per process and root
-//! ([`Graph::of`]), not once per crate.
+//! A key is a lookup on a [`Snapshot`]: each file's blob id, read once
+//! from the working tree, the index or a commit, and asked for the key of
+//! every scope the run stamps or holds (#2163). The stamp, `done`,
+//! pre-commit's standing readings, `witness --unmeasured` and `permit`'s
+//! `unless` all ask one. From the working tree, a file whose copy git
+//! knows to be the index's takes the index's id, and only the rest are
+//! read and hashed, so a run that keys eighty crates built from
+//! `php_engine` reads the engine's files once, if at all, where each key
+//! once read them again. The closure is read from `cargo metadata` once
+//! per process and root ([`Graph::of`]), and only when a crate's key is
+//! asked for, so a stamp over one file spawns no cargo.
 //!
 //! The closure is the crate, each workspace crate it depends on directly
 //! as a normal, build or dev dependency, and, from those, each reached
@@ -28,43 +34,377 @@
 //! the key its own tree gave it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::git::{self, Index};
+use crate::git::{self, Index, Stamp};
 
-/// Which content of the scope the key is taken over.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Content<'a> {
-    /// The working tree, tracked and untracked files alike: what an
-    /// instrument stamps and what `done` holds a reading to.
-    Disk,
-    /// What the index holds: what a commit takes, pre-commit's question
-    /// (#1143).
-    Index(&'a Index),
-    /// The tracked files as the commit holds them: what `permit`'s
-    /// `unless` reads as evidence a commit was measured (#1448).
-    Commit(&'a str),
+/// Each file of the workspace and its blob id, read once, and the key of
+/// any scope a lookup on it ([`Snapshot::key`]). Taken from one of three
+/// contents:
+///
+/// - [`Snapshot::disk`], the working tree, tracked and untracked files
+///   alike: what an instrument stamps and what `done` holds a reading to.
+///   Taken before the instrument measures, so a file changed while it
+///   runs leaves the reading stale rather than fresh over what it never
+///   measured; an instrument that writes sources and then stamps them
+///   takes another after it writes.
+/// - [`Snapshot::index`], what the index holds: what a commit takes,
+///   pre-commit's question (#1143).
+/// - [`Snapshot::commit`], the tracked files as the commit holds them:
+///   what `permit`'s `unless` reads as evidence a commit was measured
+///   (#1448), and what a phpt binary was built from.
+///
+/// Every key is the one the tree hash over the files on disk gave before
+/// #2163, byte for byte: the blob id of each file under the scope and its
+/// closure, then the blob id of the sorted `<id> <path>` listing.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    root: PathBuf,
+    /// `HEAD`'s short id when the snapshot was taken, the stamp's commit.
+    commit: String,
+    /// Each file the content holds and its blob id, sorted by path.
+    files: Vec<(String, String)>,
+    /// Each tracked file and its id as the content holds it, `gone` for
+    /// one missing from the working tree, sorted by path: the listing a
+    /// build's sources are named by ([`Snapshot::tracked_over`]).
+    tracked: Vec<(String, String)>,
+    /// The paths the snapshot was read under, `None` for the whole
+    /// content: a key asked of a path outside them is refused, since the
+    /// files it would hash were never read ([`Snapshot::disk_over`]).
+    covers: Option<Vec<PathBuf>>,
 }
 
-/// The key of the sources under `path`, relative to `root`, over
-/// `content`: one hash over the files of the path and, when the path is
-/// a workspace crate's directory, of the directories of its dependency
-/// closure ([`Graph::paths`]).
-pub(crate) fn of(root: &Path, path: &Path, content: Content<'_>) -> Result<String> {
-    let paths = Graph::of(root)?.paths(path);
-    match content {
-        Content::Disk => git::tree_hash(root, &paths),
-        Content::Index(index) => Ok(index.hash(&paths)),
-        Content::Commit(commit) => {
-            let named: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
-            git::tracked_hash(root, &named, Some(commit))
+/// The commits read in this process, by root and id: a commit's files
+/// never change, so `permit`'s look through a file's history lists each
+/// commit once however many keys it asks of it.
+static COMMITS: OnceLock<Mutex<Commits>> = OnceLock::new();
+
+/// The commits read, by the root they were read in and their id.
+type Commits = BTreeMap<(PathBuf, String), Arc<Snapshot>>;
+
+impl Snapshot {
+    /// The working tree now under `path` and, for a crate, its closure
+    /// alone: what one stamp outside an instrument's run reads, a
+    /// `permit` call's over the file it touched above all, where asking
+    /// git about every file of the tree would cost the call more than its
+    /// judgement does. One question to git, the files under the path
+    /// with each tagged tracked or not, and each file read and hashed:
+    /// over a few files that costs less than the three questions more the
+    /// index's ids would. Its keys are [`Snapshot::disk`]'s for every path
+    /// it covers, and it refuses any other.
+    pub(crate) fn disk_over(root: &Path, path: &Path) -> Result<Snapshot> {
+        let covers = closure(root, path)?;
+        let mut args = vec![
+            "ls-files",
+            "-z",
+            "-t",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ];
+        for path in &covers {
+            args.push(path.to_str().context("a scope path is not UTF-8")?);
         }
+        let mut files = BTreeMap::new();
+        let mut tracked = BTreeMap::new();
+        for entry in git::git(root, &args, None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            // `<tag> <path>`: `?` for an untracked file, a letter for one
+            // the index holds.
+            let (tag, path) = entry
+                .split_once(' ')
+                .with_context(|| format!("git ls-files -t wrote {entry:?}"))?;
+            let file = root.join(path);
+            let id = if file.is_file() {
+                let bytes =
+                    fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+                Some(git::blob_id(&bytes))
+            } else {
+                None
+            };
+            if tag != "?" {
+                tracked.insert(
+                    path.to_owned(),
+                    id.clone().unwrap_or_else(|| "gone".to_owned()),
+                );
+            }
+            if let Some(id) = id {
+                files.insert(path.to_owned(), id);
+            }
+        }
+        Ok(Snapshot {
+            root: root.to_path_buf(),
+            commit: git::head_commit(root)?,
+            files: files.into_iter().collect(),
+            tracked: tracked.into_iter().collect(),
+            covers: Some(covers),
+        })
     }
+
+    /// The working tree now. Four questions to git, each over the whole
+    /// tree: the index's entries, the tracked files whose copy differs
+    /// from the index's, the line endings of each, and the untracked
+    /// files it does not ignore. A file the index holds at stage 0 whose
+    /// copy git does not list as modified takes the index's id; git
+    /// compares content where the stat data cannot settle it (a racily
+    /// clean entry). Every other file is read and hashed: a modified,
+    /// untracked or conflicted one, and one whose copy carries line
+    /// endings the index's has not, which `core.autocrlf=input` leaves
+    /// unlisted (#2163; the main checkout carried two such files under
+    /// `research/` when this was written, a fresh checkout none).
+    pub fn disk(root: &Path) -> Result<Snapshot> {
+        let commit = git::head_commit(root)?;
+        let mut staged = BTreeMap::new();
+        let mut tracked = BTreeSet::new();
+        for entry in git::git(root, &["ls-files", "--stage", "-z"], None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            let (head, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("git ls-files wrote {entry:?}"))?;
+            tracked.insert(path.to_owned());
+            // `<mode> <id> <stage>`: a submodule is no file of a scope's,
+            // and a conflicted path has no stage 0.
+            if let [mode, id, "0"] = head.split(' ').collect::<Vec<_>>()[..]
+                && mode != "160000"
+            {
+                staged.insert(path.to_owned(), id.to_owned());
+            }
+        }
+        let mut differs = listed(&git::git(root, &["ls-files", "-z", "--modified"], None)?);
+        for entry in git::git(root, &["ls-files", "-z", "--eol"], None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            let (head, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("git ls-files --eol wrote {entry:?}"))?;
+            if head.contains("w/crlf") || head.contains("w/mixed") {
+                differs.insert(path.to_owned());
+            }
+        }
+        let untracked = listed(&git::git(
+            root,
+            &["ls-files", "-z", "--others", "--exclude-standard"],
+            None,
+        )?);
+        // A file's id, or `None` for one that is not a file on disk.
+        let id = |path: &str| -> Option<Result<String>> {
+            match staged.get(path) {
+                Some(id) if !differs.contains(path) => Some(Ok(id.clone())),
+                _ => {
+                    let file = root.join(path);
+                    file.is_file().then(|| {
+                        fs::read(&file)
+                            .map(|bytes| git::blob_id(&bytes))
+                            .with_context(|| format!("reading {}", file.display()))
+                    })
+                }
+            }
+        };
+        let mut files = Vec::new();
+        let mut on_disk = Vec::new();
+        for path in &tracked {
+            let held = match id(path) {
+                Some(found) => {
+                    let found = found?;
+                    files.push((path.clone(), found.clone()));
+                    found
+                }
+                None => "gone".to_owned(),
+            };
+            on_disk.push((path.clone(), held));
+        }
+        for path in untracked.difference(&tracked) {
+            if let Some(found) = id(path) {
+                files.push((path.clone(), found?));
+            }
+        }
+        files.sort_unstable();
+        Ok(Snapshot {
+            root: root.to_path_buf(),
+            commit,
+            files,
+            tracked: on_disk,
+            covers: None,
+        })
+    }
+
+    /// What `index` holds, as a commit would take it: the keys the scopes
+    /// would have on disk were the working tree the index, with no
+    /// untracked file beside it.
+    pub(crate) fn index(root: &Path, index: &Index) -> Result<Snapshot> {
+        let files = index.entries().to_vec();
+        Ok(Snapshot {
+            root: root.to_path_buf(),
+            commit: git::head_commit(root)?,
+            tracked: files.clone(),
+            files,
+            covers: None,
+        })
+    }
+
+    /// The tracked files as `commit` holds them, read once per process
+    /// and commit.
+    pub(crate) fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
+        let read = COMMITS.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let at = (root.to_path_buf(), commit.to_owned());
+        if let Some(snapshot) = read.lock().ok().and_then(|held| held.get(&at).cloned()) {
+            return Ok(snapshot);
+        }
+        let mut files = Vec::new();
+        for entry in git::git(root, &["ls-tree", "-r", "-z", "--full-tree", commit], None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            let (head, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("git ls-tree wrote {entry:?}"))?;
+            if let [_, "blob", id] = head.split(' ').collect::<Vec<_>>()[..] {
+                files.push((path.to_owned(), id.to_owned()));
+            }
+        }
+        files.sort_unstable();
+        let snapshot = Arc::new(Snapshot {
+            root: root.to_path_buf(),
+            commit: commit.chars().take(7).collect(),
+            tracked: files.clone(),
+            files,
+            covers: None,
+        });
+        if let Ok(mut held) = read.lock() {
+            held.insert(at, Arc::clone(&snapshot));
+        }
+        Ok(snapshot)
+    }
+
+    /// The workspace root the snapshot was taken in.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The key of the sources under `path`, relative to the root: one
+    /// hash over the files of the path and, when the path is a workspace
+    /// crate's directory, of the directories of its dependency closure
+    /// ([`Graph::paths`]). The graph is read only for a directory with a
+    /// manifest, the one kind of path it can widen. A path outside what a
+    /// [`Snapshot::disk_over`] was read under is refused.
+    pub fn key(&self, path: &Path) -> Result<String> {
+        self.over(&closure(&self.root, path)?)
+    }
+
+    /// The stamp of the sources under `path`: its key, and the commit
+    /// the snapshot was taken at.
+    pub(crate) fn stamp(&self, path: &Path) -> Result<Stamp> {
+        Ok(Stamp {
+            tree: self.key(path)?,
+            commit: self.commit.clone(),
+        })
+    }
+
+    /// The hash over every file under `paths`, with no closure added.
+    pub(crate) fn over(&self, paths: &[PathBuf]) -> Result<String> {
+        self.covering(paths)?;
+        Ok(git::listing_id(&under(&self.files, paths)))
+    }
+
+    /// The hash over the tracked files under `paths` alone, a file gone
+    /// from the working tree listed as gone: a checkout of a commit with
+    /// nothing under `paths` written since hashes to the commit's own
+    /// (`phpt --against`, which names a build by its sources). Tracked
+    /// files alone, since an untracked one the build reads is reached by
+    /// an edit to a tracked one, and an untracked `.DS_Store` would
+    /// otherwise leave a clean checkout matching no commit.
+    pub(crate) fn tracked_over(&self, paths: &[PathBuf]) -> Result<String> {
+        self.covering(paths)?;
+        Ok(git::listing_id(&under(&self.tracked, paths)))
+    }
+
+    /// Refuse `paths` where the snapshot was read under others: the files
+    /// it would hash were never read, and a key over what is missing is
+    /// no key of the tree.
+    fn covering(&self, paths: &[PathBuf]) -> Result<()> {
+        let Some(covers) = &self.covers else {
+            return Ok(());
+        };
+        let outside: Vec<String> = paths
+            .iter()
+            .filter(|p| {
+                !covers
+                    .iter()
+                    .any(|c| whole(c) || clean(p).starts_with(clean(c)))
+            })
+            .map(|p| p.display().to_string())
+            .collect();
+        if !outside.is_empty() {
+            bail!(
+                "a snapshot read under {} has no key over {}",
+                covers
+                    .iter()
+                    .map(|c| c.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                outside.join(", ")
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The paths the key of `path` is taken over: the path alone, or a
+/// workspace crate's directory and its closure's, the graph read only for
+/// a directory with a manifest, the one kind of path it can widen.
+fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
+    if !whole(path) && root.join(path).join("Cargo.toml").is_file() {
+        Ok(Graph::of(root)?.paths(path))
+    } else {
+        Ok(vec![path.to_path_buf()])
+    }
+}
+
+/// `path` without its `.` components, as git's pathspec reads it.
+fn clean(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
+}
+
+/// What `git ls-files -z` wrote, as a set of paths.
+fn listed(written: &str) -> BTreeSet<String> {
+    written
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `path` names the whole tree.
+fn whole(path: &Path) -> bool {
+    path.components().all(|c| matches!(c, Component::CurDir))
+}
+
+/// The entries of `listing` under any of `scopes`, as git's pathspec takes
+/// a directory or a file: the path itself or anything below it.
+fn under(listing: &[(String, String)], scopes: &[PathBuf]) -> Vec<(String, String)> {
+    if scopes.iter().any(|s| whole(s)) {
+        return listing.to_vec();
+    }
+    let scopes: Vec<PathBuf> = scopes.iter().map(|s| clean(s)).collect();
+    listing
+        .iter()
+        .filter(|(path, _)| scopes.iter().any(|s| Path::new(path).starts_with(s)))
+        .cloned()
+        .collect()
 }
 
 /// Each workspace crate's directory and the directories of its
@@ -187,6 +527,15 @@ impl Graph {
         Ok(Graph { closures })
     }
 
+    /// Whether this process has read the graph of the workspace at
+    /// `root`: what a test holds a key over one file to.
+    #[cfg(test)]
+    pub(crate) fn was_read(root: &Path) -> bool {
+        READ.get()
+            .and_then(|read| read.lock().ok().map(|held| held.contains_key(root)))
+            .unwrap_or(false)
+    }
+
     /// The paths the key of `path` is taken over, sorted: the path alone,
     /// or a workspace crate's directory and its closure's.
     pub(crate) fn paths(&self, path: &Path) -> Vec<PathBuf> {
@@ -233,10 +582,152 @@ pub(crate) fn fixture(name: &str) -> crate::scratch::Tree {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::Graph;
+    use super::{Graph, Snapshot};
     use crate::built_root;
+    use crate::git::{self, tracked_hash, tree_hash};
+    use crate::scratch::committing;
+
+    /// The scopes a snapshot is held to the tree hash over: the whole
+    /// tree, a crate's closure, a crate, a directory and one file.
+    fn scopes(root: &Path, file: &str) -> Vec<Vec<PathBuf>> {
+        let graph = Graph::of(root).unwrap();
+        vec![
+            vec![PathBuf::from(".")],
+            graph.paths(Path::new("ext/reflection")),
+            vec![PathBuf::from("crates/php_engine")],
+            vec![PathBuf::from("ext")],
+            vec![PathBuf::from(file)],
+        ]
+    }
+
+    /// Every key a snapshot of the working tree gives is the one the tree
+    /// hash over the files on disk gives, byte for byte (#2163), and its
+    /// tracked keys are the tracked hash's, on disk and at the commit:
+    /// over a fixture with an untracked file, a modified tracked file, a
+    /// deleted tracked file, a file staged and then modified again, and a
+    /// file whose copy has CRLF line endings under `core.autocrlf=input`,
+    /// which git lists as unmodified while its index holds LF.
+    #[test]
+    fn a_snapshots_keys_are_the_tree_hash_of_the_files_on_disk() {
+        let tree = super::fixture("snapshot");
+        let root: &Path = &tree;
+        let write = |path: &str, text: &str| fs::write(root.join(path), text).unwrap();
+        git::git(root, &["config", "core.autocrlf", "input"], None).unwrap();
+        write("ext/ctype/crlf.txt", "one\r\ntwo\r\n");
+        write("crates/php_ext/gone.txt", "deleted after its commit\n");
+        committing(
+            root,
+            &["add", "--", "ext/ctype/crlf.txt", "crates/php_ext/gone.txt"],
+        );
+        committing(root, &["commit", "-q", "-m", "crlf"]);
+        let eol = git::git(root, &["ls-files", "--eol", "ext/ctype/crlf.txt"], None).unwrap();
+        assert!(eol.contains("i/lf") && eol.contains("w/crlf"), "{eol}");
+        write("ext/reflection/src/untracked.rs", "fn untracked() {}\n");
+        write("crates/php_engine/src/lib.rs", "// modified\n");
+        fs::remove_file(root.join("crates/php_ext/gone.txt")).unwrap();
+        write("ext/reflection/src/lib.rs", "// staged\n");
+        committing(root, &["add", "--", "ext/reflection/src/lib.rs"]);
+        write("ext/reflection/src/lib.rs", "// staged, then modified\n");
+        let head = git::git(root, &["rev-parse", "HEAD"], None).unwrap();
+        let head = head.trim();
+        let now = Snapshot::disk(root).unwrap();
+        let then = Snapshot::commit(root, head).unwrap();
+        for paths in scopes(root, "ext/ctype/crlf.txt") {
+            let named: Vec<&str> = paths.iter().filter_map(|p| p.to_str()).collect();
+            assert_eq!(
+                now.over(&paths).unwrap(),
+                tree_hash(root, &paths).unwrap(),
+                "{paths:?}"
+            );
+            assert_eq!(
+                now.tracked_over(&paths).unwrap(),
+                tracked_hash(root, &named, None).unwrap(),
+                "{paths:?}"
+            );
+            assert_eq!(
+                then.tracked_over(&paths).unwrap(),
+                tracked_hash(root, &named, Some(head)).unwrap(),
+                "{paths:?}"
+            );
+        }
+        assert_eq!(
+            now.key(Path::new("ext/reflection")).unwrap(),
+            tree_hash(
+                root,
+                &Graph::of(root).unwrap().paths(Path::new("ext/reflection"))
+            )
+            .unwrap()
+        );
+        // Read under one path, a snapshot keys it as the whole tree's
+        // does, and refuses a path it never read.
+        for path in [
+            "ext/reflection",
+            "ext/ctype/crlf.txt",
+            "crates/php_ext",
+            "ext",
+        ] {
+            let path = Path::new(path);
+            let over = Snapshot::disk_over(root, path).unwrap();
+            assert_eq!(over.key(path).unwrap(), now.key(path).unwrap(), "{path:?}");
+        }
+        let one = Snapshot::disk_over(root, Path::new("ext/ctype")).unwrap();
+        assert!(one.key(Path::new("ext/reflection")).is_err());
+        assert!(one.key(Path::new(".")).is_err());
+    }
+
+    /// The same over this workspace, whatever its checkout holds: the
+    /// whole tree's key, and an extension's over its closure. The
+    /// line-ending case is the fixture's above, since a fresh checkout
+    /// writes no CRLF copy for `core.autocrlf=input` to leave unlisted.
+    #[test]
+    fn a_snapshot_of_the_workspace_keys_it_as_the_tree_hash_does() {
+        let root = built_root();
+        let now = Snapshot::disk(&root).unwrap();
+        assert_eq!(
+            now.key(Path::new(".")).unwrap(),
+            tree_hash(&root, &[PathBuf::from(".")]).unwrap()
+        );
+        let json = Graph::of(&root).unwrap().paths(Path::new("ext/json"));
+        assert_eq!(
+            now.key(Path::new("ext/json")).unwrap(),
+            tree_hash(&root, &json).unwrap()
+        );
+    }
+
+    /// A key over one file reads no crate graph: no `cargo metadata` for
+    /// a stamp over `seams.toml`. A crate's key reads it.
+    #[test]
+    fn a_key_over_a_file_spawns_no_cargo() {
+        let tree = super::fixture("no-graph");
+        let now = Snapshot::disk(&tree).unwrap();
+        now.key(Path::new("Cargo.toml")).unwrap();
+        now.key(Path::new("ext")).unwrap();
+        assert!(!Graph::was_read(&tree));
+        now.key(Path::new("ext/ctype")).unwrap();
+        assert!(Graph::was_read(&tree));
+    }
+
+    /// A snapshot is the tree when it was taken: a file written after it
+    /// leaves its keys where they were, so a reading stamped with the one
+    /// taken before an instrument measured is stale once the tree moves,
+    /// and the next snapshot's key moves with the tree.
+    #[test]
+    fn a_snapshot_keeps_the_tree_it_was_taken_over() {
+        let tree = super::fixture("before");
+        let before = Snapshot::disk(&tree).unwrap();
+        let ctype = Path::new("ext/ctype");
+        let key = before.key(ctype).unwrap();
+        fs::write(
+            tree.join("ext/ctype/src/lib.rs"),
+            "// written while measuring\n",
+        )
+        .unwrap();
+        assert_eq!(before.key(ctype).unwrap(), key);
+        assert_ne!(Snapshot::disk(&tree).unwrap().key(ctype).unwrap(), key);
+    }
 
     fn closure(graph: &Graph, dir: &str) -> Vec<String> {
         graph

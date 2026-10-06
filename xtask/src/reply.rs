@@ -34,6 +34,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use regex_lite::Regex;
 
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Status, Store, epoch_seconds};
 use crate::ticket;
@@ -77,9 +78,13 @@ impl Unfiled {
 
     /// The reading: `done` over the rule, carrying the session, the
     /// sentences counted, failed.
-    pub(crate) fn reading(&self, root: &Path, session_id: &str) -> Result<Reading> {
-        let mut reading =
-            Reading::stamped_over(crate::done::INSTRUMENT, &self.rule, root, Path::new("."))?;
+    pub(crate) fn reading(&self, snapshot: &Snapshot, session_id: &str) -> Result<Reading> {
+        let mut reading = Reading::stamped_over(
+            crate::done::INSTRUMENT,
+            &self.rule,
+            snapshot,
+            Path::new("."),
+        )?;
         reading.rule.clone_from(&self.rule);
         reading.status = Status::Fail;
         reading.count("closed", self.closed.len() as u64)?;

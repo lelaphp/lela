@@ -70,6 +70,7 @@ use std::path::Path;
 use regex_lite::Regex;
 
 use crate::git;
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::Store;
 
@@ -99,7 +100,7 @@ pub(super) fn captured(
     };
     let fresh = match (
         Store::of_workspace(root).read(instrument, &krate.name),
-        crate::key::of(root, &krate.path(), crate::key::Content::Disk),
+        Snapshot::disk_over(root, &krate.path()).and_then(|now| now.key(&krate.path())),
     ) {
         (Ok(Some(reading)), Ok(tree)) => !reading.tree().is_empty() && reading.tree() == tree,
         _ => false,
@@ -161,7 +162,7 @@ fn carried(
     };
     let mut commits = Vec::new();
     for commit in log.lines().filter(|c| !c.is_empty()) {
-        let Ok(tree) = crate::key::of(root, under, crate::key::Content::Commit(commit)) else {
+        let Ok(tree) = Snapshot::commit(root, commit).and_then(|then| then.key(under)) else {
             return false;
         };
         commits.push((commit, tree));

@@ -13,6 +13,7 @@ use super::hand_off::hand_off;
 use super::rules::{Judgement, Kind, deny_output, judge};
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
+use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
@@ -60,7 +61,12 @@ pub(super) fn record(
                 reading.scope.clone_from(&finding.rule);
                 reading
             }
-            None => Reading::stamped_over(INSTRUMENT, &finding.rule, root, &touched)?,
+            None => Reading::stamped_over(
+                INSTRUMENT,
+                &finding.rule,
+                &Snapshot::disk_over(root, &touched)?,
+                &touched,
+            )?,
         };
         reading.rule.clone_from(&finding.rule);
         reading.status = match finding.kind {
@@ -202,7 +208,8 @@ fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
              same way.",
         )
     };
-    let recorded = Reading::stamped_over(INSTRUMENT, rule, root, Path::new(manifest::FILE))
+    let recorded = Snapshot::disk_over(root, Path::new(manifest::FILE))
+        .and_then(|now| Reading::stamped_over(INSTRUMENT, rule, &now, Path::new(manifest::FILE)))
         .and_then(|mut reading| {
             rule.clone_into(&mut reading.rule);
             reading.status = status;

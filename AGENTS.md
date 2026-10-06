@@ -100,8 +100,9 @@ third-engine-design.md
 - ADR-0008 (accepted, 2026-09-29): Hosts are one crate each under `sapi/`, with `php_sapi` as the facade below them, as ADR-0004 laid extensions out
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
+- ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
 
-<!-- /computed in=f9deb336fc124976c7c6603cb750f2b6e33ca81070f9b82e3786fdaf2dbe2090 out=44c24bb17ad46579759553fee3c9af8fba2bac1e5a9963150d1f1ae660671a10 -->
+<!-- /computed in=5529edd9c45b6b0b1813b2ed64be47761bec3e13fe0055e19aa53743db32499a out=a717c7dcef6bb51d05f58dcc2aaebb45f624853d7634b25efa867cd7428ec528 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
