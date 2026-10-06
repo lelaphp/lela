@@ -1400,47 +1400,88 @@ enum Check {
     TraitAbstract,
 }
 
-/// The function table a class holds as it links, each method with the
+/// A kind of member a class declares and its linked record keeps a
+/// table of: a method, a constant or a property. The walks over those
+/// tables differ only in which table they read, and this says which.
+trait ClassMember: Sized + 'static {
+    /// How the table's names compare.
+    type Case: Case;
+    /// The members of this kind `class` declares, in order.
+    fn of(class: &ClassDecl) -> &[Self];
+    /// The member's name.
+    fn name(&self) -> &[u8];
+    /// The record's table of this kind.
+    fn table<H>(record: &LinkedClass<H>) -> &Rows<Row<H>, Self::Case>;
+    /// Whether a class below the one that declared it holds it: all but
+    /// a private constant (`do_inherit_constant_check`), since
+    /// `do_inherit_method` and `do_inherit_property` append a private
+    /// method or property too.
+    fn inherited(&self) -> bool {
+        true
+    }
+}
+
+impl ClassMember for MethodDecl {
+    type Case = Folded;
+    fn of(class: &ClassDecl) -> &[Self] {
+        &class.methods
+    }
+    fn name(&self) -> &[u8] {
+        &self.function.name.0
+    }
+    fn table<H>(record: &LinkedClass<H>) -> &Rows<Row<H>, Folded> {
+        &record.methods
+    }
+}
+
+impl ClassMember for ClassConstDecl {
+    type Case = Exact;
+    fn of(class: &ClassDecl) -> &[Self] {
+        &class.constants
+    }
+    fn name(&self) -> &[u8] {
+        &self.name.0
+    }
+    fn table<H>(record: &LinkedClass<H>) -> &Rows<Row<H>, Exact> {
+        &record.constants
+    }
+    fn inherited(&self) -> bool {
+        self.visibility != Visibility::Private
+    }
+}
+
+impl ClassMember for PropertyDecl {
+    type Case = Exact;
+    fn of(class: &ClassDecl) -> &[Self] {
+        &class.properties
+    }
+    fn name(&self) -> &[u8] {
+        &self.name.0
+    }
+    fn table<H>(record: &LinkedClass<H>) -> &Rows<Row<H>, Exact> {
+        &record.properties
+    }
+}
+
+/// A table of one kind a class holds as it links, each member with the
 /// class that put it there, none for the class's own, indexed by name.
-type Methods<'a> = Rows<(Option<&'a ClassDecl>, &'a MethodDecl), Folded>;
+type Members<'a, M> = Rows<(Option<&'a ClassDecl>, &'a M), <M as ClassMember>::Case>;
 
-/// A method of [`Methods`] by its name.
-fn method_name<'a>(row: &(Option<&'a ClassDecl>, &'a MethodDecl)) -> &'a [u8] {
-    &row.1.function.name.0
+/// The function table a class holds as it links.
+type Methods<'a> = Members<'a, MethodDecl>;
+
+/// The constant table a class holds as it links.
+type Constants<'a> = Members<'a, ClassConstDecl>;
+
+/// A member of [`Members`] by its name.
+fn member_name<'a, M: ClassMember>(row: &(Option<&'a ClassDecl>, &'a M)) -> &'a [u8] {
+    row.1.name()
 }
 
-/// `method`, which `by` put there, none for the class's own, into
-/// `methods` under its name, unless one of its name stands already.
-fn put<'a>(methods: &mut Methods<'a>, by: Option<&'a ClassDecl>, method: &'a MethodDecl) {
-    methods.add((by, method), &method.function.name.0, method_name);
-}
-
-/// The constant table a class holds as it links, each constant with the
-/// class that put it there, none for the class's own, indexed by name.
-type Constants<'a> = Rows<(Option<&'a ClassDecl>, &'a ClassConstDecl), Exact>;
-
-/// `constant`, which `by` put there, into `constants` under its name,
-/// unless one of its name stands already.
-fn put_constant<'a>(
-    constants: &mut Constants<'a>,
-    by: Option<&'a ClassDecl>,
-    constant: &'a ClassConstDecl,
-) {
-    constants.add((by, constant), &constant.name.0, constant_name);
-}
-
-/// A constant of [`Constants`] by its name.
-fn constant_name<'a>(row: &(Option<&'a ClassDecl>, &'a ClassConstDecl)) -> &'a [u8] {
-    &row.1.name.0
-}
-
-/// `properties_info` as a class's link reads it, each property beside
-/// the class that declared it, indexed by name.
-type Properties<'a> = Rows<(&'a ClassDecl, &'a PropertyDecl), Exact>;
-
-/// A property of [`Properties`] by its name.
-fn property_name<'a>(row: &(&'a ClassDecl, &'a PropertyDecl)) -> &'a [u8] {
-    &row.1.name.0
+/// `member`, which `by` put there, none for the class's own, into
+/// `table` under its name, unless one of its name stands already.
+fn put<'a, M: ClassMember>(table: &mut Members<'a, M>, by: Option<&'a ClassDecl>, member: &'a M) {
+    table.add((by, member), member.name(), member_name);
 }
 
 /// The class being linked, the table it is linked against and the
@@ -1694,8 +1735,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// Fatal error: Declaration of C::__construct($a) must be compatible with I::__construct() in %s on line 4
     /// ```
     fn methods_above(&self, class: &'a ClassDecl) -> Vec<(&'a ClassDecl, &'a MethodDecl)> {
-        let mut table: Methods<'a> = Rows::default();
-        self.methods_into(class, &mut table, 0);
+        let table = self.members_above::<MethodDecl>(class);
         table
             .rows()
             .iter()
@@ -1703,178 +1743,33 @@ impl<'a, H: Copy> Linker<'a, H> {
             .collect()
     }
 
-    fn methods_into(&self, class: &'a ClassDecl, table: &mut Methods<'a>, depth: u32) {
-        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
-        if let Some((_, record)) = held.and_then(|held| held.record) {
-            for row in record.methods.rows() {
-                if let Some((by, method)) = self.row_method(class, row) {
-                    put(table, Some(by), method);
-                }
-            }
-            return;
-        }
-        for method in &class.methods {
-            put(table, Some(class), method);
-        }
-        if depth < 64
-            && let Some(parent) = self.class_parent(class)
-        {
-            self.methods_into(parent, table, depth + 1);
-        }
-        let mut interfaces = Vec::new();
-        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
-        for interface in interfaces {
-            for method in &interface.methods {
-                put(table, Some(interface), method);
-            }
-        }
+    /// `class`'s table of `M` as php holds it once linked, each member
+    /// beside the class that declared it: read off its record where the
+    /// table holds one, and otherwise, for a class under way or one the
+    /// caller keeps no record of ([`Linker::members_into`]), its own,
+    /// then its parent's table, then its interfaces', which
+    /// `do_interface_implementation` put in the table a child inherits.
+    /// A parent's table holds what its interfaces declare, so a class
+    /// redeclaring such a property is held to the interface's through
+    /// its parent (`zend_do_inheritance`):
+    ///
+    /// ```php
+    /// interface I { public int $x { get; } }
+    /// abstract class P implements I {}
+    /// class C extends P { protected int $x = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to C::$x must be public (as in class I) in %s on line 4
+    /// ```
+    fn members_above<M: ClassMember>(&self, class: &'a ClassDecl) -> Members<'a, M> {
+        let mut table = Rows::default();
+        self.members_into(class, &mut table, 0);
+        table
     }
 
-    /// [`linked_class`] of `child`, whose last `abstracts` methods are
-    /// its traits' abstract ones.
-    fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
-        Some(LinkedClass {
-            methods: self.method_rows(child, abstracts)?,
-            constants: self.constant_rows(child)?,
-            properties: self.property_rows(child)?,
-        })
-    }
-
-    /// `ce->function_table` as `zend_do_link_class` leaves it, in its
-    /// order: the class's own methods, a trait's among them; each of the
-    /// parent's table it does not declare (`do_inherit_method`); the
-    /// traits' abstract methods it took; then each of its interfaces',
-    /// in `zend_do_implement_interfaces`' order, that nothing above put
-    /// there. None where the parent or an interface is held with no
-    /// record.
-    fn method_rows(&self, child: &'a ClassDecl, abstracts: usize) -> Option<Rows<Row<H>, Folded>> {
-        let own = child.methods.len().saturating_sub(abstracts);
-        let named = |row: &Row<H>| self.row_name(child, row);
-        let mut rows = Rows::default();
-        for (at, method) in (0u32..).zip(&child.methods).take(own) {
-            rows.add(Row { holder: None, at }, &method.function.name.0, named);
-        }
-        if let Some(parent) = &child.parent {
-            self.inherit_rows(&mut rows, child, &parent.0)?;
-        }
-        for (at, method) in (0u32..).zip(&child.methods).skip(own) {
-            rows.add(Row { holder: None, at }, &method.function.name.0, named);
-        }
-        let mut interfaces = Vec::new();
-        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
-        for interface in interfaces {
-            self.inherit_rows(&mut rows, child, &interface.name.0)?;
-        }
-        Some(rows)
-    }
-
-    /// The rows of the record of the class `name` names into `child`'s,
-    /// each it holds no method of the name of, its own rows naming it by
-    /// its key. None where the class is held with no record; nothing
-    /// where no class has the name.
-    fn inherit_rows(
-        &self,
-        rows: &mut Rows<Row<H>, Folded>,
-        child: &'a ClassDecl,
-        name: &[u8],
-    ) -> Option<()> {
-        let Some(held) = (self.lookup)(name) else {
-            return Some(());
-        };
-        let (handle, record) = held.record?;
-        rows.inherit(
-            &record.methods,
-            |row| Row {
-                holder: Some(row.holder_in(handle)),
-                at: row.at,
-            },
-            |row| self.row_name(child, row),
-            |row| self.row_name(held.decl, row),
-        );
-        Some(())
-    }
-
-    /// The name of the method a row of `class`'s record stands for.
-    fn row_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
-        self.row_method(class, row)
-            .map_or(&[][..], |(_, method)| &method.function.name.0)
-    }
-
-    /// The method a row of `class`'s record stands for, beside the class
-    /// that declared it.
-    fn row_method(
-        &self,
-        class: &'a ClassDecl,
-        row: &Row<H>,
-    ) -> Option<(&'a ClassDecl, &'a MethodDecl)> {
-        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
-        Some((by, by.methods.get(usize::try_from(row.at).ok()?)?))
-    }
-
-    /// `CE_CONSTANTS_TABLE` as `zend_do_link_class` leaves it, in its
-    /// order: the class's own constants, a trait's among them; each of
-    /// the parent's table it does not declare, but the parent's private
-    /// ones (`do_inherit_class_constant`); then each of its interfaces',
-    /// in `zend_do_implement_interfaces`' order, that nothing above put
-    /// there (`do_inherit_iface_constant`). None where the parent or an
-    /// interface is held with no record.
-    fn constant_rows(&self, child: &'a ClassDecl) -> Option<Rows<Row<H>, Exact>> {
-        let named = |row: &Row<H>| self.row_constant_name(child, row);
-        let mut rows = Rows::default();
-        for (at, constant) in (0u32..).zip(&child.constants) {
-            rows.add(Row { holder: None, at }, &constant.name.0, named);
-        }
-        let mut interfaces = Vec::new();
-        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
-        for name in child
-            .parent
-            .iter()
-            .chain(interfaces.iter().map(|i| &i.name))
-        {
-            let Some(held) = (self.lookup)(&name.0) else {
-                continue;
-            };
-            let (handle, record) = held.record?;
-            rows.inherit(
-                &record.constants,
-                |row| {
-                    let (_, constant) = self.row_constant(held.decl, row)?;
-                    (constant.visibility != Visibility::Private).then(|| Row {
-                        holder: Some(row.holder_in(handle)),
-                        at: row.at,
-                    })
-                },
-                named,
-                |row| self.row_constant_name(held.decl, row),
-            );
-        }
-        Some(rows)
-    }
-
-    /// The name of the constant a row of `class`'s record stands for.
-    fn row_constant_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
-        self.row_constant(class, row)
-            .map_or(&[][..], |(_, constant)| &constant.name.0)
-    }
-
-    /// The constant a row of `class`'s record stands for, beside the
-    /// class that declared it.
-    fn row_constant(
-        &self,
-        class: &'a ClassDecl,
-        row: &Row<H>,
-    ) -> Option<(&'a ClassDecl, &'a ClassConstDecl)> {
-        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
-        Some((by, by.constants.get(usize::try_from(row.at).ok()?)?))
-    }
-
-    /// `class`'s constant table as php holds it once linked, into
-    /// `table`, each constant beside the class that declared it: read
-    /// off its record where the table holds one, and otherwise, for a
-    /// class under way or one the caller keeps no record of, its own
-    /// constants, then its parent's table, then the constants of the
-    /// interfaces it names. An ancestor's private constant, `depth`
-    /// above the class asked, is in no table below it:
+    /// [`Linker::members_above`] into `table`, `depth` above the class
+    /// asked: what an ancestor declares and does not pass on
+    /// ([`ClassMember::inherited`]) is in no table below it.
     ///
     /// ```php
     /// interface I { final const F = 1; }
@@ -1886,138 +1781,134 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// ```expect exit=255
     /// Fatal error: D::F cannot override final constant I::F in %s on line 6
     /// ```
-    fn constants_into(&self, class: &'a ClassDecl, table: &mut Constants<'a>, depth: u32) {
-        let inherited = |c: &ClassConstDecl| depth == 0 || c.visibility != Visibility::Private;
+    fn members_into<M: ClassMember>(
+        &self,
+        class: &'a ClassDecl,
+        table: &mut Members<'a, M>,
+        depth: u32,
+    ) {
+        let kept = |member: &M| depth == 0 || member.inherited();
         let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
         if let Some((_, record)) = held.and_then(|held| held.record) {
-            for row in record.constants.rows() {
-                if let Some((by, constant)) = self.row_constant(class, row)
-                    && inherited(constant)
+            for row in M::table(record).rows() {
+                if let Some((by, member)) = self.row_member::<M>(class, row)
+                    && kept(member)
                 {
-                    put_constant(table, Some(by), constant);
+                    put(table, Some(by), member);
                 }
             }
             return;
         }
-        for constant in class.constants.iter().filter(|c| inherited(c)) {
-            put_constant(table, Some(class), constant);
+        for member in M::of(class).iter().filter(|member| kept(member)) {
+            put(table, Some(class), member);
         }
         if depth < 64
             && let Some(parent) = self.class_parent(class)
         {
-            self.constants_into(parent, table, depth + 1);
+            self.members_into(parent, table, depth + 1);
         }
         let mut interfaces = Vec::new();
         self.interfaces_of(&class.interfaces, &mut interfaces, 0);
         for interface in interfaces {
-            for constant in &interface.constants {
-                put_constant(table, Some(interface), constant);
+            for member in M::of(interface) {
+                put(table, Some(interface), member);
             }
         }
     }
 
-    /// `ce->properties_info` as `zend_do_link_class` leaves it, in its
-    /// order: the class's own properties, a trait's among them; each of
-    /// the parent's table it does not declare, a private one among them
-    /// (`do_inherit_property` appends whatever it does not find); then
-    /// each of its interfaces', in `zend_do_implement_interfaces`' order,
-    /// that nothing above put there. None where the parent or an
-    /// interface is held with no record.
-    fn property_rows(&self, child: &'a ClassDecl) -> Option<Rows<Row<H>, Exact>> {
-        let named = |row: &Row<H>| self.row_property_name(child, row);
+    /// [`linked_class`] of `child`, whose last `abstracts` methods are
+    /// its traits' abstract ones.
+    fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
+        let own = child.methods.len().saturating_sub(abstracts);
+        Some(LinkedClass {
+            methods: self.member_rows::<MethodDecl>(child, own)?,
+            constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
+            properties: self.member_rows::<PropertyDecl>(child, usize::MAX)?,
+        })
+    }
+
+    /// The record's table of `M` as `zend_do_link_class` leaves it, in
+    /// its order: the class's first `own` members, a trait's among them;
+    /// each of the parent's table it does not declare and that passes
+    /// on, `do_inherit_method`, `do_inherit_class_constant` and
+    /// `do_inherit_property` (a private method or property among them,
+    /// a private constant not); the rest of its own, which for a method
+    /// are the traits' abstract ones it took; then each of its
+    /// interfaces', in `zend_do_implement_interfaces`' order, that
+    /// nothing above put there. None where the parent or an interface
+    /// is held with no record.
+    ///
+    /// `ce->properties_info` puts the class's own first, so it is not
+    /// the slot order, which puts the parent's slots first.
+    fn member_rows<M: ClassMember>(
+        &self,
+        child: &'a ClassDecl,
+        own: usize,
+    ) -> Option<Rows<Row<H>, M::Case>> {
+        let named = |row: &Row<H>| self.row_member_name::<M>(child, row);
         let mut rows = Rows::default();
-        for (at, property) in (0u32..).zip(&child.properties) {
-            rows.add(Row { holder: None, at }, &property.name.0, named);
+        let declared = (0u32..).zip(M::of(child));
+        for (at, member) in declared.clone().take(own) {
+            rows.add(Row { holder: None, at }, member.name(), named);
+        }
+        if let Some(parent) = &child.parent {
+            self.inherit_rows::<M>(&mut rows, child, &parent.0)?;
+        }
+        for (at, member) in declared.skip(own) {
+            rows.add(Row { holder: None, at }, member.name(), named);
         }
         let mut interfaces = Vec::new();
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
-        let above = child
-            .parent
-            .iter()
-            .chain(interfaces.iter().map(|i| &i.name));
-        for name in above {
-            let Some(held) = (self.lookup)(&name.0) else {
-                continue;
-            };
-            let (handle, record) = held.record?;
-            rows.inherit(
-                &record.properties,
-                |row| Row {
-                    holder: Some(row.holder_in(handle)),
-                    at: row.at,
-                },
-                named,
-                |row| self.row_property_name(held.decl, row),
-            );
+        for interface in interfaces {
+            self.inherit_rows::<M>(&mut rows, child, &interface.name.0)?;
         }
         Some(rows)
     }
 
-    /// The name of the property a row of `class`'s record stands for.
-    fn row_property_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
-        self.row_property(class, row)
-            .map_or(&[][..], |(_, p)| &p.name.0)
+    /// The rows of the record of the class `name` names into `child`'s,
+    /// each that passes on and whose name `child`'s holds none of, its
+    /// own rows naming it by its key. None where the class is held with
+    /// no record; nothing where no class has the name.
+    fn inherit_rows<M: ClassMember>(
+        &self,
+        rows: &mut Rows<Row<H>, M::Case>,
+        child: &'a ClassDecl,
+        name: &[u8],
+    ) -> Option<()> {
+        let Some(held) = (self.lookup)(name) else {
+            return Some(());
+        };
+        let (handle, record) = held.record?;
+        rows.inherit(
+            M::table(record),
+            |row| {
+                let (_, member) = self.row_member::<M>(held.decl, row)?;
+                member.inherited().then(|| Row {
+                    holder: Some(row.holder_in(handle)),
+                    at: row.at,
+                })
+            },
+            |row| self.row_member_name::<M>(child, row),
+            |row| self.row_member_name::<M>(held.decl, row),
+        );
+        Some(())
     }
 
-    /// The property a row of `class`'s record stands for, beside the
-    /// class that declared it.
-    fn row_property(
+    /// The name of the member a row of `class`'s record stands for.
+    fn row_member_name<M: ClassMember>(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
+        self.row_member::<M>(class, row)
+            .map_or(&[][..], |(_, member)| member.name())
+    }
+
+    /// The member a row of `class`'s record stands for, beside the class
+    /// that declared it.
+    fn row_member<M: ClassMember>(
         &self,
         class: &'a ClassDecl,
         row: &Row<H>,
-    ) -> Option<(&'a ClassDecl, &'a PropertyDecl)> {
+    ) -> Option<(&'a ClassDecl, &'a M)> {
         let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
-        Some((by, by.properties.get(usize::try_from(row.at).ok()?)?))
-    }
-
-    /// `class`'s `properties_info` as php holds it once linked, each
-    /// property beside the class that declared it: read off its record
-    /// where the table holds one, and otherwise, for a class under way
-    /// or one the caller keeps no record of, its own properties, then
-    /// its parent's table, then its interfaces', as [`Linker::methods_above`]
-    /// reads the function table. A parent's table holds what its
-    /// interfaces declare, so a class redeclaring such a property is
-    /// held to the interface's through its parent (`zend_do_inheritance`):
-    ///
-    /// ```php
-    /// interface I { public int $x { get; } }
-    /// abstract class P implements I {}
-    /// class C extends P { protected int $x = 1; }
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Access level to C::$x must be public (as in class I) in %s on line 4
-    /// ```
-    fn properties_above(&self, class: &'a ClassDecl) -> Properties<'a> {
-        let mut table = Rows::default();
-        self.properties_into(class, &mut table, 0);
-        table
-    }
-
-    fn properties_into(&self, class: &'a ClassDecl, table: &mut Properties<'a>, depth: u32) {
-        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
-        if let Some((_, record)) = held.and_then(|held| held.record) {
-            for row in record.properties.rows() {
-                if let Some(found) = self.row_property(class, row) {
-                    table.add(found, &found.1.name.0, property_name);
-                }
-            }
-            return;
-        }
-        for property in &class.properties {
-            table.add((class, property), &property.name.0, property_name);
-        }
-        if depth < 64
-            && let Some(parent) = self.class_parent(class)
-        {
-            self.properties_into(parent, table, depth + 1);
-        }
-        let mut interfaces = Vec::new();
-        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
-        for interface in interfaces {
-            for property in &interface.properties {
-                table.add((interface, property), &property.name.0, property_name);
-            }
-        }
+        Some((by, M::of(by).get(usize::try_from(row.at).ok()?)?))
     }
 
     /// Every interface `class` implements, its own list and each one's
@@ -2838,7 +2729,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         // class that put it there, none for the child's own.
         let mut constants: Constants<'a> = Rows::default();
         for constant in &child.constants {
-            put_constant(&mut constants, None, constant);
+            put(&mut constants, None, constant);
         }
         let mut methods: Methods<'a> = Rows::default();
         for method in &child.methods {
@@ -2949,7 +2840,7 @@ impl<'a, H: Copy> Linker<'a, H> {
                 .any(|a| a.name.0.eq_ignore_ascii_case(b"Override"))
         };
         let parent = self.class_parent(child);
-        let inherited = parent.map(|parent| self.properties_above(parent));
+        let inherited = parent.map(|parent| self.members_above::<PropertyDecl>(parent));
         let mut names = child.interfaces.clone();
         let mut above = parent;
         let mut depth = 0;
@@ -3000,7 +2891,7 @@ impl<'a, H: Copy> Linker<'a, H> {
             }
             let by_parent = inherited.as_ref().is_some_and(|table| {
                 table
-                    .find(&property.name.0, property_name)
+                    .find(&property.name.0, member_name)
                     .is_some_and(|(_, p)| p.visibility != Visibility::Private)
             });
             let by_interface = interfaces
@@ -3137,8 +3028,8 @@ impl<'a, H: Copy> Linker<'a, H> {
     ) -> Result<Vec<usize>, Box<Linked>> {
         let mut added: Vec<usize> = Vec::new();
         for (at, copy) in copies.iter().enumerate() {
-            let Some(&(holder, existing)) = methods.find(&copy.key, method_name) else {
-                methods.add((None, &copy.method), &copy.key, method_name);
+            let Some(&(holder, existing)) = methods.find(&copy.key, member_name) else {
+                methods.add((None, &copy.method), &copy.key, member_name);
                 added.push(at);
                 continue;
             };
@@ -3206,7 +3097,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         if child.traits.is_empty() || child.kind == ClassKind::Trait {
             return Ok(false);
         }
-        let Some(&(None, own)) = methods.find(b"__toString", method_name) else {
+        let Some(&(None, own)) = methods.find(b"__toString", member_name) else {
             return Ok(false);
         };
         let Some(stringable) = self.class_named(b"Stringable") else {
@@ -3245,7 +3136,8 @@ impl<'a, H: Copy> Linker<'a, H> {
             return Some(Linked::Refused(at_class(child, refusal)));
         }
         let inherited = self.methods_above(parent);
-        for &(declaring, property) in self.properties_above(parent).rows() {
+        for &(declaring, property) in self.members_above::<PropertyDecl>(parent).rows() {
+            let declaring = declaring.unwrap_or(parent);
             if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
                 && let Some(linked) =
                     self.inherited_property_refused(child, own, property, declaring, Check::Parent)
@@ -3256,11 +3148,10 @@ impl<'a, H: Copy> Linker<'a, H> {
         if let Some(linked) = self.hooked_properties_refused(child) {
             return Some(linked);
         }
-        let mut above: Constants<'a> = Rows::default();
-        self.constants_into(parent, &mut above, 0);
+        let above = self.members_above::<ClassConstDecl>(parent);
         for &(declaring, constant) in above.rows() {
             let declaring = declaring.unwrap_or(parent);
-            match constants.find(&constant.name.0, constant_name).copied() {
+            match constants.find(&constant.name.0, member_name).copied() {
                 Some((held_by, held)) => {
                     if let Some(linked) =
                         self.constant_refused(child, held, held_by, constant, declaring)
@@ -3269,13 +3160,13 @@ impl<'a, H: Copy> Linker<'a, H> {
                     }
                 }
                 None if constant.visibility != Visibility::Private => {
-                    put_constant(constants, Some(declaring), constant);
+                    put(constants, Some(declaring), constant);
                 }
                 None => {}
             }
         }
         for (declaring, method) in inherited {
-            match methods.find(&method.function.name.0, method_name).copied() {
+            match methods.find(&method.function.name.0, member_name).copied() {
                 Some((None, own)) => {
                     let (declaring, method) = self.prototype(declaring, method);
                     let (fe_side, proto_side) = Self::own_over(child, declaring);
@@ -3399,7 +3290,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
             for constant in &interface.constants {
-                match constants.find(&constant.name.0, constant_name).copied() {
+                match constants.find(&constant.name.0, member_name).copied() {
                     Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
                     Some((held_by, held)) => {
                         if let Some(linked) =
@@ -3408,11 +3299,11 @@ impl<'a, H: Copy> Linker<'a, H> {
                             return Some(linked);
                         }
                     }
-                    None => put_constant(constants, Some(interface), constant),
+                    None => put(constants, Some(interface), constant),
                 }
             }
             for method in &interface.methods {
-                match methods.find(&method.function.name.0, method_name).copied() {
+                match methods.find(&method.function.name.0, member_name).copied() {
                     Some((None, own)) => {
                         let (fe_side, proto_side) = Self::own_over(child, interface);
                         if let Some(linked) = self.method_refused(
@@ -3650,7 +3541,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         let serializable = self
             .class_named(b"serializable")
             .is_some_and(|interface| self.instance_of(child, interface));
-        let has = |name: &[u8]| methods.find(name, method_name).is_some();
+        let has = |name: &[u8]| methods.find(name, member_name).is_some();
         if serializable && !(has(b"__serialize") && has(b"__unserialize")) {
             self.raised.push(Raised::Serializable {
                 class: text(&child.name.0),

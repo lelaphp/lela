@@ -531,7 +531,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// The abstract hooks a linked class is left with, each named as
     /// `zend_verify_abstract_class` names one, its scope and its name:
     /// for every property the class holds, in `properties_info`'s order
-    /// ([`Linker::properties_above`]), the hook of each kind the table's
+    /// ([`Linker::members_above`]), the hook of each kind the table's
     /// entry carries once `inherit_property_hook` has done its work,
     /// which an abstract one a backed declaration implements is not.
     ///
@@ -573,7 +573,7 @@ impl<'a, H: Copy> Linker<'a, H> {
             self.interfaces_of(&class.interfaces, &mut interfaces, 0);
         }
         let mut out = Vec::new();
-        for &(_, property) in self.properties_above(child).rows() {
+        for &(_, property) in self.members_above::<PropertyDecl>(child).rows() {
             let name = &property.name.0;
             for kind in HookKind::ALL {
                 if let Some((class, hook)) = self.abstract_hook_of(child, name, kind, &interfaces) {
