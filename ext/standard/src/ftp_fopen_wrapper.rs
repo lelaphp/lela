@@ -116,8 +116,7 @@ fn cstr(s: &[u8]) -> &[u8] {
 fn get_result(req: &mut Request, stream: Stream) -> Result<Reply, Thrown> {
     let mut line = Vec::new();
     while let Some(read) = stream.get_line(req, Some(511))? {
-        line = read.as_bytes().to_vec();
-        req.release(Value::string(read));
+        line = read;
         let reply = line.len() >= 4 && line[..3].iter().all(u8::is_ascii_digit) && line[3] == b' ';
         if reply {
             break;
@@ -843,9 +842,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         let Some(line) = data.get_line(req, Some(MAXPATHLEN))? else {
             break;
         };
-        let bytes = line.as_bytes().to_vec();
-        req.release(Value::string(line));
-        names.push(entry_name(&bytes));
+        names.push(entry_name(&line));
     }
     control.free(req);
     data.free(req);

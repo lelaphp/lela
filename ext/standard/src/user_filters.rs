@@ -472,10 +472,16 @@ impl StreamFilter for UserFilter {
     }
 
     /// `userfilter_dtor` (`Z/ext/standard/user_filters.c:103`):
-    /// `onClose()` where the object has it, then the object given up.
+    /// `onClose()` where the object has it and no throwable is pending,
+    /// as `zend_call_method_if_exists` calls nothing under
+    /// `EG(exception)`, then the object given up either way.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let object = self.object;
-        let closed = call_if_exists(req, object, b"onclose");
+        let closed = if req.stream_thrown().is_some() {
+            Ok(None)
+        } else {
+            call_if_exists(req, object, b"onclose")
+        };
         req.release(object.as_value());
         if let Some(value) = closed? {
             req.release(value);

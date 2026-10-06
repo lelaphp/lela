@@ -14,7 +14,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
 use php_ext::request::{OutputOp, Request, StartHandler, Streams as _};
-use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
 use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
@@ -799,8 +799,11 @@ impl SoapServer {
                     s.functions_all = false;
                     s.functions = Some(Table::new());
                 }
-                for (_, f) in list.snapshot() {
-                    let Some(name) = f.deref().as_str_bytes().map(<[u8]>::to_vec) else {
+                let names: Vec<Option<Vec<u8>>> = walk::rows(req, *list)
+                    .map(|(_, f)| f.deref().as_str_bytes().map(<[u8]>::to_vec))
+                    .collect();
+                for name in names {
+                    let Some(name) = name else {
                         return Err(argument_error(
                             req,
                             "TypeError",
@@ -964,10 +967,10 @@ fn declared_function(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
 fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
     let all = req.defined_functions()?;
     let mut out = Vec::new();
-    for (_, group) in all.snapshot() {
-        if let ValueRef::Array(list) = group.as_ref() {
-            for (_, name) in list.snapshot() {
-                if let Some(n) = name.as_str_bytes() {
+    for (_, group) in walk::rows(req, all) {
+        if let ValueRef::Array(list) = group.deref().as_ref() {
+            for (_, name) in walk::rows(req, *list) {
+                if let Some(n) = name.deref().as_str_bytes() {
                     out.push(n.to_vec());
                 }
             }
