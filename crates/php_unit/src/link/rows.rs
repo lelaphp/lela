@@ -25,6 +25,12 @@ pub struct LinkedClass<H> {
     /// constants nothing above declared. A row, never a value: the
     /// value is the request's to evaluate.
     pub constants: Rows<Row<H>, Exact>,
+    /// `ce->properties_info` in php's order: the class's own properties,
+    /// a trait's among them, then each of the parent's table it does not
+    /// declare, a private one among them, then the interfaces' properties
+    /// nothing above declared (`do_inherit_property`). A row's holder is
+    /// the property's `ce`, the class whose declaration it is.
+    pub properties: Rows<Row<H>, Exact>,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -32,6 +38,7 @@ impl<H> Default for LinkedClass<H> {
         LinkedClass {
             methods: Rows::default(),
             constants: Rows::default(),
+            properties: Rows::default(),
         }
     }
 }

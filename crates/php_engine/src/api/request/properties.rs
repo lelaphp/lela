@@ -10,6 +10,7 @@
 
 use php_heap::{Fatal, Heap, Intern, Obj, Ref, Zval};
 use php_unit::decl::{PropertyDecl, Visibility};
+use php_unit::link::Row;
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
@@ -766,31 +767,60 @@ impl Request {
         }
     }
 
-    /// `zend_hash_find_ptr(&ce->properties_info, name)` over the table
-    /// `zend_do_inheritance` left: the class's own declaration of
-    /// `name`, then each parent's, since a parent's entries are
-    /// appended into the child's `properties_info` and one of the same
-    /// name the child declares hides the parent's. The answer names the
-    /// class that declared it, which for a `static` property is the
-    /// class whose slot the value sits in (php's `IS_INDIRECT` into the
-    /// parent's table) and the scope its visibility is measured
-    /// against. An instance property is found here too, as php finds
-    /// one in the same table and rejects it after the access check.
+    /// `zend_hash_find_ptr(&ce->properties_info, name)`: one lookup in
+    /// the class's linked record ([`Request::linked_class`]), whose
+    /// property rows are `properties_info` as `zend_do_inheritance` left
+    /// it, the class's own declarations first and a parent's appended
+    /// where the class declares none of the name. The answer names the
+    /// class that declared it, the property's `ce`, which for a `static`
+    /// property is the class whose slot the value sits in (php's
+    /// `IS_INDIRECT` into the parent's table) and the scope its
+    /// visibility is measured against. An instance property is found
+    /// here too, as php finds one in the same table and rejects it after
+    /// the access check.
+    ///
+    /// A static property inherited through two levels shares its slot
+    /// with the class that declared it, one the child redeclares is its
+    /// own, typed as the child declares it, and an instance property or
+    /// a grandparent's private one is found and refused:
+    ///
+    /// ```php
+    /// class G { public static $shared = "G"; public static int $s = 1; private static $hidden = "G"; public $i = "G"; }
+    /// class P extends G {}
+    /// class C extends P { public static int $s = 2; public $i = "C"; }
+    /// C::$shared = "set through C";
+    /// echo G::$shared, " ", C::$s, " ", G::$s, "\n";
+    /// try { C::$s = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo C::$i; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo C::$hidden; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(isset(C::$hidden), (new C)->i);
+    /// ```
+    /// ```expect
+    /// set through C 2 1
+    /// Cannot assign string to property C::$s of type int
+    /// Access to undeclared static property C::$i
+    /// Cannot access private property C::$hidden
+    /// bool(false)
+    /// string(1) "C"
+    /// ```
     pub(crate) fn property_info_of(
         &self,
         class: ClassId,
         name: &[u8],
-    ) -> Option<(ClassId, PropertyDecl)> {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let here = at?;
-            let decl = self.class_decl(here)?;
-            if let Some(property) = decl.properties.iter().find(|p| &*p.name.0 == name) {
-                return Some((here, property.clone()));
-            }
-            at = self.class_parent(here);
-        }
-        None
+    ) -> Option<(ClassId, &PropertyDecl)> {
+        let row = self.linked_class(class)?.properties.find(name, |row| {
+            self.row_property(class, *row)
+                .map_or(&[][..], |(_, property)| &property.name.0)
+        })?;
+        self.row_property(class, *row)
+    }
+
+    /// The property a row of `class`'s `properties_info` is, beside the
+    /// class that declared it.
+    fn row_property(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &PropertyDecl)> {
+        let holder = row.holder_in(class);
+        let decl = self.class_decl(holder)?;
+        Some((holder, decl.properties.get(usize::try_from(row.at).ok()?)?))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
@@ -2192,7 +2222,7 @@ impl Request {
         if p.is_instance {
             return None;
         }
-        p.ty.map(|ty| TypedProperty {
+        p.ty.clone().map(|ty| TypedProperty {
             declaring,
             ty,
             readonly: p.is_readonly,

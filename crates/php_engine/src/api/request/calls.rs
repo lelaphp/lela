@@ -230,7 +230,7 @@ impl Request {
     /// `ce->type == ZEND_INTERNAL_CLASS`: a class the engine or an
     /// extension declared, and not one a program did.
     pub(crate) fn class_is_internal(&self, class: ClassId) -> bool {
-        usize::try_from(class.0).is_ok_and(|at| at < self.shared.classes.len())
+        self.native_class_at(class).is_some()
     }
 
     /// `func->common.function_name`: a function's name as declared.
@@ -808,14 +808,14 @@ impl Request {
             .get(at.checked_sub(self.shared.functions.len())?)
     }
 
-    /// The user function or method `function` is, if it is one: numbered
-    /// past the natives and the native methods.
+    /// The user function or method `function` is, if it is one: one of
+    /// the request's own rows, or the published arena's, which are
+    /// numbered past the natives and the native methods (design §5.14).
     pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
-        let at = usize::try_from(function.0).ok()?;
-        self.user_functions.get(
-            at.checked_sub(self.shared.functions.len())?
-                .checked_sub(self.shared.methods.len())?,
-        )
+        match function.local_at() {
+            Some(at) => self.user_functions.get(at),
+            None => self.arena.function(function),
+        }
     }
 
     /// `fbc->common.fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)`:
@@ -840,17 +840,6 @@ impl Request {
             .and_then(|at| self.shared.function_flags.get(at))
             .copied()
             .unwrap_or_default()
-    }
-
-    /// The number a user function at `index` of the table is known by.
-    pub(super) fn user_function_id(&self, index: usize) -> Option<Function> {
-        let at = self
-            .shared
-            .functions
-            .len()
-            .checked_add(self.shared.methods.len())?
-            .checked_add(index)?;
-        u32::try_from(at).ok().map(Function)
     }
 
     /// The trampoline a function number names and which of its two

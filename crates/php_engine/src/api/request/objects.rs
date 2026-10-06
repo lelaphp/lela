@@ -252,12 +252,10 @@ impl Request {
     /// (`zend_build_properties_info_table`): what a linked class
     /// declares, and the chain above it, never changes.
     pub(crate) fn placed_properties(&self, class: ClassId) -> &[(ClassId, PropertyDecl)] {
-        let row = usize::try_from(class.0).ok().and_then(|at| {
-            match at.checked_sub(self.shared.classes.len()) {
-                None => self.shared.placed.get(at),
-                Some(declared) => self.declared.get(declared).map(|row| &row.placed),
-            }
-        });
+        let row = match self.native_class_at(class) {
+            Some(native) => self.shared.placed.get(native),
+            None => self.declared_row(class).map(|row| &row.placed),
+        };
         match row {
             Some(row) => row.get_or_init(|| self.place_properties(class)),
             None => &[],

@@ -9,8 +9,8 @@
 //! `Closure::fromCallable` over such a name holds.
 //!
 //! php allocates one of each per lookup and frees it with the call.
-//! Here each is a function number of the request's past
-//! [`TRAMPOLINE_FUNCTIONS`], one pair per magic method and name the
+//! Here each is a function number of the request's own from
+//! [`TRAMPOLINE_FUNCTIONS`] on, one pair per magic method and name the
 //! request has called, so a call frame, a closure and a callable carry
 //! it as they carry any other [`Function`], and two closures over one
 //! name compare equal as php's do by name.
@@ -26,11 +26,11 @@ use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, Value, adopted};
 
-/// Where the trampolines' function numbers begin: past the enum methods'
-/// ([`crate::enums::ENUM_FUNCTIONS`]), so the spaces never meet. Each
-/// trampoline takes two numbers, its own and its
+/// Where the trampolines' function numbers begin: among the request's
+/// own, past its enum methods' ([`Function::TRAMPOLINE`]), so the spaces
+/// never meet. Each trampoline takes two numbers, its own and its
 /// [`Served::ClosureCall`]'s beside it.
-const TRAMPOLINE_FUNCTIONS: u32 = 3 << 30;
+const TRAMPOLINE_FUNCTIONS: u32 = Function::LOCAL | Function::TRAMPOLINE;
 
 /// Which of php's two functions a trampoline's number is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
