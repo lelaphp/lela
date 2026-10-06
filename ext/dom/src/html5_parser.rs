@@ -1007,12 +1007,16 @@ pub(crate) fn create_from_file(
     let mut chunks = Vec::new();
     let read = loop {
         match stream.read(req, BUFFER) {
-            Ok(Some(chunk)) if !chunk.is_empty() => {
-                chunks.push(chunk.len());
+            Ok(Some(chunk)) => {
+                let len = chunk.len();
                 source.extend_from_slice(chunk.as_bytes());
                 req.release(Value::string(chunk));
+                if len == 0 {
+                    break Ok(());
+                }
+                chunks.push(len);
             }
-            Ok(_) => break Ok(()),
+            Ok(None) => break Ok(()),
             Err(thrown) => break Err(thrown),
         }
     };

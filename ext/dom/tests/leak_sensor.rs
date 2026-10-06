@@ -33,3 +33,14 @@ fn a_modern_document_keeps_one_private_data() {
         "x:r\n0\nNamespace Error\nt\nDom\\XMLDocument\n",
     );
 }
+
+/// `Dom\HTMLDocument::createFromFile` gives up the empty read that ends
+/// the stream, as `php_stream_read` into php's own buffer makes no
+/// string of it (#2094).
+#[test]
+fn an_html_document_from_a_file_keeps_no_read() {
+    served(
+        "<?php echo Dom\\HTMLDocument::createFromFile('data:,<!doctype html><p>x')->body->textContent, \"\\n\";",
+        "x\n",
+    );
+}
