@@ -24,7 +24,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, FreshString, Key, PhpArray, PhpObject, PhpString};
+use php_ext::values::{ClassId, FreshString, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::{
     class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
@@ -286,8 +286,10 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
     let Some(flags) = value.as_int() else {
         // `zend_zval_value_name(&flags)`
         // (`Z/Zend/zend_attributes.c:54`): the value's name, so `true`
-        // stands where the type alone would read `bool`.
+        // stands where the type alone would read `bool`, and the value
+        // given up after it, `zval_ptr_dtor(&flags)`.
         let given = value_name(req, &value);
+        req.release(value);
         return Err(throw_error(
             req,
             "Error",
@@ -439,15 +441,23 @@ impl ReflectionAttribute {
     fn getArguments(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let mut out = PhpArray::new(req)?;
-        for argument in &kept.attribute.arguments {
-            let value = eval_declared(req, &argument.value, kept.scope)?;
-            match &argument.name {
-                Some(name) => {
-                    let key = PhpString::new(req, &name.0)?;
-                    out.set(req, Key::Str(key), value)?;
+        let filled = (|| {
+            for argument in &kept.attribute.arguments {
+                let value = eval_declared(req, &argument.value, kept.scope)?;
+                match &argument.name {
+                    Some(name) => {
+                        let key = PhpString::new(req, &name.0)?;
+                        out.set(req, Key::Str(key), value)?;
+                    }
+                    None => out.append(req, value)?,
                 }
-                None => out.append(req, value)?,
             }
+            Ok(())
+        })();
+        // `zval_ptr_dtor(&args)` where an argument fails to evaluate.
+        if let Err(thrown) = filled {
+            req.release(Value::array(out));
+            return Err(thrown);
         }
         Ok(out)
     }

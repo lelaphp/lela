@@ -37,3 +37,21 @@ fn a_function_s_closure_keeps_no_name() {
         "3\n",
     );
 }
+
+/// An attribute's arguments are given up where one of them fails to
+/// evaluate, as `getArguments` gives up `args`, and the flags of an
+/// `#[Attribute]` marker that are no int are given up after the error
+/// names them, `zval_ptr_dtor(&flags)` (#2078).
+#[cfg(debug_assertions)]
+#[test]
+fn an_attribute_s_arguments_are_given_up_where_they_fail() {
+    served_armed(
+        "<?php\n\
+         #[A(['k' => 1], Missing::C)] function f() {}\n\
+         try { (new ReflectionFunction('f'))->getAttributes()[0]->getArguments(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         #[Attribute('foo' . PHP_EOL)] class A {}\n\
+         #[A] function g() {}\n\
+         try { (new ReflectionFunction('g'))->getAttributes()[0]->newInstance(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n",
+        "Class \"Missing\" not found\nAttribute::__construct(): Argument #1 ($flags) must be of type int, string given\n",
+    );
+}
