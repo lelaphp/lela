@@ -5,6 +5,8 @@
 //! through the face's `Request::caller_var` and `set_caller_var`. A
 //! variable declared and not yet written reads as one the frame has not.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
@@ -12,7 +14,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef, walk};
 
 use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
@@ -212,150 +214,120 @@ fn extract(
         // The reference the call passed holds the array: a variable an
         // element is made a reference over gives up the caller's
         // variable, never the reference's own value.
-        return extracted(req, &mut array, kind, refs, &prefix);
+        let mut count = 0i64;
+        for (key, entry) in array.snapshot_refs() {
+            if let Some(target) = target(req, kind, &prefix, &key)? {
+                assign_ref(req, &mut array, &key, entry, &target)?;
+                count += 1;
+            }
+        }
+        return Ok(count);
     }
     // `ZVAL_COPY(&array_copy, var_array_param)`: "The array might be
     // stored in a local variable that will be overwritten". The call
     // passed that variable by reference, so an element written through
-    // it would give up the owner the variable held. Under this owner the
-    // walk's rows stand until the walk is done, and what writes the
+    // it would give up the owner the variable held; the held walk holds
+    // the array it reaches through that reference, and what writes the
     // array separates it.
-    let held = array.to_value();
-    req.addref(&held);
-    let count = extracted(req, &mut array, kind, refs, &prefix);
-    req.release(held);
-    count
+    let reached = given
+        .reference()
+        .map_or_else(|| array.to_value(), |cell| cell.as_value());
+    let mut count = 0i64;
+    walk::held(req, &reached, |req, key, entry| {
+        if let Some(target) = target(req, kind, &prefix, key)? {
+            assign(req, &target, *entry)?;
+            count += 1;
+        }
+        Ok(ControlFlow::<()>::Continue(()))
+    })?;
+    Ok(count)
 }
 
-/// `extract`'s walk over `array`, one arm per extract type, php's
-/// fourteen `php_extract_*` helpers folded into one: the count written.
-#[allow(clippy::too_many_lines)]
-fn extracted(
+/// The variable `extract` writes the element under `key` into, one arm
+/// per extract type, php's fourteen `php_extract_*` helpers folded into
+/// one: `None` where the type skips the element, and php's `Error` where
+/// the name it makes is `this`.
+fn target(
     req: &mut Request,
-    array: &mut PhpArray,
     kind: i64,
-    refs: bool,
     prefix: &[u8],
-) -> Result<i64, Thrown> {
-    let mut count = 0i64;
-    for (key, entry) in array.snapshot_refs() {
-        let text = match &key {
-            Key::Str(s) => s.as_bytes().to_vec(),
-            Key::Int(n) => n.to_string().into_bytes(),
-        };
-        let numeric = matches!(key, Key::Int(_));
-        let target = match kind {
-            EXTR_OVERWRITE
-            | EXTR_IF_EXISTS
-            | EXTR_SKIP
-            | EXTR_PREFIX_SAME
-            | EXTR_PREFIX_IF_EXISTS
-                if numeric =>
-            {
-                continue;
+    key: &Key,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    let text = match key {
+        Key::Str(s) => s.as_bytes().to_vec(),
+        Key::Int(n) => n.to_string().into_bytes(),
+    };
+    let numeric = matches!(key, Key::Int(_));
+    let name = match kind {
+        EXTR_OVERWRITE | EXTR_IF_EXISTS | EXTR_SKIP | EXTR_PREFIX_SAME | EXTR_PREFIX_IF_EXISTS
+            if numeric =>
+        {
+            None
+        }
+        EXTR_OVERWRITE => {
+            if !valid_var_name(&text) || (text == b"GLOBALS" && req.caller_var(&text).is_some()) {
+                None
+            } else {
+                Some(text)
             }
-            EXTR_OVERWRITE => {
-                if !valid_var_name(&text) {
-                    continue;
-                }
-                if text == b"this" {
-                    return Err(reassign_this(req));
-                }
-                if text == b"GLOBALS" && req.caller_var(&text).is_some() {
-                    continue;
-                }
-                text
+        }
+        EXTR_IF_EXISTS => {
+            if req.caller_var(&text).is_none() || !valid_var_name(&text) || text == b"GLOBALS" {
+                None
+            } else {
+                Some(text)
             }
-            EXTR_IF_EXISTS => {
-                if req.caller_var(&text).is_none() || !valid_var_name(&text) || text == b"GLOBALS" {
-                    continue;
-                }
-                if text == b"this" {
-                    return Err(reassign_this(req));
-                }
-                text
+        }
+        EXTR_SKIP => {
+            if !valid_var_name(&text) || text == b"this" || req.caller_var(&text).is_some() {
+                None
+            } else {
+                Some(text)
             }
-            EXTR_SKIP => {
-                if !valid_var_name(&text) || text == b"this" || req.caller_var(&text).is_some() {
-                    continue;
-                }
-                text
-            }
-            EXTR_PREFIX_SAME => {
-                if text.is_empty() {
-                    continue;
-                }
+        }
+        EXTR_PREFIX_SAME => {
+            if text.is_empty() {
+                None
+            } else {
                 let exists = req.caller_var(&text).is_some();
                 if exists || text == b"this" {
                     if !exists && !valid_var_name(&text) {
-                        continue;
+                        None
+                    } else {
+                        Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
                     }
-                    let name = prefixed(prefix, &text);
-                    if !valid_var_name(&name) {
-                        continue;
-                    }
-                    if name == b"this" {
-                        return Err(reassign_this(req));
-                    }
-                    name
                 } else {
-                    if !valid_var_name(&text) {
-                        continue;
-                    }
-                    text
+                    Some(text).filter(|text| valid_var_name(text))
                 }
             }
-            EXTR_PREFIX_IF_EXISTS => {
-                if req.caller_var(&text).is_none() {
-                    continue;
-                }
-                let name = prefixed(prefix, &text);
-                if !valid_var_name(&name) {
-                    continue;
-                }
-                if name == b"this" {
-                    return Err(reassign_this(req));
-                }
-                name
-            }
-            EXTR_PREFIX_ALL => {
-                if text.is_empty() {
-                    continue;
-                }
-                let name = prefixed(prefix, &text);
-                if !valid_var_name(&name) {
-                    continue;
-                }
-                if name == b"this" {
-                    return Err(reassign_this(req));
-                }
-                name
-            }
-            _ => {
-                // EXTR_PREFIX_INVALID.
-                let name = if numeric || !valid_var_name(&text) || text == b"this" {
-                    let name = prefixed(prefix, &text);
-                    if !valid_var_name(&name) {
-                        continue;
-                    }
-                    name
-                } else {
-                    text
-                };
-                if name == b"this" {
-                    return Err(reassign_this(req));
-                }
-                name
-            }
-        };
-        if refs {
-            assign_ref(req, array, &key, entry, &target)?;
-        } else {
-            assign(req, &target, entry)?;
         }
-        count += 1;
+        EXTR_PREFIX_IF_EXISTS => {
+            if req.caller_var(&text).is_none() {
+                None
+            } else {
+                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+            }
+        }
+        EXTR_PREFIX_ALL => {
+            if text.is_empty() {
+                None
+            } else {
+                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+            }
+        }
+        _ => {
+            // EXTR_PREFIX_INVALID.
+            if numeric || !valid_var_name(&text) || text == b"this" {
+                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+            } else {
+                Some(text)
+            }
+        }
+    };
+    match name {
+        Some(name) if name == b"this" => Err(reassign_this(req)),
+        name => Ok(name),
     }
-    Ok(count)
 }
 
 /// `compact($var_name, ...$var_names): array`, php's
