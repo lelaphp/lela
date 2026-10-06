@@ -12,11 +12,14 @@
 //! elements, which is why `json_encode($o, 0, 1)` is `{}` for an empty
 //! object and `false` for one with anything in it.
 
+use std::ops::ControlFlow;
+
 use php_ext::call;
 use php_ext::coerce::{Exponent, float_format, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, PhpObject, RecursionGuard, Value, ValueRef};
 
 use crate::constants::{
@@ -423,9 +426,8 @@ fn enum_case(
     encode(req, buf, &case, options, enc)
 }
 
-/// The rows an array or an object contributes, in php's order: an
-/// array's own, and an object's declared properties and then its
-/// dynamic ones with the private and protected of the class skipped,
+/// The rows an object contributes, in php's order: its declared
+/// properties and then its dynamic ones with the private and protected of the class skipped,
 /// which is `ZSTR_VAL(key)[0] == '\0'` over `zend_get_properties_for`.
 /// A hooked property is what its `get` hook answers, and a virtual one
 /// with none is no row; a class that answers `ZEND_PROP_PURPOSE_JSON`
@@ -441,10 +443,7 @@ fn enum_case(
 /// {"a":1,"v":"v"}{"y":2}
 /// {"date":"2000-01-01 00:00:00.000000","timezone_type":3,"timezone":"UTC"}
 /// ```
-fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
-    if let Some(array) = value.as_array() {
-        return Ok(array.snapshot());
-    }
+fn object_rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
@@ -546,22 +545,38 @@ fn write_rows(
     buf.push(if as_object { b'{' } else { b'[' });
     enc.depth += 1;
     let mut comma = false;
-    for (key, element) in rows(req, value)? {
-        if comma {
-            buf.push(b',');
-        }
-        comma = true;
-        pretty_break(buf, options, enc);
-        if as_object {
-            write_key(buf, &key, options, enc);
-            buf.push(b':');
-            if options & JSON_PRETTY_PRINT != 0 {
-                buf.push(b' ');
+    if let Some(array) = value.as_array().copied() {
+        // `ZEND_HASH_FOREACH_KEY_VAL_IND(myht, …)`
+        // (`Z/ext/json/json_encoder.c:243`) over the array
+        // `php_json_encode_zval`'s `ZVAL_COPY` holds ([`held`]): the walk
+        // takes no owner of its own, so a `jsonSerialize` that assigns over
+        // what holds the array leaves it standing, and one that writes it
+        // separates it from the rows being written.
+        let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+            let element = row.value().deref();
+            let row = (row.key(), &element);
+            if write_row(req, buf, row, options, enc, as_object, &mut comma)? {
+                Ok(ControlFlow::Continue(()))
+            } else {
+                Ok(ControlFlow::Break(()))
             }
-        }
-        if !encode(req, buf, &element, options, enc)? && options & JSON_PARTIAL_OUTPUT_ON_ERROR == 0
-        {
+        })?;
+        if walked.is_some() {
             return Ok(false);
+        }
+    } else {
+        for (key, element) in object_rows(req, value)? {
+            if !write_row(
+                req,
+                buf,
+                (&key, &element),
+                options,
+                enc,
+                as_object,
+                &mut comma,
+            )? {
+                return Ok(false);
+            }
         }
     }
     if enc.depth > enc.max_depth {
@@ -576,6 +591,34 @@ fn write_rows(
     }
     buf.push(if as_object { b'}' } else { b']' });
     Ok(true)
+}
+
+/// One row of `php_json_encode_array`'s walk: the comma before all but
+/// the first, the key where the rows are written as an object, then the
+/// value; `false` where the value failed to encode and the walk stops
+/// there, without `JSON_PARTIAL_OUTPUT_ON_ERROR`.
+fn write_row(
+    req: &mut Request,
+    buf: &mut Vec<u8>,
+    (key, element): (&Key, &Value),
+    options: i64,
+    enc: &mut Encoder,
+    as_object: bool,
+    comma: &mut bool,
+) -> Wrote {
+    if *comma {
+        buf.push(b',');
+    }
+    *comma = true;
+    pretty_break(buf, options, enc);
+    if as_object {
+        write_key(buf, key, options, enc);
+        buf.push(b':');
+        if options & JSON_PRETTY_PRINT != 0 {
+            buf.push(b' ');
+        }
+    }
+    Ok(encode(req, buf, element, options, enc)? || options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0)
 }
 
 /// One key of an object: the string escaped with `JSON_NUMERIC_CHECK`

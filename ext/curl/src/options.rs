@@ -2,11 +2,14 @@
 //! `CURLOPT_*` `_php_curl_setopt` accepts decoded once to the kind of
 //! value it takes ([`Opt`]), and each kind set as php sets it.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::Instance;
 use php_ext::attr::php_function;
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::constants as c;
@@ -636,9 +639,14 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
         return Err(throw_error(req, "TypeError", &text));
     };
     let mut lines = Vec::new();
-    for (_, element) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(ph, current)` (`Z/ext/curl/interface.c:2131`),
+    // no owner of the table taken: the option's argument holds it while
+    // `__toString` runs.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let element = row.value().deref();
         lines.push(bytes(req, &element)?);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let Ok(list) = Slist::of(&lines) else {
         docref(req, Level::Warning, "Could not build curl_slist");
         return Ok(false);
@@ -879,7 +887,12 @@ fn curl_setopt_array(
     handle: Instance<CurlHandle>,
     options: PhpArray,
 ) -> Result<bool, Thrown> {
-    for (key, value) in options.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(arr), …)`
+    // (`Z/ext/curl/interface.c:2357`), no owner of the table taken: the
+    // argument holds it while each option's conversion and callback run.
+    let walked = walk::foreach(req, options, Hold::None, |req, row| -> walk::Step<bool> {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let Key::Int(option) = key else {
             return Err(argument_error(
                 req,
@@ -889,8 +902,9 @@ fn curl_setopt_array(
             ));
         };
         if !setopt(req, handle.object(), option, &value, true)? {
-            return Ok(false);
+            return Ok(ControlFlow::Break(false));
         }
-    }
-    Ok(true)
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(walked.unwrap_or(true))
 }
