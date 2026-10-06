@@ -19,12 +19,19 @@ pub struct LinkedClass<H> {
     /// declare, then the traits' abstract methods it took, then the
     /// interfaces' methods nothing above declared.
     pub methods: Rows<Row<H>, Folded>,
+    /// `CE_CONSTANTS_TABLE` in php's order: the class's own constants, a
+    /// trait's among them, then each of the parent's table it does not
+    /// declare but the parent's private ones, then the interfaces'
+    /// constants nothing above declared. A row, never a value: the
+    /// value is the request's to evaluate.
+    pub constants: Rows<Row<H>, Exact>,
 }
 
 impl<H> Default for LinkedClass<H> {
     fn default() -> Self {
         LinkedClass {
             methods: Rows::default(),
+            constants: Rows::default(),
         }
     }
 }
@@ -125,13 +132,14 @@ impl<R, C: Case> Rows<R, C> {
         self.push(row, hash)
     }
 
-    /// `do_inherit_method` over each row of `from` in its order: the row
-    /// `copy` makes of it at the end, unless one of its name stands
-    /// already. A name is read only where two hashes are equal.
-    pub(crate) fn inherit<'n, 'm, S>(
+    /// `do_inherit_method`, or `do_inherit_class_constant`, over each
+    /// row of `from` in its order: the row `copy` makes of it at the
+    /// end, where it makes one, unless one of its name stands already.
+    /// A name is read only where two hashes are equal.
+    pub(crate) fn inherit<'n, 'm, S, O: Into<Option<R>>>(
         &mut self,
         from: &Rows<S, C>,
-        copy: impl Fn(&S) -> R,
+        copy: impl Fn(&S) -> O,
         named: impl Fn(&R) -> &'n [u8],
         named_from: impl Fn(&S) -> &'m [u8],
     ) {
@@ -141,8 +149,9 @@ impl<R, C: Case> Rows<R, C> {
             if self
                 .position(hash, |held| same::<C>(named(held), name))
                 .is_none()
+                && let Some(row) = copy(row).into()
             {
-                self.push(copy(row), hash);
+                self.push(row, hash);
             }
         }
     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use php_ext::call::{autoload, new_object};
 use php_ext::raising::throw_error;
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node};
 
@@ -936,9 +937,8 @@ fn prop_rows(req: &mut Request, data: &Value) -> Res<Vec<(K, Value)>> {
     match data.as_ref() {
         ValueRef::Array(a) => Ok(rows(*a)),
         ValueRef::Object(o) => {
-            let entries = o.entries(req)?;
-            Ok(entries
-                .into_iter()
+            let table = o.property_table(req)?;
+            Ok(walk::rows(req, table)
                 .map(|(k, v)| {
                     let k = match k {
                         Key::Int(n) => K::Int(n),

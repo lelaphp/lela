@@ -89,6 +89,7 @@ mod load_file;
 mod memory;
 pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 mod methods;
+pub use methods::MethodRow;
 use methods::visibility_string;
 mod objects;
 mod observing;

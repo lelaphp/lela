@@ -30,6 +30,7 @@ use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
+use crate::api::values::walk::{BuiltRows, ObjectTable, Table};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
 };
@@ -309,6 +310,62 @@ impl Request {
         handlers.get_properties(self, object)?;
         let table = self.heap.object_property_table(object.heap());
         Ok((object, self.fatal_of(table)?))
+    }
+
+    /// [`PhpObject::property_table`]: php's `Z_OBJPROP`, the class's
+    /// `get_properties` over the object a lazy one initialises to; the
+    /// table it lays down, or where the class builds a table of its own
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)),
+    /// the rows it builds.
+    pub(crate) fn property_table(&mut self, object: PhpObject) -> Result<Table, Thrown> {
+        let handlers = self.object_handlers(object.heap());
+        if handlers.answers_properties() {
+            let object = self.table_owner(object)?;
+            let rows = handlers.get_properties(self, object)?;
+            return Ok(Table::Built(BuiltRows::of(rows)));
+        }
+        let (owner, table) = self.pointer_table(object, false)?;
+        self.object_table(owner, table).map(Table::Object)
+    }
+
+    /// `owner`'s table `table`, laid down, in php's positions, each
+    /// declared slot named by the key [`Request::slot_names`] interns
+    /// for it. The `Err` is the memory limit refusing a name.
+    pub(crate) fn object_table(
+        &mut self,
+        owner: PhpObject,
+        table: PropertyTable,
+    ) -> Result<ObjectTable, Thrown> {
+        let names = if table.declared() > 0 {
+            self.slot_names(owner.class())?
+        } else {
+            Vec::new()
+        };
+        if names.len() < usize::try_from(table.declared()).unwrap_or(usize::MAX) {
+            return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                "InternalError: a declared slot of an object's table with no name",
+            ))));
+        }
+        Ok(ObjectTable::of(owner, table, names.into_boxed_slice()))
+    }
+
+    /// `zend_std_get_debug_info` past `__debugInfo`: the table
+    /// `get_properties` lays down, the class's `get_properties` called
+    /// first, or for a lazy object the table of the object its reader
+    /// reads, laid down and nothing initialised
+    /// (`zend_lazy_object_debug_info`, through
+    /// [`Request::lay_properties_no_lazy_init`]).
+    pub(crate) fn debug_table(&mut self, object: PhpObject) -> Result<ObjectTable, Thrown> {
+        let owner = if object.heap().laziness() == php_heap::Laziness::Eager {
+            let handlers = self.object_handlers(object.heap());
+            handlers.get_properties(self, object)?;
+            object
+        } else {
+            self.lay_properties_no_lazy_init(object)?
+        };
+        let table = self.heap.object_property_table(owner.heap());
+        let table = self.fatal_of(table)?;
+        self.object_table(owner, table)
     }
 
     /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`

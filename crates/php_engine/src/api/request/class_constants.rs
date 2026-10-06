@@ -7,7 +7,8 @@
 //! and the constants being worded are [`ClassConstants`]'s, whose fields
 //! no file but this one reads.
 
-use php_unit::decl::{ClassConstDecl, ClassKind, Name, Visibility};
+use php_unit::decl::{ClassConstDecl, ClassKind, Visibility};
+use php_unit::link::Row;
 
 use crate::api::call::write_prop;
 use crate::api::raising::Thrown;
@@ -53,46 +54,74 @@ impl Request {
         }
     }
 
-    /// `CE_CONSTANTS_TABLE(ce)` as `zend_do_inheritance` leaves it, read
-    /// by walking the declarations instead of copying them: the class's
-    /// own constants, then its parent's and its interfaces', and a
-    /// parent's private constant left out, which is
-    /// `do_inherit_class_constant`'s skip. The answer is the class that
-    /// declared it, which is the scope the expression is evaluated in
-    /// and the scope its visibility is checked against, and the
-    /// declaration itself.
+    /// `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce), name)`: the constant
+    /// under the name, byte for byte, in the class's linked record,
+    /// which holds the class's own constants, then what it inherited
+    /// from its parent, a parent's private one left out
+    /// (`do_inherit_class_constant`), and from its interfaces. The
+    /// answer is the class that declared it, which is the scope the
+    /// expression is evaluated in and the scope its visibility is
+    /// checked against, and the declaration itself. One lookup, the
+    /// name compared through the row, so nothing is allocated or cloned.
+    ///
+    /// A constant read through three levels and through an interface's
+    /// parent, and a parent's private one shadowed by the child's own:
+    ///
+    /// ```php
+    /// interface I { const IC = "I::IC"; }
+    /// interface J extends I { const JC = "J::JC"; }
+    /// class G { const A = "G::A"; private const P = "G::P"; const OV = "G::OV"; function gp() { return static::P; } }
+    /// class P extends G implements J { const OV = "P::OV"; }
+    /// class C extends P { private const P = "C::P"; function cp() { return self::P; } }
+    /// echo C::A, " ", C::OV, " ", C::IC, " ", C::JC, " ", (new C)->cp(), " ", (new G)->gp(), "\n";
+    /// var_dump(defined('C::IC'), defined('C::P'), defined('P::P'));
+    /// try { echo P::P; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo (new C)->gp(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// G::A P::OV I::IC J::JC C::P G::P
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// Undefined constant P::P
+    /// Cannot access private constant C::P
+    /// ```
     pub(super) fn class_constant_of(
         &self,
         class: ClassId,
         name: &[u8],
-        depth: u32,
-    ) -> Option<(ClassId, ClassConstDecl)> {
-        if depth > 64 {
-            return None;
-        }
-        let decl = self.class_decl(class)?;
-        if let Some(constant) = decl
+    ) -> Option<(ClassId, &ClassConstDecl)> {
+        let row = self.linked_class(class)?.constants.find(name, |row| {
+            self.row_constant(class, *row)
+                .map_or(&[][..], |(_, constant)| &constant.name.0)
+        })?;
+        self.row_constant(class, *row)
+    }
+
+    /// The constant a row of `class`'s constants table is, beside the
+    /// class that declared it.
+    fn row_constant(
+        &self,
+        class: ClassId,
+        row: Row<ClassId>,
+    ) -> Option<(ClassId, &ClassConstDecl)> {
+        let holder = row.holder_in(class);
+        let decl = self.class_decl(holder)?;
+        Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each
+    /// constant beside the class that declared it.
+    pub(super) fn constants_in_order(&self, class: ClassId) -> Vec<(ClassId, &ClassConstDecl)> {
+        let Some(record) = self.linked_class(class) else {
+            return Vec::new();
+        };
+        record
             .constants
+            .rows()
             .iter()
-            .find(|c| *c.name.0 == *name && (depth == 0 || c.visibility != Visibility::Private))
-        {
-            return Some((class, constant.clone()));
-        }
-        let sources: Vec<Name> = decl
-            .parent
-            .iter()
-            .chain(decl.interfaces.iter())
-            .cloned()
-            .collect();
-        for source in sources {
-            let Some(source) = self.class_named(&source.0) else {
-                continue;
-            };
-            if let Some(found) = self.class_constant_of(source, name, depth.saturating_add(1)) {
-                return Some(found);
-            }
-        }
-        None
+            .filter_map(|row| self.row_constant(class, *row))
+            .collect()
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -150,14 +179,17 @@ impl Request {
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
-        let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
+        let Some((declaring, constant)) = self.class_constant_of(class, name) else {
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",
                 &format!("Undefined constant {class_name}::{shown}"),
             ));
         };
-        let visibility = constant.visibility;
+        let (visibility, is_case) = (constant.visibility, constant.is_case);
+        let deprecated = crate::attributes::Flags::of(&constant.attributes)
+            .deprecated
+            .then(|| constant.clone());
         let asked = class;
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
@@ -184,7 +216,7 @@ impl Request {
                 &format!("Cannot access trait constant {class_name}::{shown} directly"),
             ));
         }
-        if crate::attributes::Flags::of(&constant.attributes).deprecated {
+        if let Some(constant) = deprecated {
             self.deprecated_class_constant(class, name, &constant)?;
         }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
@@ -193,14 +225,12 @@ impl Request {
         // hands out a case as the enum's instance for it and not as the
         // expression it was written with.
         self.update_enum_constants(class)?;
-        if constant.is_case {
+        if is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
         match fetch {
-            ConstantFetch::Opline => self.evaluated_class_constant(class, name, &constant),
-            ConstantFetch::Lookup => {
-                self.visited_class_constant(class, name, &constant, class_name)
-            }
+            ConstantFetch::Opline => self.evaluated_class_constant(class, name),
+            ConstantFetch::Lookup => self.visited_class_constant(class, name, class_name),
         }
     }
 
@@ -212,7 +242,7 @@ impl Request {
         let trait_asked = self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait);
-        self.class_constant_of(class, name, 0)
+        self.class_constant_of(class, name)
             .is_some_and(|(declaring, constant)| {
                 !trait_asked && self.may_access(declaring, constant.visibility)
             })
@@ -386,7 +416,10 @@ impl Request {
             self.addref(&case.as_value());
             return Ok(case);
         }
-        let Some((_, constant)) = self.class_constant_of(class, name, 0) else {
+        let Some(value) = self
+            .class_constant_of(class, name)
+            .map(|(_, constant)| constant.value.clone())
+        else {
             let class = self.class_name(class);
             return Err(crate::api::raising::throw_error(
                 self,
@@ -407,7 +440,7 @@ impl Request {
         let spelled = Owner::take(self, Value::string(spelled));
         write_prop(self, &case, b"name", spelled)?;
         if backing != php_unit::decl::EnumBacking::Pure {
-            let value = crate::api::call::eval_declared_made(self, &constant.value, Some(class))?;
+            let value = crate::api::call::eval_declared_made(self, &value, Some(class))?;
             let value = Owner::adopt(self, value);
             write_prop(self, &case, b"value", value)?;
         }

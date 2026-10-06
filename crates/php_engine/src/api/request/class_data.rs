@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use php_unit::decl::{ClassConstDecl, ClassKind};
+use php_unit::decl::ClassKind;
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -327,11 +327,13 @@ impl Request {
             self.update_class_constants(parent)?;
         }
         if !native && !updated_as_declared {
-            for name in self.constant_names(class) {
-                let Some((declaring, constant)) = self.class_constant_of(class, &name, 0) else {
-                    continue;
-                };
-                let value = self.evaluated_class_constant(declaring, &name, &constant)?;
+            let constants: Vec<(ClassId, Box<[u8]>)> = self
+                .constants_in_order(class)
+                .into_iter()
+                .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
+                .collect();
+            for (declaring, name) in constants {
+                let value = self.evaluated_class_constant(declaring, &name)?;
                 self.release(value);
             }
         }
@@ -369,10 +371,10 @@ impl Request {
                     | ConstExpr::ImmutableArray(_)
             )
         };
-        let constants = self.constant_names(class).iter().all(|name| {
-            self.class_constant_of(class, name, 0)
-                .is_none_or(|(_, constant)| written(&constant.value))
-        });
+        let constants = self
+            .constants_in_order(class)
+            .iter()
+            .all(|(_, constant)| written(&constant.value));
         let defaults = self
             .placed_properties(class)
             .iter()
@@ -392,40 +394,6 @@ impl Request {
         constants && defaults && statics
     }
 
-    /// The names of the class's constants table in php's order: its
-    /// own declaration's, then what inheritance appended, a parent's
-    /// that is not private and then an interface's, each name once.
-    fn constant_names(&self, class: ClassId) -> Vec<Box<[u8]>> {
-        let mut names: Vec<Box<[u8]>> = Vec::new();
-        let mut sources = vec![(class, 0)];
-        while let Some((at, depth)) = sources.pop() {
-            let Some(decl) = self.class_decl(at) else {
-                continue;
-            };
-            for constant in &decl.constants {
-                if (depth == 0 || constant.visibility != php_unit::decl::Visibility::Private)
-                    && !names.contains(&constant.name.0)
-                {
-                    names.push(constant.name.0.clone());
-                }
-            }
-            if depth >= 64 {
-                continue;
-            }
-            // Popped last-in first: the interfaces go on first so the
-            // parent's table is walked before them.
-            for interface in decl.interfaces.iter().rev() {
-                if let Some(found) = self.class_named(&interface.0) {
-                    sources.push((found, depth + 1));
-                }
-            }
-            if let Some(parent) = self.class_parent(at) {
-                sources.push((parent, depth + 1));
-            }
-        }
-        names
-    }
-
     /// `zend_update_class_constant` over the constant `name` that
     /// `declaring` declares: its value from the row where the request
     /// evaluated it before, and otherwise the expression it was written
@@ -437,7 +405,6 @@ impl Request {
         &mut self,
         declaring: ClassId,
         name: &[u8],
-        constant: &ClassConstDecl,
     ) -> Result<Value, Thrown> {
         if let Some((_, value)) = self
             .class_data
@@ -449,8 +416,17 @@ impl Request {
             self.addref(&value);
             return Ok(value);
         }
-        let evaluated = crate::api::call::eval_declared(self, &constant.value, Some(declaring))?;
-        let value = match &constant.ty {
+        let Some((expr, ty)) = self
+            .class_constant_of(declaring, name)
+            .map(|(_, constant)| (constant.value.clone(), constant.ty.clone()))
+        else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a class constant evaluated in a class whose table holds none of its name",
+            ));
+        };
+        let evaluated = crate::api::call::eval_declared(self, &expr, Some(declaring))?;
+        let value = match &ty {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
                 match crate::ops::verify_class_constant_type(self, *evaluated, ty, declaring, name)
                 {
@@ -490,7 +466,10 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Result<Value, Thrown> {
-        let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
+        let Some((declaring, is_case)) = self
+            .class_constant_of(class, name)
+            .map(|(declaring, constant)| (declaring, constant.is_case))
+        else {
             let class_name = self.class_name(class);
             return Err(crate::api::raising::throw_error(
                 self,
@@ -502,10 +481,10 @@ impl Request {
             ));
         };
         self.update_enum_constants(declaring)?;
-        if constant.is_case {
+        if is_case {
             return self.enum_case(declaring, name).map(|case| case.as_value());
         }
-        self.evaluated_class_constant(declaring, name, &constant)
+        self.evaluated_class_constant(declaring, name)
     }
 
     /// `zend_get_class_constant_ex`'s update of the constant `name` that
@@ -533,12 +512,11 @@ impl Request {
         &mut self,
         declaring: ClassId,
         name: &[u8],
-        constant: &ClassConstDecl,
         class_name: &str,
     ) -> Result<Value, Thrown> {
         let data = self.class_data.rows.entry(declaring).or_default();
         if data.constants.iter().any(|(held, _)| **held == *name) {
-            return self.evaluated_class_constant(declaring, name, constant);
+            return self.evaluated_class_constant(declaring, name);
         }
         if data.visiting.iter().any(|held| **held == *name) {
             return Err(crate::api::raising::throw_error(
@@ -551,7 +529,7 @@ impl Request {
             ));
         }
         data.visiting.push(name.into());
-        let evaluated = self.evaluated_class_constant(declaring, name, constant);
+        let evaluated = self.evaluated_class_constant(declaring, name);
         if let Some(data) = self.class_data.rows.get_mut(&declaring) {
             data.visiting.retain(|held| **held != *name);
         }

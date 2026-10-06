@@ -20,7 +20,7 @@ use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Guarded, Hold};
-use php_ext::values::{HeldRow, Key, Owner, PhpString, RecursionGuard, Value};
+use php_ext::values::{Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -665,6 +665,57 @@ const INDENT: usize = 4;
 /// )
 /// 18
 /// ```
+///
+/// An object's rows are walked as `print_hash` walks the table
+/// `zend_get_properties_for` holds: a nested `__debugInfo` that unsets
+/// a dynamic row ahead separates the table, and the walk prints the row
+/// it began with, never the freed string:
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class O { public int $u; public $b = 'b'; }
+/// class N { function __debugInfo() { global $o; unset($o->d); $o->b = str_repeat('c', 3); $GLOBALS['x'] = str_repeat('x', 3); return []; } }
+/// $o = new O; $o->a = new N; $o->d = str_repeat('d', 3); $o->e = 'e';
+/// print_r($o);
+/// ```
+/// ```expect
+/// O Object
+/// (
+///     [b] => b
+///     [a] => N Object
+///         (
+///         )
+///
+///     [d] => ddd
+///     [e] => e
+/// )
+/// ```
+///
+/// The object's guard is cleared before the table is released, so a
+/// destructor the release serves prints the object whole:
+///
+/// ```php
+/// class D { function __destruct() { global $o, $n; if ($n++ < 1) { echo "dtor:"; print_r($o); } } }
+/// class O { public $x = 1; function __debugInfo() { return ['d' => new D]; } }
+/// $n = 0; $o = new O;
+/// print_r($o);
+/// ```
+/// ```expect
+/// dtor:O Object
+/// (
+///     [d] => D Object
+///         (
+///         )
+///
+/// )
+/// O Object
+/// (
+///     [d] => D Object
+///         (
+///         )
+///
+/// )
+/// ```
 #[php_function]
 fn print_r(
     req: &mut Request,
@@ -690,8 +741,9 @@ fn print_r(
 }
 
 /// One value as `zend_print_zval_r_to_buf(buf, expr, indent)` renders
-/// it: an array and an object open their name and hand their rows to
-/// [`hash`], a reference is what the cell holds, and everything else is
+/// it: an array and an object open their name and print their rows as
+/// `print_hash` does ([`Printed`]), each walked with a foreach walk, a
+/// reference is what the cell holds, and everything else is
 /// `zval_get_string`, which is `1` for `true` and nothing at all for
 /// `false` and `null`.
 ///
@@ -779,25 +831,27 @@ pub(super) fn render(
         }
         // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: the
         // table a class shows in place of its properties, which is what
-        // `__debugInfo` and a `Closure` show, and the members otherwise,
-        // held until its rows are rendered, php's
+        // `__debugInfo` and a `Closure` show, and the object's own table
+        // otherwise, held until its rows are rendered, php's
         // `zend_release_properties`. A typed property nothing has
         // written is no row of php's walk (`ZEND_HASH_FOREACH_KEY_VAL_IND`).
         let held = object.props_held(req, PropertyPurpose::Debug)?;
-        let rows: Vec<(Key, Value)> = held
-            .rows()
-            .iter()
-            .filter_map(|(key, row)| match row {
-                HeldRow::Value(value) => Some((key.clone(), *value)),
-                HeldRow::Uninitialized(_) => None,
-            })
-            .collect();
         object.protect_in(req, RecursionGuard::Debug);
-        let rendered = hash(req, out, &rows, indent, true);
+        let mut printed = Printed::open(out, indent, true);
+        let walked = walk::properties(req, &held, |req, row| {
+            printed.row(req, out, row.key(), row.value())?;
+            Ok(ControlFlow::<()>::Continue(()))
+        });
+        // The guard cleared before the release, as php's
+        // `zend_release_properties` follows its unprotect, so a
+        // destructor the release serves prints the object whole.
         object.unprotect_in(req, RecursionGuard::Debug);
+        let released = held.release(req);
         // What the table left pending was raised before any row's, so a
-        // row's is chained onto it.
-        return match (held.release(req), rendered) {
+        // row's is chained onto it; a fatal a row raised ends the print
+        // where it stands.
+        let rendered = walked.and_then(|_| printed.close(out));
+        return match (released, rendered) {
             (Err(earlier), Err(later)) => Err(earlier.chain(req, later)),
             (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
             (Ok(()), Ok(())) => Ok(()),
@@ -811,26 +865,6 @@ pub(super) fn render(
     out.extend_from_slice(string.as_bytes());
     string.give_up(req);
     Ok(())
-}
-
-/// `print_hash(buf, ht, indent, is_object)`: the rows between a `(` and
-/// a `)` at this level, each `[key] => ` one step in and its value one
-/// step further, with the newline php writes after every row. An
-/// object's key is `zend_unmangle_property_name_ex`'d back out, so a
-/// protected property is `[p:protected]` and a private one
-/// `[p:C:private]` under the class that declared it.
-fn hash(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    rows: &[(Key, Value)],
-    indent: usize,
-    is_object: bool,
-) -> Result<(), Thrown> {
-    let mut printed = Printed::open(out, indent, is_object);
-    for (key, element) in rows {
-        printed.row(req, out, key, element)?;
-    }
-    printed.close(out)
 }
 
 /// One `print_hash` as it is written: its indent, whether its keys are

@@ -43,6 +43,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
 use php_ext::request::{BodyLimits, Request};
+use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
@@ -385,8 +386,9 @@ fn array_rows(array: PhpArray) -> Vec<(KeyText, Value)> {
 /// instance of, a private one from its declaring class; each unmangled.
 fn object_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(KeyText, Value)>, Thrown> {
     let scope = req.scope();
+    let table = object.property_table(req)?;
     let mut rows = Vec::new();
-    for (key, value) in object.entries(req)? {
+    for (key, value) in walk::rows(req, table) {
         let name = match key {
             Key::Int(n) => {
                 rows.push((KeyText::Index(n), value));
