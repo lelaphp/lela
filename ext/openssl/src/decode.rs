@@ -10,7 +10,6 @@
 use std::ffi::{CStr, CString};
 
 use php_ext::abi::{Instance, Union};
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
 use php_ext::request::{Request, Resolve};
 use php_ext::values::{PhpString, Value, ValueRef};
@@ -205,8 +204,8 @@ pub(crate) fn cert_from_value(
     {
         return Ok(held.cert.clone());
     }
-    let text = to_string(req, value)?;
-    Ok(cert_from_str(req, text.as_bytes(), origin))
+    let text = crate::xp_ssl::string_of(req, value)?;
+    Ok(cert_from_str(req, &text, origin))
 }
 
 /// `php_openssl_array_to_X509_sk`: the certificates an array lists, or

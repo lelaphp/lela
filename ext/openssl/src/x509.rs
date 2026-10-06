@@ -8,7 +8,6 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -697,8 +696,8 @@ pub(crate) fn setup_verify(
     };
     let (mut files, mut dirs) = (0, 0);
     for (_, item) in calist.map(|a| a.snapshot()).unwrap_or_default() {
-        let text = to_string(req, &item)?;
-        let Some(path) = check_path(req, text.as_bytes(), Origin::Item(arg, None), false) else {
+        let text = crate::xp_ssl::string_of(req, &item)?;
+        let Some(path) = check_path(req, &text, Origin::Item(arg, None), false) else {
             continue;
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();

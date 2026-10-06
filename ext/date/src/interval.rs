@@ -221,6 +221,7 @@ fn scalar(value: &Value) -> bool {
 fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
     let s = to_string(req, value)?;
     let text = String::from_utf8_lossy(s.as_bytes()).into_owned();
+    req.release(Value::string(s));
     let t = text.trim_start();
     let (sign, digits) = match t.as_bytes().first() {
         Some(b'-') => (-1i64, &t[1..]),

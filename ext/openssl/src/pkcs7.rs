@@ -4,7 +4,6 @@
 
 use php_ext::abi::{Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -33,13 +32,13 @@ pub(crate) fn write_headers(
     headers: Option<PhpArray>,
 ) -> Result<bool, Thrown> {
     for (key, value) in headers.map(|h| h.snapshot()).unwrap_or_default() {
-        let text = to_string(req, &value)?;
+        let text = crate::xp_ssl::string_of(req, &value)?;
         let mut line = Vec::new();
         if let Key::Str(name) = &key {
             line.extend_from_slice(c_string(name.as_bytes()).as_bytes());
             line.extend_from_slice(b": ");
         }
-        line.extend_from_slice(c_string(text.as_bytes()).as_bytes());
+        line.extend_from_slice(c_string(&text).as_bytes());
         line.push(b'\n');
         if !out.write(&line) {
             store_errors(req);

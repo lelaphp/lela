@@ -132,7 +132,7 @@ pub(crate) fn new_fault(req: &mut Request, f: &Fault<'_>) -> R<PhpObject> {
 /// `add_soap_fault_ex`: a fresh fault in `lang`, kept in the client's
 /// `__soap_fault` or the server's; the fault answered with one more owner,
 /// the caller's.
-pub(crate) fn add_soap_fault(
+pub(crate) fn add_soap_fault_ex(
     req: &mut Request,
     obj: PhpObject,
     code: &[u8],
@@ -162,6 +162,23 @@ pub(crate) fn add_soap_fault(
     req.addref(&value);
     obj.set_slot(req, index, value)?;
     Ok(fault)
+}
+
+/// `add_soap_fault`: [`add_soap_fault_ex`] for a caller that only keeps
+/// the fault where it is kept, the caller's owner given up,
+/// `zval_ptr_dtor(&fault)`.
+pub(crate) fn add_soap_fault(
+    req: &mut Request,
+    obj: PhpObject,
+    code: &[u8],
+    string: &[u8],
+    actor: Option<&[u8]>,
+    detail: Option<Value>,
+    lang: &[u8],
+) -> R<()> {
+    let fault = add_soap_fault_ex(req, obj, code, string, actor, detail, lang)?;
+    req.release(Value::object(fault));
+    Ok(())
 }
 
 /// One of `SoapFault`'s slots, as [`slot`].

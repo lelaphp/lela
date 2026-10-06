@@ -74,7 +74,10 @@ fn answer(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Resu
             call.return_double(f);
             Ok(())
         }
-        _ => to_string(req, &returned.deref()).map(|text| call.return_text(text.as_bytes())),
+        _ => to_string(req, &returned.deref()).map(|text| {
+            call.return_text(text.as_bytes());
+            req.release(Value::string(text));
+        }),
     };
     req.release(returned);
     answered

@@ -28,3 +28,20 @@ fn set_authorizer_on_a_closed_connection_throws_once() {
         "The SQLite3 object has not been correctly initialised or is already closed alone\n",
     );
 }
+
+/// What a user function or an aggregate's final returns is handed to
+/// the library as text, `sqlite3_result_text` over the string
+/// `zval_get_string` made, which is given up after (#2099).
+#[test]
+fn a_user_function_s_answer_is_given_up() {
+    served(
+        r#"<?php
+$db = new SQLite3(':memory:');
+$db->exec("CREATE TABLE t (a); INSERT INTO t VALUES ('x'), ('y')");
+$db->createFunction('twice', fn ($v) => $v . $v);
+$db->createAggregate('cat', fn ($c, $row, $v) => "$c$v", fn ($c, $rows) => "$c/$rows");
+var_dump($db->querySingle('SELECT twice(a) FROM t'), $db->querySingle('SELECT cat(a) FROM t'));
+"#,
+        "string(2) \"xx\"\nstring(4) \"xy/0\"\n",
+    );
+}
