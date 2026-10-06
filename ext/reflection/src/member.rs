@@ -89,7 +89,7 @@ fn hook_reflector(
     scope: ClassId,
     decl: &MethodDecl,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let object = super::class::method_factory(req, &decl.function.name.0, scope, scope)?;
+    let object = super::class::method_factory(req, &decl.function.name.0, scope, scope, None)?;
     super::keep_hook(req, *object);
     Ok(object)
 }
