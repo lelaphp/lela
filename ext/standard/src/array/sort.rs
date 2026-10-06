@@ -14,7 +14,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::compare;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value};
+use php_ext::values::{Key, Owner, PhpArray, Value};
 
 use super::constants::{
     SORT_ASC, SORT_DESC, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
@@ -956,12 +956,13 @@ fn array_multisort(
     // `GC_ADDREF(hashes[i])` (GH-22678): the sort holds each table while
     // it compares, so a comparison that writes a variable separates it
     // and every element the columns name stays alive.
-    for (array, _) in &arrays {
-        req.addref(&array.to_value());
-    }
+    let held: Vec<Owner<PhpArray>> = arrays
+        .iter()
+        .map(|(array, _)| Owner::take(req, *array))
+        .collect();
     let sorted = multisort(req, &arrays, &sorts, size);
-    for (array, _) in &arrays {
-        req.release(array.to_value());
+    for owner in held {
+        owner.give_up(req);
     }
     sorted.map(|()| True)
 }
