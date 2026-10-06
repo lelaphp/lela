@@ -216,3 +216,18 @@ fn str_replace_gives_up_the_strings_it_reads() {
         "rrrrrrrrrrrrrrrrrrrr8rrrrrrrrrrrrrrrrrrrr\n-1=-1\nk=rrrrrrrrrrrrrrrrrrrr\n3=1.5\nt\n"
     );
 }
+
+/// `implode` converts a piece that is neither a string nor an integer
+/// with `zval_get_tmp_string` and gives the string up once its bytes are
+/// copied, `zend_tmp_string_release`: what an object's `__toString()`
+/// returns and a float's rendering (#2098, #2085).
+#[test]
+fn the_strings_implode_converts_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+class A { function __toString(): string { return str_repeat('a', 3); } }
+echo implode(',', [new A, 2.5, new A]), ' ', implode([1.5]), "\n";
+"#,
+    );
+    assert_eq!(stdout, "aaa,2.5,aaa 1.5\n");
+}
