@@ -1954,19 +1954,20 @@ fn array_node(
 }
 
 /// [`array_node`]'s elements written into `array`, which stays the
-/// caller's whether they all were or one threw: a spread's operand
-/// given up once spread, as `zend_ast_add_unpacked_element`'s caller
-/// gives it up, and an element's key where its value or its write
-/// threw. An element with no key past the last integer one, or a
+/// caller's whether they all were or one threw: a spread's operand and
+/// an element's key given up once written, as
+/// `zend_ast_add_unpacked_element`'s caller and
+/// `zend_ast_add_array_element` give them up, and the key where its
+/// value threw. An element with no key past the last integer one, or a
 /// spread's, throws php's `Error`, and the array is given up with it:
 ///
 /// ```php
 /// function test($x = [PHP_INT_MAX => 42, 'foo']) {}
 /// try { test(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// class K { const S = [7 => 1, NOPE]; const U = [PHP_INT_MAX => 1, ...[2]]; }
+/// class K { const S = ['k' . 'x' => 1, NOPE]; const U = [PHP_INT_MAX => 1, ...[2]]; }
 /// try { K::S; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// try { K::U; } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// function f($x = [1 => 'c' . 'd', 'e' . 'f' => NOPE]) {}
+/// function f($x = ['a' . 'b' => 'c' . 'd', 'e' . 'f' => NOPE]) {}
 /// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
@@ -2012,10 +2013,10 @@ fn array_elements(
             },
             None => crate::ops::Offset::Next,
         };
-        // The kernel takes the value and reads the key; where the
-        // write threw, the key is given up with the array.
+        // The kernel takes the value and reads the key, which the
+        // array holds an owner of where it wrote it.
         let added = crate::ops::add_array_element(req, *array, offset, value);
-        if let (Err(_), Some(key)) = (&added, key) {
+        if let Some(key) = key {
             req.release_nogc(key);
         }
         added?;

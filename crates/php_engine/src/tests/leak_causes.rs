@@ -51,3 +51,20 @@ try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     );
     assert_eq!(exit, 0);
 }
+
+/// A constant expression that evaluates cleanly gives up the key it
+/// evaluated once the array holds its own owner of it (#2061).
+#[test]
+fn a_constant_array_gives_up_the_keys_it_evaluated() {
+    let (stdout, exit) = armed(
+        r#"<?php
+const A = "ok";
+function f7($x = array('aaa' => A)) { echo $x['aaa'], "\n"; }
+f7();
+const T = ['fo' . 'o' => 1, 'b' => 'a' . 'r'];
+foreach (T as $k => $v) { echo $k, '=', $v, "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "ok\nfoo=1\nb=ar\n");
+    assert_eq!(exit, 0);
+}
