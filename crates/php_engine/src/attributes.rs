@@ -20,7 +20,7 @@ use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, eval_declared_made, instantiate_named_made};
 use crate::api::raising::{Thrown, raise, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
 /// `fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)` of a
 /// function, and `CONST_DEPRECATED` of a constant: what the
@@ -583,7 +583,8 @@ impl Attribute {
         this: This<Self>,
         #[php(default = Attribute::TARGET_ALL)] flags: i64,
     ) -> Result<(), Thrown> {
-        this.object().set_slot(req, 0, Value::int(flags))
+        let flags = Owner::take(req, Value::int(flags));
+        this.object().set_slot(req, 0, flags)
     }
 }
 

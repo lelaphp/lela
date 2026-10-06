@@ -1864,8 +1864,13 @@ impl PhpObject {
     /// the declared count is refused as the internal-error fatal, the
     /// value released; a native that knows its class's layout never
     /// reaches it.
-    pub fn set_slot(&self, req: &mut Request, index: u32, value: Value) -> Result<(), Thrown> {
-        req.write_declared_slot(self.0, index, value)
+    pub fn set_slot(
+        &self,
+        req: &mut Request,
+        index: u32,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        req.write_declared_slot(self.0, index, value.hand_on())
     }
 
     /// `GC_IS_RECURSIVE`: whether a walk is already inside this object,
