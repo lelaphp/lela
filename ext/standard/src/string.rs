@@ -26,7 +26,6 @@ pub use strip_tags::strip_tags_ex;
 use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
@@ -156,7 +155,7 @@ pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> Owner<PhpString>
 
 /// `zval_get_string` of a value read for its bytes, the string given up.
 pub(crate) fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = to_string(req, value)?;
+    let string = php_ext::coerce::to_string(req, value)?;
     let bytes = string.as_bytes().to_vec();
     string.give_up(req);
     Ok(bytes)
@@ -1643,7 +1642,7 @@ fn implode_array(
         } else if let Some(n) = element.as_int() {
             out.extend_from_slice(n.to_string().as_bytes());
         } else {
-            out.extend_from_slice(&string_bytes(req, &element)?);
+            out.extend_from_slice(&crate::tmp_string_bytes(req, &element)?);
         }
     }
     PhpString::new(req, &out)

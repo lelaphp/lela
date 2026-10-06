@@ -436,9 +436,7 @@ fn import_simplexml_common(
         && let Some(doc) = node.doc()
     {
         let private = private::Private::new(req)?;
-        if let Some(d) = dom_mut(req, *made) {
-            d.obj.set_private_data(Box::new(private));
-        }
+        private::lay_down(req, *made, private);
         modern::convert_to_modern(req, *made, doc);
     }
     Ok(made.into_value())
@@ -1444,7 +1442,15 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             copied = Some((n, cloned));
         }
     }
-    let clone = object.clone_with(req, payload)?.hand_on_unmigrated();
+    let clone = match object.clone_with(req, payload) {
+        Ok(clone) => clone.hand_on_unmigrated(),
+        Err(thrown) => {
+            if let Some(private) = fresh {
+                private.free(req);
+            }
+            return Err(thrown);
+        }
+    };
     if let Some(d) = dom_mut(req, clone) {
         d.obj.set_object(clone);
     }
@@ -1453,10 +1459,8 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     {
         copy_document_ref(req, object, clone);
     }
-    if let Some(private) = fresh
-        && let Some(d) = dom_mut(req, clone)
-    {
-        d.obj.set_private_data(Box::new(private));
+    if let Some(private) = fresh {
+        private::lay_down(req, clone, private);
     }
     Ok(clone)
 }

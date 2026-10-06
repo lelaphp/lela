@@ -4,15 +4,14 @@
 //! `pdo_stmt_init` installs on it.
 
 use php_ext::abi::{
-    DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead,
-    PropertyTest, Refusals, Std,
+    DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Refusals, Std,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
@@ -321,70 +320,29 @@ impl ObjectHandlers for Handlers {
     }
 
     /// What `var_dump` shows, the table `row_get_properties_for` builds
-    /// for `ZEND_PROP_PURPOSE_DEBUG`, one owner the caller's.
+    /// for `ZEND_PROP_PURPOSE_DEBUG`, one owner the caller's, as php's
+    /// temporary table is the reader's to release: the statement's
+    /// properties, then each column but one named `queryString`, its
+    /// value fetched for this table and handed to it.
     fn get_debug_info(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
-        let PropertiesFor::Rows(rows) =
-            self.get_properties_for(req, object, PropertyPurpose::Debug)?
-        else {
+        let Some(stmt) = statement(req, object) else {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;
-        for (key, value) in rows {
-            req.addref(&value);
-            out.set(req, key, value)?;
+        let filled = debug_rows(req, stmt, &mut out);
+        if let Err(thrown) = filled {
+            out.give_up(req);
+            return Err(thrown);
         }
         Ok(Some(out.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
         true
-    }
-
-    /// `row_get_properties_for` under `ZEND_PROP_PURPOSE_DEBUG`: the
-    /// statement's properties, then each column but one named
-    /// `queryString`.
-    fn get_properties_for(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-        purpose: PropertyPurpose,
-    ) -> Result<PropertiesFor, Thrown> {
-        if purpose != PropertyPurpose::Debug {
-            return Ok(PropertiesFor::Standard);
-        }
-        let Some(stmt) = statement(req, object) else {
-            return Ok(PropertiesFor::Standard);
-        };
-        // Views, as `get_properties_for` answers them; a column's value is
-        // the one this read made, which the request's end frees.
-        let mut rows = Std.get_properties(req, stmt)?;
-        let names: Vec<Vec<u8>> = stmt::read(req, stmt, |s| {
-            s.columns
-                .as_ref()
-                .map(|c| c.iter().map(|c| c.name.clone()).collect())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-        for (at, name) in names.iter().enumerate() {
-            if name == b"queryString" {
-                continue;
-            }
-            let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
-            if let Some(at) = rows
-                .iter()
-                .position(|(k, _)| matches!(k, Key::Str(k) if k.as_bytes() == name.as_slice()))
-            {
-                rows[at].1 = value;
-            } else {
-                let key = PhpString::new(req, name)?.hand_on_unmigrated();
-                rows.push((Key::Str(key), value));
-            }
-        }
-        Ok(PropertiesFor::Rows(rows))
     }
 
     /// `row_get_ctor`.
@@ -400,4 +358,40 @@ impl ObjectHandlers for Handlers {
             "You may not create a PDORow manually",
         ))
     }
+}
+
+/// `row_get_properties_for`'s table under `ZEND_PROP_PURPOSE_DEBUG`
+/// laid into `out`: `zend_array_dup` of the statement's properties, each
+/// row one more owner, then each column but `queryString` fetched,
+/// `zend_hash_update` under its name.
+fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> Result<(), Thrown> {
+    for (key, value) in Std.get_properties(req, stmt)? {
+        if let Key::Str(name) = key {
+            req.addref(&Value::string(name));
+        }
+        req.addref(&value);
+        out.set(req, key, value)?;
+    }
+    let names: Vec<Vec<u8>> = stmt::read(req, stmt, |s| {
+        s.columns
+            .as_ref()
+            .map(|c| c.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+    for (at, name) in names.iter().enumerate() {
+        if name == b"queryString" {
+            continue;
+        }
+        let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
+        let key = match PhpString::new(req, name) {
+            Ok(key) => Key::Str(key.hand_on_unmigrated()),
+            Err(thrown) => {
+                req.release(value);
+                return Err(thrown);
+            }
+        };
+        out.set(req, key, value)?;
+    }
+    Ok(())
 }

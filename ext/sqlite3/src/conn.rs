@@ -1335,11 +1335,14 @@ impl SQLite3 {
     ) -> Answer<bool> {
         let object = this.object();
         let handler = callback.map(|callable| kept(req, callable, 1));
-        let Ok((db, _)) = open_db(req, object) else {
-            if let Some(handler) = handler {
-                handler.release(req);
+        let db = match open_db(req, object) {
+            Ok((db, _)) => db,
+            Err(thrown) => {
+                if let Some(handler) = handler {
+                    handler.release(req);
+                }
+                return Err(thrown);
             }
-            return Err(not_ready(req, "SQLite3"));
         };
         if let Some(old) = db.set_authorizer(handler) {
             old.release(req);

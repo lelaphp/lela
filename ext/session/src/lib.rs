@@ -165,6 +165,11 @@ struct State {
     thrown: Option<Thrown>,
     /// `PS(rfc1867_progress)`: an upload's progress while its body is read.
     progress: Option<progress::Progress>,
+    /// The strings `session_set_cookie_params` made for a key its array
+    /// gave twice and overwrote with the second, which php's leaves held
+    /// to the request's end (`memory_get_usage()` reads them), given up
+    /// at `rshutdown` with the rest of the request's.
+    overwritten: Vec<PhpString>,
 }
 
 /// The extension value (design §7.1): the natives `session.stub.php`

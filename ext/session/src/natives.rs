@@ -990,8 +990,10 @@ fn session_set_cookie_params(
             if let (Some(slot), Some(made)) = (slot, made) {
                 // A key given twice keeps the last; php overwrites the
                 // first without releasing it, so it lives to the request's
-                // end, as `memory_get_usage()` reads it.
-                *slot = Some(made);
+                // end, as `memory_get_usage()` reads it, on the state.
+                if let Some(Cookie::Made(first)) = slot.replace(made) {
+                    req.state::<State>().overwritten.push(first);
+                }
                 found += 1;
                 continue;
             }

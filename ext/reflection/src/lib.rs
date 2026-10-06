@@ -8252,6 +8252,9 @@ impl ReflectionExtension {
         for declared in req.extension_constants(extension) {
             let name = declared.0.to_vec();
             let value = constant(req, &name)?.unwrap_or_default();
+            // The lookup is a view and the row is the array's:
+            // `ZVAL_COPY_OR_DUP`, so the table keeps its own count.
+            req.addref(&value);
             let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
             constants.set(req, key, value)?;
         }

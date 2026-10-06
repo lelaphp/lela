@@ -21,8 +21,8 @@ use crate::message::{
 };
 use crate::model::{BindingType, Sdl};
 use crate::shared::{
-    ClientSlot, add_soap_fault, client_slot, instance_of, is_null, new_sdl_object, sdl_of,
-    set_client_slot,
+    ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, instance_of, is_null,
+    new_sdl_object, sdl_of, set_client_slot,
 };
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State};
 
@@ -107,7 +107,7 @@ fn fail<T>(req: &mut Request, this: PhpObject, code: &str, message: &str) -> R<T
                 ValueRef::Bool(false)
             );
             if exceptions {
-                let fault = add_soap_fault(
+                let fault = add_soap_fault_ex(
                     req,
                     this,
                     code.as_bytes(),
@@ -1092,8 +1092,7 @@ fn do_request(
             None,
             None,
             b"en",
-        )?
-        .give_up(req);
+        )?;
         return Ok((false, None));
     };
     let p0 = PhpString::new(req, &buf)?.into_value();
@@ -1127,8 +1126,7 @@ fn do_request(
                 None,
                 None,
                 b"en",
-            )?
-            .give_up(req);
+            )?;
         }
         ret = false;
     } else if trace {
@@ -1311,7 +1309,7 @@ fn soap_call_body(
             let mut error = b"Function (\"".to_vec();
             error.extend_from_slice(function);
             error.extend_from_slice(b"\") is not a valid method for this service");
-            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?.give_up(req);
+            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?;
         }
     } else {
         let uri = client_slot(this, ClientSlot::Uri);
@@ -1324,8 +1322,7 @@ fn soap_call_body(
                 None,
                 None,
                 b"en",
-            )?
-            .give_up(req);
+            )?;
         } else if location.is_none() {
             add_soap_fault(
                 req,
@@ -1335,8 +1332,7 @@ fn soap_call_body(
                 None,
                 None,
                 b"en",
-            )?
-            .give_up(req);
+            )?;
         } else {
             let call_uri = call_uri
                 .map(<[u8]>::to_vec)
@@ -1400,7 +1396,8 @@ fn soap_call_body(
         if fault.as_object().is_some() {
             return_value = owned(req, fault);
         } else {
-            let made = add_soap_fault(req, this, b"Client", b"Unknown Error", None, None, b"en")?;
+            let made =
+                add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, b"en")?;
             return_value = made.into_value().hand_on_unmigrated();
         }
     } else if fault.as_object().is_some() {

@@ -7,7 +7,7 @@ use php_ext::abi::{
     Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
+use php_ext::call::{Function, known_method, lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::decl::Name;
 use php_ext::raising::{
@@ -1192,9 +1192,8 @@ fn construct_statement(
     let Some(callable) = known_method(req, stmt.class(), &constructor, Some(stmt)) else {
         return Ok(());
     };
-    let args = args.unwrap_or_else(PhpArray::empty);
-    call_array(req, &callable, args)?.give_up(req);
-    Ok(())
+    // The statement's owner is the caller's, given up where this throws.
+    crate::fetch::call_constructor(req, &callable, args)
 }
 
 // ---- transactions

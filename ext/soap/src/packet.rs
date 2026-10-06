@@ -29,7 +29,7 @@ fn bad(
     if let Some(d) = doc {
         d.free_document();
     }
-    add_soap_fault(req, this, code, text, None, None, b"en")?.give_up(req);
+    add_soap_fault(req, this, code, text, None, None, b"en")?;
     Ok((false, Value::null()))
 }
 
@@ -356,7 +356,7 @@ fn read_fault(
     if let Some(d) = details {
         req.release(d);
     }
-    added?.give_up(req);
+    added?;
     Ok(())
 }
 

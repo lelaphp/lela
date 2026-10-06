@@ -216,3 +216,36 @@ fn str_replace_gives_up_the_strings_it_reads() {
         "rrrrrrrrrrrrrrrrrrrr8rrrrrrrrrrrrrrrrrrrr\n-1=-1\nk=rrrrrrrrrrrrrrrrrrrr\n3=1.5\nt\n"
     );
 }
+
+/// `implode` converts a piece that is neither a string nor an integer
+/// with `zval_get_tmp_string` and gives the string up once its bytes are
+/// copied, `zend_tmp_string_release`: what an object's `__toString()`
+/// returns and a float's rendering (#2098, #2085).
+#[test]
+fn the_strings_implode_converts_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+class A { function __toString(): string { return str_repeat('a', 3); } }
+echo implode(',', [new A, 2.5, new A]), ' ', implode([1.5]), "\n";
+"#,
+    );
+    assert_eq!(stdout, "aaa,2.5,aaa 1.5\n");
+}
+
+/// `pack` gives up the string each `a`, `A`, `Z`, `h` and `H` code
+/// reads, as php's `zend_tmp_string_release`, and the string a `*`
+/// count converted its argument to where it stood, as php's frame gives
+/// up its slot (#2095).
+#[test]
+fn pack_gives_up_the_strings_it_reads() {
+    let stdout = armed(
+        "<?php $s = str_repeat('s', 2); $h = str_repeat('4', 2);\n\
+         echo bin2hex(pack('a4A*Z*h*H2', $s, $s, $s, $h, $h)), \"\\n\";\n\
+         echo pack('a*', 12.5), \"\\n\";\n\
+         try { pack('a*C', $s); } catch (ValueError $e) { echo $e->getMessage(), \"\\n\"; }\n",
+    );
+    assert_eq!(
+        stdout,
+        "7373000073737373004444\n12.5\nType C: too few arguments\n"
+    );
+}

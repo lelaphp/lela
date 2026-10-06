@@ -832,7 +832,8 @@ fn finish(
     url: Option<Vec<u8>>,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = new_html_doc(req)?;
-    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?;
+    let private = crate::private::Private::new(req)?;
+    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
     let converted = dom_mut(req, *object).and_then(|d| {
         convert(
@@ -1051,5 +1052,6 @@ pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<Owner<P
     }
     let doc = new_html_doc(req)?;
     doc.set_doc_string(DocString::Encoding, Some(encoding));
-    crate::modern::document_object(req, "Dom\\HTMLDocument", doc)
+    let private = crate::private::Private::new(req)?;
+    crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)
 }

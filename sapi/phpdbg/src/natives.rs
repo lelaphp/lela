@@ -475,11 +475,7 @@ fn phpdbg_get_executable(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let (by_function, by_opcode) = shape(req, options);
     let sources = session::with(|s| s.sources.clone()).unwrap_or_default();
-    let files_key = PhpString::new(req, b"files")?;
-    let named = options
-        .get(&Key::Str(*files_key))
-        .map(|value| value.deref());
-    files_key.give_up(req);
+    let named = options.find(b"files").map(|value| value.deref());
     let files: Vec<Vec<u8>> = if let Some(named) = named
         .as_ref()
         .and_then(Value::as_array)
@@ -487,9 +483,9 @@ fn phpdbg_get_executable(
     {
         let mut files = Vec::new();
         for (_, file) in named {
-            let file = to_string(req, &file)?;
-            files.push(file.as_bytes().to_vec());
-            file.give_up(req);
+            let text = to_string(req, &file)?;
+            files.push(text.as_bytes().to_vec());
+            text.give_up(req);
         }
         files
     } else {
@@ -539,12 +535,7 @@ fn phpdbg_get_executable(
 /// with `functions`.
 fn shape(req: &mut Request, options: PhpArray) -> (bool, bool) {
     let flag = |req: &mut Request, name: &[u8]| {
-        let Ok(key) = PhpString::new(req, name) else {
-            return false;
-        };
-        let found = options.get(&Key::Str(*key));
-        key.give_up(req);
-        found.is_some_and(|value| truthy(req, &value))
+        options.find(name).is_some_and(|value| truthy(req, &value))
     };
     let by_function = flag(req, b"functions");
     let by_opcode = by_function && flag(req, b"opcodes");

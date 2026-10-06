@@ -638,10 +638,18 @@ pub(crate) fn serve_deferred(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
+/// `ZEND_RSHUTDOWN_FUNCTION(ffi)`: the callbacks given up
+/// ([`release_callbacks`]), then the types `FFI_G(weak_types)`
+/// remembered ([`crate::cdata::forget_types`]).
+pub(crate) fn rshutdown(req: &mut Request) {
+    release_callbacks(req);
+    crate::cdata::forget_types(req);
+}
+
 /// The callbacks given up at the end of the request, each callable's
 /// owner released and its code freed, as php's `RSHUTDOWN` destroys
 /// `FFI_G(callbacks)`.
-pub(crate) fn release_callbacks(req: &mut Request) {
+fn release_callbacks(req: &mut Request) {
     let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
     for callback in callbacks {
         drop(callback.closure);

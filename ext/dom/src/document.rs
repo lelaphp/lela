@@ -2476,7 +2476,8 @@ impl XMLDocument {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
         doc.set_doc_string(DocString::Encoding, Some(encoding));
-        let made = crate::modern::document_object(req, "Dom\\XMLDocument", doc)?;
+        let private = crate::private::Private::new(req)?;
+        let made = crate::modern::document_object(req, "Dom\\XMLDocument", doc, private)?;
         Ok(made.into_instance())
     }
 

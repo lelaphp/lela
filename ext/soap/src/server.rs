@@ -28,7 +28,7 @@ use crate::model::{
     SOAP_1_2_ACTOR_NEXT, SOAP_1_2_ACTOR_UNLIMATERECEIVER, SOAP_1_2_ENC_NAMESPACE,
     SOAP_1_2_ENV_NAMESPACE, Sdl, Style,
 };
-use crate::shared::{add_soap_fault, instance_of, new_fault};
+use crate::shared::{add_soap_fault_ex, instance_of, new_fault};
 use crate::table::Table;
 use crate::xml::{attr_content, get_attribute, get_node, node_is_equal};
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap};
@@ -412,7 +412,7 @@ fn server_exception(
         } else {
             b"Internal Error".to_vec()
         };
-        let fault = add_soap_fault(req, this, b"Server", &msg, None, None, b"en")?;
+        let fault = add_soap_fault_ex(req, this, b"Server", &msg, None, None, b"en")?;
         let value = fault.as_value();
         let written = soap_server_fault_ex(req, sdl, function, value, &[]);
         fault.give_up(req);

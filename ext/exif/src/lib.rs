@@ -482,8 +482,15 @@ fn add_section(
     if entries.is_empty() {
         return Ok(());
     }
-    let mut own = PhpArray::new(req)?;
-    let target = if sub_array { &mut own } else { &mut *array };
+    let mut own = if sub_array {
+        Some(PhpArray::new(req)?)
+    } else {
+        None
+    };
+    let target = match own.as_mut() {
+        Some(own) => own,
+        None => &mut *array,
+    };
     let mut index = 0;
     for entry in entries {
         let value = if entry.length == 0 {
@@ -515,11 +522,9 @@ fn add_section(
         let key = Key::from_string(PhpString::new(req, &entry.name)?.hand_on_unmigrated());
         target.set(req, key, value.hand_on_unmigrated())?;
     }
-    if sub_array {
+    if let Some(own) = own {
         let key = Key::Str(PhpString::new(req, section.name().as_bytes())?.hand_on_unmigrated());
         array.set(req, key, own.into_value().hand_on_unmigrated())?;
-    } else {
-        own.give_up(req);
     }
     Ok(())
 }
