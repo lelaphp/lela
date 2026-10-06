@@ -11733,7 +11733,7 @@ pub(crate) fn assign_obj<T: Tier>(
                 Ok(written) => written,
                 Err(fatal) => {
                     if let Some(held) = guard {
-                        held.abandon();
+                        held.abandon(&fatal);
                     }
                     return Err(fatal);
                 }

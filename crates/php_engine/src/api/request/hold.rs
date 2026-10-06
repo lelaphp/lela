@@ -1,15 +1,7 @@
-//! The owner a write takes of the table a dimension fetch walked to.
-//! Every other owner the engine holds across a call that may reach PHP
-//! code is an [`Owner`] taken where it is needed: php's `GC_ADDREF`
-//! before a diagnostic, an accessor or a conversion that can reach a
-//! user handler, and the `GC_DELREF` ([`Owner::let_go`]), `OBJ_RELEASE`
-//! or `zend_string_release` ([`Owner::give_up`]) after it. A handler may
-//! give up every other owner of the array a write is landing in, the
-//! object an accessor is served on or the string a conversion is
-//! reading; under the owner what it names stands until the owner is let
-//! go, and what is left then says whether the handler freed it or took
-//! an owner of its own, which is the test php's handler makes after the
-//! call. This file keeps the one hold that spans two oplines.
+//! The owner an `ASSIGN_DIM` takes of the table the `FETCH_DIM_W` before
+//! it walked to: the one hold of the engine that spans two oplines.
+//! Every other is an [`Owner`] taken and given back around the call it
+//! spans.
 
 use php_heap::ZvalRef;
 

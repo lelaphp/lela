@@ -206,8 +206,9 @@ impl<T: View> Owner<T> {
     /// The owner left to the request's end, as php's fatal leaves every
     /// owner it held: a fatal is ending the request, no code runs after
     /// it, and the heap is freed whole with the request (design §5.1).
-    /// Only a path that hands a `Fatal` on takes it.
-    pub(crate) fn abandon(mut self) {
+    /// The fatal it is left to is its argument, so only a path that hands
+    /// one on can take it.
+    pub(crate) fn abandon(mut self, _ending: &php_heap::Fatal) {
         self.consume();
     }
 
