@@ -569,7 +569,12 @@ impl Request {
                 raised.site().line,
             );
         }
-        self.bind_declared(&candidate.unit, candidate.at, linking.composed);
+        self.bind_declared(
+            &candidate.unit,
+            candidate.at,
+            linking.composed,
+            linking.record,
+        );
         candidate.linked = true;
         true
     }
@@ -720,7 +725,7 @@ impl Request {
         }
         self.user_functions.extend(functions);
         for (_, class) in renumbered {
-            self.bind_members(class);
+            self.bind_members(class, None);
         }
     }
 

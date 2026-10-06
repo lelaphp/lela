@@ -183,7 +183,7 @@ pub fn set_hook_refused<'a>(
     set: &MethodDecl,
     lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
 ) -> Option<Refusal> {
-    let linker = Linker::over(lookup, Vec::new());
+    let linker = Linker::over(lookup, &|()| None, Vec::new());
     match linker.set_hook_variance(class, property, ty, set)? {
         (Status::Error, refused) => Some(refused.refusal),
         _ => None,
@@ -262,7 +262,7 @@ pub enum Variance {
     Contravariant,
 }
 
-impl<'a> Linker<'a> {
+impl<'a, H: Copy> Linker<'a, H> {
     /// The two hooks of a parent's hooked property that the child's
     /// declaration of it is held to, in php's order: `inherit_property_hook`
     /// for each kind, a parent's `final` hook refused and a hook the
@@ -591,7 +591,7 @@ impl<'a> Linker<'a> {
         kind: HookKind,
         interfaces: &[&'a ClassDecl],
     ) -> Option<(&'a ClassDecl, &'a MethodDecl)> {
-        let lookup = |n: &[u8]| (self.lookup)(n);
+        let lookup = |n: &[u8]| (self.lookup)(n).map(Held::plain);
         if let Some(resolved) = resolve_property(child, name, &lookup) {
             if let Some(hook) = resolved.hook(kind) {
                 return hook.method.is_abstract.then_some((hook.class, hook.method));
@@ -617,7 +617,7 @@ impl<'a> Linker<'a> {
     /// `zend_verify_hooked_property` once the parent has been inherited,
     /// each over the virtual bit the chain leaves it.
     pub(super) fn hooked_properties_refused(&self, child: &'a ClassDecl) -> Option<Linked> {
-        let lookup = |n: &[u8]| (self.lookup)(n);
+        let lookup = |n: &[u8]| (self.lookup)(n).map(Held::plain);
         for property in child.properties.iter().filter(|p| p.hooks.is_some()) {
             let is_virtual = resolve_property(child, &property.name.0, &lookup)
                 .is_some_and(|resolved| resolved.is_virtual);

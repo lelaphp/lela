@@ -1414,6 +1414,7 @@ dependencies = [
 name = "php_unit"
 version = "0.0.0"
 dependencies = [
+ "hashbrown",
  "php_heap",
  "toml",
 ]
