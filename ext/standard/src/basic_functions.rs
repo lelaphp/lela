@@ -1765,9 +1765,12 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
     let Some(stream) = req.open_stream(filename, b"rb", true)? else {
         return Ok(None);
     };
-    let source = stream.copy_to_mem(req, None)?;
+    let source = stream.copy_to_mem(req, None);
     stream.free(req);
-    Ok(Some(source.as_bytes().to_vec()))
+    let source = source?;
+    let bytes = source.as_bytes().to_vec();
+    req.release(Value::string(source));
+    Ok(Some(bytes))
 }
 
 /// `highlight_file(string $filename, bool $return = false): string|bool`,

@@ -57,3 +57,23 @@ echo serialize(parse_ini_string("a = E_ALL\nb = E_ALL & ~E_NOTICE\nc = \${nope:-
          s:1:\"d\";a:1:{i:30719;s:1:\"x\";}s:1:\"e\";s:6:\"v30719\";}\n"
     );
 }
+
+/// `highlight_file` and `php_strip_whitespace` give up the string they
+/// read the file into once the scanner has its bytes, as php's
+/// `zend_destroy_file_handle` frees the buffer `open_file_for_scanning`
+/// filled (#2068).
+#[test]
+fn highlight_file_and_php_strip_whitespace_give_up_the_source_they_read() {
+    let file = std::env::temp_dir().join(format!("t2068-{}.php", std::process::id()));
+    std::fs::write(&file, "<?php /* c */ echo 1;\n").expect("the file the natives read");
+    let path = file.display();
+    let (stdout, fatal) = armed(&format!(
+        r#"<?php
+echo strlen(highlight_file('{path}', true)), "\n";
+echo php_strip_whitespace('{path}'), "\n";
+"#
+    ));
+    std::fs::remove_file(&file).expect("the file removed");
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "252\n<?php  echo 1; \n");
+}
