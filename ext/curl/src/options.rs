@@ -560,10 +560,8 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
 fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
     let meta: PhpArray = stream.meta_data(req)?;
     let mode = meta
-        .snapshot()
-        .into_iter()
-        .find(|(key, _)| matches!(key, Key::Str(name) if name.as_bytes() == b"mode"))
-        .and_then(|(_, mode)| mode.as_str_bytes().map(<[u8]>::to_vec))
+        .find(b"mode")
+        .and_then(|mode| mode.deref().as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
     req.release(Value::array(meta));
     Ok(mode.first() != Some(&b'r') || mode.get(1) == Some(&b'+'))

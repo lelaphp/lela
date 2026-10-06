@@ -475,9 +475,8 @@ fn gzfile(
 fn read_lines(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
     let mut lines = PhpArray::new(req)?;
     while let Some(line) = stream.get_line(req, Some(8191))? {
-        let bytes = line.as_bytes();
-        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-        let line = PhpString::new(req, &bytes[..end])?;
+        let end = line.iter().position(|b| *b == 0).unwrap_or(line.len());
+        let line = PhpString::new(req, &line[..end])?;
         lines.append(req, php_ext::values::Value::string(line))?;
     }
     Ok(lines)

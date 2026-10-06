@@ -235,7 +235,10 @@ impl Directory {
     /// the last.
     fn read(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
         let stream = this_stream(req, this, "read")?;
-        Ok(stream.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
+        Ok(match stream.read_dir(req)? {
+            Some(name) => OrFalse::Value(PhpString::new(req, &name)?),
+            None => OrFalse::False,
+        })
     }
 }
 
@@ -512,18 +515,19 @@ fn scandir(
         docref(req, Level::Warning, &format!("(errno {code}): {text}"));
         return Ok(OrFalse::False);
     };
-    let mut names: Vec<PhpString> = Vec::new();
+    let mut names: Vec<Vec<u8>> = Vec::new();
     while let Some(name) = stream.read_dir(req)? {
         names.push(name);
     }
     stream.free(req);
     match order {
         SCANDIR_SORT_NONE => {}
-        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a.as_bytes(), b.as_bytes())),
-        _ => names.sort_by(|a, b| collate(b.as_bytes(), a.as_bytes())),
+        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a, b)),
+        _ => names.sort_by(|a, b| collate(b, a)),
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
+        let name = PhpString::new(req, &name)?;
         array.append(req, Value::string(name))?;
     }
     Ok(OrFalse::Value(array))

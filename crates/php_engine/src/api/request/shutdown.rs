@@ -6,7 +6,7 @@
 
 use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, PhpArray, PhpString, Value, walk};
 
 use super::Request;
 
@@ -198,10 +198,11 @@ impl Request {
         let Some(table) = self.shutdown_functions.table.take() else {
             return;
         };
-        for (_, index) in table.snapshot() {
-            if let Some(index) = index.as_int() {
-                self.drop_shutdown_entry(index);
-            }
+        let indexes: Vec<i64> = walk::rows(self, table)
+            .filter_map(|(_, index)| index.deref().as_int())
+            .collect();
+        for index in indexes {
+            self.drop_shutdown_entry(index);
         }
         self.release(Value::array(table));
         self.shutdown_functions.entries.clear();

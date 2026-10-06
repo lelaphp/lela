@@ -614,7 +614,10 @@ fn readdir(
     #[php(default = null)] dir_handle: Option<Stream>,
 ) -> Result<OrFalse<PhpString>, Thrown> {
     let dir = dir_stream(req, dir_handle)?;
-    Ok(dir.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
+    Ok(match dir.read_dir(req)? {
+        Some(name) => OrFalse::Value(PhpString::new(req, &name)?),
+        None => OrFalse::False,
+    })
 }
 
 /// `rewind($stream): bool`, `PHP_FUNCTION(rewind)`
@@ -852,9 +855,10 @@ pub fn fgets(
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
-    Ok(stream
-        .get_line(req, maxlen)?
-        .map_or(OrFalse::False, OrFalse::Value))
+    Ok(match stream.get_line(req, maxlen)? {
+        Some(line) => OrFalse::Value(PhpString::new(req, &line)?),
+        None => OrFalse::False,
+    })
 }
 
 /// `fread($stream, int $length): string|false`, `PHP_FUNCTION(fread)`
@@ -2101,7 +2105,7 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     };
     let mut done = false;
     if let Some(to) = req.open_stream(target, b"wb", false)? {
-        done = crate::streamsfuncs::copy_stream(req, from, to, None)?.is_some();
+        done = crate::streamsfuncs::copy_stream(req, from, to, None).is_some();
         to.free(req);
     }
     from.free(req);
@@ -2314,6 +2318,8 @@ fn file(
     let contents = stream.copy_to_mem(req, None)?;
     stream.free(req);
     let buf = contents.as_bytes().to_vec();
+    // `zend_string_free(target_buf)`: the lines are copies.
+    req.release(Value::string(contents));
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
     for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
@@ -2425,12 +2431,14 @@ struct MetaData {
 }
 
 impl MetaData {
-    /// `php_stream_getc`: the next byte, or `EOF`'s `-1`.
-    fn getc(&self, req: &mut Request) -> Result<i32, Thrown> {
-        Ok(match self.stream.read(req, 1)? {
-            Some(byte) if !byte.is_empty() => i32::from(byte.as_bytes()[0]),
+    /// `php_stream_getc`: the next byte, or `EOF`'s `-1`, read into the
+    /// one `char` php reads it into, so no string is made for it.
+    fn getc(&self, req: &mut Request) -> i32 {
+        let mut byte = [0];
+        match self.stream.read_into(req, &mut byte) {
+            Some(1) => i32::from(byte[0]),
             _ => -1,
-        })
+        }
     }
 
     /// `php_next_meta_token` (`Z/ext/standard/file.c:2140`), a byte at
@@ -2447,7 +2455,7 @@ impl MetaData {
                 if self.stream.eof(req) {
                     return Ok(MetaToken::Eof);
                 }
-                let ch = self.getc(req)?;
+                let ch = self.getc(req);
                 if ch == 0 {
                     return Ok(MetaToken::Eof);
                 }
@@ -2471,7 +2479,7 @@ impl MetaData {
                         if self.stream.eof(req) {
                             break;
                         }
-                        ch = self.getc(req)?;
+                        ch = self.getc(req);
                         if ch == 0
                             || ch == compliment
                             || ch == i32::from(b'<')
@@ -2502,7 +2510,7 @@ impl MetaData {
                         if self.stream.eof(req) {
                             break;
                         }
-                        ch = self.getc(req)?;
+                        ch = self.getc(req);
                         let html401 = u8::try_from(ch).is_ok_and(|c| b"-_.:".contains(&c));
                         if ch == 0 || !(alnum(ch) || html401) {
                             break;
@@ -2839,8 +2847,7 @@ fn fscanf(
     let Some(line) = stream.get_line(req, None)? else {
         return Ok(Some(OrFalse::False));
     };
-    let scanned =
-        crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, count)?;
+    let scanned = crate::scanf::php_sscanf_internal(req, &line, format.as_bytes(), 3, count)?;
     Ok(match scanned.as_ref() {
         ValueRef::Array(array) => Some(OrFalse::Value(Union::A(*array))),
         ValueRef::Int(n) => Some(OrFalse::Value(Union::B(n))),
@@ -3130,10 +3137,9 @@ fn fgetcsv(
     let Some(line) = stream.get_line(req, len)? else {
         return Ok(OrFalse::False);
     };
-    let line = line.as_bytes().to_vec();
     let mut failed = None;
     let mut more = || match stream.get_line(req, None) {
-        Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+        Ok(next) => next,
         Err(thrown) => {
             failed = Some(thrown);
             None

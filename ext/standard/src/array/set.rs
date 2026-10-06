@@ -21,7 +21,7 @@ use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
+use php_ext::values::{Key, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
 use super::{copied, key_copy, user_compare};
@@ -198,11 +198,22 @@ impl Compare {
     }
 }
 
-/// `string_compare_function`: both values as strings, byte order.
+/// `string_compare_function`: both values as strings, byte order, each
+/// conversion given up after the comparison, as php's
+/// `zend_tmp_string_release` gives up what `zval_get_tmp_string` made.
 fn string_compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
     let x = to_string(req, a)?;
-    let y = to_string(req, b)?;
-    Ok(x.as_bytes().cmp(y.as_bytes()))
+    let y = match to_string(req, b) {
+        Ok(y) => y,
+        Err(thrown) => {
+            req.release(Value::string(x));
+            return Err(thrown);
+        }
+    };
+    let order = x.as_bytes().cmp(y.as_bytes());
+    req.release(Value::string(x));
+    req.release(Value::string(y));
+    Ok(order)
 }
 
 /// A key's text, as `zend_print_long_to_buf` prints an integer key.
@@ -674,9 +685,13 @@ fn array_diff(
         check_rest(req)?;
         return Ok(PhpArray::empty());
     }
-    if first.len() == 1 {
-        let (_, value) = first.snapshot_refs()[0].clone();
-        let search = to_string(req, &value.deref())?.as_bytes().to_vec();
+    let only = if first.len() == 1 {
+        walk::rows(req, first).next()
+    } else {
+        None
+    };
+    if let Some((_, value)) = only {
+        let search = crate::tmp_string_bytes(req, &value.deref())?;
         let mut found = false;
         for (at, other) in values.iter().enumerate().skip(1) {
             let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
@@ -685,7 +700,7 @@ fn array_diff(
                 continue;
             }
             for (_, value) in &other {
-                if to_string(req, &value.deref())?.as_bytes() == search.as_slice() {
+                if crate::tmp_string_bytes(req, &value.deref())? == search {
                     found = true;
                     break;
                 }
@@ -705,13 +720,12 @@ fn array_diff(
     let mut exclude: HashSet<Vec<u8>> = HashSet::new();
     for other in &rest {
         for (_, value) in other {
-            exclude.insert(to_string(req, &value.deref())?.as_bytes().to_vec());
+            exclude.insert(crate::tmp_string_bytes(req, &value.deref())?);
         }
     }
     let mut out = PhpArray::new(req)?;
     for (key, value) in first.snapshot_refs() {
-        let text = to_string(req, &value.deref())?.as_bytes().to_vec();
-        if exclude.contains(&text) {
+        if exclude.contains(&crate::tmp_string_bytes(req, &value.deref())?) {
             continue;
         }
         let value = copied(req, value);

@@ -57,7 +57,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::{Input, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `IF_G`'s input arrays: each variable [`sapi_filter`] was handed, raw,
 /// by where it came from; `None` where none came.
@@ -531,14 +531,7 @@ impl FilterFailedException {}
 /// `zend_hash_str_find` over an options array: the element under a
 /// string key, a view.
 fn find(options: Option<&Value>, name: &[u8]) -> Option<Value> {
-    let array = *options?.deref().as_array()?;
-    array
-        .snapshot_refs()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(s) if s.as_bytes() == name => Some(value),
-            _ => None,
-        })
+    options?.deref().as_array()?.find(name)
 }
 
 /// A new string of the request's as a value.
@@ -931,7 +924,7 @@ fn array_handler(
                 return Err(arg_type_error(req, 2, "contain only string keys"));
             }
         };
-        let Some(found) = lookup(input, name.as_bytes(), false) else {
+        let Some(found) = lookup(req, input, name.as_bytes(), false) else {
             if add_empty {
                 req.addref(&Value::string(name));
                 out.set(req, Key::Str(name), Value::null())?;
@@ -998,15 +991,12 @@ fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
 /// `zend_hash_find` by a variable name, a view: a string key alone, or
 /// with `numeric` the integer key the name is, as `zend_symtable_find`
 /// reads it.
-fn lookup(array: PhpArray, name: &[u8], numeric: bool) -> Option<Value> {
-    array
-        .snapshot()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(s) if s.as_bytes() == name => Some(value),
-            Key::Int(n) if numeric && n.to_string().as_bytes() == name => Some(value),
-            _ => None,
-        })
+fn lookup(req: &Request, array: PhpArray, name: &[u8], numeric: bool) -> Option<Value> {
+    walk::rows(req, array).find_map(|(key, value)| match key {
+        Key::Str(s) if s.as_bytes() == name => Some(value.deref()),
+        Key::Int(n) if numeric && n.to_string().as_bytes() == name => Some(value.deref()),
+        _ => None,
+    })
 }
 
 // ------------------------------------------------------------ natives
@@ -1029,7 +1019,7 @@ fn filter_has_var(req: &mut Request, input_type: i64, var_name: PhpString) -> Re
     let Some(array) = storage(req, input_type)? else {
         return Ok(false);
     };
-    let found = lookup(array, var_name.as_bytes(), false).is_some();
+    let found = lookup(req, array, var_name.as_bytes(), false).is_some();
     req.release(array.to_value());
     Ok(found)
 }
@@ -1070,7 +1060,7 @@ fn filter_input(
         return Ok(Value::bool(false));
     }
     let array = storage(req, r#type)?;
-    let found = array.and_then(|array| lookup(array, name, false).map(|v| v.deref()));
+    let found = array.and_then(|array| lookup(req, array, name, false).map(|v| v.deref()));
     if let Some(found) = &found {
         req.addref(found);
     }

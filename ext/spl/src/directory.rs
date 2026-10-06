@@ -2502,7 +2502,7 @@ fn dir_read(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         it.dir.as_ref().map(Open::stream)
     })?;
     let entry = match dir {
-        Some(dir) => dir.read_dir(req)?.map(|s| s.as_bytes().to_vec()),
+        Some(dir) => dir.read_dir(req)?,
         None => None,
     };
     fs(req, this, |it| it.entry = entry.unwrap_or_default())
@@ -2699,8 +2699,7 @@ fn read_line_raw(
         return Ok(false);
     }
     let max = usize::try_from(max).ok().filter(|m| *m > 0).map(|m| m + 1);
-    let line = stream.get_line(req, max)?;
-    let mut line = line.map(|l| l.as_bytes().to_vec()).unwrap_or_default();
+    let mut line = stream.get_line(req, max)?.unwrap_or_default();
     if !csv && flags & SplFileObject::DROP_NEW_LINE != 0 && line.last() == Some(&b'\n') {
         line.pop();
         if line.last() == Some(&b'\r') {
@@ -2762,7 +2761,7 @@ fn read_csv(
     let mut more = || {
         let stream = stream?;
         match stream.get_line(req, None) {
-            Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+            Ok(next) => next,
             Err(thrown) => {
                 failed = Some(thrown);
                 None

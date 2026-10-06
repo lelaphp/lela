@@ -752,33 +752,34 @@ fn stream_copy_to_stream(
     to: Stream,
     #[php(default = null)] length: Option<i64>,
     #[php(default = 0)] offset: i64,
-) -> Result<OrFalse<i64>, Thrown> {
+) -> OrFalse<i64> {
     let (src, dest, maxlen, pos) = (from, to, length, offset);
     if pos > 0 && !src.seek(req, pos, Whence::Set) {
         let text = format!("Failed to seek to position {pos} in the stream");
         docref(req, Level::Warning, &text);
-        return Ok(OrFalse::False);
+        return OrFalse::False;
     }
     // `PHP_STREAM_COPY_ALL`, and any other length the `size_t` makes
     // larger than a stream holds, is no limit.
     let maxlen = match maxlen {
         None => None,
-        Some(0) => return Ok(OrFalse::Value(0)),
+        Some(0) => return OrFalse::Value(0),
         Some(n) => usize::try_from(n).ok(),
     };
-    Ok(match copy_stream(req, src, dest, maxlen)? {
+    match copy_stream(req, src, dest, maxlen) {
         Some(haveread) => OrFalse::Value(i64::try_from(haveread).unwrap_or(i64::MAX)),
         None => OrFalse::False,
-    })
+    }
 }
 
 /// `_php_stream_copy_to_stream_ex` (`Z/main/streams/streams.c:1661`)
-/// from where `src` stands: a chunk read, given back, and written until
-/// a read gives nothing or `maxlen` bytes are had, `None` for no limit.
-/// The count copied, or `None` for a read or a write that failed, which
-/// `stream_copy_to_stream` answers `false` and `copy` answers `false`
-/// for. Each chunk is given back before the next is read, so a copy
-/// needs a chunk's memory whatever the stream holds (GH-13071):
+/// from where `src` stands: a chunk read into php's `char buf[CHUNK_SIZE]`
+/// and written until a read gives nothing or `maxlen` bytes are had,
+/// `None` for no limit. The count copied, or `None` for a read or a write
+/// that failed, which `stream_copy_to_stream` answers `false` and `copy`
+/// answers `false` for. The chunk is the copy's own buffer and no string,
+/// so a copy needs no memory of the request's whatever the stream holds
+/// (GH-13071):
 ///
 /// ```php
 /// $f = __DIR__ . "/big"; file_put_contents($f, str_repeat("a", 4 << 20));
@@ -793,31 +794,28 @@ pub(crate) fn copy_stream(
     src: Stream,
     dest: Stream,
     maxlen: Option<usize>,
-) -> Result<Option<usize>, Thrown> {
+) -> Option<usize> {
+    let mut buf = [0u8; 8192];
     let mut haveread: usize = 0;
     loop {
-        let readchunk = maxlen.map_or(8192, |max| (max - haveread).min(8192));
-        let Some(chunk) = src.read(req, readchunk)? else {
-            return Ok(None);
-        };
-        if chunk.is_empty() {
+        let readchunk = maxlen.map_or(buf.len(), |max| (max - haveread).min(buf.len()));
+        let didread = src.read_into(req, &mut buf[..readchunk])?;
+        if didread == 0 {
             break;
         }
-        let bytes = chunk.as_bytes().to_vec();
-        req.release(Value::string(chunk));
         let mut written = 0;
-        while written < bytes.len() {
-            match dest.write(req, &bytes[written..]) {
+        while written < didread {
+            match dest.write(req, &buf[written..didread]) {
                 Some(n) if n > 0 => written += n,
-                _ => return Ok(None),
+                _ => return None,
             }
         }
-        haveread += bytes.len();
+        haveread += didread;
         if maxlen.is_some_and(|max| haveread >= max) {
             break;
         }
     }
-    Ok(Some(haveread))
+    Some(haveread)
 }
 
 /// `stream_supports_lock($stream): bool`,
