@@ -30,7 +30,7 @@ use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
-use crate::api::values::walk::ObjectTable;
+use crate::api::values::walk::{BuiltRows, ObjectTable, Table};
 use crate::api::values::{
     ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
 };
@@ -314,27 +314,28 @@ impl Request {
 
     /// [`PhpObject::property_table`]: php's `Z_OBJPROP`, the class's
     /// `get_properties` over the object a lazy one initialises to; the
-    /// table it lays down, or where the class answers a table of its own
-    /// making ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)),
-    /// the rows it answers.
-    pub(crate) fn property_table(&mut self, object: PhpObject) -> Result<ObjectTable, Thrown> {
+    /// table it lays down, or where the class builds a table of its own
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)),
+    /// the rows it builds.
+    pub(crate) fn property_table(&mut self, object: PhpObject) -> Result<Table, Thrown> {
         let handlers = self.object_handlers(object.heap());
         if handlers.answers_properties() {
             let object = self.table_owner(object)?;
             let rows = handlers.get_properties(self, object)?;
-            return Ok(ObjectTable::answered(rows));
+            return Ok(Table::Built(BuiltRows::of(rows)));
         }
-        let (owner, _) = self.pointer_table(object, false)?;
-        self.object_table(owner)
+        let (owner, table) = self.pointer_table(object, false)?;
+        self.object_table(owner, table).map(Table::Object)
     }
 
-    /// [`PhpObject::property_table`]'s table once `owner`'s is laid
-    /// down: the table in php's positions, each declared slot named by
-    /// the key [`Request::slot_names`] interns for it. The `Err` is the
-    /// memory limit refusing the table or a name.
-    pub(crate) fn object_table(&mut self, owner: PhpObject) -> Result<ObjectTable, Thrown> {
-        let table = self.heap.object_property_table(owner.heap());
-        let table = self.fatal_of(table)?;
+    /// `owner`'s table `table`, laid down, in php's positions, each
+    /// declared slot named by the key [`Request::slot_names`] interns
+    /// for it. The `Err` is the memory limit refusing a name.
+    pub(crate) fn object_table(
+        &mut self,
+        owner: PhpObject,
+        table: PropertyTable,
+    ) -> Result<ObjectTable, Thrown> {
         let names = if table.declared() > 0 {
             self.slot_names(owner.class())?
         } else {
@@ -362,7 +363,9 @@ impl Request {
         } else {
             self.lay_properties_no_lazy_init(object)?
         };
-        self.object_table(owner)
+        let table = self.heap.object_property_table(owner.heap());
+        let table = self.fatal_of(table)?;
+        self.object_table(owner, table)
     }
 
     /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`

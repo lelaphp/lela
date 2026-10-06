@@ -1296,6 +1296,7 @@ values::Value::type_name
 values::Value::unpassed
 values::ValueRef
 values::View
+values::walk::BuiltRows
 values::walk::Guarded
 values::walk::Hold
 values::walk::ObjectTable

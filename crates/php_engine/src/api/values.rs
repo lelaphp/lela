@@ -1426,15 +1426,9 @@ impl PhpObject {
                 let count = if self.0.laziness() == php_heap::Laziness::Eager {
                     req.property_count(*self)?
                 } else {
-                    walk::rows(req, table.clone()).count()
+                    table.held()
                 };
-                let Some(dynamic) = table.dynamic() else {
-                    return Err(crate::api::raising::fatal(
-                        req,
-                        "InternalError: a debug table laid down as rows a class answers",
-                    ));
-                };
-                let owner = Owner::take(req, dynamic);
+                let owner = Owner::take(req, table.dynamic());
                 (Held::Table(table, owner), count)
             }
             Answered::Own(rows) if purpose == PropertyPurpose::Debug => {
@@ -1462,13 +1456,14 @@ impl PhpObject {
 
     /// php's `Z_OBJPROP_P`, `zend_std_get_properties`: the object's
     /// property table laid down for a walk ([`walk::foreach`],
-    /// [`walk::rows`]), a lazy object initialised first and the class's
+    /// [`walk::rows`]), [`walk::Table::Object`], a lazy object initialised first and the class's
     /// `get_properties` called, so the table is the instance's and a
     /// class that writes its fields into the table at that call
     /// (`DateInterval`) has written them. A class whose `get_properties`
     /// answers a table of its own making
     /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties),
-    /// `sxe_get_properties`) is read as the rows it answers. The table
+    /// `sxe_get_properties`) is read as the rows it builds,
+    /// [`walk::Table::Built`]. The table
     /// stays laid down, as php's object keeps the table
     /// `rebuild_object_properties` built, and `memory_get_usage()` counts
     /// it as php's does. The `Err` is what the lazy initializer or the
@@ -1485,7 +1480,7 @@ impl PhpObject {
     /// b=1&c=2
     /// []
     /// ```
-    pub fn property_table(&self, req: &mut Request) -> Result<walk::ObjectTable, Thrown> {
+    pub fn property_table(&self, req: &mut Request) -> Result<walk::Table, Thrown> {
         req.property_table(*self)
     }
 
