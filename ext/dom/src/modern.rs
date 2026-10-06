@@ -36,9 +36,12 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
 }
 
 /// A fresh object of `class` standing for `doc`, a document nothing counts
-/// yet, pinned to the `Dom\` classes with its private data laid down:
-/// `php_dom_instantiate_object_helper`, `dom_set_xml_class` and
-/// `php_dom_private_data_create`.
+/// yet, pinned to the `Dom\` classes with `private` laid down as its
+/// private data: `php_dom_instantiate_object_helper`, `dom_set_xml_class`
+/// and the `private_data` its caller made with
+/// `php_dom_private_data_create`. The one private data a document has
+/// is the one handed in, so a caller that filled a mapper keeps it; the
+/// `Err` gives `private` up.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createEmpty();
@@ -53,16 +56,23 @@ pub(crate) fn document_object(
     req: &mut Request,
     class: &str,
     doc: f::Node,
+    private: Private,
 ) -> Result<PhpObject, Thrown> {
-    let class = crate::class(req, class)?;
-    let object = php_ext::call::new_object(req, class)?;
-    let private = Private::new(req)?;
+    let object = match crate::class(req, class).and_then(|c| php_ext::call::new_object(req, c)) {
+        Ok(object) => object,
+        Err(thrown) => {
+            private.free(req);
+            return Err(thrown);
+        }
+    };
     if let Some(mut obj) = crate::libxml_half(req, object) {
         obj.adopt_document(req, doc);
         obj.take_node(req, doc);
         obj.set_class_type(ClassType::Modern);
         obj.set_document_handlers(&crate::xml_serializer::MODERN);
         obj.set_private_data(Box::new(private));
+    } else {
+        private.free(req);
     }
     Ok(object)
 }
@@ -224,7 +234,8 @@ pub(crate) fn xml_load(
         let fixed = [b"file://".as_slice(), &url].concat();
         doc.set_doc_string(DocString::Url, Some(&fixed));
     }
-    let object = document_object(req, "Dom\\XMLDocument", doc)?;
+    let private = Private::new(req)?;
+    let object = document_object(req, "Dom\\XMLDocument", doc, private)?;
     convert_to_modern(req, object, doc);
     Ok(object)
 }

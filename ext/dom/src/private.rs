@@ -83,6 +83,13 @@ impl Private {
         })
     }
 
+    /// `php_dom_private_data_destroy` with the request at hand, for data
+    /// no document took: the struct's `efree`, the templates' contents
+    /// with the drop.
+    pub(crate) fn free(mut self, req: &mut Request) {
+        self.destroy(req);
+    }
+
     /// `php_dom_retrieve_templated_content`.
     pub(crate) fn template(&self, element: Node) -> Option<Node> {
         self.templates

@@ -957,20 +957,19 @@ impl Implementation {
                     );
                     let Some(e) = Node::new_element(Some(document), ns, &local, None) else {
                         document.free_document();
+                        private.free(req);
                         return Err(dom_throw(req, Code::InvalidState));
                     };
                     element = Some(e);
                 }
                 Err(code) => {
                     document.free_document();
+                    private.free(req);
                     return Err(dom_throw(req, code));
                 }
             }
         }
-        let object = crate::modern::document_object(req, "Dom\\XMLDocument", document)?;
-        if let Some(d) = crate::dom_mut(req, object) {
-            d.obj.set_private_data(Box::new(private));
-        }
+        let object = crate::modern::document_object(req, "Dom\\XMLDocument", document, private)?;
         if let Some(dtd) = doctype {
             crate::adopt(req, object, dtd, document);
             document.add_child(dtd);
@@ -1034,12 +1033,10 @@ impl Implementation {
         let body = html.and_then(|h| element(b"body", h));
         if dtd.is_none() || head.is_none() || !title_ok || body.is_none() {
             doc.free_document();
+            private.free(req);
             return Err(dom_throw(req, Code::InvalidState));
         }
-        let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?;
-        if let Some(d) = crate::dom_mut(req, object) {
-            d.obj.set_private_data(Box::new(private));
-        }
+        let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
         returned(req, object.as_value())
     }
 }
