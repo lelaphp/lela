@@ -1034,7 +1034,13 @@ impl Request {
         loop {
             nest += 1;
             if nest > max_nesting {
-                let top = PhpString::new(self, &var[..var_len])?;
+                let top = match PhpString::new(self, &var[..var_len]) {
+                    Ok(top) => top,
+                    Err(thrown) => {
+                        value.give_up(self);
+                        return Err(thrown);
+                    }
+                };
                 let mut top_level = track;
                 let unset = top_level.unset(self, &Key::lookup(*top));
                 top.give_up(self);
@@ -1098,7 +1104,14 @@ impl Request {
                     }
                 }
             };
-            let Some(key) = self.enter(track, path, key)? else {
+            let entered = match self.enter(track, path, key) {
+                Ok(entered) => entered,
+                Err(thrown) => {
+                    value.give_up(self);
+                    return Err(thrown);
+                }
+            };
+            let Some(key) = entered else {
                 value.give_up(self);
                 return Ok(());
             };
@@ -1130,10 +1143,15 @@ impl Request {
             return Ok(last.map(|key| Owner::take(self, key)));
         };
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {
+            let fresh = match PhpArray::new(self) {
+                Ok(fresh) => fresh,
+                Err(thrown) => {
+                    key.give_up(self);
+                    return Err(thrown);
+                }
+            };
             let slot = Owner::take(self, (*key).clone());
-            let made =
-                PhpArray::new(self).and_then(|fresh| parent.set(self, slot, fresh.into_value()));
-            if let Err(thrown) = made {
+            if let Err(thrown) = parent.set(self, slot, fresh.into_value()) {
                 key.give_up(self);
                 return Err(thrown);
             }
@@ -1188,7 +1206,13 @@ impl Request {
             .unwrap_or_default();
         for (name, value) in &headers {
             let key = PhpString::new(self, name)?.into_key();
-            let value = PhpString::new(self, value)?.into_value();
+            let value = match PhpString::new(self, value) {
+                Ok(value) => value.into_value(),
+                Err(thrown) => {
+                    key.give_up(self);
+                    return Err(thrown);
+                }
+            };
             array.set(self, key, value)?;
         }
         Ok(array)

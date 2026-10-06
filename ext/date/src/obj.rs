@@ -453,15 +453,52 @@ pub(super) fn rows_array(
     fields: Fields,
     first: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let mut array = PhpArray::new(req)?;
-    if !first {
-        for (key, value) in own {
-            array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value))?;
+    let mut array = match PhpArray::new(req) {
+        Ok(array) => array,
+        Err(thrown) => {
+            give_up_fields(req, fields);
+            return Err(thrown);
+        }
+    };
+    let filled = fill_rows(req, &mut array, own, fields, first);
+    match filled {
+        Ok(()) => Ok(array),
+        Err(thrown) => {
+            array.give_up(req);
+            Err(thrown)
         }
     }
-    for (name, value) in fields {
-        set_str(req, &mut array, name, value)?;
+}
+
+/// [`rows_array`]'s writes into `array`; every field's owner handed to
+/// the array or, past a write that fails, given up.
+fn fill_rows(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    own: &[(Key, Value)],
+    fields: Fields,
+    first: bool,
+) -> Result<(), Thrown> {
+    let mut written = Ok(());
+    if !first {
+        for (key, value) in own {
+            written = array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value));
+            if written.is_err() {
+                break;
+            }
+        }
     }
+    let mut fields = fields.into_iter();
+    if written.is_ok() {
+        for (name, value) in fields.by_ref() {
+            written = set_str(req, array, name, value);
+            if written.is_err() {
+                break;
+            }
+        }
+    }
+    give_up_fields(req, fields.collect());
+    written?;
     if first {
         for (key, value) in own {
             if !array.contains(key) {
@@ -469,7 +506,14 @@ pub(super) fn rows_array(
             }
         }
     }
-    Ok(array)
+    Ok(())
+}
+
+/// The owners of fields no array took, given up.
+fn give_up_fields(req: &mut Request, fields: Fields) {
+    for (_, value) in fields {
+        value.give_up(req);
+    }
 }
 
 /// The rows a property reader sees: the object's own rows with the

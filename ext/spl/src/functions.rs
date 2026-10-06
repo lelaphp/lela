@@ -66,9 +66,14 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<Owner<P
             key.give_up(req);
             continue;
         }
-        let value = crate::string_value(req, &name)?;
-        let key = key;
         let key = Key::from_string(req, key);
+        let value = match crate::string_value(req, &name) {
+            Ok(value) => value,
+            Err(thrown) => {
+                key.give_up(req);
+                return Err(thrown);
+            }
+        };
         out.set(req, key, value)?;
     }
     Ok(OrFalse::Value(out))
@@ -569,10 +574,14 @@ pub(crate) const SPL_CLASSES: &[&str] = &[
 fn spl_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in SPL_CLASSES {
-        let key = PhpString::new(req, name.as_bytes())?;
         let value = crate::string_value(req, name.as_bytes())?;
-        let key = key;
-        let key = Key::from_string(req, key);
+        let key = match PhpString::new(req, name.as_bytes()) {
+            Ok(key) => Key::from_string(req, key),
+            Err(thrown) => {
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
         out.set(req, key, value)?;
     }
     Ok(out)

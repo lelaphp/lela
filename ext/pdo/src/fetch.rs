@@ -1624,16 +1624,39 @@ fn grouped_rows(
     for (key, rows) in groups {
         let key = symtable_key(req, &key)?;
         if flags.has(Flag::Unique) {
-            for row in rows {
-                let (at, row) = (Owner::take(req, (*key).clone()), crate::owned(req, row));
-                out.set(req, at, row)?;
-            }
-            key.give_up(req);
-        } else {
-            let mut group = PhpArray::new(req)?;
+            let mut written = Ok(());
             for row in rows {
                 let row = crate::owned(req, row);
-                group.append(req, row)?;
+                if written.is_err() {
+                    row.give_up(req);
+                    continue;
+                }
+                let at = Owner::take(req, (*key).clone());
+                written = out.set(req, at, row);
+            }
+            key.give_up(req);
+            written?;
+        } else {
+            let mut group = match PhpArray::new(req) {
+                Ok(group) => group,
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            let mut appended = Ok(());
+            for row in rows {
+                let row = crate::owned(req, row);
+                if appended.is_err() {
+                    row.give_up(req);
+                    continue;
+                }
+                appended = group.append(req, row);
+            }
+            if let Err(thrown) = appended {
+                group.give_up(req);
+                key.give_up(req);
+                return Err(thrown);
             }
             out.set(req, key, group.into_value())?;
         }
