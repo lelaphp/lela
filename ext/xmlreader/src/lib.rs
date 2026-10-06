@@ -36,9 +36,7 @@ use php_ext::call::{Function, instantiate, lookup_class};
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Resolve, Stream};
-use php_ext::values::{
-    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
-};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Expanded, Library, Raised, RelaxNg, TextReader};
 
@@ -202,15 +200,18 @@ impl ObjectHandlers for Handlers {
         let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
         let mut table = PhpArray::new(req)?;
         for (key, value) in own {
-            req.addref(&value);
-            table.set(req, key, value)?;
+            table.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         let mut thrown: Option<Thrown> = None;
         for (name, p) in Property::ALL {
             match p.read(req, object) {
                 Ok(Some(value)) => {
-                    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                    table.set(req, key, value)?;
+                    // The reader's owner of `value` handed on as one the
+                    // table takes, the reader's own given up.
+                    let held = Owner::take(req, value);
+                    req.release(value);
+                    let key = PhpString::new(req, name)?.into_key();
+                    table.set(req, key, held)?;
                 }
                 Ok(None) => {}
                 Err(t) => {

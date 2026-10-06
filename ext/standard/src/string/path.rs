@@ -9,7 +9,7 @@ use php_ext::abi::Union;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use super::constants::{
     PATHINFO_ALL, PATHINFO_BASENAME, PATHINFO_DIRNAME, PATHINFO_EXTENSION, PATHINFO_FILENAME,
@@ -275,8 +275,8 @@ pub(super) fn pathinfo(
     }
     let mut array = PhpArray::new(req)?;
     for (name, bytes) in parts {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        let value = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+        let key = PhpString::new(req, name)?.into_key();
+        let value = PhpString::new(req, &bytes)?.into_value();
         array.set(req, key, value)?;
     }
     Ok(Union::A(array))

@@ -271,7 +271,7 @@ impl CType {
         let mut array = PhpArray::new(req)?;
         for name in names {
             let name = PhpString::new(req, &name)?;
-            array.append(req, Value::string(name.hand_on_unmigrated()))?;
+            array.append(req, name.into_value())?;
         }
         Ok(array)
     }

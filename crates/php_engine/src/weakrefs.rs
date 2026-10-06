@@ -249,9 +249,8 @@ impl ObjectHandlers for WeakReferenceHandlers {
         let referent = object.native::<WeakRef>(req).and_then(|p| p.referent);
         let mut table = PhpArray::new(req)?;
         let value = referent.map_or(Value::null(), |referent| referent.as_value());
-        req.addref(&value);
-        let key = Key::Str(PhpString::new(req, b"object")?.hand_on_unmigrated());
-        table.set(req, key, value)?;
+        let key = PhpString::new(req, b"object")?.into_key();
+        table.set(req, key, Owner::take(req, value))?;
         Ok(Some(table.hand_on_unmigrated().into()))
     }
 }
@@ -450,7 +449,7 @@ impl ObjectHandlers for WeakMapHandlers {
         if !entries.contains(&at) {
             register(req, key, Holder::Map(object.index()));
         }
-        entries.set(req, at, value)
+        entries.set(req, Owner::take(req, at), Owner::adopt(req, value))
     }
 
     /// `zend_weakmap_has_dimension` (`Z/Zend/zend_weakrefs.c:409`): the
@@ -558,13 +557,11 @@ impl ObjectHandlers for WeakMapHandlers {
                 continue;
             };
             let mut pair = PhpArray::new(req)?;
-            req.addref(&owner.as_value());
-            let at = Key::Str(PhpString::new(req, b"key")?.hand_on_unmigrated());
-            pair.set(req, at, owner.as_value())?;
-            req.addref(&value);
-            let at = Key::Str(PhpString::new(req, b"value")?.hand_on_unmigrated());
-            pair.set(req, at, value)?;
-            table.append(req, pair.into_value().hand_on_unmigrated())?;
+            let at = PhpString::new(req, b"key")?.into_key();
+            pair.set(req, at, Owner::take(req, owner.as_value()))?;
+            let at = PhpString::new(req, b"value")?.into_key();
+            pair.set(req, at, Owner::take(req, value))?;
+            table.append(req, pair.into_value())?;
         }
         Ok(Some(table.hand_on_unmigrated().into()))
     }
@@ -652,8 +649,8 @@ impl ClassIterator for MapIter {
         };
         req.addref(&value);
         let cell = req.reference(value)?;
-        req.addref(&cell.as_value());
-        entries.set(req, key, cell.as_value())?;
+        let key = Owner::take(req, key);
+        entries.set(req, key, Owner::take(req, cell.as_value()))?;
         Ok(cell.as_value())
     }
 

@@ -414,7 +414,7 @@ impl SoapClient {
         for f in sdl.functions.values() {
             let s = function_to_string(&sdl, f);
             let v = PhpString::new(req, &s)?;
-            out.append(req, Value::string(v.hand_on_unmigrated()))?;
+            out.append(req, v.into_value())?;
         }
         Ok(Some(out))
     }
@@ -441,7 +441,7 @@ impl SoapClient {
                     type_to_string(&sdl, t, &mut s, 0);
                 }
                 let v = PhpString::new(req, &s)?;
-                out.append(req, Value::string(v.hand_on_unmigrated()))?;
+                out.append(req, v.into_value())?;
             }
         }
         Ok(Some(out))
@@ -602,18 +602,14 @@ impl SoapClient {
         };
         match value {
             None => {
-                cookies.unset(req, &PhpKey::from_string(name))?;
+                cookies.unset(req, &PhpKey::lookup(name))?;
             }
             Some(v) => {
                 let mut cookie = PhpArray::new(req)?;
-                req.addref(&Value::string(v));
-                cookie.set(req, PhpKey::Int(0), Value::string(v))?;
-                req.addref(&Value::string(name));
-                cookies.set(
-                    req,
-                    PhpKey::from_string(name),
-                    cookie.into_value().hand_on_unmigrated(),
-                )?;
+                let at = Owner::take(req, PhpKey::Int(0));
+                cookie.set(req, at, Owner::take(req, Value::string(v)))?;
+                let name = Owner::take(req, PhpKey::lookup(name));
+                cookies.set(req, name, cookie.into_value())?;
             }
         }
         set_client_slot(
@@ -682,7 +678,7 @@ impl SoapClient {
             }
             ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => {
                 let mut list = PhpArray::new(req)?;
-                req.addref(&headers);
+                let headers = Owner::take(req, headers);
                 list.append(req, headers)?;
                 set_client_slot(
                     req,
@@ -1003,8 +999,8 @@ fn construct(
                 let mut shown = PhpArray::new(req)?;
                 for (k, _) in t.iter() {
                     if let crate::table::Key::Str(name) = k {
-                        let key = PhpKey::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                        shown.set(req, key, Value::null())?;
+                        let key = PhpString::new(req, name)?.into_key();
+                        shown.set(req, key, Owner::take(req, Value::null()))?;
                     }
                 }
                 set_client_slot(

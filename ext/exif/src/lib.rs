@@ -499,7 +499,7 @@ fn add_section(
             match &entry.value {
                 Stored::Text(text) if section == Section::Comment => {
                     let text = PhpString::new(req, text)?.into_value();
-                    target.set(req, Key::Int(index), text.hand_on_unmigrated())?;
+                    target.set(req, Owner::take(req, Key::Int(index)), text)?;
                     index += 1;
                     continue;
                 }
@@ -512,19 +512,20 @@ fn add_section(
                         let mut list = PhpArray::new(req)?;
                         for (at, one) in (0..).zip(many) {
                             let value = number(req, *one)?;
-                            list.set(req, Key::Int(at), value.hand_on_unmigrated())?;
+                            list.set(req, Owner::take(req, Key::Int(at)), value)?;
                         }
                         list.into_value()
                     }
                 },
             }
         };
-        let key = Key::from_string(PhpString::new(req, &entry.name)?.hand_on_unmigrated());
-        target.set(req, key, value.hand_on_unmigrated())?;
+        let key = PhpString::new(req, &entry.name)?;
+        let key = Key::from_string(req, key);
+        target.set(req, key, value)?;
     }
     if let Some(own) = own {
-        let key = Key::Str(PhpString::new(req, section.name().as_bytes())?.hand_on_unmigrated());
-        array.set(req, key, own.into_value().hand_on_unmigrated())?;
+        let key = PhpString::new(req, section.name().as_bytes())?.into_key();
+        array.set(req, key, own.into_value())?;
     }
     Ok(())
 }

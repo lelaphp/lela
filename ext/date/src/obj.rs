@@ -362,9 +362,15 @@ pub(super) fn set_str(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     key: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, key) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 
@@ -375,7 +381,7 @@ pub(super) fn set_string(
     key: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
+    let value = PhpString::new(req, value)?.into_value();
     set_str(req, array, key, value)
 }
 
@@ -432,6 +438,10 @@ fn update(rows: &mut Vec<(Key, Value)>, name: PhpString, value: Value) {
     }
 }
 
+/// The fields an object's hash shows beside its own rows, each under
+/// its name with one owner of its value.
+pub(super) type Fields = Vec<(&'static [u8], Owner<Value>)>;
+
 /// The rows as an array with its own owners, each key and value one
 /// more owner of what `own` views, the table `__serialize` returns and
 /// `get_debug_info` hands a dumper: the fields first where
@@ -440,31 +450,22 @@ fn update(rows: &mut Vec<(Key, Value)>, name: PhpString, value: Value) {
 pub(super) fn rows_array(
     req: &mut Request,
     own: &[(Key, Value)],
-    fields: Vec<(&[u8], Value)>,
+    fields: Fields,
     first: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     if !first {
         for (key, value) in own {
-            if let Key::Str(name) = key {
-                req.addref(&Value::string(*name));
-            }
-            req.addref(value);
-            array.set(req, key.clone(), *value)?;
+            array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value))?;
         }
     }
     for (name, value) in fields {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        array.set(req, key, value)?;
+        set_str(req, &mut array, name, value)?;
     }
     if first {
         for (key, value) in own {
             if !array.contains(key) {
-                if let Key::Str(name) = key {
-                    req.addref(&Value::string(*name));
-                }
-                req.addref(value);
-                array.set(req, key.clone(), *value)?;
+                array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value))?;
             }
         }
     }
@@ -478,17 +479,23 @@ pub(super) fn rows_array(
 fn rows_view(
     req: &mut Request,
     object: PhpObject,
-    fields: Vec<(&[u8], Value)>,
+    fields: Fields,
     keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Value>>,
 ) -> Result<Vec<(Key, Value)>, Thrown> {
-    let mut rows = std_rows(req, object)?;
     let mut made = Vec::with_capacity(fields.len());
     for (name, value) in fields {
+        made.push((name, value.hand_on_unmigrated()));
+    }
+    let made = made;
+    let mut rows = std_rows(req, object)?;
+    let mut kept = Vec::with_capacity(made.len() * 2);
+    for (name, value) in made {
         let name = PhpString::new(req, name)?.hand_on_unmigrated();
-        made.push(Value::string(name));
-        made.push(value);
+        kept.push(Value::string(name));
+        kept.push(value);
         update(&mut rows, name, value);
     }
+    let made = kept;
     let old = keep(req, object).map(|rows| std::mem::replace(rows, made));
     for value in old.into_iter().flatten() {
         req.release(value);
@@ -510,42 +517,45 @@ fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
 
 /// `date_object_to_hash`: `date`, and where the time is local its
 /// `timezone_type` and `timezone`.
-pub(super) fn date_fields(
-    req: &mut Request,
-    t: &Time,
-) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
+pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown> {
     let text = date_format(b"x-m-d H:i:s.u", t, true);
-    let mut fields = vec![(
-        &b"date"[..],
-        Value::string(PhpString::new(req, &text)?.hand_on_unmigrated()),
-    )];
-    if t.is_localtime != 0 {
-        fields.push((b"timezone_type", Value::int(i64::from(t.zone_type))));
-        let zone: Vec<u8> = match t.zone_type {
-            ZONETYPE_ID => t.zone().map(|z| z.name().to_vec()).unwrap_or_default(),
-            ZONETYPE_OFFSET => offset_string(i64::from(t.z)).into_bytes(),
-            ZONETYPE_ABBR => t.tz_abbr().to_vec(),
-            _ => Vec::new(),
-        };
-        fields.push((
-            b"timezone",
-            Value::string(PhpString::new(req, &zone)?.hand_on_unmigrated()),
-        ));
+    let zone: Option<Vec<u8>> = (t.is_localtime != 0).then(|| match t.zone_type {
+        ZONETYPE_ID => t.zone().map(|z| z.name().to_vec()).unwrap_or_default(),
+        ZONETYPE_OFFSET => offset_string(i64::from(t.z)).into_bytes(),
+        ZONETYPE_ABBR => t.tz_abbr().to_vec(),
+        _ => Vec::new(),
+    });
+    let zone = match zone {
+        Some(zone) => Some(PhpString::new(req, &zone)?),
+        None => None,
+    };
+    let text = match PhpString::new(req, &text) {
+        Ok(text) => text,
+        Err(thrown) => {
+            if let Some(zone) = zone {
+                zone.give_up(req);
+            }
+            return Err(thrown);
+        }
+    };
+    let mut fields = vec![(&b"date"[..], text.into_value())];
+    if let Some(zone) = zone {
+        let zone_type = Owner::take(req, Value::int(i64::from(t.zone_type)));
+        fields.push((b"timezone_type", zone_type));
+        fields.push((b"timezone", zone.into_value()));
     }
     Ok(fields)
 }
 
 /// `date_timezone_object_to_hash`.
-pub(super) fn tz_fields(
-    req: &mut Request,
-    kind: &TzKind,
-) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
+pub(super) fn tz_fields(req: &mut Request, kind: &TzKind) -> Result<Fields, Thrown> {
+    let name = PhpString::new(req, &kind.name())?;
     Ok(vec![
-        (&b"timezone_type"[..], Value::int(kind.zone_type())),
         (
-            b"timezone",
-            Value::string(PhpString::new(req, &kind.name())?.hand_on_unmigrated()),
+            &b"timezone_type"[..],
+            Owner::take(req, Value::int(kind.zone_type())),
         ),
+        (b"timezone", name.into_value()),
     ])
 }
 
@@ -554,19 +564,17 @@ pub(super) fn interval_fields(
     req: &mut Request,
     diff: &RelTime,
     date_string: Option<&[u8]>,
-) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
+) -> Result<Fields, Thrown> {
     if let Some(text) = date_string {
+        let text = PhpString::new(req, text)?;
         return Ok(vec![
-            (&b"from_string"[..], Value::bool(true)),
-            (
-                b"date_string",
-                Value::string(PhpString::new(req, text)?.hand_on_unmigrated()),
-            ),
+            (&b"from_string"[..], Owner::take(req, Value::bool(true))),
+            (b"date_string", text.into_value()),
         ]);
     }
     #[allow(clippy::cast_precision_loss)]
     let f = diff.us as f64 / 1_000_000.0;
-    Ok(vec![
+    let fields: [(&'static [u8], Value); 10] = [
         (&b"y"[..], Value::int(diff.y)),
         (b"m", Value::int(diff.m)),
         (b"d", Value::int(diff.d)),
@@ -584,7 +592,11 @@ pub(super) fn interval_fields(
             },
         ),
         (b"from_string", Value::bool(false)),
-    ])
+    ];
+    Ok(fields
+        .into_iter()
+        .map(|(name, value)| (name, Owner::take(req, value)))
+        .collect())
 }
 
 /// `create_date_period_datetime`: a date of the period's class over one
@@ -593,20 +605,15 @@ pub(super) fn period_date(
     req: &mut Request,
     t: Option<&Time>,
     class: Option<ClassId>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (Some(t), Some(class)) = (t, class) else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
-    Ok(new_date(req, class, t.clone())?
-        .into_value()
-        .hand_on_unmigrated())
+    Ok(new_date(req, class, t.clone())?.into_value())
 }
 
 /// `date_period_object_to_hash`.
-pub(super) fn period_fields(
-    req: &mut Request,
-    object: PhpObject,
-) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
+pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
     let Some(p) = object.native::<PeriodObj>(req) else {
         return Ok(Vec::new());
     };
@@ -614,24 +621,34 @@ pub(super) fn period_fields(
     let (class, interval) = (p.start_ce, p.interval);
     let (recurrences, include_start, include_end) =
         (p.recurrences, p.include_start_date, p.include_end_date);
-    let start = period_date(req, start.as_ref(), class)?;
-    let current = period_date(req, current.as_ref(), class)?;
-    let end = period_date(req, end.as_ref(), class)?;
-    let interval = match interval {
-        Some(diff) => new_interval(req, diff, 0, None)?
-            .into_value()
-            .hand_on_unmigrated(),
-        None => Value::null(),
-    };
-    Ok(vec![
-        (&b"start"[..], start),
-        (b"current", current),
-        (b"end", end),
-        (b"interval", interval),
-        (b"recurrences", Value::int(recurrences)),
-        (b"include_start_date", Value::bool(include_start)),
-        (b"include_end_date", Value::bool(include_end)),
-    ])
+    let mut fields: Fields = Vec::with_capacity(7);
+    let made = (|| -> Result<(), Thrown> {
+        fields.push((b"start", period_date(req, start.as_ref(), class)?));
+        fields.push((b"current", period_date(req, current.as_ref(), class)?));
+        fields.push((b"end", period_date(req, end.as_ref(), class)?));
+        let interval = match interval {
+            Some(diff) => new_interval(req, diff, 0, None)?.into_value(),
+            None => Owner::take(req, Value::null()),
+        };
+        fields.push((b"interval", interval));
+        Ok(())
+    })();
+    if let Err(thrown) = made {
+        for (_, value) in fields {
+            value.give_up(req);
+        }
+        return Err(thrown);
+    }
+    fields.push((b"recurrences", Owner::take(req, Value::int(recurrences))));
+    fields.push((
+        b"include_start_date",
+        Owner::take(req, Value::bool(include_start)),
+    ));
+    fields.push((
+        b"include_end_date",
+        Owner::take(req, Value::bool(include_end)),
+    ));
+    Ok(fields)
 }
 
 /// The rows `DateTime`, `DateTimeImmutable` and their subclasses show
@@ -1143,11 +1160,11 @@ fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         let name = match PhpString::new(req, name) {
             Ok(name) => name,
             Err(thrown) => {
-                req.release(value);
+                value.give_up(req);
                 return Err(thrown);
             }
         };
-        let written = object.set_row(req, &Key::Str(*name), value);
+        let written = object.set_row(req, &Key::Str(*name), value.hand_on_unmigrated());
         name.give_up(req);
         written?;
     }
@@ -1155,10 +1172,7 @@ fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 }
 
 /// The interval's fields, none for one no constructor set.
-fn interval_rows(
-    req: &mut Request,
-    object: PhpObject,
-) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
+fn interval_rows(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
     let state = object
         .native::<IntervalObj>(req)
         .and_then(|i| i.diff.map(|d| (d, i.date_string.clone())));
@@ -1286,9 +1300,9 @@ impl ObjectHandlers for PeriodHandlers {
         let mut found = Value::null();
         for (field, value) in fields {
             if field == name {
-                found = value;
+                found = value.hand_on_unmigrated();
             } else {
-                req.release(value);
+                value.give_up(req);
             }
         }
         Ok(found)

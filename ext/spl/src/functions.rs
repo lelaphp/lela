@@ -62,13 +62,14 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<Owner<P
     for class in classes {
         let name = crate::class_name(req, *class);
         let key = PhpString::new(req, &name)?;
-        if out.contains(&Key::from_string(*key)) {
+        if out.contains(&Key::lookup(*key)) {
             key.give_up(req);
             continue;
         }
         let value = crate::string_value(req, &name)?;
-        let key = Key::from_string(key.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = key;
+        let key = Key::from_string(req, key);
+        out.set(req, key, value)?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -345,7 +346,7 @@ fn spl_autoload_functions(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
     let loaders = req.autoload_functions()?;
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
-        out.append(req, loader.hand_on_unmigrated())?;
+        out.append(req, loader)?;
     }
     Ok(out)
 }
@@ -570,8 +571,9 @@ fn spl_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     for name in SPL_CLASSES {
         let key = PhpString::new(req, name.as_bytes())?;
         let value = crate::string_value(req, name.as_bytes())?;
-        let key = Key::from_string(key.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = key;
+        let key = Key::from_string(req, key);
+        out.set(req, key, value)?;
     }
     Ok(out)
 }
@@ -743,7 +745,7 @@ fn iterator_to_array(
             }
             let mut out = PhpArray::new(req)?;
             for (_, value) in array.snapshot() {
-                let value = crate::copied(req, value);
+                let value = Owner::take(req, value.deref());
                 out.append(req, value)?;
             }
             return Ok(out);
@@ -766,6 +768,7 @@ fn iterator_to_array(
             set?;
         } else {
             let current = crate::owned(req, current);
+            let current = crate::owner_of(req, current);
             out.append(req, current)?;
         }
         Ok(true)

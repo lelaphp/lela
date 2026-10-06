@@ -450,7 +450,7 @@ fn modern_index(req: &mut Request, value: &Value) -> Result<Index, Thrown> {
     Ok(match v.as_ref() {
         ValueRef::Int(n) => Index::Long(n),
         ValueRef::Float(f) => Index::Long(float_offset(req, f)?),
-        ValueRef::Str(s) => match Key::from_string(*s) {
+        ValueRef::Str(s) => match Key::lookup(*s) {
             Key::Int(n) => Index::Long(n),
             Key::Str(s) => Index::Str(s),
         },

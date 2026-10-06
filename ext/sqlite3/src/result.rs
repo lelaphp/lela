@@ -98,18 +98,19 @@ fn fetch_one(
         .unwrap_or_default();
     let mut row = PhpArray::new(req)?;
     for column in 0..count {
-        let value = column_value(req, stmt, column)?.hand_on_unmigrated();
+        let value = column_value(req, stmt, column)?;
         if mode & NUM != 0 {
             let at = i64::try_from(column).unwrap_or(i64::MAX);
-            row.set(req, php_ext::values::Key::Int(at), value)?;
+            let at = Owner::take(req, php_ext::values::Key::Int(at));
+            let numbered = Owner::take(req, *value);
+            row.set(req, at, numbered)?;
         }
         if mode & ASSOC != 0 {
-            if mode & NUM != 0 {
-                req.addref(&value);
-            }
             let name = names.get(column).cloned().unwrap_or_default();
             let key = column_key(req, &name)?;
             row.set(req, key, value)?;
+        } else {
+            value.give_up(req);
         }
     }
     Ok(row)
@@ -434,7 +435,7 @@ fn fetch_all(
         match (step, taken.stmt.as_ref()) {
             (Step::Row, Some(stmt)) => {
                 let row = fetch_one(req, object, stmt, count, mode)?;
-                rows.append(req, row.into_value().hand_on_unmigrated())?;
+                rows.append(req, row.into_value())?;
                 if let Some(thrown) = thrown {
                     rows.give_up(req);
                     return Err(thrown);

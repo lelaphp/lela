@@ -1423,7 +1423,7 @@ impl CachingIterator {
     ) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
         let cache = full_cache(req, this)?;
-        let key = Key::from_string(key.0);
+        let key = Key::lookup(key.0);
         if let Some(value) = cache.get(&key) {
             return Ok(value.deref());
         }
@@ -1445,7 +1445,8 @@ impl CachingIterator {
     ) -> Result<(), Thrown> {
         let this = checked(req, this.object())?;
         let mut cache = full_cache(req, this)?;
-        cache.set(req, Key::from_string(key.0), crate::copied(req, value))?;
+        let key = Owner::take(req, Key::lookup(key.0));
+        cache.set(req, key, Owner::take(req, value.deref()))?;
         dual(req, this, |it| it.cache = Some(cache))
     }
 
@@ -1458,7 +1459,7 @@ impl CachingIterator {
     ) -> Result<(), Thrown> {
         let this = checked(req, this.object())?;
         let mut cache = full_cache(req, this)?;
-        cache.unset(req, &Key::from_string(key.0))?;
+        cache.unset(req, &Key::lookup(key.0))?;
         dual(req, this, |it| it.cache = Some(cache))
     }
 
@@ -1471,7 +1472,7 @@ impl CachingIterator {
     ) -> Result<bool, Thrown> {
         let this = checked(req, this.object())?;
         let cache = full_cache(req, this)?;
-        Ok(cache.contains(&Key::from_string(key.0)))
+        Ok(cache.contains(&Key::lookup(key.0)))
     }
 
     /// `getCache(): array`.

@@ -1034,8 +1034,9 @@ fn parse_text(
             "tm_wday" => value - 1,
             _ => value,
         };
-        let key = Key::from_string(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
-        table.set(req, key, Value::int(value))?;
+        let key = PhpString::new(req, key.as_bytes())?;
+        let key = Key::from_string(req, key);
+        table.set(req, key, Owner::take(req, Value::int(value)))?;
     }
     let mut status = Code::ZERO;
     let dst = udatf.calendar_field(None, &mut status);
@@ -1044,8 +1045,9 @@ fn parse_text(
         table.give_up(req);
         return or_false(Err(stop));
     }
-    let key = Key::from_string(PhpString::new(req, b"tm_isdst")?.hand_on_unmigrated());
-    table.set(req, key, Value::int(i64::from(dst == 1)))?;
+    let key = PhpString::new(req, b"tm_isdst")?;
+    let key = Key::from_string(req, key);
+    table.set(req, key, Owner::take(req, Value::int(i64::from(dst == 1))))?;
     Ok(OrFalse::Value(Union::B(table)))
 }
 

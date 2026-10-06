@@ -6,7 +6,7 @@
 
 use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, Value, walk};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 
 use super::Request;
 
@@ -102,7 +102,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let (entry, mut table) = self.shutdown_entry(callback, arguments)?;
         let index = self.shutdown_functions.slot(entry);
-        if let Err(thrown) = table.append(self, Value::int(index)) {
+        if let Err(thrown) = table.append(self, Owner::take(self, Value::int(index))) {
             self.drop_shutdown_entry(index);
             return Err(thrown);
         }
@@ -124,8 +124,7 @@ impl Request {
         entry: Option<(Callable, Vec<Value>)>,
     ) -> Result<(), Thrown> {
         // `zend_hash_str_update_mem` keys by the bytes, never numerically.
-        let string = self.string(name)?;
-        let key = Key::Str(string);
+        let key = PhpString::new(self, name)?.into_key();
         let standing = self
             .shutdown_functions
             .table
@@ -138,7 +137,7 @@ impl Request {
                 Some(mut table) => table.unset(self, &key).map(drop),
                 None => Ok(()),
             };
-            self.release(Value::string(string));
+            key.give_up(self);
             unset
         };
         if let Some(index) = standing {
@@ -152,21 +151,19 @@ impl Request {
     /// where the memory limit refuses it.
     fn set_named_shutdown_entry(
         &mut self,
-        key: Key,
+        key: Owner<Key>,
         callback: Callable,
         arguments: Vec<Value>,
     ) -> Result<(), Thrown> {
         let (entry, mut table) = match self.shutdown_entry(callback, arguments) {
             Ok(made) => made,
             Err(thrown) => {
-                if let Key::Str(string) = key {
-                    self.release(Value::string(string));
-                }
+                key.give_up(self);
                 return Err(thrown);
             }
         };
         let index = self.shutdown_functions.slot(entry);
-        let set = table.set(self, key, Value::int(index));
+        let set = table.set(self, key, Owner::take(self, Value::int(index)));
         if set.is_err() {
             self.drop_shutdown_entry(index);
         }

@@ -1176,11 +1176,11 @@ pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Owner<Value>, Thro
     };
     let mut out = PhpArray::new(req)?;
     for field in sb {
-        out.append(req, Value::int(field))?;
+        out.append(req, Owner::take(req, Value::int(field)))?;
     }
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, Value::int(field))?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(field)))?;
     }
     Ok(out.into_value())
 }
@@ -2372,7 +2372,7 @@ fn file(
     }
     let mut array = PhpArray::new(req)?;
     for line in lines {
-        let v = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
+        let v = PhpString::new(req, line)?.into_value();
         array.append(req, v)?;
     }
     Ok(OrFalse::Value(array))
@@ -2705,9 +2705,9 @@ fn get_meta_tags(
                     } else {
                         Vec::new()
                     };
-                    let key = Key::from_string(PhpString::new(req, &key)?.hand_on_unmigrated());
-                    let content =
-                        Value::string(PhpString::new(req, &content)?.hand_on_unmigrated());
+                    let key = PhpString::new(req, &key)?;
+                    let key = Key::from_string(req, key);
+                    let content = PhpString::new(req, &content)?.into_value();
                     array.set(req, key, content)?;
                 }
                 name = None;
@@ -3202,10 +3202,10 @@ fn fgetcsv(
     }
     let mut array = PhpArray::new(req)?;
     match fields {
-        None => array.append(req, Value::null())?,
+        None => array.append(req, Owner::take(req, Value::null()))?,
         Some(fields) => {
             for field in fields {
-                let value = Value::string(PhpString::new(req, &field)?.hand_on_unmigrated());
+                let value = PhpString::new(req, &field)?.into_value();
                 array.append(req, value)?;
             }
         }

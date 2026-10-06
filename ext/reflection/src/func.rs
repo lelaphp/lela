@@ -20,7 +20,7 @@ use php_ext::raising::{
     Thrown, arg_count_error, argument_error, deprecated, fatal, throw, throw_error,
 };
 use php_ext::request::{Execution, Request};
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
 use super::{
@@ -741,8 +741,7 @@ impl ReflectionFunctionAbstract {
             return Ok(used);
         };
         for (name, value) in closure.closure_bound(req)? {
-            req.addref(&value);
-            used.set(req, Key::Str(name.hand_on_unmigrated()), value)?;
+            used.set(req, name.into_key(), Owner::take(req, value))?;
         }
         Ok(used)
     }
@@ -976,7 +975,7 @@ impl ReflectionFunctionAbstract {
         let mut parameters = PhpArray::new(req)?;
         for offset in 0..decl.parameters.len() {
             let object = parameter_factory(req, &function, &decl, offset)?;
-            parameters.append(req, object.into_value().hand_on_unmigrated())?;
+            parameters.append(req, object.into_value())?;
         }
         Ok(parameters)
     }
@@ -1134,8 +1133,7 @@ impl ReflectionFunctionAbstract {
             } else {
                 value
             };
-            req.addref(&value);
-            statics.set(req, Key::Str(name.hand_on_unmigrated()), value)?;
+            statics.set(req, name.into_key(), Owner::take(req, value))?;
         }
         Ok(statics)
     }

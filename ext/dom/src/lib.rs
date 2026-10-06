@@ -57,7 +57,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
     Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
     XML_ATTRIBUTE_ID,
@@ -1028,8 +1028,8 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
     let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in own {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        let value = Owner::take(req, value);
+        out.set(req, Owner::take(req, key), value)?;
     }
     let Some(table) = table_of(req, object) else {
         return Ok(Some(out.hand_on_unmigrated().into()));
@@ -1065,8 +1065,8 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
         } else {
             read
         };
-        let key = Key::Str(PhpString::new(req, prop.name)?.hand_on_unmigrated());
-        out.set(req, key, shown.hand_on_unmigrated())?;
+        let key = PhpString::new(req, prop.name)?.into_key();
+        out.set(req, key, shown)?;
     }
     omitted.give_up(req);
     req.state::<State>().suppress_warnings = false;

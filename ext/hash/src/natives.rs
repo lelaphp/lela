@@ -1148,7 +1148,7 @@ fn names(req: &mut Request, crypto: bool) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for algo in ALGOS.iter().filter(|a| !crypto || a.crypto) {
         let name = PhpString::new(req, algo.name.as_bytes())?;
-        out.append(req, name.into_value().hand_on_unmigrated())?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }
@@ -1683,23 +1683,20 @@ impl HashContext {
         let fields = fields?;
         let mut out = PhpArray::new(req)?;
         let algo_name = PhpString::new(req, name.as_bytes())?;
-        out.append(req, algo_name.into_value().hand_on_unmigrated())?;
-        out.append(req, Value::int(flags.0))?;
-        out.append(req, fields.into_value().hand_on_unmigrated())?;
-        out.append(req, Value::int(magic))?;
+        out.append(req, algo_name.into_value())?;
+        out.append(req, Owner::take(req, Value::int(flags.0)))?;
+        out.append(req, fields.into_value())?;
+        out.append(req, Owner::take(req, Value::int(magic)))?;
         let mut members = PhpArray::new(req)?;
         for (key, value) in this.props(req)? {
-            req.addref(&value);
+            let value = Owner::take(req, value);
             let key = match key {
-                Key::Str(name) => {
-                    req.addref(&Value::string(name));
-                    Key::from_string(name)
-                }
-                Key::Int(_) => key,
+                Key::Str(name) => Owner::take(req, Key::lookup(name)),
+                Key::Int(_) => Owner::take(req, key),
             };
             members.set(req, key, value)?;
         }
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -1815,11 +1812,7 @@ impl HashContext {
         let mut out = PhpArray::new(req)?;
         let key = PhpString::new(req, b"algo")?;
         let name = PhpString::new(req, algo.map_or("", |a| a.label).as_bytes())?;
-        out.set(
-            req,
-            Key::Str(key.hand_on_unmigrated()),
-            name.into_value().hand_on_unmigrated(),
-        )?;
+        out.set(req, key.into_key(), name.into_value())?;
         Ok(out)
     }
 }

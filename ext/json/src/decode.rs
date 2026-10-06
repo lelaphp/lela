@@ -19,7 +19,7 @@
 use php_ext::call;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::constants::{
     JSON_BIGINT_AS_STRING, JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH,
@@ -687,9 +687,13 @@ impl Parser<'_> {
     ) -> Result<Attached, Thrown> {
         let at = match frame {
             Open::Array { at, array } => {
-                if let Some(array) = array.as_mut() {
-                    array.append(req, value)?;
-                }
+                // The parse's owner of `value` handed on as one the
+                // array takes, the parse's own given up.
+                let appended = array
+                    .as_mut()
+                    .map_or(Ok(()), |array| array.append(req, Owner::take(req, value)));
+                req.release(value);
+                appended?;
                 *at
             }
             Open::Object { at, holder, key } => {
@@ -698,8 +702,12 @@ impl Parser<'_> {
                 }
                 match holder {
                     Holder::Array(array) => {
-                        let name = Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
-                        array.set(req, name, value)?;
+                        let set = PhpString::new(req, key).and_then(|name| {
+                            let name = Key::from_string(req, name);
+                            array.set(req, name, Owner::take(req, value))
+                        });
+                        req.release(value);
+                        set?;
                     }
                     Holder::Object(object) => {
                         if key.first() == Some(&0) {

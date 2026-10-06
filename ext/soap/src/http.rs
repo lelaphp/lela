@@ -1374,8 +1374,8 @@ fn digest_authorization(
         .find(b"nc")
         .and_then(|v| v.as_int())
         .map_or(1, |n| n.wrapping_add(1));
-    let key = Key::Str(PhpString::new(req, b"nc")?.hand_on_unmigrated());
-    digest.set(req, key, Value::int(count))?;
+    let key = PhpString::new(req, b"nc")?.into_key();
+    digest.set(req, key, Owner::take(req, Value::int(count)))?;
     // `snprintf(nc, sizeof(nc), "%08" ZEND_LONG_FMT_SPEC, ...)`, or
     // `"00000001"` for a count it adds.
     let mut nc = format!("{count:08}").into_bytes();
@@ -1552,7 +1552,7 @@ fn store_cookie(
 ) -> R<()> {
     let mut zcookie = PhpArray::new(req)?;
     let value = string(req, &cookie[eqpos + 1..sempos.unwrap_or(cookie.len())])?;
-    zcookie.set(req, Key::Int(0), value.hand_on_unmigrated())?;
+    zcookie.set(req, Owner::take(req, Key::Int(0)), value)?;
     if let Some(sempos) = sempos {
         let mut options = sempos + 1;
         while options < cookie.len() {
@@ -1564,12 +1564,16 @@ fn store_cookie(
             let end = next.unwrap_or(rest.len());
             if let Some(path) = rest.strip_prefix(b"path=") {
                 let value = string(req, &path[..end - 5])?;
-                zcookie.set(req, Key::Int(1), value.hand_on_unmigrated())?;
+                zcookie.set(req, Owner::take(req, Key::Int(1)), value)?;
             } else if let Some(domain) = rest.strip_prefix(b"domain=") {
                 let value = string(req, &domain[..end - 7])?;
-                zcookie.set(req, Key::Int(2), value.hand_on_unmigrated())?;
+                zcookie.set(req, Owner::take(req, Key::Int(2)), value)?;
             } else if rest.starts_with(b"secure") {
-                zcookie.set(req, Key::Int(3), Value::bool(true))?;
+                zcookie.set(
+                    req,
+                    Owner::take(req, Key::Int(3)),
+                    Owner::take(req, Value::bool(true)),
+                )?;
             }
             match next {
                 Some(next) => options += next + 1,
@@ -1581,19 +1585,16 @@ fn store_cookie(
         let t = cstr(uri.path.as_deref().unwrap_or(b"/"));
         if let Some(c) = t.iter().rposition(|c| *c == b'/') {
             let value = string(req, &t[..c])?;
-            zcookie.set(req, Key::Int(1), value.hand_on_unmigrated())?;
+            zcookie.set(req, Owner::take(req, Key::Int(1)), value)?;
         }
     }
     if !zcookie.contains(&Key::Int(2)) {
         let value = string(req, host_of(uri))?;
-        zcookie.set(req, Key::Int(2), value.hand_on_unmigrated())?;
+        zcookie.set(req, Owner::take(req, Key::Int(2)), value)?;
     }
     let name = PhpString::new(req, &cookie[..eqpos])?;
-    cookies.set(
-        req,
-        Key::from_string(name.hand_on_unmigrated()),
-        zcookie.into_value().hand_on_unmigrated(),
-    )
+    let name = Key::from_string(req, name);
+    cookies.set(req, name, zcookie.into_value())
 }
 
 /// The URL a `Location` sends the next request to: a relative one takes
@@ -1698,9 +1699,10 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
             Some(array) => array,
             None => digest.insert(PhpArray::new(req)?),
         };
-        let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
+        let key = PhpString::new(req, name)?;
+        let key = Key::from_string(req, key);
         let value = string(req, val)?;
-        array.set(req, key, value.hand_on_unmigrated())?;
+        array.set(req, key, value)?;
     }
     let Some(digest) = digest else {
         return Ok(false);

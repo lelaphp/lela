@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{
     CLIENT_INFO, CLIENT_VERSION, ClientOption, CloseType, Command, Connect, Mysqlnd, ServerOption,
 };
@@ -1076,9 +1076,9 @@ pub(crate) fn stats_array(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, value) in stats {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+        let key = PhpString::new(req, name.as_bytes())?.into_key();
         let value = string(req, value.to_string().as_bytes())?;
-        out.set(req, key, value.hand_on_unmigrated())?;
+        out.set(req, key, value)?;
     }
     Ok(out)
 }
@@ -1106,8 +1106,8 @@ pub(crate) fn links_stats(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
     ];
     let mut out = PhpArray::new(req)?;
     for (name, n) in counts {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
-        out.set(req, key, Value::int(n))?;
+        let key = PhpString::new(req, name.as_bytes())?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(n)))?;
     }
     Ok(out)
 }

@@ -399,10 +399,10 @@ pub(super) fn str_getcsv(
     match fgetcsv(string.as_bytes(), delimiter, enclosure, escape, &mut || {
         None
     }) {
-        None => array.append(req, Value::null())?,
+        None => array.append(req, Owner::take(req, Value::null()))?,
         Some(fields) => {
             for field in fields {
-                let value = Value::string(PhpString::new(req, &field)?.hand_on_unmigrated());
+                let value = PhpString::new(req, &field)?.into_value();
                 array.append(req, value)?;
             }
         }

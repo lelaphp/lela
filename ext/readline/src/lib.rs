@@ -36,7 +36,7 @@ use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Completion, Matches};
 
@@ -257,8 +257,8 @@ fn readline_info(
             ),
         ];
         for (key, row) in rows {
-            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
-            array.set(req, key, row.hand_on_unmigrated())?;
+            let key = PhpString::new(req, key)?.into_key();
+            array.set(req, key, row)?;
         }
         return Ok(array.into_value());
     };

@@ -1112,7 +1112,7 @@ impl ReflectionClass {
                 continue;
             }
             let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
-            methods.append(req, object.into_value().hand_on_unmigrated())?;
+            methods.append(req, object.into_value())?;
         }
         // `zend_get_closure_invoke_method` over the kept closure, or a fresh
         // one, appended where the filter keeps a public instance method.
@@ -1126,7 +1126,7 @@ impl ReflectionClass {
             if let Some(kept) = kept {
                 keep(req, *object, class, Some(kept));
             }
-            methods.append(req, object.into_value().hand_on_unmigrated())?;
+            methods.append(req, object.into_value())?;
         }
         Ok(methods)
     }
@@ -1292,7 +1292,7 @@ impl ReflectionClass {
                 continue;
             }
             let object = property_factory(req, &decl.name.0, scope, class)?;
-            properties.append(req, object.into_value().hand_on_unmigrated())?;
+            properties.append(req, object.into_value())?;
         }
         // `_adddynproperty` over the kept object's table, where the filter
         // keeps public ones: a dynamic property is public.
@@ -1301,7 +1301,7 @@ impl ReflectionClass {
         {
             for name in dynamic_properties(req, class, object) {
                 let object = property_factory(req, &name, class, class)?;
-                properties.append(req, object.into_value().hand_on_unmigrated())?;
+                properties.append(req, object.into_value())?;
             }
         }
         Ok(properties)
@@ -1368,11 +1368,7 @@ impl ReflectionClass {
                 }
             };
             let key = PhpString::new(req, &decl.name.0)?;
-            constants.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                value.hand_on_unmigrated(),
-            )?;
+            constants.set(req, key.into_key(), value)?;
         }
         Ok(constants)
     }
@@ -1405,7 +1401,7 @@ impl ReflectionClass {
                 continue;
             }
             let object = class_constant_factory(req, &decl.name.0, scope)?;
-            constants.append(req, object.into_value().hand_on_unmigrated())?;
+            constants.append(req, object.into_value())?;
         }
         Ok(constants)
     }
@@ -1505,11 +1501,7 @@ impl ReflectionClass {
             let name = class_name_of(req, interface);
             let object = reflection_class_factory(req, interface)?;
             let key = PhpString::new(req, &name)?;
-            interfaces.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                object.into_value().hand_on_unmigrated(),
-            )?;
+            interfaces.set(req, key.into_key(), object.into_value())?;
         }
         Ok(interfaces)
     }
@@ -1539,7 +1531,7 @@ impl ReflectionClass {
         for interface in linked {
             let name = class_name_of(req, interface);
             let value = string_value(req, &name)?;
-            names.append(req, value.hand_on_unmigrated())?;
+            names.append(req, value)?;
         }
         Ok(names)
     }
@@ -1588,11 +1580,7 @@ impl ReflectionClass {
             let name = class_name_of(req, at);
             let object = reflection_class_factory(req, at)?;
             let key = PhpString::new(req, &name)?;
-            found.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                object.into_value().hand_on_unmigrated(),
-            )?;
+            found.set(req, key.into_key(), object.into_value())?;
         }
         Ok(found)
     }
@@ -1622,7 +1610,7 @@ impl ReflectionClass {
             let found = lookup_class(req, &trait_.0)?;
             let name = found.map_or_else(|| trait_.0.to_vec(), |found| class_name_of(req, found));
             let value = string_value(req, &name)?;
-            names.append(req, value.hand_on_unmigrated())?;
+            names.append(req, value)?;
         }
         Ok(names)
     }
@@ -1687,11 +1675,7 @@ impl ReflectionClass {
             named.extend_from_slice(&method.method.0);
             let value = string_value(req, &named)?;
             let key = PhpString::new(req, &alias.0)?;
-            aliases.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                value.hand_on_unmigrated(),
-            )?;
+            aliases.set(req, key.into_key(), value)?;
         }
         Ok(aliases)
     }
@@ -2394,8 +2378,8 @@ impl ReflectionClass {
                 value.give_up(req);
                 continue;
             }
-            let key = Key::Str(PhpString::new(req, &property.name.0)?.hand_on_unmigrated());
-            properties.set(req, key, value.hand_on_unmigrated())?;
+            let key = PhpString::new(req, &property.name.0)?.into_key();
+            properties.set(req, key, value)?;
         }
         Ok(properties)
     }
@@ -2676,8 +2660,8 @@ impl ReflectionClass {
                     None if property.ty.is_some() => continue,
                     None => Owner::take(req, Value::null()),
                 };
-                let key = Key::Str(PhpString::new(req, &property.name.0)?.hand_on_unmigrated());
-                defaults.set(req, key, value.hand_on_unmigrated())?;
+                let key = PhpString::new(req, &property.name.0)?.into_key();
+                defaults.set(req, key, value)?;
             }
         }
         Ok(defaults)

@@ -14,7 +14,7 @@ use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value};
 
-use super::{copied, key_copy};
+use super::copied;
 
 /// The array a by-reference argument holds, as `Z_PARAM_ARRAY_EX(array,
 /// 0, 1)` separates it, with the cell to write a rebuilt table into; an
@@ -166,8 +166,7 @@ fn array_push(
 ) -> Result<i64, Thrown> {
     let mut stack = Stack::of(req, array)?;
     for value in values.0 {
-        req.addref(&value);
-        if let Err(thrown) = stack.array.append(req, value) {
+        if let Err(thrown) = stack.array.append(req, Owner::take(req, value)) {
             stack.finish(req);
             return Err(thrown);
         }
@@ -330,10 +329,10 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, 
     req.addref(&first);
     let mut rebuilt = PhpArray::new(req)?;
     for (key, element) in rows.into_iter().skip(1) {
-        req.addref(&element);
+        let element = Owner::take(req, element);
         match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 rebuilt.set(req, key, element)?;
             }
             Key::Int(_) => rebuilt.append(req, element)?,
@@ -436,14 +435,13 @@ fn array_unshift(
     let mut rebuilt = PhpArray::new(req)?;
     let argc = values.0.len();
     for value in values.0 {
-        req.addref(&value);
-        rebuilt.append(req, value)?;
+        rebuilt.append(req, Owner::take(req, value))?;
     }
     for (key, element) in stack.array.snapshot_refs() {
-        req.addref(&element);
+        let element = Owner::take(req, element);
         match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 rebuilt.set(req, key, element)?;
             }
             Key::Int(_) => rebuilt.append(req, element)?,
@@ -665,8 +663,7 @@ fn array_splice(
     }
     if let Some(replacement) = &replacement {
         for (_, value) in replacement.snapshot_refs() {
-            req.addref(&value);
-            rebuilt.append(req, value)?;
+            rebuilt.append(req, Owner::take(req, value))?;
             walk.pos += 1;
         }
     }
@@ -732,10 +729,10 @@ fn remove_range(
         // `zend_hash_add_new(removed, p->key, entry)`: a string key is
         // kept, copied before the delete gives the bucket's up.
         let kept = match (&removed, &key) {
-            (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
+            (Some(_), Key::Str(_)) => Some(Owner::take(req, key.clone())),
             _ => None,
         };
-        req.addref(&element);
+        let element = Owner::take(req, element);
         stack.array.unset(req, &key)?;
         let table = stack.array.to_value();
         if holder == Holder::Shared {
@@ -744,7 +741,7 @@ fn remove_range(
         match (removed.as_deref_mut(), kept) {
             (Some(removed), Some(key)) => removed.set(req, key, element)?,
             (Some(removed), None) => removed.append(req, element)?,
-            (None, _) => req.release(element),
+            (None, _) => element.give_up(req),
         }
         if holder == Holder::Shared {
             if table.refcount() == 1 {
@@ -799,10 +796,10 @@ fn keep(
     key: &Key,
     element: Value,
 ) -> Result<(), Thrown> {
-    req.addref(&element);
+    let element = Owner::take(req, element);
     match key {
         Key::Str(_) => {
-            let key = key_copy(req, key);
+            let key = Owner::take(req, key.clone());
             rebuilt.set(req, key, element)
         }
         Key::Int(_) => rebuilt.append(req, element),
@@ -918,7 +915,7 @@ fn array_slice(
         match key {
             Key::Int(_) if !preserve => out.append(req, value)?,
             _ => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 out.set(req, key, value)?;
             }
         }

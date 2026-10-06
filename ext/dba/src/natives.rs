@@ -818,7 +818,7 @@ pub(crate) fn dba_key_split(
     let mut array = PhpArray::new(req)?;
     for part in [group, name] {
         let part = string(req, part)?;
-        array.append(req, part.into_value().hand_on_unmigrated())?;
+        array.append(req, part.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -1126,14 +1126,10 @@ pub(crate) fn dba_handlers(
         if full_info {
             let name = string(req, handler.name().as_bytes())?;
             let version = string(req, handler.version().as_bytes())?;
-            array.set(
-                req,
-                Key::Str(name.hand_on_unmigrated()),
-                version.into_value().hand_on_unmigrated(),
-            )?;
+            array.set(req, name.into_key(), version.into_value())?;
         } else {
             let name = string(req, handler.name().as_bytes())?;
-            array.append(req, name.into_value().hand_on_unmigrated())?;
+            array.append(req, name.into_value())?;
         }
     }
     Ok(array)
@@ -1174,8 +1170,8 @@ pub(crate) fn dba_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let path = string(req, &path)?;
         array.set(
             req,
-            Key::Int(i64::from(object.index())),
-            path.into_value().hand_on_unmigrated(),
+            Owner::take(req, Key::Int(i64::from(object.index()))),
+            path.into_value(),
         )?;
     }
     Ok(array)

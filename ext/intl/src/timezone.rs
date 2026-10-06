@@ -15,7 +15,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::raising::{Thrown, arg_value_error, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::common_date::{DateTimeZone, convert_datetimezone, convert_to_datetimezone, now};
 use crate::error::{self, Carrier, IntlError, Outside, or_false};
@@ -215,22 +215,27 @@ pub(crate) fn debug_table(
     rows: Option<DebugRows>,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut table = PhpArray::new(req)?;
-    set(req, &mut table, b"valid", Value::bool(rows.is_some()))?;
+    set(
+        req,
+        &mut table,
+        b"valid",
+        Owner::take(req, Value::bool(rows.is_some())),
+    )?;
     if let Some((Some(id), offsets)) = rows {
         let id = PhpString::new(req, &id)?;
-        set(
-            req,
-            &mut table,
-            b"id",
-            Value::string(id.hand_on_unmigrated()),
-        )?;
+        set(req, &mut table, b"id", id.into_value())?;
         if let Some((raw, current)) = offsets {
-            set(req, &mut table, b"rawOffset", Value::int(i64::from(raw)))?;
+            set(
+                req,
+                &mut table,
+                b"rawOffset",
+                Owner::take(req, Value::int(i64::from(raw))),
+            )?;
             set(
                 req,
                 &mut table,
                 b"currentOffset",
-                Value::int(i64::from(current)),
+                Owner::take(req, Value::int(i64::from(current))),
             )?;
         }
     }
@@ -242,10 +247,16 @@ pub(crate) fn set(
     req: &mut Request,
     table: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, name)?;
-    table.set(req, Key::Str(key.hand_on_unmigrated()), value)
+    let key = match PhpString::new(req, name) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    table.set(req, key, value)
 }
 
 /// `TimeZone_clone_obj`: the members copied, the zone cloned, and php's

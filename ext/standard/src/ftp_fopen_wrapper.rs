@@ -18,7 +18,7 @@ use php_ext::request::{
     Closer, DirListing, Handshake, Notification, NotifyCode, Opening, Request, SocketOptions,
     Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
@@ -928,8 +928,8 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
     let sb = [0, 0, mode, 1, 0, 0, -1, size, -1, mtime, -1, 4096, blocks];
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, Value::int(field))?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(field)))?;
     }
     Ok(Some(out.hand_on_unmigrated()))
 }

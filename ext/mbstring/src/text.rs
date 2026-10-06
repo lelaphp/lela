@@ -470,7 +470,7 @@ fn mb_str_split(
     }
     for chunk in chunks {
         let s = new_string(req, &chunk)?;
-        out.append(req, s.into_value().hand_on_unmigrated())?;
+        out.append(req, s.into_value())?;
     }
     Ok(out)
 }

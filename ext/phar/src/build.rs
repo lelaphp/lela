@@ -10,7 +10,7 @@ use php_ext::call::{instantiate, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::raising::{Thrown, arity, deprecated, throw};
 use php_ext::request::{Request, Stream, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Filesystem};
 
 use crate::archive::{
@@ -973,9 +973,9 @@ fn add_built(
         }
     }
     done(req);
-    let k = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let k = PhpString::new(req, key)?.into_key();
     let v = string(req, opened)?;
-    b.ret.set(req, k, v.hand_on_unmigrated())?;
+    b.ret.set(req, k, v)?;
     entry::delref(req, data);
     Ok(true)
 }

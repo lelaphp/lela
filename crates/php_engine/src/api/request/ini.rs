@@ -771,10 +771,11 @@ impl Request {
                 let mut array = self.array()?;
                 for (key, entry) in rows {
                     let key = match key {
-                        ConfiguredKey::Index(n) => Key::Int(*n),
-                        ConfiguredKey::Name(name) => Key::Str(self.string(name)?),
+                        ConfiguredKey::Index(n) => Owner::take(self, Key::Int(*n)),
+                        ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
                     let value = self.configured_value(entry)?;
+                    let value = Owner::adopt(self, value);
                     array.set(self, key, value)?;
                 }
                 Value::array(array)

@@ -1499,21 +1499,26 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
     match &t.kind {
         Kind::Void => return Ok(None),
         _ if t.scalar().is_some() => {
-            let value = to_value(req, None, v.ptr, v.ty, Fetch::Read, true, false, false)?;
-            let key = PhpString::new(req, b"cdata")?.hand_on_unmigrated();
-            table.set(req, Key::Str(key), value.hand_on_unmigrated())?;
+            let key = PhpString::new(req, b"cdata")?.into_key();
+            let value = match to_value(req, None, v.ptr, v.ty, Fetch::Read, true, false, false) {
+                Ok(value) => value,
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            table.set(req, key, value)?;
         }
         Kind::Pointer(to) => {
             let value = ffi::read::<usize>(v.ptr);
             let shown = if value == 0 {
-                Value::null()
+                Owner::take(req, Value::null())
             } else if matches!(types(req).get(*to).kind, Kind::Void) {
-                Value::int(value as i64)
+                Owner::take(req, Value::int(value as i64))
             } else {
                 to_value(req, None, value, *to, Fetch::Read, true, false, false)?
-                    .hand_on_unmigrated()
             };
-            table.set(req, Key::Int(0), shown)?;
+            table.set(req, Owner::take(req, Key::Int(0)), shown)?;
         }
         Kind::Struct(record) => {
             let union = t.attr & attr::UNION != 0;
@@ -1521,8 +1526,9 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
                 let Some(key) = key else {
                     continue;
                 };
+                let key = PhpString::new(req, key)?.into_key();
                 let value = if field.bits == 0 {
-                    to_value(
+                    let read = to_value(
                         req,
                         None,
                         v.ptr.wrapping_add(field.offset),
@@ -1531,13 +1537,19 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
                         true,
                         false,
                         union,
-                    )?
-                    .hand_on_unmigrated()
+                    );
+                    match read {
+                        Ok(value) => value,
+                        Err(thrown) => {
+                            key.give_up(req);
+                            return Err(thrown);
+                        }
+                    }
                 } else {
-                    bit_field_value(req, v.ptr, field)
+                    let bits = bit_field_value(req, v.ptr, field);
+                    Owner::take(req, bits)
                 };
-                let key = PhpString::new(req, key)?.hand_on_unmigrated();
-                table.set(req, Key::Str(key), value)?;
+                table.set(req, key, value)?;
             }
         }
         Kind::Array { of, len } => {
@@ -1545,7 +1557,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
             let mut ptr = v.ptr;
             for n in 0..*len {
                 let value = to_value(req, None, ptr, *of, Fetch::Read, true, false, false)?;
-                table.set(req, Key::Int(n), value.hand_on_unmigrated())?;
+                table.set(req, Owner::take(req, Key::Int(n)), value)?;
                 ptr = ptr.wrapping_add(size);
             }
         }

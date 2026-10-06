@@ -12,17 +12,6 @@ use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::{long, lower, memnstr, str_copy, string_bytes};
 
-/// A key handed to a new array, one more reference to its string.
-fn owned_key(req: &mut Request, key: &Key) -> Key {
-    if let Key::Str(s) = key {
-        req.addref(&Value::string(*s));
-    }
-    match key {
-        Key::Int(n) => Key::Int(*n),
-        Key::Str(s) => Key::Str(*s),
-    }
-}
-
 /// `str_replace(array|string $search, array|string $replace,
 /// string|array $subject, &$count = null): string|array`: each search
 /// string, in order, replaced in the subject by its replacement (the
@@ -135,8 +124,8 @@ fn replace_common(
                 subject.give_up(req);
                 let (value, n) = replaced?;
                 count += n;
-                let key = owned_key(req, &key);
-                out.set(req, key, Value::string(value.hand_on_unmigrated()))?;
+                let key = Owner::take(req, key.clone());
+                out.set(req, key, value.into_value())?;
             }
             Union::A(out)
         }
@@ -596,8 +585,8 @@ pub(super) fn substr_replace(
                 bytes.extend_from_slice(&s[..f]);
                 bytes.extend_from_slice(&with);
                 bytes.extend_from_slice(&s[f + l..]);
-                let value = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
-                let key = owned_key(req, &key);
+                let value = PhpString::new(req, &bytes)?.into_value();
+                let key = Owner::take(req, key.clone());
                 out.set(req, key, value)?;
             }
             Ok(Union::A(out))

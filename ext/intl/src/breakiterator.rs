@@ -16,7 +16,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arg_value_error, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::breakiterator::{Breaker, Step};
@@ -522,7 +522,7 @@ impl IntlRuleBasedBreakIterator {
             Ok(all) => {
                 let mut array = PhpArray::new(req)?;
                 for n in all {
-                    array.append(req, Value::int(i64::from(n)))?;
+                    array.append(req, Owner::take(req, Value::int(i64::from(n))))?;
                 }
                 Ok(OrFalse::Value(array))
             }
@@ -870,14 +870,13 @@ impl ObjectHandlers for Handlers {
             _ => (false, Value::null(), ""),
         };
         let mut table = PhpArray::new(req)?;
-        let key = Key::Str(PhpString::new(req, b"valid")?.hand_on_unmigrated());
-        table.set(req, key, Value::bool(valid))?;
+        let key = PhpString::new(req, b"valid")?.into_key();
+        table.set(req, key, Owner::take(req, Value::bool(valid)))?;
         if valid {
-            req.addref(&text);
-            let key = Key::Str(PhpString::new(req, b"text")?.hand_on_unmigrated());
-            table.set(req, key, text)?;
-            let kind = Value::string(PhpString::new(req, kind.as_bytes())?.hand_on_unmigrated());
-            let key = Key::Str(PhpString::new(req, b"type")?.hand_on_unmigrated());
+            let key = PhpString::new(req, b"text")?.into_key();
+            table.set(req, key, Owner::take(req, text))?;
+            let kind = PhpString::new(req, kind.as_bytes())?.into_value();
+            let key = PhpString::new(req, b"type")?.into_key();
             table.set(req, key, kind)?;
         }
         Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))

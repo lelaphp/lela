@@ -758,7 +758,7 @@ impl SoapServer {
         };
         for n in names {
             let v = PhpString::new(req, &n)?;
-            out.append(req, Value::string(v.hand_on_unmigrated()))?;
+            out.append(req, v.into_value())?;
         }
         Ok(out)
     }
@@ -1403,9 +1403,9 @@ fn callable_for(
     let value = match object {
         Some(o) => {
             let mut pair = PhpArray::new(req)?;
-            req.addref(&o);
+            let o = Owner::take(req, o);
             pair.append(req, o)?;
-            pair.append(req, n.hand_on_unmigrated())?;
+            pair.append(req, n)?;
             pair.into_value()
         }
         None => n,
@@ -1790,7 +1790,8 @@ fn store_session_object(req: &mut Request, value: Value) -> Res<bool> {
     let Some(mut arr) = cell.separate_array(req)? else {
         return Ok(false);
     };
-    let key = php_ext::values::Key::Str(PhpString::new(req, SESSION_KEY)?.hand_on_unmigrated());
+    let key = PhpString::new(req, SESSION_KEY)?.into_key();
+    let value = crate::classes::owner_of(req, value);
     arr.set(req, key, value)?;
     Ok(true)
 }

@@ -39,7 +39,7 @@ use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
     OptionAnswer, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard, Whence,
 };
-use crate::api::values::{ClassId, FreshString, Key, PhpArray, PhpString, Resource, Value};
+use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
 
 pub(crate) mod filters;
 pub(crate) mod persistent;
@@ -4413,18 +4413,19 @@ impl StreamLayer for Request {
             entries.push((b"uri".to_vec(), MetaValue::Str(uri)));
         }
         for (key, value) in entries {
+            let key = PhpString::new(self, &key)?.into_key();
             let value = match value {
-                MetaValue::Bool(b) => Value::bool(b),
-                MetaValue::Int(n) => Value::int(n),
-                MetaValue::Str(bytes) => PhpString::new(self, &bytes)?
-                    .into_value()
-                    .hand_on_unmigrated(),
-                MetaValue::Value(value) => {
-                    self.addref(&value);
-                    value
-                }
+                MetaValue::Bool(b) => Owner::take(self, Value::bool(b)),
+                MetaValue::Int(n) => Owner::take(self, Value::int(n)),
+                MetaValue::Str(bytes) => match PhpString::new(self, &bytes) {
+                    Ok(bytes) => bytes.into_value(),
+                    Err(thrown) => {
+                        key.give_up(self);
+                        return Err(thrown);
+                    }
+                },
+                MetaValue::Value(value) => Owner::take(self, value),
             };
-            let key = Key::Str(PhpString::new(self, &key)?.hand_on_unmigrated());
             out.set(self, key, value)?;
         }
         if let Some(crypto) = crypto {

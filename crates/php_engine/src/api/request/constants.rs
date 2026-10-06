@@ -10,7 +10,7 @@
 use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Owner, PhpArray, Value, adopted};
+use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted};
 use crate::exec;
 
 use super::{ExtensionId, Request, Standard};
@@ -184,8 +184,8 @@ impl Request {
             .map(|row| (row.name.clone(), row.value))
             .collect();
         for (name, value) in constants {
-            let key = Key::Str(self.string(&name)?);
-            self.addref(&value);
+            let key = PhpString::new(self, &name)?.into_key();
+            let value = Owner::take(self, value);
             array.set(self, key, value)?;
         }
         Ok(array)

@@ -274,11 +274,11 @@ impl SplFixedArray {
         let elements = with(req, this, |a| a.elements.clone())?;
         let mut out = PhpArray::new(req)?;
         for value in elements {
-            out.append(req, crate::copied(req, value))?;
+            out.append(req, Owner::take(req, value.deref()))?;
         }
         for (key, value) in crate::std_properties(req, this)? {
-            req.addref(&value);
-            let key = crate::owned_key(req, &key);
+            let value = Owner::take(req, value);
+            let key = Owner::take(req, key.clone());
             out.set(req, key, value)?;
         }
         Ok(out)
@@ -307,8 +307,8 @@ impl SplFixedArray {
             match key {
                 Key::Int(_) => elements.push(crate::copied(req, value)),
                 Key::Str(_) => {
-                    req.addref(&value);
-                    let key = crate::owned_key(req, &key);
+                    let value = Owner::take(req, value);
+                    let key = Owner::take(req, key.clone());
                     members.set(req, key, value)?;
                 }
             }
@@ -351,7 +351,7 @@ impl SplFixedArray {
         }
         let mut out = PhpArray::new(req)?;
         for value in elements {
-            out.append(req, crate::copied(req, value))?;
+            out.append(req, Owner::take(req, value.deref()))?;
         }
         Ok(out)
     }
@@ -569,7 +569,7 @@ fn with<R>(
 fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
     let n = match offset.deref().as_ref() {
         ValueRef::Int(n) => n,
-        ValueRef::Str(s) => match Key::from_string(*s) {
+        ValueRef::Str(s) => match Key::lookup(*s) {
             Key::Int(n) => n,
             Key::Str(_) => return Err(illegal(req, offset)),
         },
@@ -906,8 +906,7 @@ impl ObjectHandlers for Handlers {
         };
         let mut out = PhpArray::new(req)?;
         for (key, value) in rows {
-            req.addref(&value);
-            out.set(req, key, value)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         Ok(Some(out.hand_on_unmigrated().into()))
     }

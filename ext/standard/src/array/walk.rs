@@ -17,9 +17,9 @@ use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
+use super::copied;
 use super::pointer::ArrayOrObject;
 use super::sort::key_value;
-use super::{copied, key_copy};
 
 /// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
 /// php's `php_array_walk` (`Z/ext/standard/array.c:1438`):
@@ -546,7 +546,7 @@ fn array_filter(
         };
         if keep {
             let value = copied(req, operand);
-            let key = key_copy(req, &key);
+            let key = Owner::take(req, key.clone());
             out.set(req, key, value)?;
         }
     }
@@ -795,8 +795,8 @@ fn mapped(
                 out.give_up(req);
                 return Ok(None);
             }
-            let key = key_copy(req, &key);
-            out.set(req, key, answer.hand_on_unmigrated())?;
+            let key = Owner::take(req, key.clone());
+            out.set(req, key, answer)?;
         }
         return Ok(Some(out));
     }
@@ -815,10 +815,9 @@ fn mapped(
             None => {
                 let mut tuple = PhpArray::new(req)?;
                 for value in row {
-                    req.addref(&value);
-                    tuple.append(req, value)?;
+                    tuple.append(req, Owner::take(req, value))?;
                 }
-                Value::array(tuple.hand_on_unmigrated())
+                tuple.into_value()
             }
             Some(callback) => match call(req, callback, &row) {
                 Ok(answer) if matches!(answer.as_ref(), ValueRef::Undef) => {
@@ -826,7 +825,7 @@ fn mapped(
                     out.give_up(req);
                     return Ok(None);
                 }
-                Ok(answer) => answer.hand_on_unmigrated(),
+                Ok(answer) => answer,
                 Err(thrown) => {
                     out.give_up(req);
                     return Err(thrown);

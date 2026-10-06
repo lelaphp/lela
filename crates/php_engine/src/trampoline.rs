@@ -24,7 +24,7 @@ use php_unit::decl::{
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, Value};
+use crate::api::values::{Key, Owner, PhpArray, Value};
 
 /// Where the trampolines' function numbers begin: past the enum methods'
 /// ([`crate::enums::ENUM_FUNCTIONS`]), so the spaces never meet. Each
@@ -327,11 +327,14 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
     } else {
         req.array()?
     };
+    // The arguments are the frame's owners, moved here.
     for argument in arguments {
-        packed.append(req, argument)?;
+        packed.append(req, Owner::adopt(req, argument))?;
     }
     for (key, value) in named {
-        packed.set(req, Key::from_string(key), value)?;
+        let key = Owner::adopt(req, key);
+        let key = Key::from_string(req, key);
+        packed.set(req, key, Owner::adopt(req, value))?;
     }
     req.serve_instead(magic, vec![Value::string(name), Value::array(packed)]);
     Ok(magic)
@@ -411,13 +414,11 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
         req.array()?
     };
     for argument in passed {
-        req.addref(&argument);
-        packed.append(req, argument)?;
+        packed.append(req, Owner::take(req, argument))?;
     }
     for (key, value) in named {
-        req.addref(&Value::string(key));
-        req.addref(&value);
-        packed.set(req, Key::from_string(key), value)?;
+        let key = Owner::take(req, Key::lookup(key));
+        packed.set(req, key, Owner::take(req, value))?;
     }
     let packed = Value::array(packed);
     let arguments = [name, packed];

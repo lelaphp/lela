@@ -445,7 +445,7 @@ fn list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
     let mut status = Code::ZERO;
     while let Some(id) = all.next(&mut status) {
         let id = PhpString::new(req, &id)?;
-        array.append(req, Value::string(id.hand_on_unmigrated()))?;
+        array.append(req, id.into_value())?;
     }
     error::set_code(req, status);
     if status.is_failure() {

@@ -337,20 +337,19 @@ impl ObjectHandlers for ClosureHandlers {
                 Some(scope) => format!("{}::{written}", req.class_name(scope)),
                 None => written,
             };
-            let named = PhpString::new(req, named.as_bytes())?
-                .into_value()
-                .hand_on_unmigrated();
+            let named = PhpString::new(req, named.as_bytes())?.into_value();
             set_row(req, &mut out, b"function", named)?;
         } else {
-            let named = PhpString::new(req, written.as_bytes())?
-                .into_value()
-                .hand_on_unmigrated();
+            let named = PhpString::new(req, written.as_bytes())?.into_value();
             set_row(req, &mut out, b"name", named)?;
-            let file = PhpString::new(req, &decl.file.0)?
-                .into_value()
-                .hand_on_unmigrated();
+            let file = PhpString::new(req, &decl.file.0)?.into_value();
             set_row(req, &mut out, b"file", file)?;
-            set_row(req, &mut out, b"line", Value::int(i64::from(decl.line)))?;
+            set_row(
+                req,
+                &mut out,
+                b"line",
+                Owner::take(req, Value::int(i64::from(decl.line))),
+            )?;
         }
         // The whole table, the `use` variables and the body's `static`s.
         let bound = req.closure_bound(object, false);
@@ -365,19 +364,13 @@ impl ObjectHandlers for ClosureHandlers {
                 } else {
                     value
                 };
-                req.addref(&value);
-                statics.set(req, Key::from_string(name.hand_on_unmigrated()), value)?;
+                let name = Key::from_string(req, name);
+                statics.set(req, name, Owner::take(req, value))?;
             }
-            set_row(
-                req,
-                &mut out,
-                b"static",
-                statics.into_value().hand_on_unmigrated(),
-            )?;
+            set_row(req, &mut out, b"static", statics.into_value())?;
         }
         if let Some(this) = closure.this {
-            let this = this.as_value();
-            req.addref(&this);
+            let this = Owner::take(req, this.as_value());
             set_row(req, &mut out, b"this", this)?;
         }
         if !decl.parameters.is_empty() {
@@ -395,19 +388,12 @@ impl ObjectHandlers for ClosureHandlers {
                 } else {
                     b"<required>"
                 };
-                let stands = PhpString::new(req, stands)?
-                    .into_value()
-                    .hand_on_unmigrated();
-                let key =
-                    Key::from_string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
-                parameters.set(req, key, stands)?;
+                let key = PhpString::new(req, name.as_bytes())?;
+                let key = Key::from_string(req, key);
+                let stands = PhpString::new(req, stands)?;
+                parameters.set(req, key, stands.into_value())?;
             }
-            set_row(
-                req,
-                &mut out,
-                b"parameter",
-                parameters.into_value().hand_on_unmigrated(),
-            )?;
+            set_row(req, &mut out, b"parameter", parameters.into_value())?;
         }
         Ok(Some(out.hand_on_unmigrated().into()))
     }
@@ -487,9 +473,15 @@ fn set_row(
     req: &mut Request,
     table: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, name) {
+        Ok(key) => Key::from_string(req, key),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     table.set(req, key, value)
 }
 

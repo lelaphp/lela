@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::decl::{ClassConstDecl, ConstExpr, Name, Type, Visibility};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::locale::{self as uloc, Part, Shown};
@@ -316,9 +316,9 @@ fn assoc(
     key: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let key = PhpString::new(req, key)?.into_key();
     let value = text(req, value)?;
-    array.set(req, key, value.hand_on_unmigrated())
+    array.set(req, key, value)
 }
 
 /// `locale_get_keywords`: the keywords as `name => value`, `null` where
@@ -568,7 +568,7 @@ fn all_variants(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray
     {
         for token in tokens(&variant) {
             let value = text(req, token)?;
-            array.append(req, value.hand_on_unmigrated())?;
+            array.append(req, value)?;
         }
     }
     Ok(Some(array))

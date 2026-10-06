@@ -30,6 +30,15 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// A value a decoder answers with its one owner, the caller's, as the
+/// owner it is: one taken for the caller and the decoder's given up.
+/// What the array sinks are handed until the decoders answer owners.
+pub(crate) fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
+}
+
 /// `ZVAL_COPY`: one more owner of `value`, the caller's to give away.
 pub(crate) fn copied(req: &mut Request, value: Value) -> Value {
     let value = value.deref();

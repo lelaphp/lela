@@ -96,12 +96,13 @@ fn properties(
         Some(rows) => {
             let mut array = PhpArray::new(req)?;
             for (name, value) in rows {
-                let key = Key::from_string(init(req, &name)?.hand_on_unmigrated());
+                let key = init(req, &name)?;
+                let key = Key::from_string(req, key);
                 let value = match value {
                     Some(value) => string(req, &value)?,
                     None => PhpString::new(req, b"")?.into_value(),
                 };
-                array.set(req, key, value.hand_on_unmigrated())?;
+                array.set(req, key, value)?;
             }
             Value::array(array.hand_on_unmigrated())
         }
@@ -120,7 +121,7 @@ fn properties(
                     return Err(thrown);
                 }
             };
-            array.append(req, made.into_value().hand_on_unmigrated())?;
+            array.append(req, made.into_value())?;
         }
         Value::array(array.hand_on_unmigrated())
     };

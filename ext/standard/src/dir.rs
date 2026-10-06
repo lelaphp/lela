@@ -536,7 +536,7 @@ fn scandir(
     let mut array = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        array.append(req, Value::string(name.hand_on_unmigrated()))?;
+        array.append(req, name.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -644,7 +644,7 @@ fn glob(
             continue;
         }
         let shown = path.get(cwd_skip..).unwrap_or_default();
-        let shown = Value::string(PhpString::new(req, shown)?.hand_on_unmigrated());
+        let shown = PhpString::new(req, shown)?.into_value();
         array.append(req, shown)?;
     }
     // Every match refused by the guard is `false`, not the empty array.

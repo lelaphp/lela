@@ -825,17 +825,9 @@ fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Owne
     if flags & SplPriorityQueue::EXTR_BOTH == SplPriorityQueue::EXTR_BOTH {
         let mut out = PhpArray::new(req)?;
         let data = PhpString::new(req, b"data")?;
-        out.set(
-            req,
-            Key::Str(data.hand_on_unmigrated()),
-            crate::copied(req, elem.0),
-        )?;
+        out.set(req, data.into_key(), Owner::take(req, elem.0.deref()))?;
         let priority = PhpString::new(req, b"priority")?;
-        out.set(
-            req,
-            Key::Str(priority.hand_on_unmigrated()),
-            crate::copied(req, elem.1),
-        )?;
+        out.set(req, priority.into_key(), Owner::take(req, elem.1.deref()))?;
         return Ok(out.into_value());
     }
     if flags & SplPriorityQueue::EXTR_PRIORITY != 0 {
@@ -910,8 +902,7 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     })?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let base: &[u8] = if queue {
         b"SplPriorityQueue"
@@ -920,28 +911,24 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     };
     let mangled = |field: &[u8]| [b"\0".as_slice(), base, b"\0", field].concat();
     let name = PhpString::new(req, &mangled(b"flags"))?;
-    out.set(req, Key::Str(name.hand_on_unmigrated()), Value::int(flags))?;
+    out.set(req, name.into_key(), Owner::take(req, Value::int(flags)))?;
     let name = PhpString::new(req, &mangled(b"isCorrupted"))?;
     out.set(
         req,
-        Key::Str(name.hand_on_unmigrated()),
-        Value::bool(corrupted),
+        name.into_key(),
+        Owner::take(req, Value::bool(corrupted)),
     )?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?.hand_on_unmigrated()
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
         } else {
-            crate::copied(req, elem.0)
+            Owner::take(req, elem.0.deref())
         };
         heap.append(req, value)?;
     }
     let name = PhpString::new(req, &mangled(b"heap"))?;
-    out.set(
-        req,
-        Key::Str(name.hand_on_unmigrated()),
-        heap.into_value().hand_on_unmigrated(),
-    )?;
+    out.set(req, name.into_key(), heap.into_value())?;
     Ok(out)
 }
 
@@ -951,26 +938,22 @@ fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thro
     let (queue, flags, elements) = read(req, this, |h| (h.queue, h.flags, h.elements.clone()))?;
     let mut out = PhpArray::new(req)?;
     let props = crate::members(req, this)?;
-    out.append(req, props.into_value().hand_on_unmigrated())?;
+    out.append(req, props.into_value())?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, b"flags")?;
-    state.set(req, Key::Str(key.hand_on_unmigrated()), Value::int(flags))?;
+    state.set(req, key.into_key(), Owner::take(req, Value::int(flags)))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
-            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?.hand_on_unmigrated()
+            extracted(req, elem, SplPriorityQueue::EXTR_BOTH)?
         } else {
-            crate::copied(req, elem.0)
+            Owner::take(req, elem.0.deref())
         };
         heap.append(req, value)?;
     }
     let key = PhpString::new(req, b"heap_elements")?;
-    state.set(
-        req,
-        Key::Str(key.hand_on_unmigrated()),
-        heap.into_value().hand_on_unmigrated(),
-    )?;
-    out.append(req, state.into_value().hand_on_unmigrated())?;
+    state.set(req, key.into_key(), heap.into_value())?;
+    out.append(req, state.into_value())?;
     Ok(out)
 }
 

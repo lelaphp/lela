@@ -2901,11 +2901,11 @@ fn add_unpacked_element(
         ));
     };
     for (key, value) in source.snapshot_refs() {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         match key {
-            Key::Str(name) => {
-                req.addref(&Value::string(name));
-                array.set(req, Key::Str(name), value)?;
+            Key::Str(_) => {
+                let key = Owner::take(req, key);
+                array.set(req, key, value)?;
             }
             Key::Int(_) => array.append(req, value)?,
         }

@@ -931,13 +931,13 @@ impl SplObjectStorage {
         let rows = with(req, this, |s| s.live())?;
         let mut list = PhpArray::new(req)?;
         for (object, inf) in rows {
-            list.append(req, crate::copied(req, object.as_value()))?;
-            list.append(req, crate::copied(req, inf))?;
+            list.append(req, Owner::take(req, object.as_value().deref()))?;
+            list.append(req, Owner::take(req, inf.deref()))?;
         }
         let mut out = PhpArray::new(req)?;
-        out.append(req, list.into_value().hand_on_unmigrated())?;
+        out.append(req, list.into_value())?;
         let members = crate::members(req, this)?;
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -1031,8 +1031,7 @@ impl SplObjectStorage {
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
         for (key, value) in crate::std_properties(req, this)? {
-            req.addref(&value);
-            out.set(req, key, value)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         let mut storage = PhpArray::new(req)?;
         for (object, inf) in rows {
@@ -1040,23 +1039,15 @@ impl SplObjectStorage {
             let key = PhpString::new(req, b"obj")?;
             row.set(
                 req,
-                Key::Str(key.hand_on_unmigrated()),
-                crate::copied(req, object.as_value()),
+                key.into_key(),
+                Owner::take(req, object.as_value().deref()),
             )?;
             let key = PhpString::new(req, b"inf")?;
-            row.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                crate::copied(req, inf),
-            )?;
-            storage.append(req, row.into_value().hand_on_unmigrated())?;
+            row.set(req, key.into_key(), Owner::take(req, inf.deref()))?;
+            storage.append(req, row.into_value())?;
         }
         let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
-        out.set(
-            req,
-            Key::Str(name.hand_on_unmigrated()),
-            storage.into_value().hand_on_unmigrated(),
-        )?;
+        out.set(req, name.into_key(), storage.into_value())?;
         Ok(out)
     }
 }
@@ -2086,16 +2077,11 @@ fn get_one(
         Owner::take(req, Value::null())
     };
     if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
-        return out.append(req, value.hand_on_unmigrated());
+        return out.append(req, value);
     }
     let key = match inf.as_ref() {
-        ValueRef::Int(n) => Key::Int(n),
-        ValueRef::Str(s) => Key::from_string(
-            crate::copied(req, Value::string(*s))
-                .as_php_string()
-                .copied()
-                .unwrap_or(*s),
-        ),
+        ValueRef::Int(n) => Owner::take(req, Key::Int(n)),
+        ValueRef::Str(s) => Owner::take(req, Key::lookup(*s)),
         _ => {
             value.give_up(req);
             return Err(throw(
@@ -2105,5 +2091,5 @@ fn get_one(
             ));
         }
     };
-    out.set(req, key, value.hand_on_unmigrated())
+    out.set(req, key, value)
 }

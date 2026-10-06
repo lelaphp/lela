@@ -503,10 +503,7 @@ fn over_array_func(
         subject.give_up(req);
         match result {
             Ok(Some(result)) => {
-                if let Key::Str(s) = &key {
-                    req.addref(&Value::string(*s));
-                }
-                out.set(req, key, result.into_value().hand_on_unmigrated())?;
+                out.set(req, Owner::take(req, key), result.into_value())?;
             }
             Ok(None) => {}
             Err(thrown) => pending = Some(thrown),
@@ -558,10 +555,7 @@ fn over_array(
             result.give_up(req);
             continue;
         }
-        if let Key::Str(s) = &key {
-            req.addref(&Value::string(*s));
-        }
-        out.set(req, key, result.into_value().hand_on_unmigrated())?;
+        out.set(req, Owner::take(req, key), result.into_value())?;
     }
     Ok(out)
 }

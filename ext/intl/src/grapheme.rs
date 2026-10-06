@@ -742,7 +742,7 @@ fn grapheme_str_split(
     drop(breaks);
     for chunk in chunks {
         let chunk = PhpString::new(req, chunk)?;
-        parts.append(req, Value::string(chunk.hand_on_unmigrated()))?;
+        parts.append(req, chunk.into_value())?;
     }
     Ok(OrFalse::Value(parts))
 }

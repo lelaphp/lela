@@ -605,21 +605,32 @@ fn put_option(
     options.separate(req)?;
     let wrapper = c_string(wrapper);
     let existing = options.find(&wrapper).map(|v| v.deref());
-    let mut category = match existing.as_ref().and_then(Value::as_array) {
-        Some(array) => {
-            let array = *array;
-            req.addref(&Value::array(array));
-            array
+    let wrapper_key = PhpString::new(req, &wrapper)?.into_key();
+    let option_key = match PhpString::new(req, &c_string(option)) {
+        Ok(option) => option.into_key(),
+        Err(thrown) => {
+            wrapper_key.give_up(req);
+            return Err(thrown);
         }
-        None => PhpArray::new(req)?.hand_on_unmigrated(),
     };
-    category.separate(req)?;
-    let value = value.deref();
-    req.addref(&value);
-    let option_key = Key::Str(PhpString::new(req, &c_string(option))?.hand_on_unmigrated());
-    category.set(req, option_key, value)?;
-    let wrapper_key = Key::Str(PhpString::new(req, &wrapper)?.hand_on_unmigrated());
-    options.set(req, wrapper_key, Value::array(category))
+    let mut category = match existing.as_ref().and_then(Value::as_array) {
+        Some(array) => Owner::take(req, *array),
+        None => match PhpArray::new(req) {
+            Ok(array) => array,
+            Err(thrown) => {
+                wrapper_key.give_up(req);
+                option_key.give_up(req);
+                return Err(thrown);
+            }
+        },
+    };
+    let value = Owner::take(req, value.deref());
+    if let Err(thrown) = category.set(req, option_key, value) {
+        wrapper_key.give_up(req);
+        category.give_up(req);
+        return Err(thrown);
+    }
+    options.set(req, wrapper_key, category.into_value())
 }
 
 /// The body of [`StreamCtx::unset_option`] over the options array
@@ -634,20 +645,25 @@ fn unset_in(
         .find(wrapper)
         .map(|v| v.deref())
         .and_then(|v| v.as_array().copied());
-    let Some(mut category) = found else {
+    let Some(category) = found else {
         return Ok(());
     };
-    let name = PhpString::new(req, wrapper)?;
-    options.separate(req)?;
-    req.addref(&Value::array(category));
-    category.separate(req)?;
-    let option = PhpString::new(req, option)?;
+    let name = PhpString::new(req, wrapper)?.into_key();
+    let mut category = Owner::take(req, category);
+    let option = match PhpString::new(req, option) {
+        Ok(option) => option,
+        Err(thrown) => {
+            name.give_up(req);
+            category.give_up(req);
+            return Err(thrown);
+        }
+    };
     let unset = category.unset(req, &Key::Str(*option));
     option.give_up(req);
-    unset?;
-    options.set(
-        req,
-        Key::Str(name.hand_on_unmigrated()),
-        Value::array(category),
-    )
+    if let Err(thrown) = unset {
+        name.give_up(req);
+        category.give_up(req);
+        return Err(thrown);
+    }
+    options.set(req, name, category.into_value())
 }

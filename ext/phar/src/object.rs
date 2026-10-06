@@ -13,7 +13,7 @@ use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
 use php_ext::request::{Request, Stream, Streams as _};
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Other};
 
 use crate::archive::{
@@ -917,9 +917,9 @@ impl Phar {
         };
         let mut out = PhpArray::new(req)?;
         for (key, value) in [(&b"hash"[..], hash), (b"hash_type", kind.into_bytes())] {
-            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+            let key = PhpString::new(req, key)?.into_key();
             let value = string(req, &value)?;
-            out.set(req, key, value.hand_on_unmigrated())?;
+            out.set(req, key, value)?;
         }
         Ok(OrFalse::Value(out))
     }
@@ -1334,11 +1334,11 @@ impl Phar {
         let mut out = PhpArray::new(req)?;
         if has_zlib(req) {
             let v = string(req, b"GZ")?;
-            out.append(req, v.hand_on_unmigrated())?;
+            out.append(req, v)?;
         }
         if has_bz2(req) {
             let v = string(req, b"BZIP2")?;
-            out.append(req, v.hand_on_unmigrated())?;
+            out.append(req, v)?;
         }
         Ok(out)
     }
@@ -1353,7 +1353,7 @@ impl Phar {
         }
         for name in names {
             let v = string(req, name)?;
-            out.append(req, v.hand_on_unmigrated())?;
+            out.append(req, v)?;
         }
         Ok(out)
     }

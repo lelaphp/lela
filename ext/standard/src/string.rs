@@ -1494,7 +1494,7 @@ fn explode(
     let (d, s) = (delim.as_bytes(), string.as_bytes());
     if s.is_empty() {
         if limit >= 0 {
-            let empty = Value::string(PhpString::new(req, b"")?.hand_on_unmigrated());
+            let empty = PhpString::new(req, b"")?.into_value();
             array.append(req, empty)?;
         }
         return Ok(array);
@@ -1528,12 +1528,12 @@ fn explode(
         1
     };
     if limit == 0 || limit == 1 {
-        let whole = Value::string(str_copy(req, string).hand_on_unmigrated());
+        let whole = str_copy(req, string).into_value();
         array.append(req, whole)?;
         return Ok(array);
     }
     for i in 0..take {
-        let value = Value::string(PhpString::new(req, piece(i))?.hand_on_unmigrated());
+        let value = PhpString::new(req, piece(i))?.into_value();
         array.append(req, value)?;
     }
     Ok(array)
@@ -2356,7 +2356,11 @@ fn count_chars(
             _ => *count == 0,
         };
         if keep {
-            array.set(req, Key::Int(long(inx)), Value::int(long(*count)))?;
+            array.set(
+                req,
+                Owner::take(req, Key::Int(long(inx))),
+                Owner::take(req, Value::int(long(*count))),
+            )?;
         }
     }
     Ok(Union::A(array))
@@ -2582,14 +2586,12 @@ fn str_word_count(
         if p > start {
             match (&mut array, format) {
                 (Some(array), 1) => {
-                    let word =
-                        Value::string(PhpString::new(req, &s[start..p])?.hand_on_unmigrated());
+                    let word = PhpString::new(req, &s[start..p])?.into_value();
                     array.append(req, word)?;
                 }
                 (Some(array), _) => {
-                    let word =
-                        Value::string(PhpString::new(req, &s[start..p])?.hand_on_unmigrated());
-                    array.set(req, Key::Int(long(start)), word)?;
+                    let word = PhpString::new(req, &s[start..p])?.into_value();
+                    array.set(req, Owner::take(req, Key::Int(long(start))), word)?;
                 }
                 (None, _) => count += 1,
             }
@@ -2642,7 +2644,7 @@ fn str_split(
     let mut array = PhpArray::new(req)?;
     let chunk = usize::try_from(length).unwrap_or(usize::MAX);
     for piece in string.as_bytes().chunks(chunk) {
-        let value = Value::string(PhpString::new(req, piece)?.hand_on_unmigrated());
+        let value = PhpString::new(req, piece)?.into_value();
         array.append(req, value)?;
     }
     Ok(array)

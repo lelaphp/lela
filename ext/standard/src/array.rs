@@ -119,22 +119,12 @@ fn returned<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
 /// `zval_add_ref` on an element being copied into a new array: a
 /// reference with no other owner is followed to its value, which is
 /// what the copy holds, and anything else is one more owner.
-fn copied(req: &mut Request, value: Value) -> Value {
+fn copied(req: &Request, value: Value) -> Owner<Value> {
     let value = match value.as_ref() {
         ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
         _ => value,
     };
-    req.addref(&value);
-    value
-}
-
-/// A key written into another array: a string key one more owner, as
-/// `zend_hash_add_new` takes it.
-fn key_copy(req: &mut Request, key: &Key) -> Key {
-    if let Key::Str(s) = key {
-        req.addref(&Value::string(*s));
-    }
-    key.clone()
+    Owner::take(req, value)
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
@@ -262,11 +252,11 @@ fn array_merge(
                 ValueRef::Reference(_) if value.refcount() == 1 => value.deref(),
                 _ => value,
             };
-            req.addref(&value);
+            let value = Owner::take(req, value);
             match key {
-                Key::Str(name) => {
-                    req.addref(&Value::string(name));
-                    merged.set(req, Key::Str(name), value)?;
+                Key::Str(_) => {
+                    let key = Owner::take(req, key);
+                    merged.set(req, key, value)?;
                 }
                 Key::Int(_) => merged.append(req, value)?,
             }
@@ -589,11 +579,7 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
             Some(reference) if value.refcount() == 1 => reference.get(),
             _ => value,
         };
-        req.addref(&value);
-        if let Key::Str(s) = &key {
-            req.addref(&Value::string(*s));
-        }
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     Ok(out)
 }

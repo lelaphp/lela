@@ -597,8 +597,7 @@ fn sort_with_sort_keys(
     zend_sort(&mut keyed, &mut |a, b| a.0.cmp(&b.0));
     let mut sorted = PhpArray::new(req)?;
     for (_, value) in keyed {
-        req.addref(&value);
-        sorted.append(req, value)?;
+        sorted.append(req, Owner::take(req, value))?;
     }
     array.set(req, sorted)?;
     Ok(true)

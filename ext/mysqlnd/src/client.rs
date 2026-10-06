@@ -619,24 +619,22 @@ impl ResultSet {
             // name put at the same index first keeps it.
             let at = php_ext::values::Key::Int(i64::try_from(i).unwrap_or(i64::MAX));
             if flags & fetch::NUM != 0 && !array.contains(&at) {
-                req.addref(&value);
-                array.set(req, at, value)?;
+                array.set(req, Owner::take(req, at), Owner::take(req, value))?;
             }
             if flags & fetch::ASSOC != 0 {
                 let key = match field.and_then(|f| f.num_key) {
-                    Some(n) => php_ext::values::Key::Int(n),
-                    None => php_ext::values::Key::Str(
-                        php_ext::values::PhpString::new(
-                            req,
-                            field.map(|f| f.name.as_slice()).unwrap_or_default(),
-                        )?
-                        .hand_on_unmigrated(),
-                    ),
+                    Some(n) => Owner::take(req, php_ext::values::Key::Int(n)),
+                    None => php_ext::values::PhpString::new(
+                        req,
+                        field.map(|f| f.name.as_slice()).unwrap_or_default(),
+                    )?
+                    .into_key(),
                 };
-                array.set(req, key, value)?;
-            } else {
-                req.release(value);
+                array.set(req, key, Owner::take(req, value))?;
             }
+            // The row's own owner of the value, each key above having
+            // taken one of its own.
+            req.release(value);
         }
         Ok(array.into_value())
     }

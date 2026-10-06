@@ -24,7 +24,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
-use super::{copied, key_copy, user_compare};
+use super::{copied, user_compare};
 
 /// What a diff or an intersection compares values with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -292,8 +292,8 @@ fn by_key(
             }
         }
         if keep {
-            req.addref(&value);
-            let key = key_copy(req, &key);
+            let value = Owner::take(req, value);
+            let key = Owner::take(req, key.clone());
             out.set(req, key, value)?;
         }
     }
@@ -723,7 +723,7 @@ fn array_diff(
             continue;
         }
         let value = copied(req, value);
-        let key = key_copy(req, &key);
+        let key = Owner::take(req, key.clone());
         out.set(req, key, value)?;
     }
     Ok(out)

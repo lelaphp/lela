@@ -298,7 +298,7 @@ fn curl_share_init_persistent(
     let mut options = PhpArray::new(req)?;
     for (lock, bit) in LOCKS {
         if id & bit != 0 {
-            options.append(req, Value::int(lock))?;
+            options.append(req, Owner::take(req, Value::int(lock)))?;
         }
     }
     if let Err(thrown) = write_prop(

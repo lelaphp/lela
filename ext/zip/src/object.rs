@@ -571,7 +571,7 @@ fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Throw
     let mut out = PhpArray::new(req)?;
     let name = string(req, &st.name)?;
     let rows: [(&[u8], Value); 8] = [
-        (b"name", name.into_value().hand_on_unmigrated()),
+        (b"name", Value::string(*name)),
         (b"index", Value::int(c::long(st.index))),
         (b"crc", Value::int(i64::from(st.crc))),
         (b"size", Value::int(c::long(st.size))),
@@ -584,9 +584,10 @@ fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Throw
         ),
     ];
     for (k, v) in rows {
-        let key = Key::Str(string(req, k)?.hand_on_unmigrated());
-        out.set(req, key, v)?;
+        let key = string(req, k)?.into_key();
+        out.set(req, key, Owner::take(req, v))?;
     }
+    name.give_up(req);
     Ok(out)
 }
 

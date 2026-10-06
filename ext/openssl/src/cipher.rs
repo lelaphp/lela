@@ -581,7 +581,7 @@ fn list(req: &mut Request, names: Vec<Vec<u8>>) -> Result<Owner<PhpArray>, Throw
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        out.append(req, Value::string(name.hand_on_unmigrated()))?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }
@@ -845,7 +845,7 @@ fn openssl_seal(
             let mut list = PhpArray::new(req)?;
             for key in &sealed.keys {
                 let key = PhpString::new(req, key)?;
-                list.append(req, Value::string(key.hand_on_unmigrated()))?;
+                list.append(req, key.into_value())?;
             }
             encrypted_keys.set(req, Untyped(list.into_value()))?;
             if iv.is_given() {

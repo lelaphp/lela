@@ -735,9 +735,10 @@ impl Request {
             while matches!(line.get(start), Some(b' ' | b'\t')) {
                 start += 1;
             }
-            let key = Key::from_string(self.string(&line[..end])?);
-            let value = Value::string(self.string(&line[start..])?);
-            array.set(self, key, value)?;
+            let key = PhpString::new(self, &line[..end])?;
+            let key = Key::from_string(self, key);
+            let value = PhpString::new(self, &line[start..])?;
+            array.set(self, key, value.into_value())?;
         }
         Ok(array)
     }
@@ -760,11 +761,16 @@ fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpA
             HostValue::Str(s) => Value::string(req.string(&s)?),
             nested => Value::array(host_value(req, nested)?),
         };
-        match key {
+        let key = match key {
             Some(key) => {
-                let key = Key::from_string(req.string(&key)?);
-                array.set(req, key, value)?;
+                let key = PhpString::new(req, &key)?;
+                Some(Key::from_string(req, key))
             }
+            None => None,
+        };
+        let value = Owner::adopt(req, value);
+        match key {
+            Some(key) => array.set(req, key, value)?,
             None => array.append(req, value)?,
         }
     }

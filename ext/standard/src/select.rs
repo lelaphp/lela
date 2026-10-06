@@ -115,14 +115,8 @@ fn keep(
     key: &Key,
     element: Value,
 ) -> Result<(), Thrown> {
-    req.addref(&element);
-    let key = match key {
-        Key::Str(s) => {
-            req.addref(&Value::string(*s));
-            Key::Str(*s)
-        }
-        Key::Int(n) => Key::Int(*n),
-    };
+    let element = Owner::take(req, element);
+    let key = Owner::take(req, key.clone());
     out.set(req, key, element)
 }
 

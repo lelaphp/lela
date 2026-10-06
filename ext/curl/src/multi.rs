@@ -244,8 +244,7 @@ fn curl_multi_get_handles(
     let handles = mh(req, multi_handle)?.easy.clone();
     let mut array = PhpArray::new(req)?;
     for handle in handles {
-        req.addref(&handle.as_value());
-        array.append(req, handle.as_value())?;
+        array.append(req, Owner::take(req, handle.as_value()))?;
     }
     Ok(array)
 }
@@ -405,14 +404,13 @@ fn curl_multi_info_read(
         queued_messages.set(req, Untyped(Value::int(done.queued)))?;
     }
     let mut out = Assoc::new(req)?;
-    out.add(req, "msg", Value::int(done.msg))?;
-    out.add(req, "result", Value::int(done.result))?;
+    out.add(req, "msg", Owner::take(req, Value::int(done.msg)))?;
+    out.add(req, "result", Owner::take(req, Value::int(done.result)))?;
     if let Some(handle) = find(req, multi_handle.object(), done.easy) {
         if let Some(curl) = handle.native_mut::<Curl>(req) {
             curl.err = done.result;
         }
-        req.addref(&handle.as_value());
-        out.add(req, "handle", handle.as_value())?;
+        out.add(req, "handle", Owner::take(req, handle.as_value()))?;
     }
     Ok(Union2::Value(out.0))
 }

@@ -290,47 +290,30 @@ impl ObjectHandlers for Handlers {
                 });
                 (cal::kind(calendar), zone, locale, fields)
             });
-        set(req, &mut table, b"valid", Value::bool(calendar.is_some()))?;
+        set(
+            req,
+            &mut table,
+            b"valid",
+            Owner::take(req, Value::bool(calendar.is_some())),
+        )?;
         let Some((kind, zone, locale, fields)) = calendar else {
             return Ok(Some(table.hand_on_unmigrated().into()));
         };
         let kind = PhpString::new(req, kind.as_bytes())?;
-        set(
-            req,
-            &mut table,
-            b"type",
-            Value::string(kind.hand_on_unmigrated()),
-        )?;
+        set(req, &mut table, b"type", kind.into_value())?;
         let zone = timezone::debug_table(req, zone)?;
-        set(
-            req,
-            &mut table,
-            b"timeZone",
-            Value::array(zone.hand_on_unmigrated()),
-        )?;
+        set(req, &mut table, b"timeZone", zone.into_value())?;
         let locale = PhpString::new(req, &locale)?;
-        set(
-            req,
-            &mut table,
-            b"locale",
-            Value::string(locale.hand_on_unmigrated()),
-        )?;
+        set(req, &mut table, b"locale", locale.into_value())?;
         let mut rows = PhpArray::new(req)?;
         for (name, value) in fields {
             let value = match value {
-                Ok(n) => Value::int(i64::from(n)),
-                Err(code) => {
-                    Value::string(PhpString::new(req, code.name().as_bytes())?.hand_on_unmigrated())
-                }
+                Ok(n) => Owner::take(req, Value::int(i64::from(n))),
+                Err(code) => PhpString::new(req, code.name().as_bytes())?.into_value(),
             };
             set(req, &mut rows, name.as_bytes(), value)?;
         }
-        set(
-            req,
-            &mut table,
-            b"fields",
-            Value::array(rows.hand_on_unmigrated()),
-        )?;
+        set(req, &mut table, b"fields", rows.into_value())?;
         Ok(Some(table.hand_on_unmigrated().into()))
     }
 }
@@ -1042,7 +1025,7 @@ fn available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     error::reset(req);
     let mut list = PhpArray::new(req)?;
     for name in cal::available_locales() {
-        let name = Value::string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+        let name = PhpString::new(req, name.as_bytes())?.into_value();
         list.append(req, name)?;
     }
     Ok(list)

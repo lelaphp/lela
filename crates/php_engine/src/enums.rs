@@ -21,7 +21,7 @@ use php_unit::decl::{ClassKind, EnumBacking, Type};
 use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
 use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, Owner, Value};
 
 /// Where the function numbers of a program's enum methods begin: past
 /// every native, native method and user function a request can number,
@@ -171,7 +171,7 @@ fn cases(req: &mut Request) -> Result<Value, Thrown> {
     let mut out = req.array()?;
     for name in case_names(req, class) {
         let case = req.enum_case(class, &name)?;
-        out.append(req, case.as_value())?;
+        out.append(req, Owner::adopt(req, case.as_value()))?;
     }
     Ok(Value::array(out))
 }

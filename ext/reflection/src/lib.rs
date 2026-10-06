@@ -8200,8 +8200,8 @@ impl ReflectionExtension {
             };
             let object = new_object(req, reflector)?;
             set_name(req, *object, &name)?;
-            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
-            functions.set(req, key, object.into_value().hand_on_unmigrated())?;
+            let key = PhpString::new(req, &name)?.into_key();
+            functions.set(req, key, object.into_value())?;
         }
         Ok(functions)
     }
@@ -8254,9 +8254,8 @@ impl ReflectionExtension {
             let value = constant(req, &name)?.unwrap_or_default();
             // The lookup is a view and the row is the array's:
             // `ZVAL_COPY_OR_DUP`, so the table keeps its own count.
-            req.addref(&value);
-            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
-            constants.set(req, key, value)?;
+            let key = PhpString::new(req, &name)?.into_key();
+            constants.set(req, key, Owner::take(req, value))?;
         }
         Ok(constants)
     }
@@ -8295,10 +8294,10 @@ impl ReflectionExtension {
         let extension = this_extension(req, this.object())?;
         let mut entries = PhpArray::new(req)?;
         for entry in req.extension_ini(extension) {
-            let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?.hand_on_unmigrated());
+            let key = PhpString::new(req, &entry.decl.name.0)?.into_key();
             let value = match entry.value {
-                Some(value) => Value::string(PhpString::new(req, &value)?.hand_on_unmigrated()),
-                None => Value::null(),
+                Some(value) => PhpString::new(req, &value)?.into_value(),
+                None => Owner::take(req, Value::null()),
             };
             entries.set(req, key, value)?;
         }
@@ -8332,8 +8331,8 @@ impl ReflectionExtension {
         let mut classes = PhpArray::new(req)?;
         for (class, name) in extension_classes(req, extension) {
             let reflector = reflection_class_factory(req, class)?;
-            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
-            classes.set(req, key, reflector.into_value().hand_on_unmigrated())?;
+            let key = PhpString::new(req, &name)?.into_key();
+            classes.set(req, key, reflector.into_value())?;
         }
         Ok(classes)
     }
@@ -8366,7 +8365,7 @@ impl ReflectionExtension {
         let extension = this_extension(req, this.object())?;
         let mut names = PhpArray::new(req)?;
         for (_, name) in extension_classes(req, extension) {
-            let name = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
+            let name = PhpString::new(req, &name)?.into_value();
             names.append(req, name)?;
         }
         Ok(names)
@@ -8403,10 +8402,8 @@ impl ReflectionExtension {
                 relation.push(' ');
                 relation.push_str(part);
             }
-            let key =
-                Key::Str(PhpString::new(req, dependency.name.as_bytes())?.hand_on_unmigrated());
-            let value =
-                Value::string(PhpString::new(req, relation.as_bytes())?.hand_on_unmigrated());
+            let key = PhpString::new(req, dependency.name.as_bytes())?.into_key();
+            let value = PhpString::new(req, relation.as_bytes())?.into_value();
             dependencies.set(req, key, value)?;
         }
         Ok(dependencies)

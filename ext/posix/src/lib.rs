@@ -49,7 +49,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, clear, docref, throw_error,
 };
 use php_ext::request::{Cast, Request, Resolve, Stream};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -281,9 +281,15 @@ fn set(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     key: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, key) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 
@@ -494,7 +500,7 @@ fn posix_getgroups(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown
     };
     let mut array = PhpArray::new(req)?;
     for gid in groups {
-        array.append(req, Value::int(i64::from(gid)))?;
+        array.append(req, Owner::take(req, Value::int(i64::from(gid))))?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -658,7 +664,7 @@ fn posix_uname(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         (b"machine", u.machine()),
     ] {
         let value = string(req, field.as_bytes())?;
-        set(req, &mut array, key, value.hand_on_unmigrated())?;
+        set(req, &mut array, key, value)?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -698,7 +704,7 @@ fn posix_times(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         (b"cutime", t.cutime),
         (b"cstime", t.cstime),
     ] {
-        set(req, &mut array, key, Value::int(count))?;
+        set(req, &mut array, key, Owner::take(req, Value::int(count)))?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -1077,21 +1083,16 @@ fn posix_eaccess(
 fn group_array(req: &mut Request, group: &Group) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let name = string(req, group.name.as_bytes())?;
-    set(req, &mut array, b"name", name.hand_on_unmigrated())?;
+    set(req, &mut array, b"name", name)?;
     let passwd = string(req, group.passwd.as_bytes())?;
-    set(req, &mut array, b"passwd", passwd.hand_on_unmigrated())?;
+    set(req, &mut array, b"passwd", passwd)?;
     let mut members = PhpArray::new(req)?;
     for member in &group.mem {
         let member = string(req, member.as_bytes())?;
-        members.append(req, member.hand_on_unmigrated())?;
+        members.append(req, member)?;
     }
-    set(
-        req,
-        &mut array,
-        b"members",
-        members.into_value().hand_on_unmigrated(),
-    )?;
-    let gid = Value::int(i64::from(group.gid.as_raw()));
+    set(req, &mut array, b"members", members.into_value())?;
+    let gid = Owner::take(req, Value::int(i64::from(group.gid.as_raw())));
     set(req, &mut array, b"gid", gid)?;
     Ok(array)
 }
@@ -1159,27 +1160,27 @@ fn posix_getgrgid(req: &mut Request, group_id: i64) -> Result<OrFalse<Owner<PhpA
 fn user_array(req: &mut Request, user: &User) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let name = string(req, user.name.as_bytes())?;
-    set(req, &mut array, b"name", name.hand_on_unmigrated())?;
+    set(req, &mut array, b"name", name)?;
     let passwd = string(req, user.passwd.as_bytes())?;
-    set(req, &mut array, b"passwd", passwd.hand_on_unmigrated())?;
+    set(req, &mut array, b"passwd", passwd)?;
     set(
         req,
         &mut array,
         b"uid",
-        Value::int(i64::from(user.uid.as_raw())),
+        Owner::take(req, Value::int(i64::from(user.uid.as_raw()))),
     )?;
     set(
         req,
         &mut array,
         b"gid",
-        Value::int(i64::from(user.gid.as_raw())),
+        Owner::take(req, Value::int(i64::from(user.gid.as_raw()))),
     )?;
     let gecos = string(req, user.gecos.as_bytes())?;
-    set(req, &mut array, b"gecos", gecos.hand_on_unmigrated())?;
+    set(req, &mut array, b"gecos", gecos)?;
     let dir = string(req, user.dir.as_os_str().as_bytes())?;
-    set(req, &mut array, b"dir", dir.hand_on_unmigrated())?;
+    set(req, &mut array, b"dir", dir)?;
     let shell = string(req, user.shell.as_os_str().as_bytes())?;
-    set(req, &mut array, b"shell", shell.hand_on_unmigrated())?;
+    set(req, &mut array, b"shell", shell)?;
     Ok(array)
 }
 
@@ -1320,21 +1321,11 @@ fn posix_getrlimit(
         let soft = limit_value(req, limits.soft)?;
         let hard = limit_value(req, limits.hard)?;
         if let Some(name) = name {
-            set(
-                req,
-                &mut array,
-                format!("soft {name}").as_bytes(),
-                soft.hand_on_unmigrated(),
-            )?;
-            set(
-                req,
-                &mut array,
-                format!("hard {name}").as_bytes(),
-                hard.hand_on_unmigrated(),
-            )?;
+            set(req, &mut array, format!("soft {name}").as_bytes(), soft)?;
+            set(req, &mut array, format!("hard {name}").as_bytes(), hard)?;
         } else {
-            array.append(req, soft.hand_on_unmigrated())?;
-            array.append(req, hard.hand_on_unmigrated())?;
+            array.append(req, soft)?;
+            array.append(req, hard)?;
         }
     }
     Ok(OrFalse::Value(array))

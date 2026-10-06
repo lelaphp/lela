@@ -236,10 +236,9 @@ pub(crate) fn column_value(
 
 /// `sqlite3_column_name` as the key `add_assoc_zval` and
 /// `zend_symtable_update` file a column under.
-pub(crate) fn column_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
-    Ok(Key::from_string(
-        PhpString::new(req, name)?.hand_on_unmigrated(),
-    ))
+pub(crate) fn column_key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
+    let name = PhpString::new(req, name)?;
+    Ok(Key::from_string(req, name))
 }
 
 /// `SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE`.
@@ -508,7 +507,7 @@ fn query_single(
             for column in 0..stmt.data_count() {
                 let value = column_value(req, stmt, column)?;
                 let key = column_key(req, &stmt.column_name(column).unwrap_or_default())?;
-                row.set(req, key, value.hand_on_unmigrated())?;
+                row.set(req, key, value)?;
             }
             row.into_value()
         }
@@ -760,10 +759,14 @@ impl SQLite3 {
     fn version(req: &mut Request) -> Answer<Owner<PhpArray>> {
         let mut out = PhpArray::new(req)?;
         let version = PhpString::new(req, ffi::version().as_bytes())?.into_value();
-        let key = Key::Str(PhpString::new(req, b"versionString")?.hand_on_unmigrated());
-        out.set(req, key, version.hand_on_unmigrated())?;
-        let key = Key::Str(PhpString::new(req, b"versionNumber")?.hand_on_unmigrated());
-        out.set(req, key, Value::int(ffi::version_number()))?;
+        let key = PhpString::new(req, b"versionString")?.into_key();
+        out.set(req, key, version)?;
+        let key = PhpString::new(req, b"versionNumber")?.into_key();
+        out.set(
+            req,
+            key,
+            Owner::take(req, Value::int(ffi::version_number())),
+        )?;
         Ok(out)
     }
 

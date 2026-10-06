@@ -443,7 +443,7 @@ fn in_scope_namespace_info(
             }
         };
         info.set_slot(req, 2, element.hand_on_unmigrated())?;
-        out.append(req, info.into_value().hand_on_unmigrated())?;
+        out.append(req, info.into_value())?;
     }
     Ok(())
 }
@@ -960,13 +960,13 @@ impl DOMElement {
                 None => b"xmlns".to_vec(),
             };
             let v = string(req, &name)?;
-            out.append(req, v.hand_on_unmigrated())?;
+            out.append(req, v)?;
             ns = n.next();
         }
         let mut attr = elem.properties();
         while let Some(a) = attr {
             let v = string(req, &crate::qualified_name(a))?;
-            out.append(req, v.hand_on_unmigrated())?;
+            out.append(req, v)?;
             attr = a.next();
         }
         Ok(out)

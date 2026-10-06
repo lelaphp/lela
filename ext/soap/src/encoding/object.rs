@@ -97,13 +97,16 @@ fn unset_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Res<()
 
 /// `add_assoc_zval`: `val` is the array's from here.
 fn add_assoc(req: &mut Request, arr: &mut PhpArray, name: &[u8], val: Value) -> Res<()> {
-    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = PhpString::new(req, name)?;
+    let key = Key::from_string(req, key);
+    let val = crate::classes::owner_of(req, val);
     Ok(arr.set(req, key, val)?)
 }
 
 /// `array_init` with one element, `val`.
 fn array_of(req: &mut Request, val: Value) -> Res<Owner<PhpArray>> {
     let mut arr = PhpArray::new(req)?;
+    let val = crate::classes::owner_of(req, val);
     arr.append(req, val)?;
     Ok(arr)
 }
@@ -118,6 +121,7 @@ fn append_to_prop(
     val: Value,
 ) -> Res<()> {
     let mut a = arr;
+    let val = crate::classes::owner_of(req, val);
     a.append(req, val)?;
     if !a.is_same(arr) {
         set_zval_property(req, ret, name, Value::array(a))?;
@@ -146,10 +150,15 @@ fn model_to_zval_any(
                 let mut arr = PhpArray::new(req)?;
                 match &name {
                     Some(nm) => {
-                        let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
+                        let key = PhpString::new(req, nm)?;
+                        let key = Key::from_string(req, key);
+                        let a = crate::classes::owner_of(req, a);
                         arr.set(req, key, a)?;
                     }
-                    None => arr.append(req, a)?,
+                    None => {
+                        let a = crate::classes::owner_of(req, a);
+                        arr.append(req, a)?;
+                    }
                 }
                 any = Some(arr.into_value().hand_on_unmigrated());
             }
@@ -176,7 +185,9 @@ fn model_to_zval_any(
                 None => {
                     if let Some(nm) = name.take() {
                         let mut arr = PhpArray::new(req)?;
-                        let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
+                        let key = PhpString::new(req, &nm)?;
+                        let key = Key::from_string(req, key);
+                        let val = crate::classes::owner_of(req, val);
                         arr.set(req, key, val)?;
                         any = Some(arr.into_value().hand_on_unmigrated());
                     } else {
@@ -190,6 +201,7 @@ fn model_to_zval_any(
                             Some(el) if el.as_array().is_some() => {
                                 let mut inner =
                                     el.as_array().copied().unwrap_or_else(PhpArray::empty);
+                                let val = crate::classes::owner_of(req, val);
                                 inner.append(req, val)?;
                             }
                             // php puts the old element and this one in an
@@ -198,6 +210,7 @@ fn model_to_zval_any(
                             None => add_assoc(req, &mut arr, nm, val)?,
                         }
                     } else {
+                        let val = crate::classes::owner_of(req, val);
                         arr.append(req, val)?;
                     }
                     any = Some(Value::array(arr));
@@ -289,6 +302,7 @@ fn model_to_zval_object(
                             return Err(err);
                         }
                     };
+                    let v = crate::classes::owner_of(req, v);
                     array.append(req, v)?;
                     next = n.next().and_then(|m| get_node(Some(m), &name, None));
                 }
@@ -641,6 +655,7 @@ fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()
                     let arr = array_of(req, prop)?;
                     let mut view = *arr;
                     set_zval_property(req, ret, &name, arr.into_value().hand_on_unmigrated())?;
+                    let tmp = crate::classes::owner_of(req, tmp);
                     view.append(req, tmp)?;
                 }
             },

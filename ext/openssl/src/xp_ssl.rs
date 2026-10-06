@@ -1249,7 +1249,7 @@ impl Layer {
                     let mut array = PhpArray::new(req)?;
                     for cert in chain {
                         let object = object_of(req, cert)?;
-                        array.append(req, object.into_value().hand_on_unmigrated())?;
+                        array.append(req, object.into_value())?;
                     }
                     array.into_value()
                 }
@@ -1860,7 +1860,12 @@ impl Crypto for Layer {
         let (name, bits, version) =
             cipher.map_or((Vec::new(), 0, Vec::new()), |c| (c.name, c.bits, c.version));
         crate::put_bytes(req, &mut array, b"cipher_name", &name)?;
-        crate::put(req, &mut array, b"cipher_bits", Value::int(i64::from(bits)))?;
+        crate::put(
+            req,
+            &mut array,
+            b"cipher_bits",
+            Owner::take(req, Value::int(i64::from(bits))),
+        )?;
         crate::put_bytes(req, &mut array, b"cipher_version", &version)?;
         if let Some(alpn) = tls.alpn_selected() {
             crate::put_bytes(req, &mut array, b"alpn_protocol", &alpn)?;

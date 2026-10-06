@@ -496,7 +496,7 @@ fn read_lines(req: &mut Request, stream: Stream) -> Result<Owner<PhpArray>, Thro
         };
         let end = line.iter().position(|b| *b == 0).unwrap_or(line.len());
         let cut = PhpString::new(req, &line[..end])?;
-        lines.append(req, cut.into_value().hand_on_unmigrated())?;
+        lines.append(req, cut.into_value())?;
     }
     Ok(lines)
 }

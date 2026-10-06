@@ -85,10 +85,10 @@ fn convert_array(
     for (key, value) in input.snapshot() {
         let key = match key {
             Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
-                Some(name) => Key::Str(new_string(req, &name)?.hand_on_unmigrated()),
+                Some(name) => new_string(req, &name)?.into_key(),
                 None => continue,
             },
-            Key::Int(n) => Key::Int(n),
+            Key::Int(n) => Owner::take(req, Key::Int(n)),
         };
         let value = value.deref();
         let converted = match value.as_ref() {
@@ -112,7 +112,7 @@ fn convert_array(
                 continue;
             }
         };
-        out.set(req, key, converted.hand_on_unmigrated())?;
+        out.set(req, key, converted)?;
     }
     input.unprotect();
     Ok(Some(out))
@@ -459,7 +459,7 @@ fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut all = PhpArray::new(req)?;
     for enc in Encoding::all() {
         let name = new_string(req, enc.name())?;
-        all.append(req, name.into_value().hand_on_unmigrated())?;
+        all.append(req, name.into_value())?;
     }
     let kept = Owner::take(req, *all);
     req.state::<State>().all_encodings = Some(kept.hand_on_unmigrated());
@@ -507,7 +507,7 @@ fn mb_encoding_aliases(req: &mut Request, encoding: PhpString) -> Result<Owner<P
     let mut out = PhpArray::new(req)?;
     for alias in enc.aliases() {
         let alias = new_string(req, alias)?;
-        out.append(req, alias.into_value().hand_on_unmigrated())?;
+        out.append(req, alias.into_value())?;
     }
     Ok(out)
 }
@@ -911,7 +911,7 @@ fn convert_array_in(
             }
             Walk::Kept => {}
             Walk::Replace(new) => {
-                if !array.replace(req, &key, new.hand_on_unmigrated())? {
+                if !array.replace(req, &key, new)? {
                     array.unprotect();
                     return Err(fatal(
                         req,

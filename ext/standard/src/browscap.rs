@@ -436,8 +436,8 @@ fn get_browser(
     }
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
-        let key = Key::Str(PhpString::new(req, &key)?.hand_on_unmigrated());
-        let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
+        let key = PhpString::new(req, &key)?.into_key();
+        let value = PhpString::new(req, &value)?.into_value();
         array.set(req, key, value)?;
     }
     if return_array {

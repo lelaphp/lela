@@ -1008,13 +1008,13 @@ fn multisort(
         let mut rebuilt = PhpArray::new(req)?;
         for row in &rows {
             let (key, value) = &column[*row];
-            req.addref(value);
+            let value = Owner::take(req, *value);
             match key {
                 Key::Str(_) => {
-                    let key = super::key_copy(req, key);
-                    rebuilt.set(req, key, *value)?;
+                    let key = Owner::take(req, key.clone());
+                    rebuilt.set(req, key, value)?;
                 }
-                Key::Int(_) => rebuilt.append(req, *value)?,
+                Key::Int(_) => rebuilt.append(req, value)?,
             }
         }
         rebuilt.set_next_free(req, count)?;

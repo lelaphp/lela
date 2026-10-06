@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::State;
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
@@ -160,11 +160,7 @@ fn from_fd_set(
     let mut out = PhpArray::new(req)?;
     for ((key, element), set) in array.snapshot().into_iter().zip(ready) {
         if *set {
-            req.addref(&element);
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            out.set(req, key, element)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, element))?;
         }
     }
     target.set(req, Some(out))
@@ -1270,7 +1266,7 @@ fn socket_create_pair(
     let mut out = PhpArray::new(req)?;
     for fd in fds {
         let made = new_socket(req, Sock::owning(fd, c_int(domain)))?;
-        out.append(req, made.into_value().hand_on_unmigrated())?;
+        out.append(req, made.into_value())?;
     }
     assign(req, &pair, out.into_value())?;
     Ok(true)

@@ -1103,6 +1103,7 @@ values::HeldProperties::rows
 values::HeldRow
 values::Key
 values::Key::from_string
+values::Key::lookup
 values::Key::to_prop_name
 values::Layout
 values::Laziness
@@ -1115,6 +1116,7 @@ values::Owner::cursor_reset
 values::Owner::give_up
 values::Owner::hand_on_unmigrated
 values::Owner::into_instance
+values::Owner::into_key
 values::Owner::into_raw
 values::Owner::into_resource
 values::Owner::into_static

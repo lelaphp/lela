@@ -1608,13 +1608,13 @@ impl PDO {
         };
         let mut out = PhpArray::new(req)?;
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
-        out.append(req, made.hand_on_unmigrated())?;
+        out.append(req, made)?;
         if state != Some(SqlState::NONE) {
             let on = held.map_or(On::Dbh, On::Stmt);
             error::fetch_error(req, this, on, &mut out)?;
         }
         while out.len() < 3 {
-            out.append(req, Value::null())?;
+            out.append(req, Owner::take(req, Value::null()))?;
         }
         Ok(out)
     }
@@ -1726,10 +1726,9 @@ impl PDO {
                     |c| crate::class_name(req, c),
                 );
                 let text = crate::string(req, class.as_bytes())?;
-                out.append(req, text.hand_on_unmigrated())?;
+                out.append(req, text)?;
                 if let Some(args) = args {
-                    req.addref(&Value::array(args));
-                    out.append(req, Value::array(args))?;
+                    out.append(req, Owner::take(req, Value::array(args)))?;
                 }
                 return Ok(out.into_value());
             }

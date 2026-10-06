@@ -181,13 +181,23 @@ fn transition(
     abbr: &[u8],
 ) -> Result<(), Thrown> {
     let mut row = PhpArray::new(req)?;
-    set_str(req, &mut row, b"ts", Value::int(ts))?;
+    set_str(req, &mut row, b"ts", Owner::take(req, Value::int(ts)))?;
     let time = format_timestamp(req, b"x-m-d\\TH:i:sP", ts, false)?;
     set_string(req, &mut row, b"time", &time)?;
-    set_str(req, &mut row, b"offset", Value::int(offset))?;
-    set_str(req, &mut row, b"isdst", Value::bool(is_dst))?;
+    set_str(
+        req,
+        &mut row,
+        b"offset",
+        Owner::take(req, Value::int(offset)),
+    )?;
+    set_str(
+        req,
+        &mut row,
+        b"isdst",
+        Owner::take(req, Value::bool(is_dst)),
+    )?;
     set_string(req, &mut row, b"abbr", abbr)?;
-    out.append(req, Value::array(row.hand_on_unmigrated()))
+    out.append(req, row.into_value())
 }
 
 /// `timezone_transitions_get` and `DateTimeZone::getTransitions`.
@@ -392,8 +402,18 @@ fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<Owner<Php
     let loc = zone.location();
     let mut out = PhpArray::new(req)?;
     set_string(req, &mut out, b"country_code", &loc.country_code)?;
-    set_str(req, &mut out, b"latitude", Value::float(loc.latitude))?;
-    set_str(req, &mut out, b"longitude", Value::float(loc.longitude))?;
+    set_str(
+        req,
+        &mut out,
+        b"latitude",
+        Owner::take(req, Value::float(loc.latitude)),
+    )?;
+    set_str(
+        req,
+        &mut out,
+        b"longitude",
+        Owner::take(req, Value::float(loc.longitude)),
+    )?;
     set_string(req, &mut out, b"comments", &loc.comments)?;
     Ok(OrFalse::Value(out))
 }
@@ -722,8 +742,7 @@ impl DateTimeZone {
         let object = this.object();
         let mut hash = PhpArray::new(req)?;
         for (key, value) in object.props(req)? {
-            req.addref(&value);
-            hash.set(req, key, value)?;
+            hash.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         let kind = from_hash(*hash);
         hash.give_up(req);
