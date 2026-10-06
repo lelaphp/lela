@@ -30,6 +30,7 @@ use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{
     ClassId, DeclaredRows, HashIterator, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place,
     Value, ValueRef,
@@ -1317,7 +1318,10 @@ impl Table {
     fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.snapshot_refs()),
-            Table::Props(object) => object.entries(req),
+            Table::Props(object) => {
+                let table = object.property_table(req)?;
+                Ok(walk::rows(req, table).collect())
+            }
         }
     }
 

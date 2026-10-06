@@ -14,7 +14,7 @@ use crate::api::call::call;
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Guarded, Hold};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use crate::engine::{Engine, LeakSensor};
 use crate::test::Capture;
 
@@ -158,6 +158,68 @@ fn live_reads(
     PhpString::new(req, read.as_bytes())
 }
 
+/// `object_rows(object &$o, callable $f, bool $owner): string`: a
+/// foreach walk over the object's property table that calls `$f` with
+/// each row's key and then reads the row's value, which `$f` may have
+/// unset, or freed with the whole object; each row as `key=value`, a
+/// `\0` of a mangled key spelt `\0`.
+#[php_function]
+fn object_rows(
+    req: &mut Request,
+    o: Ref<PhpObject>,
+    f: Callable,
+    owner: bool,
+) -> Result<Owner<PhpString>, Thrown> {
+    let Some(object) = o.get().copied() else {
+        return Err(throw_error(req, "Exception", "no object"));
+    };
+    let table = object.property_table(req)?;
+    let mut read = String::new();
+    walk::foreach(req, table, hold(owner), |req, row| -> walk::Step {
+        let key = match row.key() {
+            Key::Int(n) => Value::int(*n),
+            Key::Str(s) => Value::string(*s),
+        };
+        let answer = call(req, &f, &[key])?;
+        answer.give_up(req);
+        let key = match row.key() {
+            Key::Int(n) => n.to_string(),
+            Key::Str(s) => String::from_utf8_lossy(s.as_bytes()).replace('\0', "\\0"),
+        };
+        let bytes = row.value().as_str_bytes().unwrap_or_default();
+        read.push_str(&key);
+        read.push('=');
+        read.push_str(&String::from_utf8_lossy(bytes));
+        read.push(' ');
+        Ok(ControlFlow::Continue(()))
+    })?;
+    PhpString::new(req, read.as_bytes())
+}
+
+/// `object_guarded(object &$o): string`: a guarded walk over the
+/// object's property table that asks, at its first row, whether a second
+/// guarded walk over the same table is inside it already.
+#[php_function]
+fn object_guarded(req: &mut Request, o: Ref<PhpObject>) -> Result<Owner<PhpString>, Thrown> {
+    let Some(object) = o.get().copied() else {
+        return Err(throw_error(req, "Exception", "no object"));
+    };
+    let table = object.property_table(req)?;
+    let inner = table.clone();
+    let walked = walk::foreach_guarded(req, table, Hold::Owner, |req, _| -> walk::Step<bool> {
+        let again = walk::foreach_guarded(req, inner.clone(), Hold::Owner, |_, _| -> walk::Step {
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(ControlFlow::Break(again == Guarded::Recursive))
+    })?;
+    let said = match walked {
+        Guarded::Walked(Some(true)) => "inside",
+        Guarded::Walked(_) => "not inside",
+        Guarded::Recursive => "recursive at the start",
+    };
+    PhpString::new(req, said.as_bytes())
+}
+
 fn walks() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -167,6 +229,8 @@ fn walks() -> Extension {
             guarded::declared(),
             foreach_calls::declared(),
             live_reads::declared(),
+            object_rows::declared(),
+            object_guarded::declared(),
         ])
         .build("walks")
 }
@@ -286,4 +350,95 @@ fn a_live_walk_s_row_stands_after_the_callback_unsets_it() {
         "v9223372036854775807 w9223372036854775807 emptied\n"
     );
     assert_eq!(served.exit_code, 0);
+}
+
+/// A foreach walk over an object's property table reads php's
+/// positions: the declared slots in slot order, each keyed by its
+/// mangled name, a typed one nothing has written stepped over, then the
+/// dynamic rows.
+#[test]
+fn a_foreach_walk_reads_an_object_s_declared_rows_then_its_dynamic_ones() {
+    let served = armed().serve_capture(
+        "<?php #[AllowDynamicProperties] class P { private $a = 'a'; protected $b = 'b'; public int $u; public $c = 'c'; }\n\
+         $o = new P; $o->d = 'd';\n\
+         echo object_rows($o, function () {}, true), \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "\\0P\\0a=a \\0*\\0b=b c=c d=d \n"
+    );
+    assert_eq!(served.fatal, None);
+}
+
+/// Holding the object's table, a foreach walk reads the dynamic rows it
+/// began with when the callback writes them, as php's walk over the
+/// table `zend_get_properties_for` holds reads them once the write
+/// separated it, while a declared row is read in its slot as it stands:
+/// one the callback unsets ahead is not visited. Holding nothing, the
+/// walk reads the dynamic rows as they stand too, and a row appended
+/// into the place the unset last row gave back, php's `nNumUsed` drawn
+/// in by `zend_hash_del`, is below the end the walk fixed and visited.
+#[test]
+fn a_foreach_walk_over_an_object_reads_its_slots_as_they_stand() {
+    let script = |owner: &str| {
+        format!(
+            "<?php function s($c) {{ return $c . PHP_INT_MAX; }}\n\
+             #[AllowDynamicProperties] class P {{ public $a = 'a'; public $b = 'b'; }}\n\
+             $o = new P; $o->d = s('d'); $o->e = s('e');\n\
+             echo object_rows($o, function ($k) {{ global $o; if ($k === 'a') {{ unset($o->b, $o->e); $o->d = 'new'; $o->f = 'f'; $GLOBALS['y'] = s('z'); }} }}, {owner}), \"\\n\";\n"
+        )
+    };
+    let served = armed().serve_capture(&script("true"), Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "a=a d=d9223372036854775807 e=e9223372036854775807 \n"
+    );
+    assert_eq!(served.fatal, None);
+    let served = armed().serve_capture(&script("false"), Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "a=a d=new f=f \n");
+    assert_eq!(served.fatal, None);
+}
+
+/// A foreach walk over an object's table holding nothing ends at the
+/// table's destruction. Holding the table, the walk reads its dynamic
+/// rows to the end, the object kept from reuse until the walk ends.
+#[test]
+fn a_foreach_walk_over_an_object_holding_nothing_ends_where_it_is_destroyed() {
+    let script = |owner: &str| {
+        format!(
+            "<?php function s($c) {{ return $c . PHP_INT_MAX; }}\n\
+             #[AllowDynamicProperties] class P {{ public $a; public $b; function __destruct() {{ echo 'gone '; }} }}\n\
+             $o = new P; $o->a = s('a'); $o->b = s('b'); $o->d = s('d'); $o->e = s('e');\n\
+             echo object_rows($o, function ($k) {{ if ($k === 'a') {{ $GLOBALS['o'] = 0; $GLOBALS['y'] = s('z'); $GLOBALS['z'] = s('q'); }} }}, {owner}), \"\\n\";\n"
+        )
+    };
+    let served = armed().serve_capture(&script("false"), Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "gone a=a9223372036854775807 \n"
+    );
+    assert_eq!(served.fatal, None);
+    let served = armed().serve_capture(&script("true"), Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "gone a=a9223372036854775807 d=d9223372036854775807 e=e9223372036854775807 \n"
+    );
+    assert_eq!(served.fatal, None);
+}
+
+/// A guarded walk over an object's property table marks its dynamic
+/// table, `zobj->properties`, as `json_encode`'s walk over the table
+/// `zend_get_properties_for` hands it marks the table: a second guarded
+/// walk inside it finds it marked, and the mark is cleared as it ends.
+#[test]
+fn a_guarded_walk_over_an_object_marks_its_table() {
+    let served = armed().serve_capture(
+        "<?php #[AllowDynamicProperties] class P { public $a = 1; }\n\
+         $o = new P; $o->d = 2;\n\
+         echo object_guarded($o), ' ', object_guarded($o), \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "inside inside\n");
+    assert_eq!(served.fatal, None);
 }
