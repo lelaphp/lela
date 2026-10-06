@@ -2105,7 +2105,7 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     };
     let mut done = false;
     if let Some(to) = req.open_stream(target, b"wb", false)? {
-        done = crate::streamsfuncs::copy_stream(req, from, to, None)?.is_some();
+        done = crate::streamsfuncs::copy_stream(req, from, to, None).is_some();
         to.free(req);
     }
     from.free(req);

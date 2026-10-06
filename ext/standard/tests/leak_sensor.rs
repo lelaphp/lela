@@ -109,3 +109,27 @@ echo "\n"; unlink($f);
     );
     assert_eq!(stdout, "author=Jo k=v \n");
 }
+
+/// `copy`, `stream_copy_to_stream`, `getimagesize`,
+/// `php_strip_whitespace` and `proc_open`'s command and environment keep
+/// none of the strings they read or converted (#2090).
+#[test]
+fn the_whole_file_and_copy_natives_give_up_what_they_read() {
+    let stdout = armed(
+        r#"<?php
+$d = sys_get_temp_dir() . '/leak-sensor-copy-' . getmypid(); @mkdir($d);
+file_put_contents("$d/a", str_repeat('x', 10));
+$a = fopen("$d/a", 'r'); $b = fopen('php://memory', 'w+');
+var_dump(copy("$d/a", "$d/b"), stream_copy_to_stream($a, $b), stream_copy_to_stream($a, $b));
+file_put_contents("$d/i.gif", "GIF89a\x02\x00\x03\x00\x80\x00\x00");
+echo getimagesize("$d/i.gif")[3], ' ', strlen(php_strip_whitespace("$d/a")), "\n";
+$p = proc_open(['/bin/sh', '-c', 'echo $A' . str_repeat(' ', 1)], [1 => ['pipe', 'w']], $pipes, null, ['A' => str_repeat('b', 3)]);
+echo stream_get_contents($pipes[1]); proc_close($p);
+unlink("$d/a"); unlink("$d/b"); unlink("$d/i.gif"); rmdir($d);
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "bool(true)\nint(10)\nint(0)\nwidth=\"2\" height=\"3\" 10\nbbb\n"
+    );
+}
