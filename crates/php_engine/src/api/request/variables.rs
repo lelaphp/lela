@@ -19,7 +19,7 @@ use php_unit::AutoGlobal;
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -1105,7 +1105,7 @@ impl Request {
             if !parent.try_append(self, fresh.into_value().hand_on_unmigrated())? {
                 return Ok(None);
             }
-            let last = parent.snapshot().last().map(|(k, _)| k.clone());
+            let last = walk::rows(self, parent).last().map(|(key, _)| key);
             return Ok(last.map(|key| self.owned_key(&key)));
         };
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {

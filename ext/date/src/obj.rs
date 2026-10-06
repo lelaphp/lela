@@ -380,7 +380,9 @@ pub(super) fn set_string(
 }
 
 /// A declared property's name as the readers key it: `\0*\0p` for a
-/// protected one, `\0C\0p` for a private one of class `C`.
+/// protected one, `\0C\0p` for a private one of class `C`. Interned,
+/// as php's `prop_info->name` is (`zend_declare_typed_property`), so a
+/// row keyed by it is a view no reader takes an owner from.
 fn mangled(req: &mut Request, class: ClassId, name: PhpString) -> Result<PhpString, Thrown> {
     let mut at = Some(class);
     while let Some(c) = at {
@@ -396,12 +398,7 @@ fn mangled(req: &mut Request, class: ClassId, name: PhpString) -> Result<PhpStri
                 Visibility::Protected => b"\0*\0".to_vec(),
                 Visibility::Private => [&b"\0"[..], &owner, b"\0"].concat(),
             };
-            // The mangled name is a view in the rows `std_rows` answers,
-            // which nothing gives back: the leak it was before #2047.
-            return Ok(
-                PhpString::new(req, &[prefix.as_slice(), name.as_bytes()].concat())?
-                    .hand_on_unmigrated(),
-            );
+            return PhpString::interned(req, &[prefix.as_slice(), name.as_bytes()].concat());
         }
         at = parent_of(req, c);
     }

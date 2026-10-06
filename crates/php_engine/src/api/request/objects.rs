@@ -378,6 +378,22 @@ impl Request {
     /// after
     /// ```
     ///
+    /// A destructor that runs a collection, which finds the object
+    /// reachable while the store's walk holds it, leaves it a possible
+    /// root again once it returns, so the collection at the request's
+    /// end frees the cycle the walk served:
+    ///
+    /// ```php
+    /// class A { public $data = []; function __destruct() { gc_collect_cycles(); }
+    ///     function b() { $this->data[] = new B($this); return $this->data[0]; } }
+    /// class B { function __construct(public $a) {} function __destruct() {} }
+    /// $a = new A; $b = $a->b(); unset($b, $a);
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// done
+    /// ```
+    ///
     /// A destructor that takes an owner of its object resurrects it:
     /// the release that served it finds a count above zero and frees
     /// nothing, and the object is never served again, because
@@ -424,6 +440,12 @@ impl Request {
             }
         }
         self.restore_pending(saved);
+        // `OBJ_RELEASE(object)` after php's `GC_ADDREF`: the owners as
+        // they were, and the object a possible root again where any are
+        // left, as a walk that served it leaves it. A collection the
+        // destructor ran may have found it reachable and taken it out of
+        // the buffer, and the shutdown collection finds it here.
+        self.gc_possible_root(object);
     }
 
     /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)

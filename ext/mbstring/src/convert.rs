@@ -16,7 +16,7 @@ use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `mb_fast_convert` under a substitute, with the errors met.
 pub(crate) fn convert(
@@ -1049,19 +1049,21 @@ fn conversion_map(req: &mut Request, map: PhpArray) -> Result<Vec<u32>, Thrown> 
     if !map.len().is_multiple_of(4) {
         return Err(value_error(req, 2, "must have a multiple of 4 elements"));
     }
-    let mut out = Vec::with_capacity(map.len());
-    for (_, value) in map.snapshot() {
-        // `*mapelm++ = tmp`: the `zend_long` cut to a `uint32_t`.
-        let Some(n) = try_long(&value.deref()) else {
-            return Err(value_error(
-                req,
-                2,
-                "must only be composed of values of type int",
-            ));
-        };
-        out.push(u32::try_from(n & 0xFFFF_FFFF).unwrap_or(0));
-    }
-    Ok(out)
+    let longs: Option<Vec<i64>> = walk::rows(req, map)
+        .map(|(_, value)| try_long(&value.deref()))
+        .collect();
+    let Some(longs) = longs else {
+        return Err(value_error(
+            req,
+            2,
+            "must only be composed of values of type int",
+        ));
+    };
+    // `*mapelm++ = tmp`: the `zend_long` cut to a `uint32_t`.
+    Ok(longs
+        .into_iter()
+        .map(|n| u32::try_from(n & 0xFFFF_FFFF).unwrap_or(0))
+        .collect())
 }
 
 /// `zval_try_get_long`: an integer, a float in range, a numeric string,

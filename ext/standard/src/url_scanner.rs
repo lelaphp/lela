@@ -26,7 +26,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{Key, PhpString, SmartStr};
+use php_ext::values::{PhpString, SmartStr};
 
 use crate::State;
 
@@ -227,20 +227,12 @@ impl Settings {
         let separator = separator(req);
         // `check_http_host`: `EG(symbol_table)`'s `$_SERVER`, the
         // program's, not armed where the program has not made it.
-        let http_host =
-            req.global(b"_SERVER").and_then(|server| {
-                let host =
-                    server.as_array()?.snapshot().into_iter().find_map(
-                        |(key, value)| match key {
-                            Key::Str(name) if name.as_bytes() == b"HTTP_HOST" => {
-                                value.as_php_string().map(|host| host.as_bytes().to_vec())
-                            }
-                            _ => None,
-                        },
-                    )?;
-                let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
-                Some(host[..end].to_vec())
-            });
+        let http_host = req.global(b"_SERVER").and_then(|server| {
+            let host = server.as_array()?.find(b"HTTP_HOST")?;
+            let host = host.deref().as_php_string()?.as_bytes().to_vec();
+            let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
+            Some(host[..end].to_vec())
+        });
         Settings {
             tags,
             hosts,
@@ -634,6 +626,19 @@ impl Chunk<'_> {
         }
         // `stop:`: what the state started on and could not decide.
         self.ctx.buf = self.data[start..].to_vec();
+    }
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(url_scanner)`
+/// (`Z/ext/standard/url_scanner_ex.re:1000`): both rewriters' query
+/// pairs and hidden inputs `smart_str_free`d, which
+/// `output_reset_rewrite_vars` only empties.
+pub(crate) fn rshutdown(req: &mut Request) {
+    for context in [Context::Session, Context::Output] {
+        let mut url_app = std::mem::take(&mut context.rewriter(req).url_app);
+        let mut form_app = std::mem::take(&mut context.rewriter(req).form_app);
+        form_app.free(req);
+        url_app.free(req);
     }
 }
 

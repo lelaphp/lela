@@ -144,8 +144,7 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
         let text = to_string(req, &value)?;
-        let bytes = text.as_bytes();
-        let has = |word: &[u8]| bytes.windows(word.len()).any(|w| w == word);
+        let has = |word: &[u8]| text.as_bytes().windows(word.len()).any(|w| w == word);
         let coding = if has(b"gzip") {
             Coding::Gzip
         } else if has(b"deflate") {
@@ -303,20 +302,6 @@ fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
     Ok(true)
 }
 
-/// Whether a handler of `name` is on the stack,
-/// `php_output_handler_started`.
-fn started(req: &mut Request, name: &str) -> Result<bool, Thrown> {
-    let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let found = match list.as_ref() {
-        ValueRef::Array(handlers) => handlers.iter().any(
-            |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
-        ),
-        _ => false,
-    };
-    list.give_up(req);
-    Ok(found)
-}
-
 /// `php_zlib_output_compression_start`: with a chunk size and a coding,
 /// the handler started, and `zlib.output_handler`'s after it.
 fn compression_start(req: &mut Request) -> Result<(), Thrown> {
@@ -426,7 +411,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         return Ok(false);
     }
     globals(req).compression = compression;
-    if compression != 0 && !started(req, HANDLER_NAME)? {
+    if compression != 0 && !req.buffer_handler_started(HANDLER_NAME.as_bytes()) {
         compression_start(req)?;
     }
     Ok(true)

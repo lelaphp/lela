@@ -1593,7 +1593,9 @@ impl ReflectionFunction {
 
     /// `ReflectionFunction::getClosure()`: the closure a reflector over one
     /// keeps, one more owner, since a closure is immutable; else
-    /// `zend_create_fake_closure` over the function with no scope.
+    /// `zend_create_fake_closure` over the function with no scope, which
+    /// holds the function and not the name it was resolved by, so the
+    /// name is given up once the closure is made.
     ///
     /// ```php
     /// $c = function () { return 1; };

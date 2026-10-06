@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, StreamCtx, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
@@ -130,17 +130,28 @@ fn get_headers(
         stream.hand_on_unmigrated().free(req);
         return Ok(OrFalse::False);
     };
-    let mut headers = PhpArray::new(req)?;
-    for (_, line) in lines.snapshot() {
-        let line = line.deref();
-        let ValueRef::Str(line) = line.as_ref() else {
-            continue;
-        };
-        add_header(req, &mut headers, line.as_bytes(), associative)?;
-    }
+    // The lines read first, as bytes: what `add_header` writes is the
+    // answer, never the stream's `wrapper_data`, so the meta data is
+    // given up before the answer is built.
+    let lines: Vec<Vec<u8>> = walk::rows(req, lines)
+        .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
+        .collect();
     meta.give_up(req);
     stream.hand_on_unmigrated().free(req);
-    Ok(OrFalse::Value(headers))
+    Ok(OrFalse::Value(header_array(req, &lines, associative)?))
+}
+
+/// The header lines of `wrapper_data` as `get_headers` answers them.
+fn header_array(
+    req: &mut Request,
+    lines: &[Vec<u8>],
+    associative: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let mut headers = PhpArray::new(req)?;
+    for line in lines {
+        add_header(req, &mut headers, line, associative)?;
+    }
+    Ok(headers)
 }
 
 /// One header line into `get_headers`' answer: appended as it is, or

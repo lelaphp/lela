@@ -360,28 +360,28 @@ impl Stream {
     /// `php_stream_get_line`: the next line with its `\n`, at most
     /// `maxlen - 1` bytes of it, or all of it for `None`; `None` back is
     /// no byte to give, at eof or after a read that failed (`fgets`
-    /// answers `false`). The string is asked for at `maxlen` first, as
-    /// `fgets` asks `zend_string_alloc`, so a length past the memory
-    /// limit is php's fatal before a byte is read.
-    #[cfg_attr(debug_assertions, track_caller)]
+    /// answers `false`). The line is bytes, the buffer php's
+    /// `php_stream_get_line(stream, NULL, 0, &len)` hands its caller to
+    /// `efree`, and no string: a native that reads it for a parser holds
+    /// nothing to give up, and one that hands it to a program, as `fgets`
+    /// does, makes the string. Room for `maxlen` is asked of the heap
+    /// first, as `fgets` asks `zend_string_alloc` and `fgetcsv`
+    /// `emalloc`, so a length past the memory limit is php's fatal before
+    /// a byte is read.
     pub fn get_line(
         self,
         req: &mut Request,
         maxlen: Option<usize>,
-    ) -> Result<Option<Owner<PhpString>>, Thrown> {
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         if let Some(len) = maxlen
             && len > req.heap_memory_limit()
         {
             let asked = PhpString::filled(req, len, |_| {})?;
             asked.give_up(req);
         }
-        match req
+        Ok(req
             .stream_op(self, |req, stream| stream.get_line(req, maxlen))
-            .flatten()
-        {
-            Some(line) => Ok(Some(PhpString::new(req, &line)?)),
-            None => Ok(None),
-        }
+            .flatten())
     }
 
     /// `php_stream_get_record`, what `stream_get_line` answers: the bytes
@@ -653,16 +653,15 @@ impl Stream {
     }
 
     /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
-    /// `None` past the last (`readdir` answers `false`).
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn read_dir(self, req: &mut Request) -> Result<Option<Owner<PhpString>>, Thrown> {
-        match req
+    /// `None` past the last (`readdir` answers `false`). The name is
+    /// bytes, the `d_name` of the `php_stream_dirent` php fills, and no
+    /// string: a native that lists names for itself holds nothing to
+    /// give up, and one that hands a name to a program, as `readdir`
+    /// does, makes the string.
+    pub fn read_dir(self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+        Ok(req
             .stream_op(self, |req, stream| stream.read_dir(req))
-            .flatten()
-        {
-            Some(name) => Ok(Some(PhpString::new(req, &name)?)),
-            None => Ok(None),
-        }
+            .flatten())
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
@@ -1101,7 +1100,10 @@ pub trait StreamFilter: Send {
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown>;
 
-    /// `fops->dtor`, served once when the filter leaves its chain.
+    /// `fops->dtor`, served once when the filter leaves its chain, a
+    /// throwable pending or not: it gives up what the filter holds, and
+    /// serves no PHP code while [`Request::stream_thrown`] holds one, as
+    /// `zend_call_function` serves none under `EG(exception)`.
     fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
         Ok(())
     }

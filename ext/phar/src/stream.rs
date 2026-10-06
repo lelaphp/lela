@@ -614,8 +614,7 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
                 return Err(thrown);
             }
         };
-        out.push(name.as_bytes().to_vec());
-        name.give_up(req);
+        out.push(name);
     }
     dir.close(req);
     dir.give_up(req);

@@ -10,7 +10,9 @@
 use php_ext::call::lookup_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk,
+};
 use php_ext_libxml::ffi::{Node, Ns};
 
 use crate::classes::FaultSlot;
@@ -1453,7 +1455,7 @@ pub(crate) fn soap_create_typemap(
         let mut to_xml: Option<Value> = None;
         let mut to_zval: Option<Value> = None;
         if !entry.is_packed() {
-            for (k, v) in entry.snapshot() {
+            for (k, v) in walk::rows(req, *entry) {
                 let PhpKey::Str(name) = &k else { continue };
                 let v = v.deref();
                 match name.as_bytes() {

@@ -64,10 +64,7 @@ fn spend(req: &mut Request) {
 /// `STDIN` for `-R`, `-F` and `-B`.
 fn get_line(req: &mut Request, value: &Value) -> Option<Vec<u8>> {
     let stream = req.stream_of(value)?;
-    let line = stream.get_line(req, None).ok().flatten()?;
-    let bytes = line.as_bytes().to_vec();
-    line.give_up(req);
-    Some(bytes)
+    stream.get_line(req, None).ok().flatten()
 }
 
 /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's

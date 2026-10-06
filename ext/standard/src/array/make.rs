@@ -692,13 +692,20 @@ fn character_range(
     step: i64,
     negative: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
+    if low > high && i64::from(low - high) < step {
+        return Err(boundary_error(req));
+    }
+    if high > low {
+        if negative {
+            return Err(negative_step_error(req));
+        }
+        if i64::from(high - low) < step {
+            return Err(boundary_error(req));
+        }
+    }
     let mut out = PhpArray::new(req)?;
     let step_wide = i64::from(u8::MAX).min(step);
     if low > high {
-        if i64::from(low - high) < step {
-            out.give_up(req);
-            return Err(boundary_error(req));
-        }
         let mut at = i64::from(low);
         while at >= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
@@ -710,14 +717,6 @@ fn character_range(
             at -= step;
         }
     } else if high > low {
-        if negative {
-            out.give_up(req);
-            return Err(negative_step_error(req));
-        }
-        if i64::from(high - low) < step {
-            out.give_up(req);
-            return Err(boundary_error(req));
-        }
         let mut at = i64::from(low);
         while at <= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
@@ -762,36 +761,35 @@ fn double_range(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok(math_round(calc, 0, crate::math::PHP_ROUND_HALF_UP) as u32)
     };
+    // `RANGE_CHECK_DOUBLE_INIT_ARRAY`: the checks, then the array.
+    let (size, down) = if start > end {
+        if start - end < step {
+            return Err(boundary_error(req));
+        }
+        (size(req, start, end)?, true)
+    } else if end > start {
+        if negative {
+            return Err(negative_step_error(req));
+        }
+        if end - start < step {
+            return Err(boundary_error(req));
+        }
+        (size(req, end, start)?, false)
+    } else {
+        (1, false)
+    };
     filled(req, |req, out| {
-        if start > end {
-            if start - end < step {
-                return Err(boundary_error(req));
-            }
-            let size = size(req, start, end)?;
-            let mut i = 0u32;
-            let mut element = start;
-            while i < size && element >= end {
-                out.append(req, Value::float(element))?;
-                i += 1;
-                element = start - f64::from(i) * step;
-            }
-        } else if end > start {
-            if negative {
-                return Err(negative_step_error(req));
-            }
-            if end - start < step {
-                return Err(boundary_error(req));
-            }
-            let size = size(req, end, start)?;
-            let mut i = 0u32;
-            let mut element = start;
-            while i < size && element <= end {
-                out.append(req, Value::float(element))?;
-                i += 1;
-                element = start + f64::from(i) * step;
-            }
-        } else {
-            out.append(req, Value::float(start))?;
+        let mut i = 0u32;
+        let mut element = start;
+        while i < size && if down { element >= end } else { element <= end } {
+            out.append(req, Value::float(element))?;
+            i += 1;
+            let distance = f64::from(i) * step;
+            element = if down {
+                start - distance
+            } else {
+                start + distance
+            };
         }
         Ok(())
     })
@@ -821,34 +819,32 @@ fn long_range(
         }
         Ok(calc + 1)
     };
+    // `RANGE_CHECK_LONG_INIT_ARRAY`: the checks, then the array.
+    let (size, down) = if start > end {
+        if start.wrapping_sub(end).cast_unsigned() < step {
+            return Err(boundary_error(req));
+        }
+        (size(req, start, end)?, true)
+    } else if end > start {
+        if negative {
+            return Err(negative_step_error(req));
+        }
+        if end.wrapping_sub(start).cast_unsigned() < step {
+            return Err(boundary_error(req));
+        }
+        (size(req, end, start)?, false)
+    } else {
+        (1, false)
+    };
     filled(req, |req, out| {
-        if start > end {
-            if start.wrapping_sub(end).cast_unsigned() < step {
-                return Err(boundary_error(req));
-            }
-            let size = size(req, start, end)?;
-            for i in 0..size {
-                out.append(
-                    req,
-                    Value::int(start.wrapping_sub(i.wrapping_mul(step).cast_signed())),
-                )?;
-            }
-        } else if end > start {
-            if negative {
-                return Err(negative_step_error(req));
-            }
-            if end.wrapping_sub(start).cast_unsigned() < step {
-                return Err(boundary_error(req));
-            }
-            let size = size(req, end, start)?;
-            for i in 0..size {
-                out.append(
-                    req,
-                    Value::int(start.wrapping_add(i.wrapping_mul(step).cast_signed())),
-                )?;
-            }
-        } else {
-            out.append(req, Value::int(start))?;
+        for i in 0..size {
+            let distance = i.wrapping_mul(step).cast_signed();
+            let element = if down {
+                start.wrapping_sub(distance)
+            } else {
+                start.wrapping_add(distance)
+            };
+            out.append(req, Value::int(element))?;
         }
         Ok(())
     })

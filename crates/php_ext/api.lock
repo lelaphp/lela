@@ -633,6 +633,7 @@ request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::bailing_out
 request::Request::buffer_handler
+request::Request::buffer_handler_started
 request::Request::buffer_status
 request::Request::build_defs
 request::Request::called_scope
@@ -1300,10 +1301,12 @@ values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
 values::walk::Row::value
+values::walk::Rows
 values::walk::Step
 values::walk::buckets
 values::walk::detached
 values::walk::held
 values::walk::held_guarded
 values::walk::live
+values::walk::rows
 values::zend_sort

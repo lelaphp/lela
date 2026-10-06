@@ -18,7 +18,7 @@ use php_ext::raising::{
     throw_error, warning,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 use super::sort::key_value;
 use super::{copied, key_copy, returned};
@@ -289,7 +289,7 @@ fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<Owner<Php
 /// ```
 #[php_function]
 fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
-    let last = array.snapshot_refs().pop();
+    let last = walk::rows(req, array).last();
     key_or_null(req, last.map(|(key, _)| key))
 }
 
@@ -337,8 +337,8 @@ fn array_first(array: PhpArray) -> Value {
 /// NULL
 /// ```
 #[php_function]
-fn array_last(array: PhpArray) -> Value {
-    let last = array.snapshot_refs().pop();
+fn array_last(req: &mut Request, array: PhpArray) -> Value {
+    let last = walk::rows(req, array).last();
     value_or_null(last.map(|(_, value)| value))
 }
 

@@ -203,8 +203,7 @@ fn pcre(req: &mut Request, regexp: &[u8], path: &[u8]) -> Result<Found, Thrown> 
                 return Err(thrown);
             }
         };
-        names.push(name.as_bytes().to_vec());
-        name.give_up(req);
+        names.push(name);
     }
     dir.close(req);
     dir.give_up(req);

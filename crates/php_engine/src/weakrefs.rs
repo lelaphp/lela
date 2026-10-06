@@ -27,7 +27,9 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{HashIterator, Key, Owner, PhpArray, PhpObject, PhpString, Place, Value};
+use crate::api::values::{
+    HashIterator, Key, Owner, PhpArray, PhpObject, PhpString, Place, Value, walk,
+};
 use crate::classes::ArrayAccess;
 use crate::interfaces::{Countable, Iterator, IteratorAggregate};
 
@@ -276,6 +278,20 @@ fn map_key(req: &mut Request, offset: &Value) -> Result<PhpObject, Thrown> {
     }
 }
 
+/// The object ids a map's `entries` are keyed by, in order, read in one
+/// pass before any is registered or unlisted: [`register`] and
+/// [`unregister`] without `unref` write the request's list of weak
+/// holders and no row of the table, so these are the ids php's
+/// `ZEND_HASH_MAP_FOREACH_NUM_KEY` reads as it goes.
+fn keyed_ids(req: &Request, entries: PhpArray) -> Vec<u32> {
+    walk::rows(req, entries)
+        .filter_map(|(key, _)| match key {
+            Key::Int(id) => u32::try_from(id).ok(),
+            Key::Str(_) => None,
+        })
+        .collect()
+}
+
 fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
     map.native::<ZendWeakMap>(req)
         .and_then(|payload| payload.entries)
@@ -304,10 +320,8 @@ impl ObjectHandlers for WeakMapHandlers {
         let Some(entries) = entries else {
             return;
         };
-        for (key, _) in entries.snapshot() {
-            if let Key::Int(id) = key
-                && let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id))
-            {
+        for id in keyed_ids(req, entries) {
+            if let Some(owner) = stored(req, id) {
                 unregister(req, owner, Holder::Map(object.index()), false);
             }
         }
@@ -577,10 +591,10 @@ impl ObjectHandlers for WeakMapHandlers {
     /// int(0)
     /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        for (_, value) in entries_of(req, object)
-            .map(|e| e.snapshot_refs())
-            .unwrap_or_default()
-        {
+        let Some(entries) = entries_of(req, object) else {
+            return;
+        };
+        for (_, value) in walk::rows(req, entries) {
             visit(value);
         }
     }
@@ -708,10 +722,8 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         None => None,
     };
     let made = req.clone_with_payload(object, ZendWeakMap { entries: copy })?;
-    for (key, _) in copy.map(|e| e.snapshot()).unwrap_or_default() {
-        if let Key::Int(id) = key
-            && let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id))
-        {
+    for id in copy.map(|copy| keyed_ids(req, copy)).unwrap_or_default() {
+        if let Some(owner) = stored(req, id) {
             register(req, owner, Holder::Map(made.index()));
         }
     }

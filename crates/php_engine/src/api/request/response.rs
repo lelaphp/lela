@@ -537,6 +537,16 @@ impl Request {
         adopted(self, made)
     }
 
+    /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
+    /// handler of `name` is on the stack, read off the stack itself, as
+    /// `zlib.output_compression` and `tidy.clean_output` ask before they
+    /// start theirs; nothing is made, where `ob_list_handlers()`'s array
+    /// would be.
+    #[must_use]
+    pub fn buffer_handler_started(&self, name: &[u8]) -> bool {
+        self.output().handler_started(name)
+    }
+
     /// `php_output_start_default`, what `body` writes through the stack,
     /// then `php_output_get_contents` and `php_output_discard`: what the
     /// body printed, as a string, for a native that hands back what it

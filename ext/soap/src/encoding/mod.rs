@@ -24,7 +24,7 @@ use std::sync::Arc;
 use php_ext::call::lookup_class;
 use php_ext::raising::throw_error;
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Library, Node, Ns};
 
 use crate::model::{
@@ -662,10 +662,11 @@ fn master_to_xml_held(
         && let Some(map) = map.deref().as_array().copied()
     {
         let name = class_name(req, *o);
-        for (key, tmp) in map.snapshot() {
+        for (key, tmp) in walk::rows(req, map) {
             let php_ext::values::Key::Str(type_name) = key else {
                 continue;
             };
+            let tmp = tmp.deref();
             let Some(tmp) = tmp.as_str_bytes() else {
                 continue;
             };

@@ -29,7 +29,7 @@ use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Value, ValueRef};
+use crate::api::values::{Key, Value, ValueRef, walk};
 
 /// The classes whose link is under way, and `CG(delayed_autoloads)`.
 #[derive(Default)]
@@ -289,7 +289,7 @@ impl Request {
             }
             match crate::api::call::eval_const_expr_made(self, &expr, None) {
                 Ok(value) => {
-                    if let Some(literal) = literal_of(&value) {
+                    if let Some(literal) = literal_of(self, &value) {
                         values.push((expr, literal));
                     }
                     self.release(value);
@@ -505,7 +505,7 @@ fn is_literal(expr: &ConstExpr) -> bool {
 
 /// A value as the constant expression that writes it, arrays element by
 /// element with their keys; none for an object or a resource.
-fn literal_of(value: &Value) -> Option<ConstExpr> {
+fn literal_of(req: &Request, value: &Value) -> Option<ConstExpr> {
     Some(match value.deref().as_ref() {
         ValueRef::Null | ValueRef::Undef => ConstExpr::Null,
         ValueRef::Bool(b) => ConstExpr::Bool(b),
@@ -514,12 +514,12 @@ fn literal_of(value: &Value) -> Option<ConstExpr> {
         ValueRef::Str(s) => ConstExpr::Str(s.as_bytes().into()),
         ValueRef::Array(array) => {
             let mut elements = Vec::new();
-            for (key, element) in array.snapshot() {
+            for (key, element) in walk::rows(req, *array) {
                 let key = match key {
                     Key::Int(i) => ConstExpr::long(i),
                     Key::Str(s) => ConstExpr::Str(s.as_bytes().into()),
                 };
-                elements.push((Some(key), literal_of(&element)?));
+                elements.push((Some(key), literal_of(req, &element.deref())?));
             }
             ConstExpr::Array { elements, line: 0 }
         }

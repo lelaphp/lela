@@ -9,7 +9,6 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::ValueRef;
 
 use crate::{CLEAN_OUTPUT, DEFAULT_CONFIG, State, default_config, ffi};
 
@@ -116,20 +115,6 @@ fn repair(req: &mut Request, doc: &mut ffi::Doc, input: &[u8]) -> Result<Option<
     doc.save(req).map(Some)
 }
 
-/// Whether a handler of `name` is on the stack,
-/// `php_output_handler_started`.
-fn started(req: &mut Request) -> Result<bool, Thrown> {
-    let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let started = match list.as_ref() {
-        ValueRef::Array(list) => list.iter().any(|(_, value)| {
-            matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == NAME.as_bytes())
-        }),
-        _ => false,
-    };
-    list.give_up(req);
-    Ok(started)
-}
-
 /// `php_tidy_clean_output_start`: the handler started where
 /// `TG(clean_output)` asks for it.
 fn clean_output_start(req: &mut Request) -> Result<(), Thrown> {
@@ -191,7 +176,7 @@ pub(crate) fn on_clean_output(req: &mut Request, value: Option<&[u8]>) -> Result
     if req.ini_stage() != IniStage::Startup {
         req.state::<State>().clean_output = on;
     }
-    if runtime && on && !started(req)? {
+    if runtime && on && !req.buffer_handler_started(NAME.as_bytes()) {
         clean_output_start(req)?;
     }
     Ok(true)

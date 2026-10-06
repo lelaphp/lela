@@ -5,7 +5,7 @@
 use php_ext::call::{iterate, lookup_class};
 use php_ext::coerce::key_of;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Ns};
 
 use super::{
@@ -470,7 +470,7 @@ fn array_body(
             if let Some(a) = el.and_then(|v| v.as_array().copied())
                 && !a.is_empty()
             {
-                let first = a.snapshot().into_iter().next().map(|(_, v)| v);
+                let first = walk::rows(req, a).next().map(|(_, v)| v.deref());
                 el = first;
                 *slot = first.and_then(|v| v.as_array().copied()).map_or(0, count);
             }
@@ -619,7 +619,8 @@ fn get_array_type(
     let (mut cur_type, mut prev_type) = (0, 0);
     let (mut cur_stype, mut prev_stype): (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
     let (mut cur_ns, mut prev_ns): (Option<Vec<u8>>, Option<Vec<u8>>) = (None, None);
-    for (_, tmp) in arr.snapshot() {
+    for (_, tmp) in walk::rows(req, arr) {
+        let tmp = tmp.deref();
         match tmp.as_ref() {
             ValueRef::Object(o) if Some(o.class()) == soap_var => {
                 let slot = |n| crate::shared::slot(*o, n);

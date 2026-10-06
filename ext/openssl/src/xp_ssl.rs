@@ -25,7 +25,7 @@ use php_ext::request::{
     Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
     XportFactory,
 };
-use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
 use php_ext_standard::UriParser;
 
 use crate::decode::{Origin, check_path};
@@ -442,7 +442,7 @@ impl SslOptions {
         o.peer_name = text(req, b"peer_name")?;
         o.capture_peer_cert = flag(req, b"capture_peer_cert")?.unwrap_or(false);
         o.capture_peer_cert_chain = flag(req, b"capture_peer_cert_chain")?.unwrap_or(false);
-        o.peer_fingerprint = option(req, ctx, b"peer_fingerprint").map(|v| fingerprint(&v));
+        o.peer_fingerprint = option(req, ctx, b"peer_fingerprint").map(|v| fingerprint(req, &v));
         o.allow_self_signed = flag(req, b"allow_self_signed")?.unwrap_or(false);
         o.verify_depth = long(req, b"verify_depth")?;
         Ok(o)
@@ -450,13 +450,13 @@ impl SslOptions {
 }
 
 /// `peer_fingerprint` sorted.
-fn fingerprint(value: &Value) -> Fingerprint {
+fn fingerprint(req: &Request, value: &Value) -> Fingerprint {
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Str(text) => Fingerprint::Text(text.as_bytes().to_vec()),
         ValueRef::Array(array) => {
             let mut pairs = Vec::new();
-            for (key, item) in array.snapshot() {
+            for (key, item) in walk::rows(req, *array) {
                 let item = item.deref();
                 match (key, item.as_ref()) {
                     (Key::Str(algo), ValueRef::Str(expected)) => {
@@ -1615,9 +1615,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
     }
     let mut added = 0;
     let mut block: Option<Vec<u8>> = None;
-    while let Ok(Some(line)) = stream.get_line(req, None) {
-        let bytes = line.as_bytes().to_vec();
-        line.give_up(req);
+    while let Ok(Some(bytes)) = stream.get_line(req, None) {
         match &mut block {
             None => {
                 if bytes == b"-----BEGIN CERTIFICATE-----\n"

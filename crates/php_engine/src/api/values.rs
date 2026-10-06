@@ -1383,7 +1383,14 @@ impl PhpObject {
                 }
                 (rows, Held::Rows)
             }
-            Answered::Debug(info) => (info.table.snapshot(), Held::Table(info.table, info.thrown)),
+            // Views of the class's debug table, which the rows hold one
+            // owner of until their release.
+            Answered::Debug(info) => {
+                let rows = walk::rows(req, info.table)
+                    .map(|(key, value)| (key, value.deref()))
+                    .collect();
+                (rows, Held::Table(info.table, info.thrown))
+            }
         };
         let count = rows.len();
         let rows = rows

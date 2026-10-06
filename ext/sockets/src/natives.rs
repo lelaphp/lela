@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::State;
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
@@ -107,28 +107,46 @@ fn to_fd_set(
         return Ok(None);
     };
     let mut fds = Vec::new();
-    for (_, element) in array.snapshot() {
+    let mut refused = None;
+    for (_, element) in walk::rows(req, array) {
+        let element = element.deref();
         let fd = match element.as_ref() {
             ValueRef::Object(object) if object.native::<Sock>(req).is_some() => {
                 object.native::<Sock>(req).and_then(Sock::fd)
             }
             _ => {
-                let given = value_name(req, &element);
-                let tail = format!("only have elements of type Socket, {given} given");
-                return Err(arg_type_error(req, position, &tail));
+                refused = Some(Refused::Given(value_name(req, &element)));
+                break;
             }
         };
         let Some(fd) = fd else {
-            return Err(argument_error(
-                req,
-                "TypeError",
-                position,
-                "contains a closed socket",
-            ));
+            refused = Some(Refused::Closed);
+            break;
         };
         fds.push(fd);
     }
-    Ok(Some(fds))
+    match refused {
+        None => Ok(Some(fds)),
+        Some(Refused::Given(given)) => {
+            let tail = format!("only have elements of type Socket, {given} given");
+            Err(arg_type_error(req, position, &tail))
+        }
+        Some(Refused::Closed) => Err(argument_error(
+            req,
+            "TypeError",
+            position,
+            "contains a closed socket",
+        )),
+    }
+}
+
+/// Why [`to_fd_set`] refused an element, read in the walk and raised
+/// after it.
+enum Refused {
+    /// An element that is no socket, by its type's name.
+    Given(String),
+    /// A socket closed already.
+    Closed,
 }
 
 /// `php_sock_array_from_fd_set` (`Z/ext/sockets/sockets.c:592`): a new

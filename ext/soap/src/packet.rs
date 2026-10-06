@@ -5,7 +5,7 @@
 use php_ext::abi::{Ref, Untyped};
 use php_ext::coerce::to_string;
 use php_ext::request::Request;
-use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::ffi::{Kind, Node};
 
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
@@ -489,7 +489,9 @@ fn read_body(
         return_value.give_up(req);
         Value::null()
     } else if param_count == 1 {
-        let first = return_value.snapshot().into_iter().next().map(|(_, v)| v);
+        let first = walk::rows(req, *return_value)
+            .next()
+            .map(|(_, v)| v.deref());
         let out = match first {
             Some(v) => {
                 req.addref(&v);

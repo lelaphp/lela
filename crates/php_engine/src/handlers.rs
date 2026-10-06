@@ -14633,13 +14633,13 @@ fn served_property_step(
         req.release(stepped);
         return Ok(());
     }
-    req.addref(&stepped);
+    // `write_property` takes an owner of the value and of the name, on
+    // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
+    // gives up after the write, and one more of the name, which the
+    // operand keeps its own of.
+    req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
-    let written = table.write_property(req, object, name, stepped);
-    if written.is_err() {
-        req.release(stepped);
-    }
-    written
+    table.write_property(req, object, name, stepped)
 }
 
 /// Where a compound write or a step over a property the class serves
@@ -16393,7 +16393,7 @@ fn unpack_binds(req: &Request, array: PhpArray) -> bool {
         .calls()
         .last()
         .map_or(0, |call| call.arguments.len());
-    array.snapshot_refs().into_iter().any(|(key, _)| {
+    crate::api::values::walk::rows(req, array).any(|(key, _)| {
         let number = match key {
             crate::api::values::Key::Str(name) => {
                 crate::api::call::arg_offset_by_name(req, function, name.as_bytes()).number()

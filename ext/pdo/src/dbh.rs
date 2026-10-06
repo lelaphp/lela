@@ -789,12 +789,7 @@ fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown
     let line = stream.get_line(req, Some(512));
     stream.close(req);
     stream.give_up(req);
-    let Some(line) = line? else {
-        return Ok(None);
-    };
-    let bytes = line.as_bytes().to_vec();
-    line.give_up(req);
-    Ok(Some(bytes))
+    line
 }
 
 /// `create_driver_specific_pdo_object`: `None` where the current object

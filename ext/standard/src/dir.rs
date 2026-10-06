@@ -235,7 +235,10 @@ impl Directory {
     /// the last.
     fn read(req: &mut Request, this: This<Self>) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let stream = this_stream(req, this, "read")?;
-        Ok(stream.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
+        Ok(match stream.read_dir(req)? {
+            Some(name) => OrFalse::Value(PhpString::new(req, &name)?),
+            None => OrFalse::False,
+        })
     }
 }
 
@@ -513,15 +516,12 @@ fn scandir(
         docref(req, Level::Warning, &format!("(errno {code}): {text}"));
         return Ok(OrFalse::False);
     };
-    let mut names: Vec<Owner<PhpString>> = Vec::new();
+    let mut names: Vec<Vec<u8>> = Vec::new();
     loop {
         match stream.read_dir(req) {
             Ok(Some(name)) => names.push(name),
             Ok(None) => break,
             Err(thrown) => {
-                for name in names {
-                    name.give_up(req);
-                }
                 stream.give_up(req);
                 return Err(thrown);
             }
@@ -530,11 +530,12 @@ fn scandir(
     stream.hand_on_unmigrated().free(req);
     match order {
         SCANDIR_SORT_NONE => {}
-        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a.as_bytes(), b.as_bytes())),
-        _ => names.sort_by(|a, b| collate(b.as_bytes(), a.as_bytes())),
+        SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a, b)),
+        _ => names.sort_by(|a, b| collate(b, a)),
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
+        let name = PhpString::new(req, &name)?;
         array.append(req, Value::string(name.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(array))

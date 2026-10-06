@@ -286,7 +286,8 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
     let Some(flags) = value.as_int() else {
         // `zend_zval_value_name(&flags)`
         // (`Z/Zend/zend_attributes.c:54`): the value's name, so `true`
-        // stands where the type alone would read `bool`.
+        // stands where the type alone would read `bool`, and the value
+        // given up after it, `zval_ptr_dtor(&flags)`.
         let given = value_name(req, &value);
         value.give_up(req);
         return Err(throw_error(
@@ -441,25 +442,29 @@ impl ReflectionAttribute {
     fn getArguments(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let mut out = PhpArray::new(req)?;
-        for argument in &kept.attribute.arguments {
-            let value = match eval_declared(req, &argument.value, kept.scope) {
-                Ok(value) => value,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
+        let filled = (|| {
+            for argument in &kept.attribute.arguments {
+                let value = eval_declared(req, &argument.value, kept.scope)?;
+                match &argument.name {
+                    Some(name) => {
+                        let key = PhpString::new(req, &name.0)?;
+                        out.set(
+                            req,
+                            Key::Str(key.hand_on_unmigrated()),
+                            value.hand_on_unmigrated(),
+                        )?;
+                    }
+                    None => out.append(req, value.hand_on_unmigrated())?,
                 }
-            };
-            match &argument.name {
-                Some(name) => {
-                    let key = PhpString::new(req, &name.0)?;
-                    out.set(
-                        req,
-                        Key::Str(key.hand_on_unmigrated()),
-                        value.hand_on_unmigrated(),
-                    )?;
-                }
-                None => out.append(req, value.hand_on_unmigrated())?,
             }
+            Ok(())
+        })();
+        // The array built so far is given up where an argument fails to
+        // evaluate, as the VM frees the return value php's `RETURN_THROWS()`
+        // leaves.
+        if let Err(thrown) = filled {
+            out.give_up(req);
+            return Err(thrown);
         }
         Ok(out)
     }

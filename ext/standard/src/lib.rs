@@ -790,6 +790,20 @@ pub fn extension() -> Extension {
         .build("standard")
 }
 
+/// `zval_get_tmp_string` and `zend_tmp_string_release` around a read
+/// whose bytes are kept: the value's text, as `to_string` converts it,
+/// and the string the conversion handed over given up. What a native
+/// reading a value's text once calls, so no conversion outlives it.
+pub(crate) fn tmp_string_bytes(
+    req: &mut Request,
+    value: &php_ext::values::Value,
+) -> Result<Vec<u8>, Thrown> {
+    let text = php_ext::coerce::to_string(req, value)?;
+    let bytes = text.as_bytes().to_vec();
+    text.give_up(req);
+    Ok(bytes)
+}
+
 /// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
 /// runtime: `file.c`'s `auto_detect_line_endings`, the URL rewriter's
 /// two over session's entries, and the five of `assert.c`.
@@ -837,10 +851,13 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `PHP_RSHUTDOWN(basic)`'s share here: the syslog closed and
-/// `BG(last_http_headers)` given back.
+/// `PHP_RSHUTDOWN(basic)`'s share here, in its order: the syslog
+/// closed, `ASSERTG(callback)` given up, the URL rewriter's buffers
+/// freed and `BG(last_http_headers)` given back.
 fn rshutdown(req: &mut Request) {
     syslog::close(req);
+    assert::rshutdown(req);
+    url_scanner::rshutdown(req);
     http_fopen_wrapper::clear_last_headers(req);
 }
 

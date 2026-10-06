@@ -430,7 +430,9 @@ impl Request {
     /// `declaring` declares: its value from the row where the request
     /// evaluated it before, and otherwise the expression it was written
     /// as evaluated in `declaring`'s scope, held to its type, and kept.
-    /// One more owner is the caller's.
+    /// One more owner is the caller's. A value its type refuses is given
+    /// up with the `TypeError`, as `zend_update_class_constant` gives up
+    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept.
     pub(crate) fn evaluated_class_constant(
         &mut self,
         declaring: ClassId,
@@ -447,13 +449,25 @@ impl Request {
             self.addref(&value);
             return Ok(value);
         }
-        let evaluated =
-            crate::api::call::eval_declared_made(self, &constant.value, Some(declaring))?;
+        let evaluated = crate::api::call::eval_declared(self, &constant.value, Some(declaring))?;
         let value = match &constant.ty {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
-                crate::ops::verify_class_constant_type(self, evaluated, ty, declaring, name)?
+                match crate::ops::verify_class_constant_type(self, *evaluated, ty, declaring, name)
+                {
+                    // The owner goes on to the row that keeps the value,
+                    // and the caller's is taken below; the float an int
+                    // converts to holds nothing either way.
+                    Ok(value) => {
+                        evaluated.hand_on();
+                        value
+                    }
+                    Err(thrown) => {
+                        evaluated.give_up(self);
+                        return Err(thrown);
+                    }
+                }
             }
-            _ => evaluated,
+            _ => evaluated.hand_on(),
         };
         self.addref(&value);
         self.class_data

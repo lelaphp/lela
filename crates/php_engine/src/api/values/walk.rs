@@ -1,8 +1,12 @@
-//! The callback walks (#1980 candidate 3): a native that runs code of
-//! the program for each row of a table, a callback, a magic method or a
-//! handler a diagnostic reaches, walks the table here, and the walk owns
-//! what it walks while that code runs. Each walk ports one of php's
-//! iteration modes once:
+//! The walks over a table (#1980 candidate 3), each porting one of php's
+//! iteration modes once. A native that only reads the rows walks them
+//! with [`rows`], an iterator that borrows the request, so a body that
+//! could reach code of the program does not compile in it: php's walk
+//! that counts on the table's own holder to keep it, held at compile
+//! time. A native that runs code of the program for each row, a
+//! callback, a magic method or a handler a diagnostic reaches, walks
+//! the table with a callback walk, and the walk owns what it walks
+//! while that code runs:
 //!
 //! - [`held`] holds the table for the walk where the program could
 //!   give it up, php's `ZVAL_COPY` or `GC_ADDREF` of it, and
@@ -23,17 +27,19 @@
 //!   table changing nor changes the one being worked on. The `usort`
 //!   family.
 //!
-//! A row walk takes the table and lends the body each row's key and
-//! value for that step. The body answers a [`Step`]: std's
+//! A callback walk takes the table and lends the body each row's key
+//! and value for that step. The body answers a [`Step`]: std's
 //! `ControlFlow` to go on or stop early with a value, and `Err` for a
 //! throwable, which `?` hands on. [`detached`] lends the body the whole
 //! copy instead, since what walks its rows is the sort the body runs,
-//! whose comparisons are lent the rows; it answers what the body did. The walk owns the loop and calls the body, so what it took
+//! whose comparisons are lent the rows; it answers what the body did.
+//! The walk owns the loop and calls the body, so what it took
 //! is given back on every way out, `?` included, by the walk itself and
 //! never by a `Drop` (design §5.1: nothing runs implicitly on drop). A
 //! body keeps a row past its step only by taking an owner of its own
 //! ([`crate::api::values::Owner::take`]).
 
+use std::marker::PhantomData;
 use std::ops::ControlFlow;
 
 use php_heap::{Arr, PropertyTable, TableRow};
@@ -41,13 +47,93 @@ use php_heap::{Arr, PropertyTable, TableRow};
 use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
+use crate::api::values::{ArrayIter, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
 
 /// What a walk's body answers for one row: `Continue` to go on to the
 /// next, `Break` to end the walk there with what the walk answers, and
 /// `Err`, what `?` hands on, a throwable that ends the walk as php's
 /// loops end on `EG(exception)`.
 pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
+
+/// php's `ZEND_HASH_FOREACH_KEY_VAL` over a table nothing can change
+/// while it is walked: the rows of `table` in order, each a view of its
+/// key and of its value as the table holds it, a reference row as the
+/// reference ([`Value::deref`] follows it). The walk holds no owner, as
+/// php's holds none, because the body cannot reach code of the program:
+/// the walk borrows the request until it ends, and everything that can
+/// reach that code, a conversion that calls `__toString`, a diagnostic
+/// a handler reads, a release that runs a destructor, takes the request
+/// mutably. So the views the walk lends stand while it runs. A body
+/// that needs the request mutably is a callback walk's ([`held`] by
+/// default); one that reads every row and then acts on what it read
+/// ends the walk first, a `find` or a `collect` of what it read, and
+/// acts after.
+///
+/// The compiler holds a body to that, `E0502`: here the conversion that
+/// can call `__toString` takes the request the walk borrows.
+///
+/// ```compile_fail,E0502
+/// # use php_engine::api::coerce;
+/// # use php_engine::api::raising::Thrown;
+/// # use php_engine::api::request::Request;
+/// # use php_engine::api::values::{PhpArray, walk};
+/// fn strings(req: &mut Request, table: PhpArray) -> Result<(), Thrown> {
+///     for (_, value) in walk::rows(req, table) {
+///         coerce::to_string(req, &value)?;
+///     }
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+///
+/// What the compiler cannot hold is a view copied out of the walk and
+/// kept past it, the same view a `collect` of the rows hands on: a view
+/// carries no owner (design §5.1), so once the walk ends nothing keeps
+/// the row it names, and code of the program can give it up. A debug
+/// build catches two uses of it while the request is served: the
+/// freed-use guard refuses and reports an owner taken or given up on
+/// the freed block, and the quarantine holds the freed slot back from
+/// reuse and reports a write into it as the slot leaves. A read through
+/// it is caught by neither; the quarantine only keeps the slot from
+/// being another value's for its bin's next sixteen frees.
+///
+/// `array_key_last` and `array_last` read the last row on it, a
+/// reference row followed:
+///
+/// ```php
+/// $a = ['x' => 1, 'y' => 2];
+/// $r = &$a['y'];
+/// var_dump(array_key_last($a), array_last($a));
+/// ```
+/// ```expect
+/// string(1) "y"
+/// int(2)
+/// ```
+pub fn rows(_request: &Request, table: PhpArray) -> Rows<'_> {
+    Rows {
+        rows: table.iter(),
+        request: PhantomData,
+    }
+}
+
+/// The [`rows`] walk: an iterator over a table's rows that borrows the
+/// request while it lives.
+#[derive(Debug)]
+#[must_use = "a rows walk reads nothing until it is iterated"]
+pub struct Rows<'r> {
+    rows: ArrayIter,
+    /// The request borrowed for the walk, which is what keeps a body
+    /// from running code of the program.
+    request: PhantomData<&'r Request>,
+}
+
+impl Iterator for Rows<'_> {
+    type Item = (Key, Value);
+
+    fn next(&mut self) -> Option<(Key, Value)> {
+        self.rows.next()
+    }
+}
 
 /// A table as a held walk's caller came by it, which says whether the
 /// walk must hold it ([`held`]).
@@ -136,7 +222,7 @@ pub fn held<B>(
     mut body: impl FnMut(&mut Request, &Key, &Value) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     let owner = reached.hold(req);
-    let walked = rows(req, reached.table(), &mut body);
+    let walked = lend_rows(req, reached.table(), &mut body);
     if let Some(owner) = owner {
         owner.give_up(req);
     }
@@ -176,7 +262,7 @@ pub fn held_guarded<B>(
     }
     let owner = reached.hold(req);
     table.protect();
-    let walked = rows(req, table, &mut body);
+    let walked = lend_rows(req, table, &mut body);
     table.unprotect();
     if let Some(owner) = owner {
         owner.give_up(req);
@@ -187,7 +273,7 @@ pub fn held_guarded<B>(
 /// The rows of `table` from its first bucket, each lent to `body`, until
 /// the last or the first that breaks or throws. The table is read again
 /// at each step, so a row stands as long as the bucket that holds it.
-fn rows<B>(
+fn lend_rows<B>(
     req: &mut Request,
     table: PhpArray,
     body: &mut impl FnMut(&mut Request, &Key, &Value) -> Step<B>,

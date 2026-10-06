@@ -337,6 +337,12 @@ impl Output {
         self.handlers.len()
     }
 
+    /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
+    /// handler of `name` is on the stack.
+    pub(crate) fn handler_started(&self, name: &[u8]) -> bool {
+        self.handlers.iter().any(|h| h.name.bytes() == name)
+    }
+
     /// `php_output_set_implicit_flush`.
     fn set_implicit_flush(&mut self, on: bool) {
         if on {
@@ -1563,12 +1569,7 @@ fn conflicts(req: &mut Request, registered: &BufferHandler) -> bool {
         return false;
     }
     for &set in registered.conflicts {
-        let started = req
-            .output()
-            .handlers
-            .iter()
-            .any(|h| h.name.bytes() == set.as_bytes());
-        if !started {
+        if !req.output().handler_started(set.as_bytes()) {
             continue;
         }
         let text = if set == registered.name {

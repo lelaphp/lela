@@ -170,6 +170,16 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
     }
 }
 
+/// `PHP_RSHUTDOWN_FUNCTION(assert)` (`Z/ext/standard/assert.c:157`):
+/// `ASSERTG(callback)` given up as the request ends, the string the
+/// entry was made into or the callable `assert_options` set.
+pub(crate) fn rshutdown(req: &mut Request) {
+    if let Some(callback) = req.assert_callback().copied() {
+        req.set_assert_callback(None);
+        req.release(callback);
+    }
+}
+
 macro_rules! handler {
     ($name:ident, $entry:literal) => {
         #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature

@@ -7,7 +7,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
-use php_ext::values::ValueRef;
+use php_ext::values::{Key, PhpArray, Value, ValueRef, walk};
 
 /// <https://fetch.spec.whatwg.org/#http-tab-or-space>.
 const fn is_http_tab_or_space(c: u8) -> bool {
@@ -172,19 +172,23 @@ pub fn sniff_charset_from_stream(
     let headers = meta
         .find(b"wrapper_data")
         .and_then(|data| data.deref().as_array().copied());
-    let lines = headers
-        .map(|headers| headers.snapshot())
-        .unwrap_or_default();
+    let charset = headers.and_then(|headers| charset_of_headers(req, headers));
     meta.give_up(req);
+    Ok(charset)
+}
+
+/// The charset of the last `Content-Type:` line among the wrapper's
+/// header lines, read from the last line back as php's loop reads them;
+/// `None` where a line that is not a header comes first.
+fn charset_of_headers(req: &Request, headers: PhpArray) -> Option<Vec<u8>> {
+    let lines: Vec<(Key, Value)> = walk::rows(req, headers).collect();
     for (_, line) in lines.iter().rev() {
         let line = line.deref();
         let ValueRef::Str(line) = line.as_ref() else {
             continue;
         };
         let line = line.as_bytes();
-        let Some(colon) = line.iter().position(|c| *c == b':') else {
-            return Ok(None);
-        };
+        let colon = line.iter().position(|c| *c == b':')?;
         // `space < colon` with no blank at all is a null pointer, which
         // compares below any other: php bails out then too.
         if line
@@ -192,11 +196,11 @@ pub fn sniff_charset_from_stream(
             .position(|c| *c == b' ')
             .is_none_or(|space| space < colon)
         {
-            return Ok(None);
+            return None;
         }
         if line.len() >= 13 && line[..13].eq_ignore_ascii_case(b"content-type:") {
-            return Ok(sniff_charset_from_string(&line[13..]));
+            return sniff_charset_from_string(&line[13..]);
         }
     }
-    Ok(None)
+    None
 }

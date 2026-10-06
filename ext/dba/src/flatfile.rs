@@ -54,14 +54,7 @@ pub(crate) fn gets(
     file: Stream,
     max: Option<usize>,
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    match file.get_line(req, max)? {
-        Some(line) => {
-            let bytes = line.as_bytes().to_vec();
-            line.give_up(req);
-            Ok(Some(bytes))
-        }
-        None => Ok(None),
-    }
+    file.get_line(req, max)
 }
 
 /// The walk's buffer, `buf` and `buf_size` of `flatfile.c`, held while

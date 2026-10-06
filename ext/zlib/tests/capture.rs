@@ -12,3 +12,22 @@ fn the_extension_is_loaded() {
     let served = engine.serve_capture("<?php var_dump(extension_loaded('zlib'));", sink);
     assert_eq!(served.stdout, b"bool(true)\n");
 }
+
+/// `zlib.output_compression` turned on by `ini_set` asks whether its
+/// handler is on the stack as `php_output_handler_started` does, by
+/// reading the stack, and keeps nothing: armed, the request ends with no
+/// block of its heap held (#2070).
+#[cfg(debug_assertions)]
+#[test]
+fn turning_output_compression_on_keeps_nothing_of_the_output_layer_s() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension(), php_ext_zlib::extension()])
+        .sense_leaks(php_ext::test::LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        "<?php var_dump(ini_set('zlib.output_compression', '1'), ini_get('zlib.output_compression'));",
+        Capture::default(),
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(served.stdout, b"string(1) \"0\"\nstring(1) \"1\"\n");
+}

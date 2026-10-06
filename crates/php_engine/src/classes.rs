@@ -146,7 +146,7 @@ impl ObjectHandlers for ClosureHandlers {
         // `*table`, so the collector walks them as the closure's and
         // counts no node of the table's.
         if let Some(bound) = closure.bound {
-            for (_, value) in bound.snapshot_refs() {
+            for (_, value) in crate::api::values::walk::rows(req, bound) {
                 visit(value);
             }
         }
@@ -869,11 +869,11 @@ impl Closure {
             &placed.arguments,
             &placed.extra_named,
         )?;
-        // The call's value is the caller's, a reference's referent taken
-        // out of it.
-        let owner = Owner::take(req, returned.deref());
-        req.release(returned);
-        Ok(owner)
+        // `zend_unwrap_reference(&closure_result)`: the cell a closure
+        // returning by reference handed back given up for the value it
+        // holds, whose owner is the caller's.
+        let value = req.unwrap_reference(returned);
+        Ok(Owner::adopt(req, value))
     }
 
     /// `Closure::fromCallable(callable $callback): Closure`,

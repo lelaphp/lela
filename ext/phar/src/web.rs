@@ -5,7 +5,7 @@
 use php_ext::abi::Callable;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{PhpArray, PhpString, Value, walk};
 
 use crate::archive::{ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, Found};
@@ -123,35 +123,40 @@ fn mount_in(
 /// `Phar::mungServer()`: the names kept, at most four, each a string.
 pub(crate) fn mung_server(req: &mut Request, names: PhpArray) -> Result<(), Thrown> {
     const LIST: &str = "expecting an array of any of these strings: PHP_SELF, REQUEST_URI, SCRIPT_FILENAME, SCRIPT_NAME";
-    let values = names.snapshot();
-    if values.is_empty() {
+    // Each value's bit, `None` for one that is no string, read before
+    // any is kept.
+    let bits: Vec<Option<u8>> = walk::rows(req, names)
+        .map(|(_, value)| {
+            value.deref().as_str_bytes().map(|name| match name {
+                b"PHP_SELF" => MUNG_PHP_SELF,
+                b"REQUEST_URI" => MUNG_REQUEST_URI,
+                b"SCRIPT_NAME" => MUNG_SCRIPT_NAME,
+                b"SCRIPT_FILENAME" => MUNG_SCRIPT_FILENAME,
+                _ => 0,
+            })
+        })
+        .collect();
+    if bits.is_empty() {
         return Err(throw(
             req,
             "PharException",
             &format!("No values passed to Phar::mungServer(), {LIST}"),
         ));
     }
-    if values.len() > 4 {
+    if bits.len() > 4 {
         return Err(throw(
             req,
             "PharException",
             &format!("Too many values passed to Phar::mungServer(), {LIST}"),
         ));
     }
-    for (_, value) in values {
-        let Some(name) = value.as_str_bytes().map(<[u8]>::to_vec) else {
+    for bit in bits {
+        let Some(bit) = bit else {
             return Err(throw(
                 req,
                 "PharException",
                 &format!("Non-string value passed to Phar::mungServer(), {LIST}"),
             ));
-        };
-        let bit = match name.as_slice() {
-            b"PHP_SELF" => MUNG_PHP_SELF,
-            b"REQUEST_URI" => MUNG_REQUEST_URI,
-            b"SCRIPT_NAME" => MUNG_SCRIPT_NAME,
-            b"SCRIPT_FILENAME" => MUNG_SCRIPT_FILENAME,
-            _ => 0,
         };
         req.state::<crate::State>().mung |= bit;
     }
