@@ -20,7 +20,7 @@ use crate::api::call::constant;
 use crate::api::coerce::to_string;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{Emalloc, PhpString, Value};
+use crate::api::values::{Emalloc, Owner, PhpString, Value};
 use crate::ini_syntax::{Held, Host, Val};
 use php_compile::multibyte::{self, Filter, Step};
 use php_compile::syntax::Colours;
@@ -151,8 +151,9 @@ impl<F> InRequest<'_, F> {
 /// (`Z/Zend/zend_ini_parser.y:162`).
 fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let string = to_string(req, value)?;
+    let string = Owner::adopt(req, string);
     let bytes = string.as_bytes().to_vec();
-    req.release(Value::string(string));
+    string.give_up(req);
     Ok(bytes)
 }
 
