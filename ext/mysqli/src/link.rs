@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, OrFalse, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -952,7 +952,7 @@ pub(crate) fn options(
     };
     let as_long = |_: &mut Request| long;
     let text = match option {
-        3 | 4 | 5 | 7 | 35 | 43 => Some(to_string(req, &value)?.as_bytes().to_vec()),
+        3 | 4 | 5 | 7 | 35 | 43 => Some(crate::bytes_of(req, &value)?),
         _ => None,
     };
     let text = text.unwrap_or_default();

@@ -333,3 +333,32 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
     let served = engine.serve_capture(source, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), "int(1054)\n");
 }
+
+/// A text option of `mysqli_options()` given as a number, and the class
+/// name `mysqli_result::fetch_object()` is given, are read through
+/// `zval_get_string`, whose string is the caller's, and given back once
+/// read, so an armed request that passes either leaves no block of its
+/// heap held (#2092). Against the server of `ci/mysql/compose.yaml`;
+/// with none listening the test says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = "<?php var_dump(mysqli_options(mysqli_init(), MYSQLI_INIT_COMMAND, 5));
+        $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        $class = 'std'; $class .= 'Class';
+        var_dump(get_class(mysqli_query($l, 'SELECT 1 AS a')->fetch_object($class)));";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nstring(8) \"stdClass\"\n"
+    );
+}
