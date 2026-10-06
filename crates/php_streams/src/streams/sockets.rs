@@ -1336,9 +1336,7 @@ impl Transports for Request {
         let Some((name, _)) = found else {
             return Ok(stream);
         };
-        let path = format!("{name}://").into_bytes();
-        let named = self.stream_op(*stream, |req, s| s.set_orig_path(req, &path));
-        Ok(super::kept(self, stream, named.transpose())?.0)
+        super::orig_path_set(self, stream, format!("{name}://").as_bytes())
     }
 
     fn transports(&self) -> Vec<&'static str> {
@@ -1431,11 +1429,10 @@ impl Transports for Request {
             stream.orig_path = Some(super::OrigPath::Persistent(name.into()));
         }
         let stream = self.stream_alloc_as(stream, persistent.is_some())?;
-        let named = match persistent {
-            Some(_) => None,
-            None => self.stream_op(*stream, |req, s| s.set_orig_path(req, name)),
+        let stream = match persistent {
+            Some(_) => stream,
+            None => super::orig_path_set(self, stream, name)?,
         };
-        let (stream, _) = super::kept(self, stream, named.transpose())?;
         stream.set_ctx(self, context);
         if role == Role::Peer && connected {
             let connected = self
@@ -1544,7 +1541,7 @@ impl Stream {
             return Ok(Err(Some(text)));
         }
         let peer = peer.map(|peer| PhpString::new(req, &peer)).transpose();
-        Ok(Ok(super::kept(req, client, peer)?))
+        Ok(Ok(super::freed_on_throw(req, client, peer)?))
     }
 
     /// `php_stream_xport_get_name` (`Z/main/streams/transports.c:327`):

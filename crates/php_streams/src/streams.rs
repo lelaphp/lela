@@ -2318,14 +2318,24 @@ pub(crate) fn temporary_file(
     );
     stream.wrapper = PLAIN_FILES;
     let stream = req.stream_alloc(stream)?;
-    let named = req.stream_op(*stream, |req, s| s.set_orig_path(req, &orig_path));
-    Ok(Some(kept(req, stream, named.transpose())?.0))
+    Ok(Some(orig_path_set(req, stream, &orig_path)?))
+}
+
+/// `stream->orig_path` set on a stream an open has just made, the stream
+/// freed where that threw.
+pub(crate) fn orig_path_set(
+    req: &mut Request,
+    stream: Owner<Stream>,
+    path: &[u8],
+) -> Result<Owner<Stream>, Thrown> {
+    let named = req.stream_op(*stream, |req, s| s.set_orig_path(req, path));
+    Ok(freed_on_throw(req, stream, named.transpose())?.0)
 }
 
 /// The stream an open has just made beside what the open did after it,
 /// `done`, or the stream freed where that threw, so no owner is left
 /// behind.
-pub(crate) fn kept<T>(
+pub(crate) fn freed_on_throw<T>(
     req: &mut Request,
     stream: Owner<Stream>,
     done: Result<T, Thrown>,
@@ -2969,32 +2979,37 @@ pub(crate) fn standard_handles(
     if stdin_replaced {
         req.streams().standard_closed[0] = false;
     }
-    let (mut opened, mut threw) = (Vec::with_capacity(3), Ok(()));
-    for (path, mode) in [
+    let free = |req: &mut Request, opened: [Option<Owner<Stream>>; 3]| {
+        opened
+            .into_iter()
+            .flatten()
+            .for_each(|stream| stream.free(req));
+    };
+    let mut opened = [None, None, None];
+    for (at, (path, mode)) in [
         (&b"php://stdin"[..], &b"rb"[..]),
         (b"php://stdout", b"wb"),
         (b"php://stderr", b"wb"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         match req.open_stream_wrapper(path, mode, false) {
-            Ok(stream) => opened.push(stream),
+            Ok(stream) => opened[at] = stream,
             Err(thrown) => {
-                threw = Err(thrown);
-                break;
+                free(req, opened);
+                return Err(thrown);
             }
         }
     }
-    if threw.is_err() || opened.iter().any(Option::is_none) {
-        let opened = opened.into_iter().flatten();
-        opened.for_each(|stream| stream.free(req));
-        return threw.map(|()| None);
-    }
-    let opened: Vec<Stream> = opened
-        .into_iter()
-        .flatten()
-        .map(Owner::hand_on_unmigrated)
-        .collect();
-    let [stdin, stdout, stderr] = opened[..] else {
-        return Ok(None);
+    let [stdin, stdout, stderr] = match opened {
+        [Some(stdin), Some(stdout), Some(stderr)] => {
+            [stdin, stdout, stderr].map(Owner::hand_on_unmigrated)
+        }
+        opened => {
+            free(req, opened);
+            return Ok(None);
+        }
     };
     req.streams().standard_streams = [
         Some(stdin.resource()),
@@ -3548,7 +3563,7 @@ fn temp_stream(
     outer.flags.no_buffer = true;
     let outer = req.stream_alloc(outer)?;
     let inner = req.stream_alloc(memory(mode));
-    let (outer, inner) = kept(req, outer, inner)?;
+    let (outer, inner) = freed_on_throw(req, outer, inner)?;
     let inner = inner.hand_on_unmigrated();
     req.stream_op(*outer, |_, stream| stream.ops.enclose(inner));
     Ok(outer)
@@ -4106,7 +4121,7 @@ impl StreamLayer for Request {
         let (opened, named) = match (opened, named) {
             (Ok(stream), Some(name)) => {
                 let filled = PhpString::filled(self, name.len(), |b| b.copy_from_slice(&name));
-                let (stream, named) = kept(self, stream, filled)?;
+                let (stream, named) = freed_on_throw(self, stream, filled)?;
                 (Ok(stream), Some(named))
             }
             (opened, _) => (opened, None),
@@ -4208,7 +4223,7 @@ impl StreamLayer for Request {
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
         // The opener hands its owner on with the view, the hook's debt
         // until #2102 has it return the owner: the owner taken here stands
-        // for that one, which is given up.
+        // for that one, whose count is released.
         let opened = match opened? {
             Some(stream) => {
                 let owner = Owner::take(self, stream);
@@ -4285,7 +4300,7 @@ impl StreamLayer for Request {
         } else {
             temp(self, TempMode::Default, PHP_STREAM_MAX_MEM).map(Some)
         };
-        let (stream, copy) = kept(self, stream, copy)?;
+        let (stream, copy) = freed_on_throw(self, stream, copy)?;
         if let Some(copy) = copy {
             if self.copy_all(*stream, *copy) {
                 stream.free(self);
@@ -4293,7 +4308,7 @@ impl StreamLayer for Request {
                     s.seek(req, 0, Some(Whence::Set));
                     s.set_orig_path(req, path)
                 });
-                return Ok(Some(kept(self, copy, sought.transpose())?.0));
+                return Ok(Some(freed_on_throw(self, copy, sought.transpose())?.0));
             }
             copy.free(self);
         }
