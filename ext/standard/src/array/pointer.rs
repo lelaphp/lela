@@ -237,16 +237,14 @@ fn current(req: &mut Request, array: ArrayOrObject) -> Result<Value, Thrown> {
 }
 
 fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Thrown> {
-    let current = match pointed(req, &given, name)? {
-        Pointed::Array(array) => array.cursor_current(),
-        Pointed::Built(array) => {
-            let current = owned_current(req, array.cursor_current());
-            req.release(Value::array(array));
-            return Ok(current);
-        }
+    let pointed = pointed(req, &given, name)?;
+    let current = match &pointed {
+        Pointed::Array(array) | Pointed::Built(array) => array.cursor_current(),
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(_, value)| value),
     };
-    Ok(owned_current(req, current))
+    let current = owned_current(req, current);
+    pointed.read(req);
+    Ok(current)
 }
 
 /// What `php_array_iter_return_current` answers: the value, a
@@ -279,16 +277,14 @@ fn owned_current(req: &mut Request, current: Option<Value>) -> Value {
 /// ```
 #[php_function]
 fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString, i64>>, Thrown> {
-    let key = match pointed(req, &array.value(), "key")? {
-        Pointed::Array(array) => array.cursor_key(),
-        Pointed::Built(array) => {
-            let key = array.cursor_key().map(|key| key_return(req, &key));
-            req.release(Value::array(array));
-            return Ok(key);
-        }
+    let pointed = pointed(req, &array.value(), "key")?;
+    let key = match &pointed {
+        Pointed::Array(array) | Pointed::Built(array) => array.cursor_key(),
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(key, _)| key),
     };
-    Ok(key.map(|key| key_return(req, &key)))
+    let key = key.map(|key| key_return(req, &key));
+    pointed.read(req);
+    Ok(key)
 }
 
 /// What a pointer native reads: an array, the table a class that
@@ -297,11 +293,21 @@ fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString
 enum Pointed {
     /// The argument's array, a view.
     Array(PhpArray),
-    /// The `(array)` cast's table, one owner the reader's, given up once
-    /// it is read, where php reads the table `sxe_get_properties` keeps
-    /// on the object.
+    /// A table made for this read, one owner the reader's, given up once
+    /// it is read: the `(array)` cast's, where php reads the table
+    /// `sxe_get_properties` keeps on the object, and a mover's copy of an
+    /// array sent by value.
     Built(PhpArray),
     Object(PhpObject),
+}
+
+impl Pointed {
+    /// The read done: a table made for it given up, nothing else.
+    fn read(self, req: &mut Request) {
+        if let Pointed::Built(array) = self {
+            req.release(Value::array(array));
+        }
+    }
 }
 
 /// `Z_PARAM_ARRAY_OR_OBJECT`, then `get_ht_for_iap` over an object: the
@@ -342,29 +348,28 @@ fn not_an_array(req: &mut Request, given: &Value) -> Thrown {
 /// (`USED_RET()`).
 fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Result<Value, Thrown> {
     let target = given.get().map_or_else(Value::null, Raw::value);
-    // The array moved over, and whether this call made it, so gives it up.
-    let (mut array, made) = match target.as_ref() {
+    let pointed = match target.as_ref() {
         ValueRef::Array(array) => match given.separated(req)? {
-            Some(array) => (array, false),
+            Some(array) => Pointed::Array(array),
             // A value sent where a reference was asked for, past the
             // notice: php separates the argument slot, which nobody
             // reads after, so the move is over a copy.
-            _ => (array.copy(req)?, true),
+            _ => Pointed::Built(array.copy(req)?),
         },
-        _ => match pointed(req, &target, move_name(how))? {
-            Pointed::Array(array) => (array, false),
-            Pointed::Built(array) => (array, true),
-            Pointed::Object(object) => {
-                if !object.pointer_move(req, how)? {
-                    return Ok(Value::bool(false));
-                }
-                if !req.return_value_used() {
-                    return Ok(Value::null());
-                }
-                let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
-                return Ok(owned_current(req, current));
+        _ => pointed(req, &target, move_name(how))?,
+    };
+    let mut array = match &pointed {
+        Pointed::Array(array) | Pointed::Built(array) => *array,
+        Pointed::Object(object) => {
+            if !object.pointer_move(req, how)? {
+                return Ok(Value::bool(false));
             }
-        },
+            if !req.return_value_used() {
+                return Ok(Value::null());
+            }
+            let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
+            return Ok(owned_current(req, current));
+        }
     };
     let current = if array.is_empty() {
         Value::bool(false)
@@ -377,9 +382,7 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
         }
         owned_current(req, array.cursor_current())
     };
-    if made {
-        req.release(Value::array(array));
-    }
+    pointed.read(req);
     Ok(current)
 }
 
