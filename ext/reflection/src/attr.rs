@@ -454,7 +454,9 @@ impl ReflectionAttribute {
             }
             Ok(())
         })();
-        // `zval_ptr_dtor(&args)` where an argument fails to evaluate.
+        // The array built so far is given up where an argument fails to
+        // evaluate, as the VM frees the return value php's `RETURN_THROWS()`
+        // leaves.
         if let Err(thrown) = filled {
             req.release(Value::array(out));
             return Err(thrown);
