@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use php_heap::{
     Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval, ZvalRef,
@@ -48,6 +48,7 @@ pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
 pub(crate) use caller::NativeCaller;
+pub(crate) use objects::placed_of;
 mod calls;
 mod class_constants;
 pub(crate) use class_constants::ConstantFetch;
@@ -554,16 +555,14 @@ pub(crate) enum MemberAt {
 /// One class a request declared or the engine published: the unit that
 /// holds its declaration and the declaration's index there, for a class
 /// that uses traits the class composed with them at its link, which is
-/// the table's row in its place (`zend_do_bind_traits`); beside them its
-/// placed properties, once read ([`Request::placed_properties`]), or
-/// for a published class once its publisher built them, and
-/// what binding it settled ([`Bound`]). Where it stands in
-/// `EG(class_table)` is the table's ([`Named`]), not the row's.
+/// the table's row in its place (`zend_do_bind_traits`); and what
+/// binding it settled ([`Bound`]), its placed properties among it.
+/// Where it stands in `EG(class_table)` is the table's ([`Named`]), not
+/// the row's.
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
-    placed: OnceLock<Placed>,
     bound: Bound,
 }
 
@@ -587,6 +586,10 @@ pub(crate) struct Bound {
     /// none for a class with no parent and for one bound before its
     /// parent was, whose parent is looked up by name.
     parent: Option<ClassId>,
+    /// The class's placed properties, built as it bound
+    /// ([`objects::placed_of`]): plain data, which a published class's
+    /// row carries from its publication on.
+    placed: Placed,
 }
 
 /// A class's declared instance properties in slot order, each beside the

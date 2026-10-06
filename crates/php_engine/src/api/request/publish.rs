@@ -10,7 +10,7 @@
 //! request's tables under the class's number, as php reaches it through
 //! `ZEND_MAP_PTR`; nothing of it is written into the row.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use php_unit::Unit;
 use php_unit::link::{Composed, LinkedClass};
@@ -39,25 +39,25 @@ impl Request {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
-            placed: OnceLock::new(),
             bound: Bound::default(),
         };
         let class = self.arena.reserve_class()?;
         let members = self.members_of(&row, class)?;
         let (functions, members) = self.place_published(class, members)?;
+        // `zend_build_properties_info_table` at the link: built by the
+        // publisher, so no request writes the published row.
+        let placed = self.placed_over(class, row.decl()?, Some(&record), parent);
         let row = Declared {
             bound: Bound {
                 record: Some(record),
                 functions,
                 members,
                 parent,
+                placed,
             },
             ..row
         };
         self.arena.publish_class(class, row).then_some(())?;
-        // `zend_build_properties_info_table` at the link: built by the
-        // publisher, so no request writes the published row.
-        let _ = self.placed_properties(class);
         Some(class)
     }
 
@@ -100,7 +100,6 @@ impl Request {
                 unit: Arc::clone(unit),
                 at,
                 composed: None,
-                placed: OnceLock::new(),
                 bound: Bound::default(),
             };
             let Some(record) = self.record_over(&row, &named) else {

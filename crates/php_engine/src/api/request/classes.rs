@@ -6,7 +6,7 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use php_heap::{FrameRef, Heap};
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
@@ -442,7 +442,6 @@ impl Request {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
-            placed: OnceLock::new(),
             bound: Bound::default(),
         };
         if let Some(decl) = row.decl() {
@@ -537,14 +536,35 @@ impl Request {
             return;
         };
         let record = record.or_else(|| self.record_at_bind(class));
+        let placed = self
+            .class_decl(class)
+            .map_or_else(super::Placed::default, |decl| {
+                self.placed_over(class, decl, record.as_ref(), parent)
+            });
         if let Some(declared) = self.declared_mut(class) {
             declared.bound = Bound {
                 record,
                 functions,
                 members,
                 parent,
+                placed,
             };
         }
+    }
+
+    /// The placed properties of `class`, declared by `decl`, over its
+    /// parent's, read off `record` ([`super::placed_of`]): built once as
+    /// the class binds, so a publisher hands the number on with them
+    /// built.
+    pub(super) fn placed_over(
+        &self,
+        class: ClassId,
+        decl: &ClassDecl,
+        record: Option<&LinkedClass<ClassId>>,
+        parent: Option<ClassId>,
+    ) -> super::Placed {
+        let above = parent.map_or(&[][..], |parent| self.placed_properties(parent));
+        super::placed_of(class, decl, record, above)
     }
 
     /// The members the class `row` declares binding settles under the
