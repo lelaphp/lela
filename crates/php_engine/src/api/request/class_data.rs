@@ -455,8 +455,9 @@ impl Request {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
                 match crate::ops::verify_class_constant_type(self, *evaluated, ty, declaring, name)
                 {
-                    // The value held, or the float an int converts to,
-                    // which holds nothing to give up.
+                    // The owner goes on to the row that keeps the value,
+                    // and the caller's is taken below; the float an int
+                    // converts to holds nothing either way.
                     Ok(value) => {
                         evaluated.hand_on();
                         value

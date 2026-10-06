@@ -12,7 +12,7 @@
 //! the leaks that sensor found in the engine (#2057), the owner type
 //! as one meets it (#1995), a table copied as php copies it (#2005),
 //! the callback walks as a native meets them (#1980), and the owners
-//! the face takes for a native and gives up (#2057).
+//! the face takes for a native and gives up (#2059, #2080).
 
 use crate::api;
 

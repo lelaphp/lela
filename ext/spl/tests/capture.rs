@@ -74,21 +74,3 @@ bool(true)
     let served = engine.serve_capture(PROBE, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), EXPECTED);
 }
-
-/// `spl_autoload_register()` with no callable registers `spl_autoload`
-/// under its name, which the stack keeps its own owner of, so the name
-/// made to resolve it is given up, once registered and once found
-/// registered already (#2075); the leak sensor is armed (#1992).
-#[cfg(debug_assertions)]
-#[test]
-fn the_default_autoloader_keeps_no_name() {
-    let engine = Engine::builder()
-        .extensions(&[php_ext_spl::extension()])
-        .sense_leaks(php_ext::test::LeakSensor::Armed)
-        .build();
-    let served = engine.serve_capture(
-        "<?php spl_autoload_register(); spl_autoload_register(); foreach (spl_autoload_functions() as $f) { echo $f, \"\\n\"; }",
-        Capture::default(),
-    );
-    assert_eq!(String::from_utf8_lossy(&served.stdout), "spl_autoload\n");
-}

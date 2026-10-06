@@ -1,5 +1,5 @@
 //! The owners the face takes for a native and gives up, as a program
-//! meets them (#2057, design §5.1): each engine arms the request leak
+//! meets them (#2059, #2080, design §5.1): each engine arms the request leak
 //! sensor (#1992), so an owner the face took and kept ends the request
 //! in the `InternalError` naming what the heap still held.
 
