@@ -1099,8 +1099,6 @@ values::HashIterator::set_position
 values::HeldProperties
 values::HeldProperties::count
 values::HeldProperties::release
-values::HeldProperties::rows
-values::HeldRow
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
@@ -1304,10 +1302,12 @@ values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
 values::walk::Row::refcount
+values::walk::Row::uninitialized
 values::walk::Row::value
 values::walk::Rows
 values::walk::Step
 values::walk::Table
+values::walk::Unwritten
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded

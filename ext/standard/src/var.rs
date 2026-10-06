@@ -19,7 +19,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Guarded, Hold};
+use php_ext::values::walk::{self, Guarded, Hold, Unwritten};
 use php_ext::values::{Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
@@ -838,7 +838,7 @@ pub(super) fn render(
         let held = object.props_held(req, PropertyPurpose::Debug)?;
         object.protect_in(req, RecursionGuard::Debug);
         let mut printed = Printed::open(out, indent, true);
-        let walked = walk::properties(req, &held, |req, row| {
+        let walked = walk::properties(req, &held, Unwritten::Skipped, |req, row| {
             printed.row(req, out, row.key(), row.value())?;
             Ok(ControlFlow::<()>::Continue(()))
         });

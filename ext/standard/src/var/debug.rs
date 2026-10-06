@@ -9,7 +9,10 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
-use php_ext::values::{HeldRow, Key, Laziness, RecursionGuard, Value, ValueRef};
+use std::ops::ControlFlow;
+
+use php_ext::values::walk::{self, Guarded, Hold, Row, Unwritten};
+use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
 
 /// `debug_zval_dump(mixed $value, mixed ...$values): void`, php's
 /// `PHP_FUNCTION(debug_zval_dump)` (`Z/ext/standard/var.c:434`): each
@@ -172,29 +175,32 @@ fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> 
     let values = std::iter::once(value).chain(values.0);
     let mut out = Vec::new();
     for value in values {
-        dump(req, &mut out, &value, 1)?;
+        dump(req, &mut out, &value, 0, 1)?;
     }
     req.write(&out);
     Ok(())
 }
 
-/// `zval_object_property_dump`'s value: the row's value dumped, or for
-/// a typed property nothing has written `uninitialized(T)` at the
-/// indent the value would take.
-fn dump_row(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    row: &HeldRow,
-    level: usize,
-) -> Result<(), Thrown> {
-    match row {
-        HeldRow::Value(value) => dump(req, out, value, level),
-        HeldRow::Uninitialized(ty) => {
+/// `zval_object_property_dump`'s value: the row's value dumped, its
+/// count read less the walk's owner of it ([`walk_owners`]), or for a typed property
+/// nothing has written `uninitialized(T)` at the indent the value would
+/// take.
+fn dump_row(req: &mut Request, out: &mut Vec<u8>, row: &Row, level: usize) -> Result<(), Thrown> {
+    match row.uninitialized() {
+        None => dump(req, out, row.value(), walk_owners(row), level),
+        Some(ty) => {
             pad(out, level);
             out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
             Ok(())
         }
     }
+}
+
+/// The owners of a row's value the walk lending it holds beyond what
+/// php's walk holds, which a count printed leaves out: the walk's own
+/// for the step ([`Row::refcount`]).
+fn walk_owners(row: &Row) -> u32 {
+    row.value().refcount().saturating_sub(row.refcount())
 }
 
 fn pad(out: &mut Vec<u8>, level: usize) {
@@ -204,9 +210,11 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 }
 
 /// `php_debug_zval_dump` (`Z/ext/standard/var.c:301`), one arm per
-/// type as php's switch has them. An array is held while its rows are
-/// walked, so an element's `__debugInfo` that frees it through another
-/// name (GH-19801) leaves it standing until the walk is done:
+/// type as php's switch has them, each count read as php reads it, less
+/// the `walked` owners of `value` a walk holds for its step where php's
+/// holds none. An array is held while its rows are walked, so an
+/// element's `__debugInfo` that frees it through another name
+/// (GH-19801) leaves it standing until the walk is done:
 ///
 /// ```php
 /// $a = [new class { function __debugInfo() { global $b; $b->a = null; gc_collect_cycles(); return []; } }];
@@ -226,9 +234,16 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 /// }
 /// ```
 #[allow(clippy::too_many_lines)]
-fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+fn dump(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    value: &Value,
+    walked: u32,
+    level: usize,
+) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
+    let refcount = |value: &Value| value.refcount().saturating_sub(walked);
     pad(out, level);
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),
@@ -243,25 +258,27 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
             out.extend_from_slice(s.as_bytes());
             if value.is_refcounted() {
-                let count = value.refcount();
+                let count = refcount(value);
                 out.extend_from_slice(format!("\" refcount({count})\n").as_bytes());
             } else {
                 out.extend_from_slice(b"\" interned\n");
             }
         }
         ValueRef::Array(array) => {
-            if array.is_recursive() {
-                out.extend_from_slice(b"*RECURSION*\n");
-                return Ok(());
-            }
-            // `GC_ADDREF(myht)` beside the mark (GH-19801): the walk holds
-            // an owner of its own, so an element's `__debugInfo` that gives
-            // up the array's last other owner leaves it standing until the
-            // walk is done; the count printed is the one before it. An
-            // immutable array is held by neither call.
-            let count = value.refcount();
-            req.addref(value);
-            array.protect();
+            // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
+            // `GC_PROTECT_RECURSION(myht)` (GH-19801) and
+            // `ZEND_HASH_FOREACH_KEY_VAL`: a foreach walk holding the array
+            // and guarding its recursion, so an element's `__debugInfo`
+            // that gives up the array's last other owner leaves it
+            // standing until the walk is done; the walk's owner is given
+            // up as `GC_DTOR_NO_REF(myht)` frees the array where it was the
+            // last. An immutable array is held and marked by neither. The
+            // count printed is the one before the walk's owner, php's
+            // `Z_REFCOUNT_P(struc) - 1`. The header is laid down before the
+            // walk and taken back where the walk found the array marked,
+            // since php prints `*RECURSION*` in its place.
+            let opened = out.len();
+            let count = refcount(value);
             let packed = if array.is_packed() { "packed " } else { "" };
             if value.is_refcounted() {
                 out.extend_from_slice(
@@ -272,27 +289,25 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     format!("array({}) {packed}interned {{\n", array.len()).as_bytes(),
                 );
             }
-            let mut dumped = Ok(());
-            for (key, element) in array.snapshot_refs() {
-                out.extend(std::iter::repeat_n(b' ', level + 1));
-                match key {
-                    Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
-                    Key::Str(s) => {
-                        out.extend_from_slice(b"[\"");
-                        out.extend_from_slice(s.as_bytes());
-                        out.extend_from_slice(b"\"]=>\n");
+            let walked =
+                walk::foreach_guarded(req, *array, Hold::Owner, |req, row| -> walk::Step {
+                    out.extend(std::iter::repeat_n(b' ', level + 1));
+                    match row.key() {
+                        Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
+                        Key::Str(s) => {
+                            out.extend_from_slice(b"[\"");
+                            out.extend_from_slice(s.as_bytes());
+                            out.extend_from_slice(b"\"]=>\n");
+                        }
                     }
-                }
-                dumped = dump(req, out, &element, level + 2);
-                if dumped.is_err() {
-                    break;
-                }
+                    dump(req, out, row.value(), walk_owners(row), level + 2)?;
+                    Ok(ControlFlow::Continue(()))
+                })?;
+            if let Guarded::Recursive = walked {
+                out.truncate(opened);
+                out.extend_from_slice(b"*RECURSION*\n");
+                return Ok(());
             }
-            array.unprotect();
-            // `GC_DTOR_NO_REF(myht)`: the walk's owner given up, which
-            // frees the array where it was the last.
-            req.release(*value);
-            dumped?;
             pad(out, level);
             out.extend_from_slice(b"}\n");
         }
@@ -313,7 +328,6 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     return Err(thrown);
                 }
             };
-            let props = held.rows(req);
             // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
             // anonymous class's name.
             let full = object.handlers(req).get_class_name(req, *object);
@@ -330,25 +344,21 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     "{prefix}object({name})#{} ({}) refcount({}){{\n",
                     object.index(),
                     held.count(),
-                    value.refcount()
+                    refcount(value)
                 )
                 .as_bytes(),
             );
-            let mut dumped = Ok(());
-            for (key, row) in props {
+            let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
                 out.extend(std::iter::repeat_n(b' ', level + 1));
                 // An element a class shows among its properties is an
                 // integer key, `[%ld]=>`.
-                let prop = match key {
+                let prop = match row.key() {
                     Key::Int(n) => {
                         out.extend_from_slice(format!("[{n}]=>\n").as_bytes());
-                        dumped = dump_row(req, out, &row, level + 2);
-                        if dumped.is_err() {
-                            break;
-                        }
-                        continue;
+                        dump_row(req, out, row, level + 2)?;
+                        return Ok(ControlFlow::Continue(()));
                     }
-                    Key::Str(prop) => prop,
+                    Key::Str(prop) => *prop,
                 };
                 let bytes = prop.as_bytes();
                 out.push(b'[');
@@ -372,11 +382,10 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     }
                 }
                 out.extend_from_slice(b"]=>\n");
-                dumped = dump_row(req, out, &row, level + 2);
-                if dumped.is_err() {
-                    break;
-                }
-            }
+                dump_row(req, out, row, level + 2)?;
+                Ok(ControlFlow::Continue(()))
+            })
+            .map(|_| ());
             // What the class's debug table left pending was raised
             // before any row's, so a row's is chained onto it.
             let left = held.release(req);
@@ -398,16 +407,15 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 format!(
                     "resource({}) of type ({kind}) refcount({})\n",
                     resource.id(),
-                    value.refcount()
+                    refcount(value)
                 )
                 .as_bytes(),
             );
         }
         ValueRef::Reference(cell) => {
-            out.extend_from_slice(
-                format!("reference refcount({}) {{\n", value.refcount()).as_bytes(),
-            );
-            dump(req, out, &cell.get(), level + 2)?;
+            let count = refcount(value);
+            out.extend_from_slice(format!("reference refcount({count}) {{\n").as_bytes());
+            dump(req, out, &cell.get(), 0, level + 2)?;
             pad(out, level);
             out.extend_from_slice(b"}\n");
         }
