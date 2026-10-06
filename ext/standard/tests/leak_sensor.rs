@@ -58,3 +58,18 @@ unlink("$d/a.txt"); unlink("$d/b.txt"); rmdir($d);
     );
     assert_eq!(stdout, "4 .,..,a.txt,b.txt 2\n");
 }
+
+/// `array_diff` and `array_intersect` compare their values as strings
+/// and keep none of the strings they converted, over the names
+/// `stream_get_wrappers` and `stream_get_filters` list and a string
+/// the program builds (#2066).
+#[test]
+fn the_strings_a_set_function_compares_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+$made = str_repeat('a', 3);
+echo implode(',', array_intersect(stream_get_wrappers(), ['php', 'file'])), ' ', count(array_diff(stream_get_filters(), ['string.rot13'])) > 0 ? 'y' : 'n', ' ', implode(',', array_diff([$made, 'b', $made . 'c'], ['b'])), ' ', implode(',', array_intersect([$made, 'b'], [$made])), "\n";
+"#,
+    );
+    assert_eq!(stdout, "php,file y aaa,aaac aaa\n");
+}
