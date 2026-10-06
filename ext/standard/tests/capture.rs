@@ -138,6 +138,26 @@ fn extract_holds_the_array_it_walks_when_an_element_overwrites_its_variable() {
     assert_eq!(stdout, "2,1,vvvvvvvvvv");
 }
 
+/// `extract` under `EXTR_REFS` walks the array its reference holds live,
+/// as php's ref helpers walk its buckets (`ZEND_HASH_MAP_FOREACH`): a
+/// destructor served as a variable is overwritten that unsets a row
+/// ahead leaves it unvisited, and one that rewrites the row in place
+/// leaves the walk reading the new value (#2042).
+#[test]
+fn extract_refs_walks_the_array_live_under_a_destructor() {
+    let script = |body: &str| {
+        format!(
+            "<?php class D {{ function __destruct() {{ {body} echo \"d,\"; }} }}\n$o = new D; $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';\n$arr = ['o' => 1, $k . $k => $v . $v];\necho extract($arr, EXTR_REFS), ',';\n$x = $z . $z; echo $kkkkkkkkkk ?? 'unset';"
+        )
+    };
+    let (stdout, fatal) = served(&script("unset($GLOBALS['arr']['kkkkkkkkkk']);"));
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "d,1,unset");
+    let (stdout, fatal) = served(&script("$GLOBALS['arr']['kkkkkkkkkk'] = 'new';"));
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "d,2,new");
+}
+
 /// `serialize` holds an owner of a nested array while it walks it when
 /// it reached the array through a shared reference. An element's
 /// `__serialize` that assigns over that reference gives up the array's
@@ -169,6 +189,26 @@ fn serialize_holds_a_nested_array_a_serialize_method_gives_up() {
         stdout,
         "a:1:{i:0;a:2:{i:0;O:1:\"C\":0:{}i:1;s:10:\"vvvvvvvvvv\";}}"
     );
+}
+
+/// `print_r` holds a nested array while it walks it when it reached the
+/// array through a shared reference, as `serialize` does. An element's
+/// `__debugInfo` that assigns over that reference gives up the array's
+/// only owner, and the rows after the element are still the array's, so
+/// a string of their size allocated in `__debugInfo` is not handed their
+/// blocks.
+///
+/// Here dax departs from php on purpose: dax prints
+/// the row the array held. No divergence row records it, as #1989's
+/// test says for `serialize`: no witness or phpt compares this input
+/// (#2044).
+#[test]
+fn print_r_holds_a_nested_array_a_debug_info_method_gives_up() {
+    let (stdout, fatal) = served(
+        "<?php class C { function __debugInfo() { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\nprint_r($outer);",
+    );
+    assert_eq!(fatal, None);
+    assert!(stdout.contains("[1] => vvvvvvvvvv\n"), "{stdout}");
 }
 
 /// What `conn` sent until it went quiet for a moment.
