@@ -90,6 +90,7 @@ Heap::block
 Heap::block_resize
 Heap::call_destructors
 Heap::close_resources
+Heap::dup_value
 Heap::free_block
 Heap::free_object_storage
 Heap::gc_call_destructor
@@ -139,6 +140,7 @@ Heap::object_with
 Heap::objects
 Heap::observe_allocations
 Heap::overflow_rendered
+Heap::proptable_to_symtable
 Heap::reference
 Heap::reference_separate
 Heap::reference_set
@@ -168,6 +170,7 @@ Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate
 Heap::string_with
+Heap::symtable_to_proptable
 Heap::take_sensed
 Heap::trace_allocations
 Heap::unobserve_allocations

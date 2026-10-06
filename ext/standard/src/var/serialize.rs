@@ -198,9 +198,11 @@ impl Serializer {
     /// `php_add_var_hash`: the number an earlier sight gave `value`, or
     /// zero after recording this one with an owner of it. A scalar and an
     /// array are never recorded, a reference to an object is the object,
-    /// and an object nothing else holds, in no array more than one holds
-    /// and of a class with neither `__serialize()` nor `__sleep()`, is
-    /// counted without being recorded, since nothing can show it again.
+    /// and an object nothing else holds, in no array more than one holds,
+    /// whose property table nothing else holds either
+    /// ([`PhpObject::properties_shared`]) and of a class with neither
+    /// `__serialize()` nor `__sleep()`, is counted without being
+    /// recorded, since nothing can show it again.
     /// The owner keeps an object a `__serialize()` made and let go alive
     /// until the serializer is done, so the next one it makes is another
     /// object and not an `r:` to the first; one nothing records is freed
@@ -235,6 +237,7 @@ impl Serializer {
                 let object = *object;
                 if !in_rcn_array
                     && value.refcount() == 1
+                    && !object.properties_shared()
                     && !has_method(req, object.class(), b"__serialize")
                     && !has_method(req, object.class(), b"__sleep")
                 {
