@@ -33,6 +33,11 @@ pub mod attr {
 /// extension and the `Capture` sink.
 #[cfg(feature = "test")]
 pub mod test {
+    /// A debug build's request leak sensor, which a test arms with
+    /// `Engine::builder().sense_leaks(LeakSensor::Armed)` so an owner its
+    /// natives kept fails it (#1992).
+    #[cfg(debug_assertions)]
+    pub use php_engine::LeakSensor;
     /// A native a traced request entered, for the witness runner
     /// (harness §4.5 condition 2, revision 58).
     #[cfg(feature = "witness-trace")]
