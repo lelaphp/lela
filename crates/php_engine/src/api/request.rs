@@ -119,6 +119,8 @@ mod static_props;
 mod static_vars;
 mod symbol_tables;
 mod table;
+#[cfg(debug_assertions)]
+mod teardown;
 mod temporary;
 pub use temporary::TemporaryGuard;
 mod ticks;
@@ -970,10 +972,12 @@ mod tests {
     }
 
     /// The same entry, serving: what a native class's `__destruct` is,
-    /// a Rust body on the request that served it.
+    /// a Rust body on the request that served it, which gives up the
+    /// string it made once it is written.
     fn writes_d(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
         let text = crate::api::values::PhpString::new(req, b"d\n")?;
         req.write(text.as_bytes());
+        req.release(crate::api::values::Value::string(text));
         Ok(crate::api::values::Value::null())
     }
 
