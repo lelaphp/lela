@@ -3242,6 +3242,21 @@ fn php_open(
 /// string(5) "SHOUT"
 /// No URL resource specified
 /// ```
+///
+/// The resource's opened path is the filter's own, so a file included
+/// through the filter is named as the file it read, in `__FILE__` and in
+/// `get_included_files()`:
+///
+/// ```php
+/// $f = __DIR__ . '/filter-include-witness.php';
+/// file_put_contents($f, '<?php echo __FILE__ === realpath($GLOBALS["f"]) ? "real" : __FILE__, "\n";');
+/// include 'php://filter/read=string.rot13|string.rot13/resource=' . $f;
+/// var_dump(in_array(realpath($f), get_included_files(), true)); unlink($f);
+/// ```
+/// ```expect
+/// real
+/// bool(true)
+/// ```
 fn filter_open(
     req: &mut Request,
     path: &[u8],
