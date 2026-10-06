@@ -1279,6 +1279,7 @@ values::walk::Row::key
 values::walk::Row::make_ref
 values::walk::Row::value
 values::walk::Step
+values::walk::buckets
 values::walk::held
 values::walk::held_guarded
 values::walk::live

@@ -13,7 +13,11 @@
 //!   the iterator `foreach` by reference stands on: the holder read again
 //!   after each step, a row unset ahead skipped and one appended
 //!   visited, and php's `TypeError` once the holder holds no array or
-//!   object. `array_walk` and `extract` under `EXTR_REFS`.
+//!   object. `array_walk`.
+//! - [`buckets`] reads the buckets of the table a reference holds as
+//!   they stand, up to where they ended as it began, php's
+//!   `ZEND_HASH_FOREACH` over a table nothing holds for the walk:
+//!   `extract` under `EXTR_REFS`.
 //!
 //! A walk takes the table and lends the body each row's key and value
 //! for that step. The body answers a [`Step`]: std's `ControlFlow` to go
@@ -191,11 +195,11 @@ fn rows<B>(
     Ok(None)
 }
 
-/// One row a [`live`] walk lends its body: the key and the value as the
-/// table held them when the walk stepped onto them, each owned by the
-/// walk for the step, so a body whose code unsets the row can still
-/// read it, and where the row stands, so the body can make it a
-/// reference in place ([`Row::make_ref`]).
+/// One row a [`live`] or [`buckets`] walk lends its body: the key and
+/// the value as the table held them when the walk stepped onto them,
+/// each owned by the walk for the step, so a body whose code unsets the
+/// row can still read it, and where the row stands, so the body can make
+/// it a reference in place ([`Row::make_ref`]).
 #[derive(Debug)]
 pub struct Row {
     key: Owner<Key>,
@@ -523,4 +527,88 @@ fn object_row(
         at,
         iterator,
     }))
+}
+
+/// php's walk over the buckets of a table it does not hold,
+/// `ZEND_HASH_FOREACH` as `extract`'s ref helpers walk with it
+/// (`php_extract_ref_*`, `Z/ext/standard/array.c`): the array the
+/// reference `holder` holds, separated first as php's parser separates a
+/// by-reference array argument, walked bucket by bucket from the first
+/// up to where its rows ended as the walk began. Each row is read as it
+/// stands when the walk reaches it, so a row the body's code unset ahead
+/// is not visited and one it rewrote in place is read as it now is; a
+/// row appended past the end is not visited, and the holder is never
+/// read again, so the walk goes on over the table it began on whatever
+/// the holder holds after. A throwable the body's code leaves pending
+/// does not end the walk, as php's loop tests no `EG(exception)`; the
+/// body ends it by breaking or by answering `Err`.
+///
+/// The program can give the table up mid-walk. The walk registers a
+/// hash iterator at it, which the table's destruction poisons, and ends there,
+/// so it reads nothing freed (the iterator is given back on every way
+/// out). What holds no array at the start is the `InternalError` it is.
+///
+/// ```php
+/// class D { function __destruct() { $GLOBALS['arr']['added'] = 'A'; echo "d,"; } }
+/// $o = new D; $arr = ['o' => 1, 'b' => 2];
+/// echo extract($arr, EXTR_REFS), ',', $added ?? 'unset', "\n";
+/// class E { function __destruct() { $GLOBALS['keep'] = $GLOBALS['brr']; $GLOBALS['brr'] = ['zz' => 'Z']; echo "e,"; } }
+/// $p = new E; $brr = ['p' => 1, 'q' => 2];
+/// echo extract($brr, EXTR_REFS), ',', $q, ',', $zz ?? 'unset', "\n";
+/// ```
+/// ```expect
+/// d,2,unset
+/// e,2,2,unset
+/// ```
+pub fn buckets<B>(
+    req: &mut Request,
+    holder: PhpRef,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    if holder.get().as_array().is_none() {
+        return Err(fatal(
+            req,
+            "InternalError: a bucket walk's reference holds no array",
+        ));
+    }
+    let Some(table) = holder.separate_array(req)? else {
+        return Err(fatal(req, "InternalError: a bucket walk's array is gone"));
+    };
+    let table = table.heap();
+    let end = table.num_used();
+    let at = req.heap_mut().iterator_add(table, 0);
+    let walked = bucket_steps(req, table, end, at, &mut body);
+    req.heap_mut().iterator_del(at);
+    walked
+}
+
+/// [`buckets`]' loop over `table` below `end`, while iterator `at` says
+/// the table stands.
+fn bucket_steps<B>(
+    req: &mut Request,
+    table: Arr,
+    end: u32,
+    at: u32,
+    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    let mut pos = 0;
+    while req.heap_mut().iterator_on(at, table) {
+        let Some((found, key, value)) = table.live_from(pos).filter(|(found, _, _)| *found < end)
+        else {
+            break;
+        };
+        pos = found.saturating_add(1);
+        let mut row = Row {
+            key: Owner::take(req, Key::of(key)),
+            value: Owner::take(req, Value::of_zval(value)),
+            at: At::Bucket(table, found),
+            iterator: at,
+        };
+        let step = body(req, &mut row);
+        row.give_up(req);
+        if let ControlFlow::Break(broke) = step? {
+            return Ok(Some(broke));
+        }
+    }
+    Ok(None)
 }

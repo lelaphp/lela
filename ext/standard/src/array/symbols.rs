@@ -209,13 +209,16 @@ fn extract(
 }
 
 /// `extract` under `EXTR_REFS`, php's `php_extract_ref_*` helpers: the
-/// array the call's reference holds walked live, as their
-/// `ZEND_HASH_MAP_FOREACH` walks its buckets, each row a variable takes
-/// made a reference in place (`ZVAL_MAKE_REF_EX`) and the variable bound
-/// to it. Overwriting a variable can serve a destructor that writes the
-/// array; a row it unsets ahead is not visited and one it rewrites is
-/// read as it now stands. A temporary passed where a reference was
-/// asked for is walked in a cell of its own, which nobody reads after.
+/// array the call's reference holds walked by its buckets as their
+/// `ZEND_HASH_MAP_FOREACH` walks them ([`walk::buckets`]), each row a
+/// variable takes made a reference in place (`ZVAL_MAKE_REF_EX`) and the
+/// variable bound to it. Overwriting a variable can serve a destructor
+/// that writes the array: a row it unsets ahead is not visited, one it
+/// rewrites is read as it now stands, one it appends is past the end,
+/// and an array it puts in the variable is not the one walked. A
+/// destructor that throws leaves the rows after it bound, as php's loop
+/// tests no `EG(exception)`. A temporary passed where a reference was asked
+/// for is walked in a cell of its own, which nobody reads after.
 ///
 /// ```php
 /// class D { function __destruct() { unset($GLOBALS['arr']['kkkkkkkkkk']); echo "d,"; } }
@@ -229,6 +232,19 @@ fn extract(
 /// ```expect
 /// d,1,unset
 /// e,2,new
+/// ```
+///
+/// ```php
+/// class F { function __destruct() { $GLOBALS['keep'] = $GLOBALS['crr']; $GLOBALS['crr'] = 5; echo "f,"; } }
+/// $f = new F; $crr = ['f' => 1, 'g' => 2];
+/// echo extract($crr, EXTR_REFS), ',', $g, "\n";
+/// class G { function __destruct() { throw new Exception('thrown'); } }
+/// $h = new G; $drr = ['h' => 1, 'i' => 2];
+/// try { extract($drr, EXTR_REFS); } catch (Exception $e) { echo $e->getMessage(), ',', $i, "\n"; }
+/// ```
+/// ```expect
+/// f,2,2
+/// thrown,2
 /// ```
 fn extracted_refs(
     req: &mut Request,
@@ -246,7 +262,7 @@ fn extracted_refs(
         PhpRef::new(req, array.to_value())?
     };
     let mut count = 0i64;
-    let walked = walk::live(req, holder, |req, row| {
+    let walked = walk::buckets(req, holder, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
             req.addref(&cell.as_value());
