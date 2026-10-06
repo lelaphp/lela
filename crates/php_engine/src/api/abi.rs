@@ -2546,8 +2546,8 @@ pub trait ObjectHandlers: Send + Sync {
     /// `get_gc`: the values the object's payload owns, for the cycle
     /// collector's walk. The declared slots and the dynamic table are
     /// the heap's to walk; `Std` names nothing more.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        let _ = (req, object, visit);
+    fn get_gc(&self, req: &mut Request, object: PhpObject, _visit: &mut dyn FnMut(Value)) {
+        let _ = (req, object);
     }
 
     /// `do_operation`: the value an operator over the object answers,

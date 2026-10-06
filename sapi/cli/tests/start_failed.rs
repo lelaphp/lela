@@ -22,9 +22,9 @@ const FAILED: &str = "<br />\n<b>Fatal error</b>:  Uncaught Error: Invalid seria
 /// The response to `request` sent on a connection of its own.
 fn response(address: &str, request: &str) -> String {
     let mut stream = TcpStream::connect(address).unwrap_or_else(|e| panic!("connecting: {e}"));
-    let _ = stream.write_all(request.as_bytes());
+    stream.write_all(request.as_bytes()).ok();
     let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
+    stream.read_to_end(&mut response).ok();
     String::from_utf8_lossy(&response).into_owned()
 }
 
@@ -34,7 +34,7 @@ fn the_built_in_server_shuts_a_failed_request_down_and_serves_the_next() {
         .and_then(|probe| probe.local_addr())
         .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port());
     let root = std::env::temp_dir().join(format!("php-server-start-failed-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
     std::fs::write(root.join("index.php"), "<?php echo \"ran\\n\";")
         .unwrap_or_else(|e| panic!("writing index.php: {e}"));
@@ -70,12 +70,12 @@ fn the_built_in_server_shuts_a_failed_request_down_and_serves_the_next() {
     let next = response(&address, "GET /index.php HTTP/1.1\r\nHost: x\r\n\r\n");
     std::thread::sleep(Duration::from_millis(200));
     let pid = child.id().to_string();
-    let _ = Command::new("kill").args(["-INT", &pid]).status();
+    Command::new("kill").args(["-INT", &pid]).status().ok();
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !matches!(child.try_wait(), Ok(Some(_))) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
+    child.kill().ok();
     let logged: Vec<String> = lines
         .map_while(Result::ok)
         .filter_map(|line| line.split_once("] ").map(|(_, rest)| rest.to_owned()))
@@ -84,7 +84,7 @@ fn the_built_in_server_shuts_a_failed_request_down_and_serves_the_next() {
                 .map_or(line.clone(), |(_, rest)| rest.to_owned())
         })
         .collect();
-    let _ = std::fs::remove_dir_all(&root);
+    std::fs::remove_dir_all(&root).ok();
     let (head, body) = failed.split_once("\r\n\r\n").unwrap_or_default();
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{failed:?}");
     assert!(

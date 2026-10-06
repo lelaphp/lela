@@ -302,16 +302,16 @@ mod tests {
         let Ok(mut outer) = FiberStack::new(SIZE, |probe: &mut Probe, _| {
             let Ok(mut inner) = FiberStack::new(SIZE, |probe: &mut Probe, _| {
                 probe.log.push(20);
-                let _ = suspend(probe, 21);
+                suspend(probe, 21).ok();
                 probe.log.push(22);
                 23
             }) else {
                 return -1;
             };
-            let _ = inner.resume(probe, 0);
+            inner.resume(probe, 0).ok();
             probe.log.push(11);
-            let _ = suspend(probe, 12);
-            let _ = inner.resume(probe, 0);
+            suspend(probe, 12).ok();
+            inner.resume(probe, 0).ok();
             probe.log.push(13);
             14
         }) else {

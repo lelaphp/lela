@@ -224,7 +224,7 @@ impl Request {
                     if text.as_str_bytes().is_some() {
                         if let Ok(name) = PhpString::new(self, b"string") {
                             self.addref(&text);
-                            let _ = throwable.set_prop(self, name, text);
+                            throwable.set_prop(self, name, text).ok();
                         }
                     } else {
                         crate::api::raising::warning(
@@ -236,7 +236,9 @@ impl Request {
                 }
                 Err(inner) => {
                     self.release(throwable.as_value());
-                    let _ = self.thrown_without_frame(&inner);
+                    if let Ok(undef) = self.thrown_without_frame(&inner) {
+                        self.release(undef);
+                    }
                     return Err(Fatal::Error(String::new()));
                 }
             }

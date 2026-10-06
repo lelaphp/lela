@@ -865,7 +865,7 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         out::notice(b"Destroying compiled opcodes");
     }
     if let Some(dir) = std::path::Path::new(std::ffi::OsStr::from_bytes(&resolved)).parent() {
-        let _ = std::env::set_current_dir(dir);
+        std::env::set_current_dir(dir).ok();
     }
     out::notice(
         [&b"Set execution context: "[..], &resolved]
@@ -1236,7 +1236,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
         // `zend_print_zval_r` writes through the program's output, which
         // `PHPDBG_DISCARD_OUTPUT` does not hold; the newline is phpdbg's.
         tier::Evaluated::Printed(printed) => {
-            let _ = php_sapi::OutputSink::write(&mut out::Sink, &printed);
+            php_sapi::OutputSink::write(&mut out::Sink, &printed).ok();
             out::out(b"\n");
         }
         // The compiler threw with the frame executing, which

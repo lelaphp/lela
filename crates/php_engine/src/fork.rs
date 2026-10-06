@@ -111,7 +111,7 @@ impl Thread {
     /// Joined, once its owner has told it to end.
     pub(crate) fn join(self) {
         // A thread that panicked has ended all the same.
-        let _ = self.handle.join();
+        self.handle.join().ok();
     }
 
     /// Forgotten, in a process forked from the one that started it, which
@@ -216,7 +216,7 @@ mod tests {
     fn a_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let Some(thread) = spawn("php-test", move || {
-            let _ = rx.recv();
+            rx.recv().ok();
         }) else {
             return;
         };

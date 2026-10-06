@@ -265,7 +265,7 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     let played = req.with_fiber_switch_blocked(|req| play(req, &taken));
     req.state::<State>().signals.dispatching = false;
     if masked {
-        let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None);
+        sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None).ok();
     }
     played
 }
@@ -537,7 +537,7 @@ pub(crate) fn rshutdown(req: &mut Request) {
     let numbers: Vec<i32> = table.handlers.keys().copied().collect();
     for (number, handler) in table.handlers {
         if handler.as_int() != Some(0) {
-            let _ = ffi::install(number, Disposition::Default, false, false);
+            ffi::install(number, Disposition::Default, false, false).ok();
         }
         req.release(handler);
     }

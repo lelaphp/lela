@@ -86,7 +86,7 @@ impl<'a> Dumps<'a> {
         let program = self.dir.write(file, &body)?;
         let expected = self.dump(&self.oracle.pin().oracle.path, &program)?;
         let actual = self.engine_dump(&program, &body);
-        let _ = fs::remove_file(&program);
+        fs::remove_file(&program).ok();
         // Trouble on the engine's side is one file's and never the
         // lane's, whichever compiler it was: a panic inside the linked
         // one (design §8) as much as a binary that would not start. The

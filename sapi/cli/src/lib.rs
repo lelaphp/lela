@@ -112,18 +112,20 @@ pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
-    let _ = TITLE.set(ffi::save_ps_args().map(ProcessTitle::new));
+    TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
     let options = match Options::parse(&argv, &|ini| {
         engine(ini, IniFiles::default(), false).has_shell()
     }) {
         Ok(options) => options,
         Err(refused) => {
-            let _ = std::io::stderr()
+            std::io::stderr()
                 .lock()
-                .write_all(refused.stderr.as_bytes());
-            let _ = std::io::stdout()
+                .write_all(refused.stderr.as_bytes())
+                .ok();
+            std::io::stdout()
                 .lock()
-                .write_all(refused.stdout.as_bytes());
+                .write_all(refused.stdout.as_bytes())
+                .ok();
             return php_sapi::exit_code(refused.exit_code);
         }
     };
@@ -237,7 +239,7 @@ fn started(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, text: fn(&Engine) -> Str
 
 /// `text` on stdout, and the status 0.
 fn print(text: &str) -> i32 {
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    std::io::stdout().lock().write_all(text.as_bytes()).ok();
     0
 }
 

@@ -20,7 +20,7 @@ fn a_sigint_stops_the_built_in_server_with_status_zero() {
     assert_eq!(server.get("/index.php"), "served");
     let _idle = server.connect();
     let mut half = server.connect();
-    let _ = half.write_all(b"GET /index.php HTTP/1.0\r\n");
+    half.write_all(b"GET /index.php HTTP/1.0\r\n").ok();
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(server.stop(), Some(0));
 }

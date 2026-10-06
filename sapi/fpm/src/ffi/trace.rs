@@ -101,5 +101,5 @@ pub(crate) fn close(pid: i32) -> bool {
 
 /// `fpm_pctl_kill(pid, FPM_PCTL_CONT)`: the child let go on.
 pub(crate) fn resume(pid: i32) {
-    let _ = kill(Pid::from_raw(pid), Signal::SIGCONT);
+    kill(Pid::from_raw(pid), Signal::SIGCONT).ok();
 }

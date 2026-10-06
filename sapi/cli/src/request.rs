@@ -36,26 +36,26 @@ impl OutputSink for Process {
     /// closed fd or a pipe whose reader left, sets `EG(exit_status)` to
     /// 255 and is `php_handle_aborted_connection`.
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
         crate::ffi::write_stdout(bytes).map_err(|_| Aborted {
             exit_status: Some(255),
         })
     }
 
     fn flush(&mut self) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
     }
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(entry);
-        let _ = stderr.write_all(b"\n");
+        stderr.write_all(entry).ok();
+        stderr.write_all(b"\n").ok();
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
@@ -84,9 +84,9 @@ pub fn describe(
         Some(path) => {
             if std::fs::File::open(path).is_err() {
                 let mut stderr = std::io::stderr().lock();
-                let _ = stderr.write_all(b"Could not open input file: ");
-                let _ = stderr.write_all(path.as_os_str().as_encoded_bytes());
-                let _ = stderr.write_all(b"\n");
+                stderr.write_all(b"Could not open input file: ").ok();
+                stderr.write_all(path.as_os_str().as_encoded_bytes()).ok();
+                stderr.write_all(b"\n").ok();
                 return Err(1);
             }
             let name = path.as_os_str().as_encoded_bytes().to_vec();
@@ -94,7 +94,7 @@ pub fn describe(
         }
         None if stdin => {
             let mut source = Vec::new();
-            let _ = std::io::stdin().lock().read_to_end(&mut source);
+            std::io::stdin().lock().read_to_end(&mut source).ok();
             (STANDARD_INPUT.to_vec(), Vec::new(), Some(source))
         }
         None => (STANDARD_INPUT.to_vec(), Vec::new(), None),
@@ -198,7 +198,7 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 /// request's own.
 fn ended(served: &Observables, sink: &mut dyn OutputSink) -> i32 {
     if served.start_failed {
-        let _ = sink.write(b"Could not startup.\n");
+        sink.write(b"Could not startup.\n").ok();
         return 1;
     }
     served.exit_code
@@ -318,7 +318,7 @@ pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i3
     };
     line.extend_from_slice(&name);
     line.push(b'\n');
-    let _ = sink.write(&line);
+    sink.write(&line).ok();
     sink.flush();
     if served.exit_code == 0 { 0 } else { 255 }
 }
@@ -594,9 +594,9 @@ mod tests {
 
     fn scratch(name: &str, source: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("php_sapi-lint-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let path = dir.join(name);
-        let _ = std::fs::write(&path, source);
+        std::fs::write(&path, source).ok();
         path
     }
 

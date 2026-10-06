@@ -245,11 +245,12 @@ fn folded(columns: Columns, rows: Vec<Row>, name: &str, what: &str) -> String {
     } else {
         (table(columns, &shown) + "\n", " more")
     };
-    let _ = writeln!(
+    writeln!(
         out,
         "{}{more} {what}; every row: `cargo xtask status --section {name} --uncut`.",
         settled.len()
-    );
+    )
+    .ok();
     out
 }
 
@@ -320,14 +321,15 @@ pub fn session(
         .filter(|r| r.facts.get("this_session").and_then(Value::as_u64) > Some(0))
         .collect();
         if !rows.is_empty() {
-            let _ = write!(
+            write!(
                 facts,
                 "\n## permits this session\n\n{}",
                 table(THIS_SESSION, &rows)
-            );
+            )
+            .ok();
         }
         if let Some(note) = log.unreadable_note() {
-            let _ = writeln!(facts, "\n{note}");
+            writeln!(facts, "\n{note}").ok();
         }
     }
     Ok(match format {
@@ -347,10 +349,10 @@ pub(crate) fn local_template() -> String {
          which the SessionStart hook does before `xtask status --session`.\n",
     );
     for name in LOCAL_SECTIONS {
-        let _ = write!(
+        write!(
             out,
             "\n## {name}\n\n<!-- computed exec cmd=\"cargo xtask status --section {name}\" volatile name={name} | do not edit; run computed -->\n<!-- /computed -->\n"
-        );
+        ).ok();
     }
     out
 }
@@ -659,35 +661,33 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                 .iter()
                 .filter(|r| uncut || r.status == Status::Open)
                 .collect();
+            let reason: fn(&str) -> String = if uncut { cell } else { clipped };
             if !shown.is_empty() {
-                let _ = writeln!(out, "| id | kind | status | since | reason |");
-                let _ = writeln!(out, "|---|---|---|---|---|");
+                writeln!(out, "| id | kind | status | since | reason |").ok();
+                writeln!(out, "|---|---|---|---|---|").ok();
             }
             for row in &shown {
                 let id = match row.covers.len() {
                     0 => cell(row.id.as_str()),
                     n => format!("{} (covers {n})", cell(row.id.as_str())),
                 };
-                let _ = writeln!(
+                writeln!(
                     out,
                     "| {id} | {} | {} | {} | {} |",
                     row.kind.as_str(),
                     row.status.as_str(),
                     row.since,
-                    if uncut {
-                        cell(&row.reason)
-                    } else {
-                        clipped(&row.reason)
-                    }
-                );
+                    reason(&row.reason),
+                )
+                .ok();
             }
             if !shown.is_empty() {
-                let _ = writeln!(out);
+                writeln!(out).ok();
             }
-            let _ = writeln!(out, "| kind | open | accepted | fixed | rows |");
-            let _ = writeln!(out, "|---|---|---|---|---|");
+            writeln!(out, "| kind | open | accepted | fixed | rows |").ok();
+            writeln!(out, "|---|---|---|---|---|").ok();
             for kind in kinds {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "| {} | {} | {} | {} | {} |",
                     kind.as_str(),
@@ -695,18 +695,20 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                     counts.cell(kind, Status::Accepted),
                     counts.cell(kind, Status::Fixed),
                     counts.by_kind[&kind]
-                );
+                )
+                .ok();
             }
-            let _ = writeln!(
+            writeln!(
                 out,
                 "| total | {} | {} | {} | {} |",
                 of(Status::Open),
                 of(Status::Accepted),
                 of(Status::Fixed),
                 registry.rows().len()
-            );
+            )
+            .ok();
             if !uncut {
-                let _ = writeln!(out, "\n{EVERY_ROW}");
+                writeln!(out, "\n{EVERY_ROW}").ok();
             }
             Ok(out)
         }
@@ -891,40 +893,42 @@ fn permits(
         Table::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
         Table::Md => {
             let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules);
-            let _ = writeln!(out);
+            writeln!(out).ok();
             let (head, rule) = if window.is_some() {
                 (" silent |", "---|")
             } else {
                 ("", "")
             };
-            let _ = writeln!(
+            writeln!(
                 out,
                 "| instrument | readings | failures | last failure |{head}"
-            );
-            let _ = writeln!(out, "|---|---|---|---|{rule}");
+            )
+            .ok();
+            writeln!(out, "|---|---|---|---|{rule}").ok();
             for i in &instruments {
                 let candidate = match i.silent {
                     Some(true) => " candidate |",
                     Some(false) => "  |",
                     None => "",
                 };
-                let _ = writeln!(
+                writeln!(
                     out,
                     "| {} | {} | {} | {} |{candidate}",
                     cell(&i.name),
                     i.readings,
                     i.failures,
                     i.last_failure.as_deref().unwrap_or("")
-                );
+                )
+                .ok();
             }
             if window.is_none() {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "\nThe candidates for silent are not rendered: `[telemetry] silent_days` is unset in seams.toml (harness-design.md §7)."
-                );
+                ).ok();
             }
             if let Some(note) = log.unreadable_note() {
-                let _ = writeln!(out, "\n{note}");
+                writeln!(out, "\n{note}").ok();
             }
             out
         }
@@ -1140,10 +1144,10 @@ fn week_section(
         Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
         Table::Md => {
             let mut out = String::new();
-            let _ = writeln!(out, "| week | days | reading | bar | readings |");
-            let _ = writeln!(out, "|---|---|---|---|---|");
+            writeln!(out, "| week | days | reading | bar | readings |").ok();
+            writeln!(out, "|---|---|---|---|---|").ok();
             for (n, w, reads) in &rows {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "| {n} | {} | {} | {} | {} |",
                     cell(&w.days),
@@ -1154,7 +1158,8 @@ fn week_section(
                         .map(Judged::text)
                         .collect::<Vec<_>>()
                         .join("; ")
-                );
+                )
+                .ok();
             }
             out
         }
@@ -1338,7 +1343,7 @@ fn modules(manifest: &Manifest, readings: &[Reading], format: Table) -> Result<S
             let mut out =
                 String::from("| seam | module | items | share | commit |\n|---|---|---|---|---|\n");
             for row in &rows {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "| {} | {} | {} | {:.1}% | {} |",
                     cell(row.seam),
@@ -1346,7 +1351,8 @@ fn modules(manifest: &Manifest, readings: &[Reading], format: Table) -> Result<S
                     row.items,
                     row.share * 100.0,
                     short(row.commit),
-                );
+                )
+                .ok();
             }
             out
         }
@@ -1446,21 +1452,23 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
         }))?,
         Table::Md => {
             let mut out = String::new();
-            let _ = writeln!(out, "| fact | variable | value | state |");
-            let _ = writeln!(out, "|---|---|---|---|");
-            let _ = writeln!(
+            writeln!(out, "| fact | variable | value | state |").ok();
+            writeln!(out, "|---|---|---|---|").ok();
+            writeln!(
                 out,
                 "| tree | {TREE_VARIABLE} | {} | {} |",
                 cell(&display(named).unwrap_or_default()),
                 set(named.is_some())
-            );
-            let _ = writeln!(
+            )
+            .ok();
+            writeln!(
                 out,
                 "| promise | {PROMISE_VARIABLE} | {} | {} |",
                 cell(promise.as_deref().unwrap_or_default()),
                 set(promise.is_some())
-            );
-            let _ = writeln!(
+            )
+            .ok();
+            writeln!(
                 out,
                 "| pin |  | {} | {} |",
                 cell(&pinned.display().to_string()),
@@ -1469,7 +1477,8 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 } else {
                     "not a directory"
                 }
-            );
+            )
+            .ok();
             let (path, state) = match &found {
                 Ok(tree) => (
                     tree.display().to_string(),
@@ -1480,7 +1489,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 ),
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
-            let _ = writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state));
+            writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state)).ok();
             out
         }
     })
@@ -1521,16 +1530,16 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
         }))?,
         Table::Md => {
             let mut out = String::new();
-            let _ = writeln!(out, "| fact | value |");
-            let _ = writeln!(out, "|---|---|");
-            let _ = writeln!(out, "| tag | {} |", cell(&source.tag));
-            let _ = writeln!(out, "| commit | {} |", cell(&source.commit));
-            let _ = writeln!(out, "| phpt_files | {} |", source.phpt_files);
-            let _ = writeln!(out, "| patterns | {} |", cell(&patterns.join(" ")));
-            let _ = writeln!(out, "| key | {key} |");
-            let _ = writeln!(out, "| targets | {} |", cell(&targets));
+            writeln!(out, "| fact | value |").ok();
+            writeln!(out, "|---|---|").ok();
+            writeln!(out, "| tag | {} |", cell(&source.tag)).ok();
+            writeln!(out, "| commit | {} |", cell(&source.commit)).ok();
+            writeln!(out, "| phpt_files | {} |", source.phpt_files).ok();
+            writeln!(out, "| patterns | {} |", cell(&patterns.join(" "))).ok();
+            writeln!(out, "| key | {key} |").ok();
+            writeln!(out, "| targets | {} |", cell(&targets)).ok();
             let packages: Vec<String> = HOSTS.map(EngineHost::package).into();
-            let _ = writeln!(out, "| hosts | {} |", cell(&packages.join(" ")));
+            writeln!(out, "| hosts | {} |", cell(&packages.join(" "))).ok();
             out
         }
     })
@@ -1772,10 +1781,10 @@ const BUNDLE: Columns = (
 
 fn table((head, line): Columns, rows: &[Row]) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "| {} |", head.join(" | "));
-    let _ = writeln!(out, "|{}", "---|".repeat(head.len()));
+    writeln!(out, "| {} |", head.join(" | ")).ok();
+    writeln!(out, "|{}", "---|".repeat(head.len())).ok();
     for row in rows {
-        let _ = writeln!(out, "| {} |", line(row).join(" | "));
+        writeln!(out, "| {} |", line(row).join(" | ")).ok();
     }
     out
 }

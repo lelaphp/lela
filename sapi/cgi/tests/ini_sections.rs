@@ -45,7 +45,7 @@ fn the_host_s_table_and_each_directory_s_are_set_for_the_request() {
     std::fs::write(dir.join("www/t.php"), program).unwrap();
     let sub = served(&dir, "www/sub/t.php", "Example.com");
     let top = served(&dir, "www/t.php", "other");
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let head = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n";
     assert_eq!(
         sub,

@@ -699,7 +699,7 @@ fn terminate(seconds: i64, hard: u64) -> ! {
     let line = format!(
         "\nFatal error: Maximum execution time of {seconds}+{hard} seconds exceeded (terminated) in Unknown on line 0\n"
     );
-    let _ = std::io::stderr().write_all(line.as_bytes());
+    std::io::stderr().write_all(line.as_bytes()).ok();
     std::process::exit(124)
 }
 

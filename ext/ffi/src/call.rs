@@ -588,7 +588,7 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
         }
     };
     if ret != 0 && !matches!(types(req).get(shape.ret).kind, Kind::Void) {
-        let _ = write_value(req, ret, shape.ret, &returned);
+        write_value(req, ret, shape.ret, &returned).ok();
     }
     req.release(returned);
 }

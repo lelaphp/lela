@@ -225,9 +225,9 @@ mod tests {
     #[test]
     fn a_directory_given_by_c_is_searched_for_the_sapi_s_file_first() {
         let dir = std::env::temp_dir().join(format!("php-sapi-ini-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("php.ini"), "a=1\n");
-        let _ = std::fs::write(dir.join("php-cli.ini"), "a=2\n");
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join("php.ini"), "a=1\n").ok();
+        std::fs::write(dir.join("php-cli.ini"), "a=2\n").ok();
         let given = |path: &std::path::Path| Search {
             path: Some(path.as_os_str().as_encoded_bytes().to_vec()),
             ignore: true,
@@ -245,7 +245,7 @@ mod tests {
                 .is_some_and(|path| path.ends_with(b"/php.ini"))
         );
         assert_eq!((found.scan_dir(), found.scanned().count()), (None, 0));
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

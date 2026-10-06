@@ -126,7 +126,7 @@ pub fn serve(engine: &Engine) -> i32 {
 /// displayed, and 1 out of `main` (`Z/sapi/phpdbg/phpdbg.c:1449-1452`),
 /// every later cycle and the prompt left.
 fn start_failed(sink: &mut dyn OutputSink) -> i32 {
-    let _ = sink.write(b"Could not startup");
+    sink.write(b"Could not startup").ok();
     sink.flush();
     1
 }

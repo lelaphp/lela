@@ -32,13 +32,14 @@ pub fn dump(tree: &Tree, tokens: &[Token], source: &[u8]) -> String {
                 descendants,
                 ..
             } => {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "{:indent$}{kind:?}@{}..{}",
                     "",
                     range.start,
                     range.end()
-                );
+                )
+                .ok();
                 open.push(at + descendants as usize + 1);
             }
             Element::Token { kind, id } => {
@@ -50,12 +51,13 @@ pub fn dump(tree: &Tree, tokens: &[Token], source: &[u8]) -> String {
                     }
                     None => (0, 0, &[][..]),
                 };
-                let _ = writeln!(
+                writeln!(
                     out,
                     "{:indent$}{kind:?}@{start}..{end} {:?}",
                     "",
                     String::from_utf8_lossy(text)
-                );
+                )
+                .ok();
             }
         }
     }

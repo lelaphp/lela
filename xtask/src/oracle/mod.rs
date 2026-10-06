@@ -947,7 +947,7 @@ fn fed(stdin: Stdin<'_>, child: &mut std::process::Child) -> Option<thread::Join
     };
     let bytes = bytes.to_vec();
     Some(thread::spawn(move || {
-        let _ = std::io::Write::write_all(&mut pipe, &bytes);
+        std::io::Write::write_all(&mut pipe, &bytes).ok();
     }))
 }
 
@@ -975,7 +975,7 @@ impl Drained {
                     held.extend_from_slice(&chunk[..n]);
                 }
             }
-            let _ = tell.send(());
+            tell.send(()).ok();
         });
         Drained { bytes, done }
     }
@@ -984,9 +984,9 @@ impl Drained {
     /// it, or what had come by `until` where a process the program started
     /// still holds it open.
     fn taken(self, until: Instant) -> Vec<u8> {
-        let _ = self
-            .done
-            .recv_timeout(until.saturating_duration_since(Instant::now()));
+        self.done
+            .recv_timeout(until.saturating_duration_since(Instant::now()))
+            .ok();
         self.bytes
             .lock()
             .map(|mut held| std::mem::take(&mut *held))
@@ -1013,7 +1013,7 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
-        let _ = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL);
+        nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL).ok();
     }
 }
 
@@ -1127,7 +1127,7 @@ impl<'a> Oracle<'a> {
     pub(crate) fn beside<'b>(&self, pin: &'b Pin) -> Oracle<'b> {
         let digest = OnceLock::new();
         if let Some(found) = self.digest.get() {
-            let _ = digest.set(found.clone());
+            digest.set(found.clone()).ok();
         }
         Oracle {
             pin,
@@ -1258,7 +1258,7 @@ impl<'a> Oracle<'a> {
         let (stdout, stderr) = taken.read(started + limit)?;
         drop(group);
         if let Some(feeding) = feeding {
-            let _ = feeding.join();
+            feeding.join().ok();
         }
 
         let (stdout, stderr) = if call.raw {
@@ -1487,7 +1487,7 @@ fn engine_sources() -> impl Iterator<Item = &'static str> {
 fn newest_source(root: &Path, host: &Path) -> Option<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
     for dir in engine_sources() {
-        let _ = crate::tally::files_under(&root.join(dir), &mut found);
+        crate::tally::files_under(&root.join(dir), &mut found).ok();
     }
     found
         .into_iter()

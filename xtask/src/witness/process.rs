@@ -83,7 +83,7 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        let _ = binary.fpm.set(Ok(fpm));
+        binary.fpm.set(Ok(fpm)).ok();
         binary
     }
 

@@ -60,9 +60,9 @@ fn year(out: &mut String, tm_year: i64) {
     if lead == 0 && trail < 0 {
         out.push_str("-0");
     } else {
-        let _ = write!(out, "{lead:02}");
+        write!(out, "{lead:02}").ok();
     }
-    let _ = write!(out, "{:02}", trail.abs());
+    write!(out, "{:02}", trail.abs()).ok();
 }
 
 /// `strftime` over the conversions the seven formats use.
@@ -77,19 +77,19 @@ fn strftime(format: &str, tm: &Tm) -> String {
         match chars.next() {
             Some('Y') => year(&mut out, tm.year - 1900),
             Some('m') => {
-                let _ = write!(out, "{:02}", tm.month);
+                write!(out, "{:02}", tm.month).ok();
             }
             Some('d') => {
-                let _ = write!(out, "{:02}", tm.day);
+                write!(out, "{:02}", tm.day).ok();
             }
             Some('H') => {
-                let _ = write!(out, "{:02}", tm.hour);
+                write!(out, "{:02}", tm.hour).ok();
             }
             Some('M') => {
-                let _ = write!(out, "{:02}", tm.min);
+                write!(out, "{:02}", tm.min).ok();
             }
             Some('S') => {
-                let _ = write!(out, "{:02}", tm.sec);
+                write!(out, "{:02}", tm.sec).ok();
             }
             Some(other) => {
                 out.push('%');

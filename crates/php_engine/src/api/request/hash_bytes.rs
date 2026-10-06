@@ -315,7 +315,7 @@ impl Request {
         };
         if added {
             // The memory limit's fatal is recorded and ends the request.
-            let _ = bytes.add(self);
+            bytes.add(self).ok();
         } else {
             bytes.del(last);
         }

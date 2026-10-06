@@ -164,13 +164,14 @@ impl Chains {
             write_chain(&mut out, root, 0, None, &by, &mut seen, &mut under);
         }
         if !alone.is_empty() {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "\n{} on their own: no open ticket shown blocks them and they block nothing shown",
                 alone.len()
-            );
+            )
+            .ok();
             for row in alone {
-                let _ = writeln!(out, "#{} {} [{}]", row.number, row.title, row.standing());
+                writeln!(out, "#{} {} [{}]", row.number, row.title, row.standing()).ok();
             }
         }
         let cycle: Vec<&Row> = self
@@ -179,9 +180,9 @@ impl Chains {
             .filter(|row| !seen.contains(&row.number) && !row.blocks.is_empty())
             .collect();
         if !cycle.is_empty() {
-            let _ = writeln!(out, "\n{} in a cycle, each waiting on another", cycle.len());
+            writeln!(out, "\n{} in a cycle, each waiting on another", cycle.len()).ok();
             for row in cycle {
-                let _ = writeln!(out, "#{} {} [{}]", row.number, row.title, row.standing());
+                writeln!(out, "#{} {} [{}]", row.number, row.title, row.standing()).ok();
             }
         }
         out
@@ -204,19 +205,20 @@ fn write_chain(
         let first = under
             .get(&row.number)
             .map_or_else(String::new, |n| format!(" under #{n}"));
-        let _ = writeln!(out, "{indent}#{}, written out above{first}", row.number);
+        writeln!(out, "{indent}#{}, written out above{first}", row.number).ok();
         return;
     }
     if let Some(parent) = parent {
         under.insert(row.number, parent);
     }
-    let _ = writeln!(
+    writeln!(
         out,
         "{indent}#{} {} [{}]",
         row.number,
         row.title,
         row.standing()
-    );
+    )
+    .ok();
     for number in &row.blocks {
         if let Some(child) = by.get(number) {
             write_chain(out, child, depth + 1, Some(row.number), by, seen, under);

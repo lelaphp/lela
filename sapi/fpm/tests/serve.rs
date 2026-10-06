@@ -19,7 +19,7 @@ fn php_fpm() -> Command {
 /// A directory of the test's own.
 fn tree(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sapi-fpm-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -56,7 +56,7 @@ fn a_configuration_test_says_the_file_is_sound() {
         .arg(&path)
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let said = String::from_utf8_lossy(&out.stderr);
     let expected = format!(
         "NOTICE: configuration file {} test is successful",
@@ -170,12 +170,13 @@ fn a_request_is_served_by_a_child_under_the_host_s_name() {
     let body = connect(&socket, started)
         .map(|s| response(s, &script))
         .unwrap_or_default();
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
-    let _ = std::fs::remove_dir_all(&dir);
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
     let body = String::from_utf8_lossy(&body);
     assert!(body.ends_with("\r\n\r\nfpm-fcgi 1"), "{body:?}");
 }
@@ -228,12 +229,13 @@ fn a_child_past_its_max_requests_finishes_a_persistent_cdb_make_file() {
     let second = connect(&socket, Instant::now())
         .map(|s| response(s, &reader))
         .unwrap_or_default();
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
-    let _ = std::fs::remove_dir_all(&dir);
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
     let first = String::from_utf8_lossy(&first);
     let second = String::from_utf8_lossy(&second);
     assert!(first.ends_with("\r\n\r\n2066"), "{first:?}");
@@ -288,13 +290,14 @@ fn a_child_whose_request_start_fails_finishes_the_request_and_ends() {
     let next = connect(&socket, Instant::now())
         .map(|s| request(s, &pairs))
         .unwrap_or_default();
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
+        .status()
+        .ok();
+    master.wait().ok();
     let log = std::fs::read_to_string(dir.join("fpm.log")).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         String::from_utf8_lossy(&failed),
         "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<br />\n<b>Fatal error</b>:  Uncaught Error: Invalid serialization data for DateTime object in [no active file]:0\nStack trace:\n#0 [internal function]: DateTime-&gt;__unserialize(Array)\n#1 {main}\n  thrown in <b>[no active file]</b> on line <b>0</b><br />\n<br />\n<b>Warning</b>:  PHP Request Startup: Failed to decode session object. Session has been destroyed in <b>Unknown</b> on line <b>0</b><br />\n"
@@ -427,11 +430,12 @@ fn quit_at_debug(dir: &Path, ports: impl IntoIterator<Item = u16>) -> String {
             tried.push(port);
             continue;
         }
-        let _ = Command::new("kill")
+        Command::new("kill")
             .arg("-QUIT")
             .arg(master.id().to_string())
-            .status();
-        let _ = master.wait();
+            .status()
+            .ok();
+        master.wait().ok();
         let written = std::fs::read_to_string(&log).unwrap_or_default();
         return written.lines().map(|l| masked(l) + "\n").collect();
     }
@@ -443,7 +447,7 @@ fn quit_at_debug(dir: &Path, ports: impl IntoIterator<Item = u16>) -> String {
 fn a_static_pool_at_debug_sent_sigquit_writes_the_oracle_s_lines() {
     let dir = tree("debug");
     let lines = quit_at_debug(&dir, std::iter::repeat_with(free_port));
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(lines, QUIT_AT_DEBUG);
 }
 
@@ -461,7 +465,7 @@ fn a_port_taken_before_the_master_binds_it_is_given_up_for_another() {
     let lines = quit_at_debug(&dir, ports);
     let first = std::fs::read_to_string(dir.join("fpm-0.log")).unwrap_or_default();
     drop(taken);
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert!(
         first.contains("unable to bind listening socket"),
         "the held port was not the first the master tried: {first}"
@@ -510,13 +514,14 @@ fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
             )
         })
         .unwrap_or_default();
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-QUIT")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
+        .status()
+        .ok();
+    master.wait().ok();
     let written = std::fs::read_to_string(&log).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let expected = format!(
         "said into stderr: \"NOTICE: PHP message: PHP Warning:  REQUEST_BODY_FILE: open('{missing}') failed: No such file or directory (2) in Unknown on line 0\""
     );
@@ -575,12 +580,13 @@ fn a_request_s_host_and_directory_tables_are_set_for_it_alone() {
     };
     let sub = served("www/sub/t.php", "Example.com");
     let top = served("www/t.php", "other");
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
-    let _ = std::fs::remove_dir_all(&dir);
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
     let head = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n";
     assert_eq!(
         sub,
@@ -629,12 +635,13 @@ fn the_fork_stress_passes_under_a_child() {
     let body = connect(&socket, started)
         .map(|s| request_within(s, &pairs, Duration::from_mins(5)))
         .unwrap_or_default();
-    let _ = Command::new("kill")
+    Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
-        .status();
-    let _ = master.wait();
-    let _ = std::fs::remove_dir_all(&dir);
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
     let body = String::from_utf8_lossy(&body);
     assert!(
         body.ends_with(
