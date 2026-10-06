@@ -83,15 +83,11 @@ fn fill_errors(
         let (kind, failure) = reported(error.kind);
         let object = new_object(req, class)?;
         let context = PhpString::new(req, &error.data)?;
-        let kind_value = kind.into_return(req)?;
         write_prop(req, &object, b"context", context.into_value())?;
-        for (name, value) in [
-            (&b"type"[..], kind_value),
-            (b"failure", Value::bool(failure)),
-        ] {
-            let value = Owner::take(req, value);
-            write_prop(req, &object, name, value)?;
-        }
+        let kind_value = case_owner(req, kind)?;
+        write_prop(req, &object, b"type", kind_value)?;
+        let failed = Owner::take(req, Value::bool(failure));
+        write_prop(req, &object, b"failure", failed)?;
         if failure {
             reason = Some(kind.case_name());
         }
@@ -402,6 +398,17 @@ impl InvalidUrlException {
     }
 }
 
+/// The case object of `kind` as an owner. `IntoReturn` answers a case
+/// with one owner taken for the caller (`enum_case`), which the face has
+/// no way to name as the owner it is: a second is taken for the caller
+/// and that one given back.
+fn case_owner(req: &mut Request, kind: UrlValidationErrorType) -> Result<Owner<Value>, Thrown> {
+    let returned = kind.into_return(req)?;
+    let owner = Owner::take(req, returned);
+    req.release(returned);
+    Ok(owner)
+}
+
 /// `zend_readonly_property_modification_error`.
 fn readonly_property(req: &mut Request, class: &str, name: &str) -> Thrown {
     php_ext::raising::throw_error(
@@ -541,9 +548,7 @@ impl UrlValidationError {
         if this.prop(req, b"type").is_some() {
             return Err(readonly_property(req, class, "type"));
         }
-        // The case object, a view of the class's case table.
-        let kind = r#type.into_return(req)?;
-        let kind = Owner::take(req, kind);
+        let kind = case_owner(req, r#type)?;
         write_prop(req, &this, b"type", kind)?;
         if this.prop(req, b"failure").is_some() {
             return Err(readonly_property(req, class, "failure"));
