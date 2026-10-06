@@ -54,6 +54,23 @@ pub(crate) enum Sensed {
     Unconsumed {
         site: &'static std::panic::Location<'static>,
     },
+    /// Blocks the heap still held where the request ended, once every
+    /// block of the request's lifetime was freed by name: how many, the
+    /// bytes its accounting counted in them, and the first its walk met
+    /// (`zend_mm_check_leaks`).
+    Leak {
+        bytes: usize,
+        blocks: usize,
+        first: Held,
+    },
+}
+
+/// One block a heap held where the request ended: where it stands and the
+/// bytes it takes, what php's `zend_leak_info` names first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub(crate) at: usize,
+    pub(crate) size: usize,
 }
 
 impl Sensed {
@@ -75,6 +92,16 @@ impl Sensed {
             )),
             Sensed::Unconsumed { site } => Fatal::Error(format!(
                 "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"
+            )),
+            Sensed::Leak {
+                bytes,
+                blocks,
+                first,
+            } => Fatal::Error(format!(
+                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}",
+                if blocks == 1 { "block" } else { "blocks" },
+                first.size,
+                first.at
             )),
         }
     }

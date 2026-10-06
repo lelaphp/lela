@@ -255,6 +255,20 @@ pub(crate) fn free_table_header(a: Arr) {
     unsafe { System.free(a.address()) };
 }
 
+/// The data a [`table_header`]'s array laid down on `mm`, given back
+/// before [`free_table_header`] gives back the header: the end
+/// of `zend_hash_destroy` over a table whose elements the caller has
+/// freed already. A debug build's teardown is the one caller (design
+/// §5.1, the request leak sensor).
+#[cfg(debug_assertions)]
+pub(crate) fn free_table_data(mm: &mut Mm, a: Arr) {
+    if let Some(data) = a.data_addr() {
+        // SAFETY: the data was laid down out of `mm` and the caller has
+        // freed every element it held, so nothing names it.
+        unsafe { mm.free(data) };
+    }
+}
+
 /// `zend_hash_add_new(ht, str, &val)` under `zend_add_interned_string`
 /// (`Z/Zend/zend_string.c:173-185`): `s`, interned already, as its own
 /// key and as the value, out of `mm` for the data the first add lays

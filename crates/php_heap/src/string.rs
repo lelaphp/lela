@@ -895,6 +895,28 @@ impl Table {
     }
 }
 
+impl Table {
+    /// `zend_interned_strings_deactivate` (`Z/Zend/zend_string.c:346`) in
+    /// a debug build's teardown before the request leak sensor: every
+    /// string the request interned freed, then the table's data, then its
+    /// header.
+    #[cfg(debug_assertions)]
+    pub(crate) fn destroy(&mut self, mm: &mut Mm) {
+        let Some(arr) = self.arr.take() else {
+            return;
+        };
+        for (_, z) in &arr {
+            if let Some(s) = z.as_str() {
+                // SAFETY: the string was interned out of `mm` and the
+                // table, freed with it, is its last name.
+                unsafe { mm.free(s.address()) };
+            }
+        }
+        crate::array::free_table_data(mm, arr);
+        crate::array::free_table_header(arr);
+    }
+}
+
 impl Drop for Table {
     /// The header back to the system allocator. The data was the
     /// request's and went, or goes, with the heap's chunks.

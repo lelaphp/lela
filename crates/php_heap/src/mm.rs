@@ -45,6 +45,9 @@ use std::sync::OnceLock;
 use crate::hooks::Fatal;
 use crate::observe::{Allocation, AllocationObserverId, ObserveAllocations, Observers};
 
+#[cfg(debug_assertions)]
+mod leaks;
+
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
 pub(crate) const CHUNK_SIZE: usize = 2 * 1024 * 1024;
