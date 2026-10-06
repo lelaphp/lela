@@ -315,8 +315,10 @@ impl Funcs {
                 }
                 None => Value::null(),
             }),
-            Funcs::Class => class_step(req, it, |iter, req, data| iter.current(req, data))
-                .unwrap_or_else(|| Ok(Value::null())),
+            Funcs::Class => class_step(req, it, |iter, req, data| {
+                iter.current(req, data).map(Owner::hand_on)
+            })
+            .unwrap_or_else(|| Ok(Value::null())),
         }
     }
 
@@ -341,8 +343,10 @@ impl Funcs {
                 }
                 None => Value::null(),
             }),
-            Funcs::Class => class_step(req, it, |iter, req, data| iter.key(req, data))
-                .unwrap_or_else(|| Ok(Value::null())),
+            Funcs::Class => class_step(req, it, |iter, req, data| {
+                iter.key(req, data).map(Owner::hand_on)
+            })
+            .unwrap_or_else(|| Ok(Value::null())),
         }
     }
 }

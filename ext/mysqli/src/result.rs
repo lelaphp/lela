@@ -975,14 +975,13 @@ impl ClassIterator for RowIter {
         Ok(self.current.is_some_and(|row| row.as_array().is_some()))
     }
 
-    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         let row = self.current.unwrap_or_default();
-        req.addref(&row);
-        Ok(row)
+        Ok(Owner::take(req, row))
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        Ok(Value::int(self.row_num))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::int(self.row_num)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

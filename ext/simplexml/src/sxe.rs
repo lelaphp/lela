@@ -1295,17 +1295,16 @@ impl ClassIterator for Loop {
         Ok(sxe(req, object).is_some_and(|s| s.current.is_some()))
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         // The iterator's `current` hands its caller an owner.
         let value = current(req, object).unwrap_or_else(Value::null);
-        req.addref(&value);
-        Ok(value)
+        Ok(Owner::take(req, value))
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         match current_name(req, object) {
-            Some(name) => string(req, &name).map(Owner::hand_on_unmigrated),
-            None => Ok(Value::null()),
+            Some(name) => string(req, &name),
+            None => Ok(Owner::take(req, Value::null())),
         }
     }
 

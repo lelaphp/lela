@@ -1648,7 +1648,7 @@ impl ClassIterator for Iter {
         Ok(self.key >= 0 && self.key < len)
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let v = view(req, object);
         if v.ptr == 0 {
             return Err(ffi_error(req, "NULL pointer dereference"));
@@ -1677,11 +1677,10 @@ impl ClassIterator for Iter {
             false,
             false,
         )
-        .map(Owner::hand_on_unmigrated)
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        Ok(Value::int(self.key))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::int(self.key)))
     }
 
     fn move_forward(&mut self, _: &mut Request, _: PhpObject) -> Result<(), Thrown> {

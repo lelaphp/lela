@@ -495,16 +495,14 @@ impl RecursiveIteratorIterator {
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let key = rec_key(req, this)?;
-        Ok(crate::owner_of(req, key))
+        rec_key(req, this)
     }
 
     /// `current(): mixed`, the sub-iterator's.
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let current = rec_current(req, this)?;
-        Ok(crate::owner_of(req, current))
+        rec_current(req, this)
     }
 
     /// `next(): void`.
@@ -2395,8 +2393,7 @@ impl RecursiveTreeIterator {
         let this = rec_checked(req, this.object())?;
         if rec(req, this, |it| it.flags & Self::BYPASS_CURRENT != 0)? {
             // The element the inner iterator answered is its one owner.
-            let current = rec_current(req, this)?;
-            return Ok(crate::owner_of(req, current));
+            return rec_current(req, this);
         }
         let Some(entry) = tree_entry(req, this)? else {
             return Ok(Owner::take(req, Value::null()));
@@ -3203,22 +3200,30 @@ fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> 
 }
 
 /// The sub-iterator's `key()`.
-fn rec_key(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+fn rec_key(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let key = level.sub.key(req)?;
-    Ok(crate::owned(req, key))
+    Ok(owned_bare(req, key))
+}
+
+/// The value the sub-iterator answered, its one owner, with a reference
+/// followed: the owner moved to what the reference holds.
+fn owned_bare(req: &mut Request, value: Value) -> Owner<Value> {
+    let bare = Owner::take(req, value.deref());
+    req.release(value);
+    bare
 }
 
 /// The sub-iterator's `current()`, what `RecursiveIteratorIterator` and a
 /// `BYPASS_CURRENT` tree answer.
-fn rec_current(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+fn rec_current(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let current = level.sub.value(req)?;
-    Ok(crate::owned(req, current))
+    Ok(owned_bare(req, current))
 }
 
 fn top(req: &mut Request, this: PhpObject) -> Result<Option<Level>, Thrown> {
@@ -3702,11 +3707,11 @@ impl ClassIterator for RecWalk {
         rec_valid(req, object)
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         rec_current(req, object)
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         rec_key(req, object)
     }
 

@@ -638,35 +638,37 @@ impl ClassIterator for MapIter {
     /// `zend_weakmap_iterator_get_current_data`, made a reference in
     /// place under a walk by reference, as `FE_FETCH_RW` makes the zval
     /// it points at one.
-    fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some((_, key, value)) = self.here(req, map) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         if !self.by_ref || value.as_php_ref().is_some() {
-            req.addref(&value);
-            return Ok(value);
+            return Ok(Owner::take(req, value));
         }
         let Some(mut entries) = entries_of(req, map) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         req.addref(&value);
+        // The cell's one owner is the caller's, and the entry takes a
+        // second.
         let cell = req.reference(value)?;
-        req.addref(&cell.as_value());
-        entries.set(req, key, cell.as_value())?;
-        Ok(cell.as_value())
+        let cell = Owner::adopt(req, cell.as_value());
+        if let Err(thrown) = entries.set(req, key, Owner::take(req, *cell).hand_on_unmigrated()) {
+            cell.give_up(req);
+            return Err(thrown);
+        }
+        Ok(cell)
     }
 
     /// `zend_weakmap_iterator_get_current_key`: the object the entry is
     /// keyed by, `null` past the last.
-    fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let object = match self.here(req, map) {
             Some((_, Key::Int(id), _)) => u32::try_from(id).ok().and_then(|id| stored(req, id)),
             _ => None,
         };
-        Ok(object.map_or_else(Value::null, |object| {
-            req.addref(&object.as_value());
-            object.as_value()
-        }))
+        let key = object.map_or_else(Value::null, |object| object.as_value());
+        Ok(Owner::take(req, key))
     }
 
     /// `zend_weakmap_iterator_move_forward`: past the entry it stands at.

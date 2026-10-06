@@ -964,13 +964,14 @@ impl ClassIterator for ListIterator {
         Ok(self.cursor.pointer.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let found = with(req, object, |l| l.at(self.cursor))?;
-        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+        let current = found.map_or_else(Value::null, |v| v.deref());
+        Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        Ok(Value::int(self.cursor.position))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::int(self.cursor.position)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

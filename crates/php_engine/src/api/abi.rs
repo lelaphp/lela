@@ -2094,9 +2094,10 @@ pub trait ClassIterator: Send {
     /// `funcs->valid`, `SUCCESS` as `true`.
     fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown>;
     /// `funcs->get_current_data`, one owner, the caller's.
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
-    /// `funcs->get_current_key`, one owner, the caller's.
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>;
+    /// `funcs->get_current_key`, one owner, the caller's, as php's
+    /// caller frees the `zval` the function filled.
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>;
     /// `funcs->move_forward`.
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
     /// `funcs->dtor`, when the loop gives the iterator up, before the

@@ -811,22 +811,21 @@ impl ClassIterator for NodeIter {
         Ok(self.current.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        let Some(current) = self.current else {
-            return Ok(Value::null());
-        };
-        req.addref(&current.as_value());
-        Ok(current.as_value())
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        let current = self
+            .current
+            .map_or_else(Value::null, |current| current.as_value());
+        Ok(Owner::take(req, current))
     }
 
     /// `php_dom_iterator_current_key`: the index, or a named map's item
     /// by its name, a modern attribute by its qualified name.
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         if !named_keys(req, object) {
-            return Ok(Value::int(self.index));
+            return Ok(Owner::take(req, Value::int(self.index)));
         }
         let Some(node) = self.current.and_then(|o| node_of(req, o)) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let modern = self
             .current
@@ -836,7 +835,7 @@ impl ClassIterator for NodeIter {
         } else {
             node.name()
         };
-        string(req, &name).map(Owner::hand_on_unmigrated)
+        string(req, &name)
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
