@@ -485,8 +485,10 @@ impl Request {
     /// `FREE_OP` gives one up, since a temporary the compiler numbered
     /// for an opline's value and nothing read is still an owner here;
     /// then, in `zend_leave_helper`'s order, the extra named arguments,
-    /// the extra arguments (`zend_vm_stack_free_extra_args`, `nogc`),
-    /// the receiver (`ZEND_CALL_RELEASE_THIS`) and the closure, all of
+    /// the extra arguments (`zend_vm_stack_free_extra_args`, each a
+    /// possible root as `i_zval_ptr_dtor` makes it, so a cycle a
+    /// collection in the callee found reachable through one is found
+    /// again), the receiver (`ZEND_CALL_RELEASE_THIS`) and the closure, all of
     /// them while the frame still stands on both stacks, as php's
     /// `vm_stack_top` is only put back after them, so a destructor one
     /// of them serves pushes its frames above it; then
@@ -503,6 +505,17 @@ impl Request {
     /// ```expect
     /// #0 %s(4): D->__destruct()
     /// #0 %s(4): D->__destruct()
+    /// ```
+    ///
+    /// ```php
+    /// function &foo() { $a = []; $a[] =& $a; return $a; }
+    /// function bar() { var_dump(gc_collect_cycles()); }
+    /// bar(foo());
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(1)
     /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
@@ -536,8 +549,12 @@ impl Request {
         });
         if let Some((named, extra_args, receiver, closure)) = held {
             self.release_named(named);
+            // `zend_vm_stack_free_extra_args_ex`'s `i_zval_ptr_dtor`: an
+            // extra argument that keeps owners after the release is a
+            // possible root, so a cycle a collection in the callee found
+            // reachable through it is found again.
             for extra in extra_args {
-                self.release_nogc(extra);
+                self.release(extra);
             }
             if let Some(receiver) = receiver {
                 self.give_up_receiver(receiver);

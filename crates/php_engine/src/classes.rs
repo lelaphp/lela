@@ -845,7 +845,10 @@ impl Closure {
             &placed.arguments,
             &placed.extra_named,
         )?;
-        Ok(returned.deref())
+        // `zend_unwrap_reference(&closure_result)`: the cell a closure
+        // returning by reference handed back given up for the value it
+        // holds.
+        Ok(req.unwrap_reference(returned))
     }
 
     /// `Closure::fromCallable(callable $callback): Closure`,
