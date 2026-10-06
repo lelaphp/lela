@@ -2431,12 +2431,14 @@ struct MetaData {
 }
 
 impl MetaData {
-    /// `php_stream_getc`: the next byte, or `EOF`'s `-1`.
-    fn getc(&self, req: &mut Request) -> Result<i32, Thrown> {
-        Ok(match self.stream.read(req, 1)? {
-            Some(byte) if !byte.is_empty() => i32::from(byte.as_bytes()[0]),
+    /// `php_stream_getc`: the next byte, or `EOF`'s `-1`, read into the
+    /// one `char` php reads it into, so no string is made for it.
+    fn getc(&self, req: &mut Request) -> i32 {
+        let mut byte = [0];
+        match self.stream.read_into(req, &mut byte) {
+            Some(1) => i32::from(byte[0]),
             _ => -1,
-        })
+        }
     }
 
     /// `php_next_meta_token` (`Z/ext/standard/file.c:2140`), a byte at
@@ -2453,7 +2455,7 @@ impl MetaData {
                 if self.stream.eof(req) {
                     return Ok(MetaToken::Eof);
                 }
-                let ch = self.getc(req)?;
+                let ch = self.getc(req);
                 if ch == 0 {
                     return Ok(MetaToken::Eof);
                 }
@@ -2477,7 +2479,7 @@ impl MetaData {
                         if self.stream.eof(req) {
                             break;
                         }
-                        ch = self.getc(req)?;
+                        ch = self.getc(req);
                         if ch == 0
                             || ch == compliment
                             || ch == i32::from(b'<')
@@ -2508,7 +2510,7 @@ impl MetaData {
                         if self.stream.eof(req) {
                             break;
                         }
-                        ch = self.getc(req)?;
+                        ch = self.getc(req);
                         let html401 = u8::try_from(ch).is_ok_and(|c| b"-_.:".contains(&c));
                         if ch == 0 || !(alnum(ch) || html401) {
                             break;

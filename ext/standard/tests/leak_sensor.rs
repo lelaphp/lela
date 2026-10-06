@@ -94,3 +94,18 @@ unlink($f);
     );
     assert_eq!(stdout, "bool(false)\nin file\nnamed\n");
 }
+
+/// `get_meta_tags` reads its file a byte at a time and keeps none of the
+/// bytes past the tags it returns (#2088).
+#[test]
+fn the_bytes_get_meta_tags_scans_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+$f = sys_get_temp_dir() . '/leak-sensor-meta-' . getmypid() . '.html';
+file_put_contents($f, "<html><head><meta name=\"author\" content=\"Jo\"><meta name=k content=v></head></html>");
+foreach (get_meta_tags($f) as $k => $v) echo $k, '=', $v, ' ';
+echo "\n"; unlink($f);
+"#,
+    );
+    assert_eq!(stdout, "author=Jo k=v \n");
+}
