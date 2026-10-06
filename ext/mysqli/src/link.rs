@@ -288,7 +288,7 @@ pub(crate) fn deactivate(req: &mut Request) {
     for (key, plinks) in req.state::<State>().plinks.drain() {
         for handle in plinks.open {
             if !matches!(end_psession(req, handle), Ok(true)) {
-                let _ = handle.close(req, CloseType::Explicit);
+                handle.close(req, CloseType::Explicit).ok();
                 continue;
             }
             give_to_pool(req, &key, handle);
@@ -310,7 +310,7 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
         None => Some(kept),
     };
     if let Some(past) = past {
-        let _ = past.close(req);
+        past.close(req).ok();
     }
 }
 
@@ -614,7 +614,7 @@ fn free_link(req: &mut Request, object: PhpObject) {
         Link::Closed => return,
     };
     if mysql.mysql.is_some() {
-        let _ = close_conn(req, &mut mysql, CloseType::Explicit, open);
+        close_conn(req, &mut mysql, CloseType::Explicit, open).ok();
     }
 }
 

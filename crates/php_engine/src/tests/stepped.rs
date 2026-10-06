@@ -258,7 +258,7 @@ fn served(builder: fn() -> EngineBuilder, programs: &[Program], armed: bool) -> 
     for program in programs {
         let dir = scratch(&format!("stepped_{}", program.name));
         for (name, source) in program.beside {
-            let _ = std::fs::write(dir.join(name), source);
+            std::fs::write(dir.join(name), source).ok();
         }
         rec.mark(program.name);
         ARMED.set(armed);

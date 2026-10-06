@@ -35,7 +35,7 @@ fn a_persistent_link_and_its_flock_outlive_the_request() {
         "<?php var_dump(dba_open('{path}', 'rdt', 'flatfile')); var_dump(dba_fetch('k', dba_popen('{path}', 'wd', 'flatfile')));"
     );
     let served = engine.serve_capture(&second, Capture::default());
-    let _ = std::fs::remove_file(&*path);
+    std::fs::remove_file(&*path).ok();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "\nWarning: dba_open(): Driver initialization failed for handler: flatfile: Unable to establish lock in Standard input code on line 1\nbool(false)\nstring(1) \"v\"\n"
@@ -58,7 +58,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
         ])
         .build();
     let path = std::env::temp_dir().join(format!("t1695-{}.dba", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let path = path.display();
     let written = format!(
         "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
@@ -84,7 +84,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
     assert_eq!(String::from_utf8_lossy(&served.stdout), "");
     let read = format!("<?php var_dump(dba_fetch('t1695', dba_popen('{path}', 'c', 'flatfile')));");
     let served = engine.serve_capture(&read, Capture::default());
-    let _ = std::fs::remove_file(path.to_string());
+    std::fs::remove_file(path.to_string()).ok();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "string(6) \"a|i:1;\"\n"
@@ -99,7 +99,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
 /// value (#1804).
 fn written_then_read(name: &str, then: &str) -> (String, String) {
     let path = std::env::temp_dir().join(format!("t1804-{name}-{}.cdb", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let path = path.display();
     let built = || {
         Engine::builder()
@@ -117,7 +117,7 @@ fn written_then_read(name: &str, then: &str) -> (String, String) {
         "<?php clearstatcache(); echo filesize('{path}'), \"\\n\"; var_dump(dba_fetch('key0', dba_open('{path}', 'r', 'cdb')));"
     );
     let served = built().serve_capture(&read, Capture::default());
-    let _ = std::fs::remove_file(path.to_string());
+    std::fs::remove_file(path.to_string()).ok();
     (
         String::from_utf8_lossy(&written.stdout).into_owned(),
         String::from_utf8_lossy(&served.stdout).into_owned(),

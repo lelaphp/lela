@@ -259,8 +259,8 @@ struct Server(Child);
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        self.0.kill().ok();
+        self.0.wait().ok();
     }
 }
 
@@ -282,7 +282,7 @@ impl Server {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { return };
-                let _ = lines.send(line);
+                lines.send(line).ok();
             }
         });
         let started = format!("(http://127.0.0.1:{port}) started");

@@ -9,8 +9,9 @@
 //! them (design §7.1), the statements a Zend extension is told of
 //! under extended info (#1823), and a debug build's freed-use guard
 //! (#1990) and request leak sensor (#1992) as a program meets them,
-//! the owner type as one meets it (#1995), and a table copied as php
-//! copies it (#2005).
+//! the owner type as one meets it (#1995), a table copied as php
+//! copies it (#2005), and the callback walks as a native meets them
+//! (#1980).
 
 use crate::api;
 
@@ -35,3 +36,4 @@ mod stepped;
 mod table_copy;
 pub(crate) mod test_ext;
 mod time_limit;
+mod walks;

@@ -170,7 +170,7 @@ impl Request {
         }
         if self.is_pending() {
             // The unwind exit, which `zend_exception_error` gives up.
-            let _ = self.exception_error(Level::Warning);
+            self.exception_error(Level::Warning).ok();
         }
         Ok(())
     }

@@ -1386,7 +1386,7 @@ impl Layer {
             } else {
                 Readiness::Writable
             };
-            let _ = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
+            let _ready = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
         };
         if socket.blocked != blocked {
             socket.set_blocking(blocked);
@@ -1550,14 +1550,14 @@ impl Layer {
                     break;
                 }
                 if retry {
-                    let _ = socket.wait(wait_for(err), left);
+                    let _ready = socket.wait(wait_for(err), left);
                 }
             } else {
                 if err == SSL_ERROR_NONE {
                     break;
                 }
                 if began_blocked {
-                    let _ = socket.wait(wait_for(err), left);
+                    let _ready = socket.wait(wait_for(err), left);
                 }
             }
             if !retry {

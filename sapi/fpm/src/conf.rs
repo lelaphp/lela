@@ -804,10 +804,11 @@ impl Reader<'_> {
             }
             self.filename = filename.to_vec();
             if let Some((message, line)) = &failed {
-                let _ = std::io::Write::write_all(
+                std::io::Write::write_all(
                     &mut std::io::stderr(),
                     format!("PHP:  {message} in Unknown on line {line}\n").as_bytes(),
-                );
+                )
+                .ok();
             }
             if self.error || failed.is_some() {
                 self.include = None;

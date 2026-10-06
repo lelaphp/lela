@@ -522,7 +522,7 @@ impl Doc {
         let buf = errbuf
             .as_mut()
             .map(|errbuf| errbuf.as_mut_ptr().cast::<Buffer>());
-        let _ = self.lend(req, |raw| {
+        self.lend(req, |raw| {
             if let Some(buf) = buf {
                 // SAFETY: the buffer was initialised over this allocator.
                 unsafe { tidyBufFree(buf) };
@@ -531,7 +531,8 @@ impl Doc {
                 // SAFETY: the document is released once, here.
                 unsafe { tidyRelease(raw) };
             }
-        });
+        })
+        .ok();
         if let Some(errbuf) = errbuf {
             errbuf.free(req);
         }

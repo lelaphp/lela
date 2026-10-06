@@ -51,6 +51,7 @@ mod emalloc;
 mod fresh;
 mod owner;
 mod smart_str;
+pub mod walk;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
 pub use owner::{Owner, View};
@@ -742,7 +743,7 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        let held = req.take_hold(self.to_value());
+        let held = Owner::take(req, self.to_value());
         let mut pending: Option<Thrown> = None;
         let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
@@ -760,7 +761,7 @@ impl PhpArray {
             };
             ordering.then(x.position.cmp(&y.position))
         });
-        req.release_hold(held);
+        held.give_up(req);
         sorted?;
         pending.map_or(Ok(()), Err)
     }
@@ -2860,7 +2861,8 @@ mod tests {
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
         fn dtor(req: &mut Request, r: Resource) {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
-            let _ = req.define_constant(b"dtor", Value::int(i64::from(seen)));
+            req.define_constant(b"dtor", Value::int(i64::from(seen)))
+                .ok();
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

@@ -77,9 +77,12 @@ pub mod tier {
 #[must_use]
 pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn(&[u8])) -> Engine {
     let engine = prepare(builder, ini).build();
-    let _ = std::io::stderr().lock().write_all(engine.startup_errors());
+    std::io::stderr()
+        .lock()
+        .write_all(engine.startup_errors())
+        .ok();
     if let Some(status) = engine.refused(&mut Starting(log_message)) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
         std::process::exit(status);
     }
     engine
@@ -94,12 +97,12 @@ struct Starting(fn(&[u8]));
 
 impl OutputSink for Starting {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        let _ = std::io::stdout().lock().write_all(bytes);
+        std::io::stdout().lock().write_all(bytes).ok();
         Ok(())
     }
 
     fn flush(&mut self) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
     }
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
@@ -109,7 +112,7 @@ impl OutputSink for Starting {
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 
     /// Each call reaches the process as it is made, so a diagnostic's

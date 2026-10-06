@@ -18,7 +18,7 @@ use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown, deprecated, raise, throw, throw_error, warning};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -4660,7 +4660,7 @@ pub(crate) fn array_key_exists(
         ValueRef::Int(n) => return Ok(array.heap().contains(php_heap::Key::Long(n))),
         _ => {}
     }
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     let converted = match key.as_ref() {
         ValueRef::Undef => {
             undefined(req);
@@ -4675,7 +4675,7 @@ pub(crate) fn array_key_exists(
         }
         _ => array_offset(req, &key, false),
     };
-    if req.let_go(held).freed() {
+    if held.let_go(req).freed() {
         return Ok(false);
     }
     let key = converted?;
@@ -4771,9 +4771,9 @@ pub(crate) fn isset_dim(
     // `zend_find_array_dim_slow`: a handler that took the container's
     // last owner destroys the table, and the entry is then not found.
     let key = if offset.deref().as_float().is_some() {
-        let held = req.take_hold(array.to_value());
+        let held = Owner::take(req, array.to_value());
         let key = isset_offset(req, offset, constant);
-        if req.let_go(held).freed() {
+        if held.let_go(req).freed() {
             return key.map(|_| empty);
         }
         key?
@@ -4913,9 +4913,9 @@ pub(crate) fn unset_dim(
             // after it: a handler that unset the container took the last
             // owner, and the table is destroyed here rather than
             // deleted from.
-            let held = req.take_hold(array.to_value());
+            let held = Owner::take(req, array.to_value());
             let n = double_to_long(req, f);
-            if req.let_go(held).freed() || req.is_pending() {
+            if held.let_go(req).freed() || req.is_pending() {
                 return Ok(());
             }
             php_heap::Key::Long(n)
@@ -5235,7 +5235,7 @@ fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
         // `op_str = zend_string_copy(Z_STR_P(op))`: a handler the warning
         // reaches may give up the string's every other owner, and the
         // deprecation after it names the string.
-        let held = req.take_hold(Value::string(s));
+        let held = Owner::take(req, Value::string(s));
         if trailing {
             warning(req, "A non-numeric value encountered");
         }
@@ -5249,7 +5249,7 @@ fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
                 ),
             );
         }
-        req.let_go(held);
+        held.let_go(req);
         return Ok(Some(capped));
     }
     if let Some(b) = value.as_bool() {
@@ -5702,7 +5702,7 @@ mod tests {
             return Value::null();
         };
         for (k, v) in entries {
-            let _ = a.set(req, k, v);
+            a.set(req, k, v).ok();
         }
         Value::array(a)
     }

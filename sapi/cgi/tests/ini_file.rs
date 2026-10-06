@@ -40,7 +40,7 @@ fn a_php_ini_s_cgi_entries_are_the_ones_php_cgi_reads() {
         .env("SCRIPT_FILENAME", dir.join("sb.php"))
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         String::from_utf8_lossy(&shell.stdout),
         "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n\

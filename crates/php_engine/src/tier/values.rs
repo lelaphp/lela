@@ -147,7 +147,7 @@ pub fn last_error(req: &Request) -> Option<(Vec<u8>, Vec<u8>, u32)> {
 /// `Z/sapi/phpdbg/phpdbg_prompt.c:830-838`); a write that meets the
 /// memory limit leaves what it had not reached.
 pub fn set_argv(req: &mut Request, argv: Vec<Vec<u8>>) {
-    let _ = req.build_argv(argv);
+    req.build_argv(argv).ok();
 }
 
 /// `stdin` the program's stdin in the request standing, `STDIN`,
@@ -156,5 +156,5 @@ pub fn set_argv(req: &mut Request, argv: Vec<Vec<u8>>) {
 /// `Z/sapi/phpdbg/phpdbg_prompt.c:790-796`); a host that asked for no
 /// handles has nothing replaced.
 pub fn set_stdin(req: &mut Request, stdin: std::os::fd::OwnedFd) {
-    let _ = req.reregister_file_handles(stdin);
+    req.reregister_file_handles(stdin).ok();
 }

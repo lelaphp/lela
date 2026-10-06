@@ -195,22 +195,24 @@ fn arrays(text: &str, out: &mut String) {
                 .filter_map(number)
                 .collect();
             let listed: Vec<String> = values.iter().map(i64::to_string).collect();
-            let _ = writeln!(
+            writeln!(
                 out,
                 "#[allow(dead_code)]\npub(crate) static {}: [{element}; {}] = [{}];",
                 rust_name(name),
                 values.len(),
                 listed.join(", ")
-            );
+            )
+            .ok();
         } else if let (Some((c_type, name)), Some(value)) =
             (head.rsplit_once(char::is_whitespace), number(body))
         {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "#[allow(dead_code)]\npub(crate) const {}: {} = {value};",
                 rust_name(name),
                 rust_type(c_type)
-            );
+            )
+            .ok();
         }
     }
 }
@@ -230,10 +232,11 @@ fn defines(text: &str, out: &mut String, seen: &mut Vec<String>) {
         {
             seen.push(name.to_owned());
             let value = u32::try_from(value & 0xFFFF_FFFF).unwrap_or(0);
-            let _ = writeln!(
+            writeln!(
                 out,
                 "#[allow(dead_code)]\npub(crate) const {name}: u32 = {value:#x};"
-            );
+            )
+            .ok();
         }
     }
 }
@@ -263,9 +266,10 @@ fn members(text: &str, name: &str, out: &mut String) {
         } else {
             "LANGUAGE"
         };
-        let _ = writeln!(
+        writeln!(
             out,
             "#[allow(dead_code)]\npub(crate) const {kind}_{short}: i32 = {value};"
-        );
+        )
+        .ok();
     }
 }

@@ -110,7 +110,7 @@ fn a_handler_that_blocks_past_the_limit_unsuspended_is_timed_out() {
 fn a_fatal_under_the_guard_resumes_the_limit() {
     fn begin(observed: &mut Observed<'_>) {
         let mut untimed = observed.suspend_time_limit();
-        let _ = untimed.call_named(b"bails", &[]);
+        untimed.call_named(b"bails", &[]).ok();
     }
     let engine = engine("0", |observed| blocks(observed, begin));
     let (served, _) = timed(

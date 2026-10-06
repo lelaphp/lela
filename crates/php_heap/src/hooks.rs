@@ -116,17 +116,15 @@ pub trait HeapHooks {
     /// since a temporary is freed without a root and one the producing
     /// code rooted would otherwise be lost. A heap with no frames has
     /// none.
-    fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
-        let _ = visit;
-    }
+    fn gc_live_temporaries(&mut self, _visit: &mut dyn FnMut(Zval)) {}
     /// A `WeakMap`'s entries for the cycle collector, each key beside
     /// its entry in place (`zend_weakmap_get_key_entry_gc`), and whether
     /// `map` is one: php tests `get_gc == zend_weakmap_get_gc`, since an
     /// entry is owned by the map and kept alive by its key and the walk
     /// treats it as reached through both. A heap that hands out no weak
     /// map has none.
-    fn gc_weakmap_entries(&mut self, map: Obj, visit: &mut dyn FnMut(Obj, ZvalRef)) -> bool {
-        let _ = (map, visit);
+    fn gc_weakmap_entries(&mut self, map: Obj, _visit: &mut dyn FnMut(Obj, ZvalRef)) -> bool {
+        let _ = map;
         false
     }
     /// Every `WeakMap` entry keyed by `key`, in place, beside the map
@@ -134,8 +132,8 @@ pub trait HeapHooks {
     /// collector walks from an object carrying
     /// `IS_OBJ_WEAKLY_REFERENCED`. A `WeakReference` names no entry, and
     /// a heap that hands out no weak map has none.
-    fn gc_weakly_keyed(&mut self, key: Obj, visit: &mut dyn FnMut(ZvalRef, Obj)) {
-        let _ = (key, visit);
+    fn gc_weakly_keyed(&mut self, key: Obj, _visit: &mut dyn FnMut(ZvalRef, Obj)) {
+        let _ = key;
     }
     /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`): the object
     /// is being freed, its destructor served and its members not yet

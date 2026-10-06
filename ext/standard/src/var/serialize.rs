@@ -5,6 +5,8 @@
 //! and enum cases as php reads them, and a float at
 //! `serialize_precision` through `zend_gcvt`.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
 use php_ext::call::{call_method, lookup_class};
@@ -12,6 +14,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Reached};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
@@ -353,7 +356,7 @@ fn write(
             return Ok(());
         }
     }
-    let through_ref = value.as_php_ref().is_some();
+    let reached = *value;
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
@@ -372,20 +375,14 @@ fn write(
             // A table reached through a reference the walk shares with
             // the program can lose its only owner to an element's
             // `__serialize` that assigns over the reference, and
-            // `php_var_serialize_nested_data` then reads freed rows. That
-            // table is held across its walk; any other is held by the
-            // table, argument or copy it was reached from. The test
+            // `php_var_serialize_nested_data` then reads freed rows. The
+            // held walk holds that table across its rows; any other is
+            // held by the table, argument or copy it was reached from.
+            // The test
             // `serialize_holds_a_nested_array_a_serialize_method_gives_up`
             // says why there is no divergence row.
-            let held = through_ref.then(|| {
-                req.addref(&value);
-                value
-            });
-            let written = nested(req, out, &value, *array, hash, shared, false);
-            if let Some(held) = held {
-                req.release(held);
-            }
-            written?;
+            let reached = Reached::of(&reached).unwrap_or(Reached::Held(*array));
+            nested(req, out, &value, reached, hash, shared, false)?;
         }
         ValueRef::Object(object) => object_value(req, out, *object, hash)?,
         _ => out.extend_from_slice(b"i:0;"),
@@ -414,44 +411,83 @@ fn nested(
     req: &mut Request,
     out: &mut Vec<u8>,
     outer: &Value,
-    table: PhpArray,
+    reached: Reached,
     hash: &mut Serializer,
     in_rcn_array: bool,
     incomplete: bool,
 ) -> Result<(), Thrown> {
-    let rows = table.snapshot_refs();
-    let mut skip_magic = incomplete;
-    let count = rows.len() - usize::from(incomplete && rows.iter().any(|(k, _)| is_magic(k)));
+    let table = reached.table();
+    let count = table.len() - usize::from(incomplete && table.iter().any(|(k, _)| is_magic(&k)));
     out.extend_from_slice(count.to_string().as_bytes());
     out.extend_from_slice(b":{");
-    for (key, data) in rows {
-        if skip_magic && is_magic(&key) {
+    let mut skip_magic = incomplete;
+    walk::held(req, reached, |req, key, data| {
+        if skip_magic && is_magic(key) {
             skip_magic = false;
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
-        match &key {
+        match key {
             Key::Int(n) => write_long(out, *n),
             Key::Str(s) => write_string(out, s.as_bytes()),
         }
         let data = match data.as_php_ref() {
             Some(cell) if data.refcount() == 1 => cell.get(),
-            _ => data,
+            _ => *data,
         };
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
             && inner.is_same(*outer_array)
         {
             hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         write(req, out, &data, hash, in_rcn_array, false)?;
-    }
+        Ok(ControlFlow::<()>::Continue(()))
+    })?;
     out.push(b'}');
     Ok(())
 }
 
 fn is_magic(key: &Key) -> bool {
     matches!(key, Key::Str(s) if s.as_bytes() == MAGIC_MEMBER)
+}
+
+/// An object whose class has `__serialize`: the array the method
+/// answers written as the object's data, `php_var_serialize_nested_data`
+/// over it, and php's `TypeError` for anything else.
+fn serialize_method(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
+    let Some(array) = data.as_array().copied() else {
+        req.release(data);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        return Err(throw_error(
+            req,
+            "TypeError",
+            &format!("{shown}::__serialize() must return an array"),
+        ));
+    };
+    write_class_name(req, out, object);
+    // The serializer owns what `__serialize` answered, and the
+    // program holds it too where its refcount says so, which php's
+    // `in_rcn_array` carries into the rows.
+    let shared = data.refcount() > 1;
+    let written = nested(
+        req,
+        out,
+        &object.as_value(),
+        Reached::Held(array),
+        hash,
+        shared,
+        false,
+    );
+    req.release(data);
+    written
 }
 
 /// The `IS_OBJECT` arm.
@@ -484,39 +520,7 @@ fn object_value(
         return Ok(());
     }
     if has_method(req, object.class(), b"__serialize") {
-        let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
-        let Some(array) = data.as_array().copied() else {
-            req.release(data);
-            let shown = String::from_utf8_lossy(&name).into_owned();
-            return Err(throw_error(
-                req,
-                "TypeError",
-                &format!("{shown}::__serialize() must return an array"),
-            ));
-        };
-        write_class_name(req, out, object);
-        let shared = data.refcount() > 1;
-        let rows = array.snapshot_refs();
-        out.extend_from_slice(rows.len().to_string().as_bytes());
-        out.extend_from_slice(b":{");
-        let mut written = Ok(());
-        for (key, value) in rows {
-            match &key {
-                Key::Int(n) => write_long(out, *n),
-                Key::Str(s) => write_string(out, s.as_bytes()),
-            }
-            let value = match value.as_php_ref() {
-                Some(cell) if value.refcount() == 1 => cell.get(),
-                _ => value,
-            };
-            written = write(req, out, &value, hash, shared, false);
-            if written.is_err() {
-                break;
-            }
-        }
-        out.push(b'}');
-        req.release(data);
-        return written;
+        return serialize_method(req, out, object, &name, hash);
     }
     if is_serializable(req, object.class()) {
         return custom(req, out, object, &name, hash);
@@ -539,7 +543,15 @@ fn object_value(
         let table = sleep_props(req, object, &name, list)?;
         req.release(names);
         write_class_name(req, out, object);
-        let written = nested(req, out, &object.as_value(), table, hash, false, false);
+        let written = nested(
+            req,
+            out,
+            &object.as_value(),
+            Reached::Held(table),
+            hash,
+            false,
+            false,
+        );
         req.release(table.to_value());
         return written;
     }
@@ -553,7 +565,15 @@ fn object_value(
         }
         table.set(req, key, value)?;
     }
-    let written = nested(req, out, &object.as_value(), table, hash, false, incomplete);
+    let written = nested(
+        req,
+        out,
+        &object.as_value(),
+        Reached::Held(table),
+        hash,
+        false,
+        incomplete,
+    );
     req.release(table.to_value());
     if written.is_err() {
         hash.fail(object);
@@ -692,7 +712,9 @@ fn sleep_props(
     let props = object.props_for(req, PropertyPurpose::Serialize)?;
     let shown_class = String::from_utf8_lossy(class).into_owned();
     let mut out = PhpArray::new(req)?;
-    for (_, name) in list.snapshot() {
+    walk::held(req, Reached::Held(list), |req, _, name| {
+        // A name the list holds by reference is what the reference holds.
+        let name = name.deref();
         if name.as_php_string().is_none() {
             docref(
                 req,
@@ -723,7 +745,7 @@ fn sleep_props(
                 .iter()
                 .any(|candidate| uninitialized_typed(req, object, candidate))
         {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let Some((prop, value)) = found else {
             docref(
@@ -733,7 +755,7 @@ fn sleep_props(
                     "\"{shown}\" returned as member variable from __sleep() but does not exist"
                 ),
             );
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let key = Key::Str(prop);
         if out.contains(&key) {
@@ -742,12 +764,13 @@ fn sleep_props(
                 Level::Warning,
                 &format!("\"{shown}\" is returned from __sleep() multiple times"),
             );
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         req.addref(&value);
         req.addref(&Value::string(prop));
         out.set(req, key, value)?;
-    }
+        Ok(ControlFlow::<()>::Continue(()))
+    })?;
     Ok(out)
 }
 

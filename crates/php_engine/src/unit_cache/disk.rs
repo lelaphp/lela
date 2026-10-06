@@ -170,9 +170,9 @@ impl Disk<'_> {
         ));
         let partial = PathBuf::from(partial);
         if write_new(&partial, &bytes).is_ok() {
-            let _ = std::fs::hard_link(&partial, &path);
+            std::fs::hard_link(&partial, &path).ok();
         }
-        let _ = std::fs::remove_file(&partial);
+        std::fs::remove_file(&partial).ok();
     }
 
     /// `zend_file_cache_invalidate`: the unit kept for `full` removed.
@@ -182,7 +182,7 @@ impl Disk<'_> {
 
     fn remove(&self, path: &Path) {
         if !self.read_only {
-            let _ = std::fs::remove_file(path);
+            std::fs::remove_file(path).ok();
         }
     }
 }
@@ -239,7 +239,7 @@ mod tests {
         );
         let mut stale = std::fs::read(disk.path(full)).unwrap_or_default();
         stale[MAGIC.len()] = b'b';
-        let _ = std::fs::write(disk.path(full), &stale);
+        std::fs::write(disk.path(full), &stale).ok();
         assert!(
             disk.load(full, None).is_none(),
             "a file another build wrote is never read"
@@ -248,18 +248,18 @@ mod tests {
         disk.store(full, 7, 12, b"body");
         let mut corrupt = std::fs::read(disk.path(full)).unwrap_or_default();
         corrupt.push(b'!');
-        let _ = std::fs::write(disk.path(full), &corrupt);
+        std::fs::write(disk.path(full), &corrupt).ok();
         assert!(
             !disk.holds(full, None),
             "nor one whose body is not what it wrote"
         );
-        let _ = std::fs::remove_file(disk.path(full));
+        std::fs::remove_file(disk.path(full)).ok();
         disk.store(full, 7, 12, b"body");
         assert!(
             disk.load(full, Some(8)).is_none(),
             "a changed file is not read"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A tier that replaces `zend_execute_ex`, as phpdbg's does.

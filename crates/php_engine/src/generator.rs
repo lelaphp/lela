@@ -520,7 +520,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
                 req.release(root_parent.as_value());
                 // A resumption that bails out leaves the request ending,
                 // which the caller of `current` reads there.
-                let _ = resume(req, generator);
+                resume(req, generator).ok();
                 return current(req, generator);
             }
         } else {
@@ -679,7 +679,7 @@ pub(crate) fn with_frames<R>(
     let root_pushed = push(req, root).is_some();
     let out = f(req, floor);
     if root_pushed {
-        let _ = suspend(req, root);
+        suspend(req, root).ok();
     }
     unwind_chain(req, &chain);
     out
@@ -1258,7 +1258,7 @@ fn delegation_chain(req: &Request, orig: PhpObject, root: PhpObject) -> Vec<PhpO
 /// the last one pushed first.
 fn unwind_chain(req: &mut Request, chain: &[PhpObject]) {
     for link in chain.iter().rev() {
-        let _ = suspend(req, *link);
+        suspend(req, *link).ok();
     }
 }
 

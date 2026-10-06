@@ -291,7 +291,7 @@ fn identity(row: &Value) -> String {
         }
     }
     let mut out = String::new();
-    let _ = write!(out, "{row}");
+    write!(out, "{row}").ok();
     out
 }
 

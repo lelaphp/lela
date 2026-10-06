@@ -192,7 +192,9 @@ impl Connector for Driver {
         };
         let failed = |req: &mut Request, server: Mysqlnd| {
             let failure = error_of(req, server, None);
-            let _ = server.close(req, php_ext_mysqlnd::client::CloseType::Explicit);
+            server
+                .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
+                .ok();
             Err(failure)
         };
         if options.is_some() && !driver_options(req, options, &mut h, &mut connect_opts)? {
@@ -683,7 +685,7 @@ impl Connection for Db {
     /// `pdo_mysql_request_shutdown`: `mysqlnd_end_psession`.
     fn persistent_shutdown(&mut self, req: &mut Request) {
         if let Some(h) = self.handle(req) {
-            let _ = h.server.end_psession(req);
+            h.server.end_psession(req).ok();
         }
     }
 
@@ -717,9 +719,9 @@ impl Connection for Db {
             return;
         };
         if let Some(h) = handle(req, id) {
-            let _ = h
-                .server
-                .close(req, php_ext_mysqlnd::client::CloseType::Explicit);
+            h.server
+                .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
+                .ok();
         }
         if let Some(slot) = req.state::<State>().handles.get_mut(id) {
             *slot = None;

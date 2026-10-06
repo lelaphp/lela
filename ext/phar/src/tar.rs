@@ -442,7 +442,7 @@ pub(crate) fn parse(
     phar.is_temporary_alias = actual_alias.is_none();
     phar.alias = Some(registered_alias.clone().unwrap_or_else(|| fname.to_vec()));
     let id = archives(req).insert(phar);
-    let _ = archives(req).fname_map.add(fname, id);
+    archives(req).fname_map.add(fname, id).ok();
     if let Some(alias) = registered_alias {
         if let Some(holder) = archives(req).by_alias(&alias)
             && !archive::free_alias(req, holder)
@@ -452,7 +452,7 @@ pub(crate) fn parse(
                 "phar error: Unable to add tar-based phar \"{name}\", alias is already in use"
             ));
         }
-        let _ = archives(req).alias_map.add(&alias, id);
+        archives(req).alias_map.add(&alias, id).ok();
     }
     Ok(Ok(id))
 }
@@ -512,7 +512,7 @@ fn write_member(
     } else {
         header[NAME.start..NAME.start + name.len()].copy_from_slice(name);
     }
-    let _ = octal(&mut header[MODE], m.flags & ENT_PERM_MASK, 7);
+    octal(&mut header[MODE], m.flags & ENT_PERM_MASK, 7).ok();
     if octal(&mut header[SIZE], m.size, 11).is_err() {
         return Err(format!(
             "tar-based phar \"{fname}\" cannot be created, filename \"{shown}\" is too large for tar file format"
@@ -744,7 +744,7 @@ pub(crate) fn flush(
                 let (_, old) = a.manifest.update(b".phar/stub.php", e);
                 dropped.extend(old);
             } else if !a.manifest.contains(b".phar/stub.php") {
-                let _ = a.manifest.add(b".phar/stub.php", e);
+                a.manifest.add(b".phar/stub.php", e).ok();
             }
         }
         for mut e in dropped {

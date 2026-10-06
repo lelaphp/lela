@@ -42,9 +42,10 @@ impl Workers {
         };
         let max = atol(asked.as_encoded_bytes());
         if max <= 1 {
-            let _ = std::io::stderr()
+            std::io::stderr()
                 .lock()
-                .write_all(b"number of workers must be larger than 1\n");
+                .write_all(b"number of workers must be larger than 1\n")
+                .ok();
             return none;
         }
         let master = std::process::id();

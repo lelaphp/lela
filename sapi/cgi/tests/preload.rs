@@ -28,7 +28,7 @@ fn served(quiet: bool) -> String {
         .arg(&main)
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
