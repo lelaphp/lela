@@ -212,8 +212,10 @@ impl ObjectHandlers for Handlers {
         for (name, p) in Property::ALL {
             match p.read(req, object) {
                 Ok(Some(value)) => {
+                    // The table's row takes the value's owner.
+                    let value = value.hand_on_unmigrated();
                     let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                    table.set(req, key, value.hand_on_unmigrated())?;
+                    table.set(req, key, value)?;
                 }
                 Ok(None) => {}
                 Err(t) => {

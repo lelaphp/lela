@@ -1471,7 +1471,7 @@ impl Request {
             .object_handlers(object.heap())
             .cast_object(self, object, target)?
         {
-            Some(casted) => casted.hand_on(),
+            Some(casted) => casted,
             None => match target {
                 TypeTag::Int | TypeTag::Float => {
                     let class = self.class_name(object.class());
@@ -1484,11 +1484,12 @@ impl Request {
                         self,
                         &format!("Object of class {class} could not be converted to {to}"),
                     );
-                    if target == TypeTag::Int {
+                    let one = if target == TypeTag::Int {
                         Value::int(1)
                     } else {
                         Value::float(1.0)
-                    }
+                    };
+                    Owner::take(self, one)
                 }
                 _ => {
                     return Ok(if object_lhs {
@@ -1504,7 +1505,7 @@ impl Request {
         } else {
             crate::ops::compare(self, other, &casted)
         };
-        self.release(casted);
+        casted.give_up(self);
         order
     }
 
@@ -1728,8 +1729,8 @@ impl Request {
                 Some(_) => value.deref(),
                 None => value,
             };
-            let name = key.to_prop_name(self)?.hand_on();
-            self.addref(&value);
+            let name = key.to_prop_name(self)?;
+            let value = Owner::take(self, value);
             self.write_cloned_property(new, table, name, value)?;
         }
         Ok(())
@@ -1748,34 +1749,30 @@ impl Request {
         &mut self,
         object: PhpObject,
         table: &'static dyn crate::api::abi::ObjectHandlers,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let bytes = name.as_bytes().to_vec();
         let place = match table.get_property_ptr_ptr(self, object, &bytes) {
             Ok(place) => place,
             Err(thrown) => {
-                self.release(value);
-                self.release(Value::string(name));
+                value.give_up(self);
+                name.give_up(self);
                 return Err(thrown);
             }
         };
         if place == crate::api::abi::PropertyPlace::Handlers {
-            let name = Owner::adopt(self, name);
-            let value = Owner::adopt(self, value);
             return table.write_property(self, object, name, value);
         }
         let silent = self.serves_accessor(object.class(), b"__set");
         let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
             Ok(placed) => placed.map(|(slot, _)| slot),
             Err(thrown) => {
-                self.release(value);
-                self.release(Value::string(name));
+                value.give_up(self);
+                name.give_up(self);
                 return Err(thrown);
             }
         };
-        let name = Owner::adopt(self, name);
-        let value = Owner::adopt(self, value);
         table.write_property(self, object, name, value)?;
         if let Some(slot) = slot {
             object

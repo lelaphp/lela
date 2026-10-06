@@ -21,7 +21,7 @@ use php_ext::request::{
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
-use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
+use crate::http_fopen_wrapper::{closed, file_ini, url_wrap_http};
 use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_raw_url_decode};
@@ -736,10 +736,15 @@ fn open(
         Ok(data) => data,
         Err(XportFailure { text, .. }) => return refused(req, Reply::default(), Some(text)),
     };
-    let reply = get_result(req, control)?;
+    let reply = match get_result(req, control) {
+        Ok(reply) => reply,
+        Err(thrown) => {
+            closed(req, data);
+            return Err(thrown);
+        }
+    };
     if reply.code != 150 && reply.code != 125 {
-        data.close(req);
-        data.give_up(req);
+        closed(req, data);
         return refused(req, reply, None);
     }
     let init = Notification::ProgressInit {
@@ -747,13 +752,11 @@ fn open(
         max: file_size,
     };
     if let Err(thrown) = notify(req, ctx, init) {
-        data.close(req);
-        data.give_up(req);
+        closed(req, data);
         return Err(thrown);
     }
     if !data_secured(req, *data, ctx, ssl_on_data) {
-        data.close(req);
-        data.give_up(req);
+        closed(req, data);
         return refused(req, Reply::default(), None);
     }
     let closer = Box::new(Control {
@@ -761,8 +764,7 @@ fn open(
         transfer,
     });
     if let Err(thrown) = data.set_closer(req, closer) {
-        data.close(req);
-        data.give_up(req);
+        closed(req, data);
         return Err(thrown);
     }
     Ok(Some(data))

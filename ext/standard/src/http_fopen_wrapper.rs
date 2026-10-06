@@ -637,10 +637,7 @@ fn tunnel(
                 value.give_up(req);
                 set
             });
-            if let Err(thrown) = set {
-                closed(req, stream);
-                return Err(thrown);
-            }
+            held!(req, stream, set);
             true
         }
         _ => false,
@@ -682,14 +679,13 @@ fn tunnel(
         closed(req, stream);
         return unsetting.map(|()| None);
     }
-    loop {
-        match get_line(req, *stream, Some(HTTP_HEADER_BLOCK_SIZE - 1)) {
-            Ok(Some(line)) if !matches!(line.first(), None | Some(b'\n' | b'\r' | 0)) => {}
-            Ok(_) => break,
-            Err(thrown) => {
-                closed(req, stream);
-                return Err(thrown);
-            }
+    while let Some(line) = held!(
+        req,
+        stream,
+        get_line(req, *stream, Some(HTTP_HEADER_BLOCK_SIZE - 1))
+    ) {
+        if matches!(line.first(), None | Some(b'\n' | b'\r' | 0)) {
+            break;
         }
     }
     let enabled = stream.crypto_setup(req, SSLV23_CLIENT, None)
@@ -713,9 +709,9 @@ fn tunnel(
     Ok(stream)
 }
 
-/// `php_stream_close` over the stream the opener holds: closed, and its
+/// `php_stream_close` over the stream an opener holds: closed, and its
 /// owner given up.
-fn closed(req: &mut Request, stream: Owner<Stream>) {
+pub(crate) fn closed(req: &mut Request, stream: Owner<Stream>) {
     stream.close(req);
     stream.give_up(req);
 }
