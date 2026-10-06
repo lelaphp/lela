@@ -21,11 +21,11 @@ use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
     Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
     class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
-    dynamic_properties, is_closure_invoke, is_constructor, is_internal, keep, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_methods,
-    linked_properties, looked_up, lookup_class, method_or_invoke, namespace_end, new_object,
-    property_named, reflection_class_factory, set_name, set_string_prop, string_value,
-    table_method, this_class, user_line,
+    dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties,
+    linked_table, looked_up, lookup_class, method_or_invoke, method_ptr, namespace_end, new_object,
+    property_named, reflection_class_factory, set_name, set_string_prop, string_value, this_class,
+    user_line,
 };
 
 /// The name of the first of `traits` whose function table has `method`,
@@ -36,7 +36,7 @@ fn trait_with(req: &mut Request, traits: &[Name], method: &[u8]) -> Result<Vec<u
         let Some(at) = lookup_class(req, &used.0)? else {
             continue;
         };
-        if table_method(req, at, method).is_some() {
+        if linked_table(req, at).place(method).is_some() {
             return Ok(class_name_of(req, at));
         }
     }
@@ -56,7 +56,8 @@ pub(super) fn class_is_abstract(req: &mut Request, class: ClassId) -> bool {
         .class_decl(class)
         .is_some_and(|decl| decl.flags.is_abstract);
     explicit
-        || linked_methods(req, class)
+        || linked_table(req, class)
+            .rows
             .iter()
             .any(|m| m.decl.is_abstract)
 }
@@ -70,10 +71,9 @@ fn cannot_instantiate(req: &mut Request, class: ClassId) -> bool {
 /// `ce->constructor`: the linked `__construct`, with the scope that
 /// declared it.
 fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, ClassId)> {
-    linked_methods(req, class)
-        .into_iter()
-        .find(|m| is_constructor(&m.decl))
-        .map(|m| (m.decl, m.scope))
+    linked_table(req, class)
+        .named(b"__construct")
+        .map(|m| (m.decl.clone(), m.scope))
 }
 
 /// `reflection_method_factory(ce, mptr, ...)`: a `ReflectionMethod`
@@ -103,6 +103,8 @@ pub(super) fn method_factory(
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
     keep(req, object, ce, None);
+    let method = method_ptr(req, ce, name);
+    keep_method(req, object, method);
     Ok(object)
 }
 
@@ -871,11 +873,11 @@ impl ReflectionClass {
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
-        let clone = linked_methods(req, class)
-            .into_iter()
-            .find(|m| m.decl.function.name.0.eq_ignore_ascii_case(b"__clone"));
-        if let Some(clone) = clone {
-            return Ok(clone.decl.visibility == Visibility::Public);
+        let clone = linked_table(req, class)
+            .named(b"__clone")
+            .map(|clone| clone.decl.visibility);
+        if let Some(visibility) = clone {
+            return Ok(visibility == Visibility::Public);
         }
         if let Some(object) = kept_object(req, this.object()) {
             return Ok(object.handlers(req).clone_obj().is_some());
@@ -1020,9 +1022,7 @@ impl ReflectionClass {
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
         let lowered = name.to_ascii_lowercase();
-        let found = linked_methods(req, class)
-            .into_iter()
-            .any(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered);
+        let found = linked_table(req, class).place(&lowered).is_some();
         Ok(found || is_closure_invoke(req, class, &lowered))
     }
 
@@ -1098,7 +1098,8 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4 | 16 | 32 | 64);
         let class = this_class(req, this.object())?;
         let mut methods = PhpArray::new(req)?;
-        for found in linked_methods(req, class) {
+        let table = linked_table(req, class);
+        for found in &table.rows {
             if found.decl.visibility == Visibility::Private && found.scope != class {
                 continue;
             }

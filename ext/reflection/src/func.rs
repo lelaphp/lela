@@ -25,10 +25,10 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
 use super::{
     at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
-    function_string, is_constructor, keep, keep_closure, kept_class, kept_closure, kept_object,
-    linked_methods, method_or_invoke, method_string, namespace_end, new_object,
-    reflection_class_factory, required_parameters, set_name, set_string_prop, signature,
-    string_value, table_method, this_name,
+    function_string, is_constructor, keep, keep_closure, keep_method, kept_class, kept_closure,
+    kept_method, kept_object, linked_table, method_or_invoke, method_ptr, method_string,
+    namespace_end, new_object, reflection_class_factory, required_parameters, set_name,
+    set_string_prop, signature, string_value, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -64,6 +64,11 @@ fn this_method(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
+    if let Some(held) = kept_method(req, this)
+        && let Some(method) = held.method()
+    {
+        return Ok((method.scope, method.decl.clone(), method.scope));
+    }
     let name = this_name(req, this, "ReflectionMethod")?;
     let Some(class) = req
         .this()
@@ -106,11 +111,7 @@ pub(super) fn is_internal(decl: &FunctionDecl) -> bool {
 /// One method of a linked class by its name, `zend_hash_find_ptr` over
 /// the function table.
 fn method_decl(req: &mut Request, class: ClassId, name: &[u8]) -> Option<MethodDecl> {
-    let lowered = name.to_ascii_lowercase();
-    linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-        .map(|m| m.decl)
+    linked_table(req, class).named(name).map(|m| m.decl.clone())
 }
 
 /// Whether the declared return type is the tentative one a native
@@ -175,16 +176,19 @@ fn prototype_of(
     this: PhpObject,
     name: &[u8],
 ) -> Result<Option<ClassId>, Thrown> {
+    if let Some(held) = kept_method(req, this)
+        && let Some(method) = held.method()
+    {
+        return Ok(method.prototype);
+    }
     let named = (this.prop(req, b"class")).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     let class = match (super::kept_class(req, this), named) {
         (Some(class), _) => class,
         (None, Some(named)) => class_named(req, &named)?,
         (None, None) => return Ok(None),
     };
-    let lowered = name.to_ascii_lowercase();
-    Ok(linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+    Ok(linked_table(req, class)
+        .named(name)
         .and_then(|m| m.prototype))
 }
 
@@ -2115,10 +2119,11 @@ impl ReflectionMethod {
             Union::A(object) => Some(object).filter(|o| o.closure(req).is_some()),
             Union::B(_) => None,
         };
-        let found = if let Some(closure) = closure {
-            method_or_invoke(req, class, &method_name, Some(closure))
-        } else {
-            table_method(req, class, &method_name)
+        let held = method_ptr(req, class, &method_name);
+        let found = match (closure, &held) {
+            (_, Some(held)) => held.method().cloned(),
+            (Some(closure), None) => method_or_invoke(req, class, &method_name, Some(closure)),
+            (None, None) => None,
         };
         let Some(found) = found else {
             let class = class_name_of(req, class);
@@ -2142,6 +2147,7 @@ impl ReflectionMethod {
         // closure's `__invoke`, the closure the method was made over.
         let kept = closure.filter(|_| found.via_handler);
         keep(req, this, class, kept);
+        keep_method(req, this, held);
         Ok(())
     }
 
@@ -2183,11 +2189,8 @@ impl ReflectionMethod {
         };
         let class = class_named(req, &given[..at])?;
         let name = given[at + 2..].to_vec();
-        let lowered = name.to_ascii_lowercase();
-        let Some(found) = linked_methods(req, class)
-            .into_iter()
-            .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-        else {
+        let held = method_ptr(req, class, &name);
+        let Some(found) = held.as_ref().and_then(|held| held.method()).cloned() else {
             let named = class_name_of(req, class);
             return Err(throw(
                 req,
@@ -2211,6 +2214,7 @@ impl ReflectionMethod {
         set_name(req, object, &found.decl.function.name.0)?;
         set_string_prop(req, object, b"class", &scope)?;
         super::keep(req, object, class, None);
+        keep_method(req, object, held);
         Ok(Static(object))
     }
 
@@ -2317,8 +2321,12 @@ impl ReflectionMethod {
                 via_handler: false,
             }
         });
+        let held = kept_method(req, this.object());
         let kept = kept_closure(req, this.object());
-        let Some(found) = hook.or_else(|| method_or_invoke(req, class, &name, kept)) else {
+        let Some(found) = hook
+            .or_else(|| held.as_ref()?.method().cloned())
+            .or_else(|| method_or_invoke(req, class, &name, kept))
+        else {
             let class = class_name_of(req, class);
             return Err(throw(
                 req,
