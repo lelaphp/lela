@@ -8,9 +8,10 @@
 //! list the compiler appends to an enum a program declares and the
 //! engine to an enum a native declares. A native enum's rows are served
 //! as its other native methods are; a program's enum gets one function
-//! number per method per request when its class is declared
-//! ([`ENUM_FUNCTIONS`]), the scope of each the enum itself, as php
-//! allocates a `zend_internal_function` per method per enum.
+//! number per method where its class is bound, the request's own or the
+//! published arena's ([`crate::api::call::Function::ENUM`]), the scope
+//! of each the enum itself, as php allocates a `zend_internal_function`
+//! per method per enum.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -22,11 +23,6 @@ use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
 use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Value};
-
-/// Where the function numbers of a program's enum methods begin: past
-/// every native, native method and user function a request can number,
-/// so the three spaces never meet.
-pub(crate) const ENUM_FUNCTIONS: u32 = 1 << 30;
 
 /// Which of the three a function number of a program's enum serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

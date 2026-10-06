@@ -139,7 +139,7 @@ pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
-pub(crate) use preload::{Keyed, Preloaded, Preloading, Stacked};
+pub(crate) use preload::{Keyed, Named, Preloaded, Preloading};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -293,11 +293,11 @@ pub struct Request {
     constants: constants::Constants,
     /// The class constants' state ([`class_constants::ClassConstants`]).
     class_constants: class_constants::ClassConstants,
-    /// The methods `zend_enum_register_funcs` gives each enum a program
-    /// declares, one function number each past
-    /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
-    /// `zend_internal_function` per method per enum.
-    enum_functions: Stacked<(ClassId, crate::enums::EnumMethod)>,
+    /// The methods `zend_enum_register_funcs` gives each enum the request
+    /// declared, one function number each of the request's own from
+    /// [`Function::ENUM`] on, as php allocates a `zend_internal_function`
+    /// per method per enum. A published enum's are the arena's.
+    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
     /// The properties' guards, source lists and scope
     /// ([`properties::Properties`]).
     properties: properties::Properties,
@@ -370,15 +370,21 @@ pub struct Request {
     frames: frames::Frames,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
+    /// php's `EG(class_table)` past what the engine registered at
+    /// startup, the aliases aside: each class under its lowered name,
+    /// in the order declared, the preload's first and then the
+    /// request's, each in the bucket it stands in.
+    declared: Keyed<Named>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
-    /// order declared: php's `EG(class_table)` past what the engine
-    /// registered at startup. A `ClassId` past the engine's classes
-    /// counts into this list. What design §6.2 binds early into an
-    /// immutable linked class shared across requests is not built yet,
-    /// so every class a unit declares is this request's, the
-    /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
-    declared: Keyed<Declared>,
+    /// order declared: the rows a `ClassId` of the request's own counts
+    /// into (design §5.14, *Identities*), dropped with the request. A
+    /// published class's row is the engine's arena's.
+    own_classes: Vec<Declared>,
+    /// The engine's published arena as the request started (design
+    /// §5.14), which every `ClassId` and `Function` of the published
+    /// space this request holds names a row of, the preload's first.
+    arena: Arc<crate::arena::Arena>,
     /// The classes a load bound early ([`classes::Classes`]).
     classes: classes::Classes,
     /// The classes whose link is under way and what their links left
@@ -412,12 +418,15 @@ pub struct Request {
     aliases: Keyed<preload::Alias>,
     /// `EG(class_table)`'s buckets past the engine's classes.
     buckets: preload::Buckets,
-    /// The functions and methods the units this request served declared,
-    /// each the unit that holds it and which of its op arrays is the
-    /// body: php's `EG(function_table)` past the natives and each user
-    /// class's `function_table`. A `Function` past the natives and the
-    /// native methods counts into this list (design §5.6).
-    user_functions: Stacked<UserFunction>,
+    /// The functions, methods and closures the units this request
+    /// served declared, each the unit that holds it and which of its op
+    /// arrays is the body: a `Function` of the request's own counts into
+    /// this list (design §5.6, §5.14).
+    user_functions: Vec<UserFunction>,
+    /// php's `EG(function_table)` past the natives as the preload left
+    /// it: its functions, published, in the order its table holds them,
+    /// which the request's own top-level functions follow.
+    preloaded_functions: Arc<[Function]>,
     /// The `static` variables' tables ([`static_vars::StaticVars`]).
     static_vars: static_vars::StaticVars,
     /// Where the request is the preload's (design §6.3), the files it
@@ -535,18 +544,17 @@ pub(crate) enum MemberAt {
     Hook { property: u32, kind: HookKind },
 }
 
-/// One class a request declared: the unit that holds its declaration and
-/// the declaration's index there, for a class that uses traits the
-/// class composed with them at its link, which is the table's row in
-/// its place (`zend_do_bind_traits`), and the bucket of
-/// `EG(class_table)` it stands in; beside them its placed properties,
-/// once read ([`Request::placed_properties`]), and what binding it
-/// settled ([`Bound`]).
+/// One class a request declared or the engine published: the unit that
+/// holds its declaration and the declaration's index there, for a class
+/// that uses traits the class composed with them at its link, which is
+/// the table's row in its place (`zend_do_bind_traits`); beside them its
+/// placed properties, once read ([`Request::placed_properties`]), and
+/// what binding it settled ([`Bound`]). Where it stands in
+/// `EG(class_table)` is the table's ([`Named`]), not the row's.
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
-    place: preload::Bucket,
     placed: OnceLock<Placed>,
     bound: Bound,
 }
@@ -557,14 +565,16 @@ pub(crate) struct Declared {
 pub(crate) struct Bound {
     /// The class's linked record: `ce->function_table` whole, its own
     /// methods and what it inherited, in php's order. None only while
-    /// the class is bound again under a new number.
+    /// the class binds.
     record: Option<LinkedClass<ClassId>>,
     /// The function each of the class's own methods is, by its index
     /// among them, which a row of a record naming the class reads.
     functions: Box<[Option<Function>]>,
-    /// The rows of the request's user functions the class's methods and
-    /// hooks took, first to last.
-    members: Range<usize>,
+    /// The numbers the class's methods and hooks took as user
+    /// functions, first to last, all in the class's own space: the
+    /// request's where the class is its own, the arena's where it is
+    /// published.
+    members: Range<u32>,
     /// `ce->parent`, where its name named a class as the class bound;
     /// none for a class with no parent and for one bound before its
     /// parent was, whose parent is looked up by name.
@@ -644,6 +654,7 @@ impl Request {
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
+        let arena = Arc::clone(&shared.arena);
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             paths: paths::Paths::startup(&shared),
@@ -670,7 +681,7 @@ impl Request {
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
             class_constants: class_constants::ClassConstants::default(),
-            enum_functions: tables.enum_functions,
+            enum_functions: Vec::new(),
             calls: calls::Calls::default(),
             properties: properties::Properties::default(),
             site_override: None,
@@ -695,6 +706,8 @@ impl Request {
             returned: Value::null(),
             limits: limits::Limits::new(),
             declared: tables.classes,
+            own_classes: Vec::new(),
+            arena,
             classes: classes::Classes::default(),
             links: linking::Links::default(),
             record: recording::Record::default(),
@@ -704,7 +717,8 @@ impl Request {
             script_encodings: None,
             buckets,
             aliases: tables.aliases,
-            user_functions: tables.functions,
+            user_functions: Vec::new(),
+            preloaded_functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
             accel_loaded: None,

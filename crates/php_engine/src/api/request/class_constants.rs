@@ -357,7 +357,7 @@ impl Request {
     /// Whether `class` is one the engine was built with, a native's,
     /// rather than one a program declared.
     pub(super) fn native_class(&self, class: ClassId) -> bool {
-        usize::try_from(class.0).is_ok_and(|at| at < self.shared.classes.len())
+        self.native_class_at(class).is_some()
     }
 
     /// `zend_enum_get_case` (`Z/Zend/zend_enum.c:410`): the one instance
