@@ -22,6 +22,7 @@ Arr::iter
 Arr::len
 Arr::live_from
 Arr::next_free
+Arr::num_used
 Arr::position
 Arr::protect
 Arr::refcount
@@ -108,6 +109,7 @@ Heap::interned_find
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
+Heap::iterator_on
 Heap::iterator_pos
 Heap::iterator_pos_ex
 Heap::iterator_set_lead
@@ -245,6 +247,7 @@ Origin::number
 PropBit
 PropertyTable
 PropertyTable::backward
+PropertyTable::declared
 PropertyTable::end
 PropertyTable::forward
 PropertyTable::is_empty
@@ -337,6 +340,7 @@ Zval::double
 Zval::fe_pos
 Zval::indirect
 Zval::is_refcounted
+Zval::is_same_value
 Zval::is_undef
 Zval::kind
 Zval::long

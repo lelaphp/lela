@@ -317,7 +317,7 @@ impl Mysqlnd {
 
     /// `mysqlnd_store_result`.
     pub fn store(self, req: &mut Request) -> Result<Option<ResultSet>, Thrown> {
-        let stored = self.call(req, |req, conn| conn.store(req))?.flatten();
+        let stored = self.call(req, |req, conn| Ok(conn.store(req)))?.flatten();
         Ok(stored.map(|res| ResultSet {
             res,
             conn: self.acquire(req),

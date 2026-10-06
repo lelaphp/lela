@@ -61,9 +61,9 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{Hold, Opened, Raised, Request};
+use crate::api::request::{Opened, Raised, Request};
 use crate::api::values::{
-    ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
+    ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
     self, Cached, CallStage, CallState, E_FATAL_ERRORS, LAST_CATCH, ReturnValue, cached_class,
@@ -8534,9 +8534,9 @@ fn read_dimension(
 /// done
 /// ```
 fn object_held<T>(req: &mut Request, object: PhpObject, step: impl FnOnce(&mut Request) -> T) -> T {
-    let held = req.take_hold(object.as_value());
+    let held = Owner::take(req, object.as_value());
     let stepped = step(req);
-    req.let_go(held);
+    held.let_go(req);
     stepped
 }
 
@@ -8875,9 +8875,9 @@ fn made_array(
     if !was_false {
         return Ok(Some(array));
     }
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     crate::api::raising::deprecated(req, "Automatic conversion of false to array is deprecated");
-    Ok((!req.let_go(held).freed()).then_some(array))
+    Ok((!held.let_go(req).freed()).then_some(array))
 }
 
 /// `zend_assign_to_string_offset` (`Z/Zend/zend_execute.c:2038`),
@@ -8895,7 +8895,7 @@ fn made_array(
 /// a copy laid into the place for a shared or an interned one, so the string written is the
 /// place's alone before anything can raise. Then the dimension that is
 /// no long, the value that is no string and the value longer than a
-/// byte each raise with the string held ([`Request::take_hold`]), php's
+/// byte each raise with the string held ([`Owner::take`]), php's
 /// `GC_ADDREF(s)`, since a handler the diagnostic reaches may overwrite
 /// the variable the string hangs from; where the hold was the string's
 /// last owner the write lands nowhere and the temporary is `null`
@@ -9196,9 +9196,9 @@ fn string_held<T>(
     string: Value,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
-    let held = req.take_hold(string);
+    let held = Owner::take(req, string);
     let stepped = step(req);
-    let left = req.let_go(held);
+    let left = held.let_go(req);
     let stepped = stepped?;
     if req.is_pending() {
         return Err(Thrown::of(None));
@@ -9216,7 +9216,7 @@ enum Keeper {
     /// An owner of the array or object the place is an entry of, as the
     /// `FETCH_DIM_W` before walked to it ([`Request::hold_walk`]), or of
     /// the reference the place is the value of.
-    Held(Hold),
+    Held(Owner<Value>),
     /// An entry of a table no owner was taken of: a property's slot, a
     /// static property's, a symbol table's. The string's own hold is all
     /// the write goes by, as php's is.
@@ -9238,7 +9238,7 @@ impl Keeper {
         };
         match self {
             Keeper::Frame => holds(),
-            Keeper::Held(hold) => hold.value().refcount() > 1 && holds(),
+            Keeper::Held(hold) => hold.refcount() > 1 && holds(),
             Keeper::Unheld => true,
         }
     }
@@ -9247,7 +9247,7 @@ impl Keeper {
     /// the table goes and the write with it.
     fn give_back(self, req: &mut Request) {
         if let Keeper::Held(hold) = self {
-            let _ = req.let_go(hold);
+            let _ = hold.let_go(req);
         }
     }
 }
@@ -9269,7 +9269,7 @@ fn keeper(
 ) -> Keeper {
     let cell = exec::value_of(place.read());
     if text_at != place && cell.as_php_ref().is_some() {
-        return Keeper::Held(req.take_hold(cell));
+        return Keeper::Held(Owner::take(req, cell));
     }
     match op.op1_type {
         OperandKind::Var => {
@@ -9317,7 +9317,7 @@ enum WriteAt {
 /// before it is a key, `Undefined variable` for a variable nothing
 /// wrote and the `null` offset's deprecation after it, and a handler
 /// the diagnostic reaches may overwrite the variable the array hangs
-/// from, so the array is held across them ([`Request::take_hold`]) and the
+/// from, so the array is held across them ([`Owner::take`]) and the
 /// write lands nowhere ([`WriteAt::Gone`]) where anything but its one
 /// owner is left after (`GC_DELREF(ht) != 1`), the array destroyed with
 /// the hold where that was the last.
@@ -9397,9 +9397,9 @@ fn held_alone<T>(
     array: PhpArray,
     step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
 ) -> Result<Option<T>, Thrown> {
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     let stepped = step(req);
-    let left = req.let_go(held);
+    let left = held.let_go(req);
     let stepped = stepped?;
     if req.is_pending() {
         return Err(Thrown::of(None));
@@ -11717,10 +11717,10 @@ pub(crate) fn assign_obj<T: Tier>(
                 && data.op1_type == OperandKind::Cv
                 && req.slot(frame, data.op1).tag() == TypeTag::Undef
         })
-        .map(|container| req.take_hold(container.deref()));
+        .map(|container| Owner::take(req, container.deref()));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     let container = match &guard {
-        Some(held) => held.value(),
+        Some(held) => **held,
         None => early.map_or_else(|| fetch(req), Ok)?.deref(),
     };
     let mut member = exec::Member::default();
@@ -11728,7 +11728,17 @@ pub(crate) fn assign_obj<T: Tier>(
         member.name(req, frame, code, op),
         container.as_object().copied(),
     ) {
-        (Ok(name), Some(object)) => assign_property(req, frame, code, op, object, &name, value)?,
+        (Ok(name), Some(object)) => {
+            match assign_property(req, frame, code, op, object, &name, value) {
+                Ok(written) => written,
+                Err(fatal) => {
+                    if let Some(held) = guard {
+                        held.abandon(&fatal);
+                    }
+                    return Err(fatal);
+                }
+            }
+        }
         (Ok(name), None) => {
             let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
             let shown = crate::ops::value_name(req, &container.undef_as_null());
@@ -11749,7 +11759,7 @@ pub(crate) fn assign_obj<T: Tier>(
     member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if let Some(held) = guard {
-        req.release_hold(held);
+        held.give_up(req);
     }
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
@@ -13308,9 +13318,9 @@ fn append_value(
             data.op1,
         ));
     }
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    (!req.let_go(held).freed()).then_some(value)
+    (!held.let_go(req).freed()).then_some(value)
 }
 
 /// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8370`), the opline
@@ -13478,9 +13488,9 @@ fn undefined_key_write(
     array: PhpArray,
     key: php_heap::Key,
 ) -> Result<Landing, Thrown> {
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     let name = match key {
-        php_heap::Key::Str(s) => Some(req.take_hold(exec::value_of(php_heap::Zval::string(s)))),
+        php_heap::Key::Str(s) => Some(Owner::take(req, exec::value_of(php_heap::Zval::string(s)))),
         php_heap::Key::Long(_) => None,
     };
     let message = match key {
@@ -13491,7 +13501,7 @@ fn undefined_key_write(
         ),
     };
     crate::api::raising::warning(req, &message);
-    let left = req.let_go(held);
+    let left = held.let_go(req);
     let landing = if req.is_pending() {
         Err(Thrown::of(None))
     } else if left.not_alone() {
@@ -13500,7 +13510,7 @@ fn undefined_key_write(
         req.array_lookup(array.heap(), key).map(Landing::from)
     };
     if let Some(name) = name {
-        req.let_go(name);
+        name.let_go(req);
     }
     landing
 }
@@ -14623,13 +14633,13 @@ fn served_property_step(
         req.release(stepped);
         return Ok(());
     }
-    req.addref(&stepped);
+    // `write_property` takes an owner of the value and of the name, on
+    // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
+    // gives up after the write, and one more of the name, which the
+    // operand keeps its own of.
+    req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
-    let written = table.write_property(req, object, name, stepped);
-    if written.is_err() {
-        req.release(stepped);
-    }
-    written
+    table.write_property(req, object, name, stepped)
 }
 
 /// Where a compound write or a step over a property the class serves
