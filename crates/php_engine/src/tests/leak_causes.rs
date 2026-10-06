@@ -91,3 +91,27 @@ $n = 'p' . $q; $o->$n = 'a'; $o->$n .= 'x'; unset($o, $a); echo $n, "\n";
     assert_eq!(stdout, "abcx\n2x\nabcxy\nabcx\npq\n");
     assert_eq!(exit, 0);
 }
+
+/// The collector's fiber, made again after a destructor suspended the
+/// one before it, is given up when the request's end destroys it, and
+/// the collection at the end frees it (#2073).
+#[test]
+fn the_collectors_fiber_is_freed_when_the_request_ends() {
+    let (stdout, exit) = armed(
+        r#"<?php
+class Cycle {
+    public $self; public $id;
+    function __construct($id) { $this->id = $id; $this->self = $this; }
+    function __destruct() {
+        echo "{$this->id}: start\n";
+        if ($this->id === 0) { global $held; $held = Fiber::getCurrent(); Fiber::suspend(); }
+        echo "{$this->id}: end\n";
+    }
+}
+$f = new Fiber(function () { new Cycle(0); new Cycle(1); gc_collect_cycles(); $GLOBALS['held']->resume(); });
+$f->start();
+"#,
+    );
+    assert_eq!(stdout, "1: start\n1: end\n0: start\n0: end\n");
+    assert_eq!(exit, 0);
+}
