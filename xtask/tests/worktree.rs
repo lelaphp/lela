@@ -503,15 +503,15 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         "the clone's own build is not what retire removes: {out}"
     );
     assert!(
-        fs::read_to_string(root.join("target/harness/log.jsonl"))
+        fs::read_to_string(root.join("target/harness/log.migrated.jsonl"))
             .unwrap()
             .contains("the-clones-own"),
-        "the clone's readings stand: {out}"
+        "the clone's log stands, split into the log of each instrument and kept whole: {out}"
     );
 }
 
 /// The retire half: a worktree's readings live in its own `target/harness/`
-/// and removing the worktree removes them, so the log is appended into the
+/// and removing the worktree removes them, so the log is landed in the
 /// main checkout's store first and its `status --section permits` counts
 /// the retired agent's denials (harness-design.md §4.2). The store is the
 /// one `Track::of` names, so a retire asked from a checkout that is not
@@ -557,7 +557,7 @@ fn retiring_appends_the_readings_to_the_main_store_and_removes_the_worktree() {
     let (code, out) = retire(&dir, &["t40"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
-        fs::read_to_string(root.join("target/harness/log.jsonl"))
+        fs::read_to_string(root.join("target/harness/log/permit.jsonl"))
             .unwrap()
             .lines()
             .count(),
@@ -567,7 +567,7 @@ fn retiring_appends_the_readings_to_the_main_store_and_removes_the_worktree() {
     assert!(!dir.exists(), "the worktree is removed: {out}");
     assert_eq!(worktrees(&root).len(), 1, "{out}");
 
-    let appended = fs::read_to_string(root.join("target/harness/log.jsonl")).unwrap();
+    let appended = fs::read_to_string(root.join("target/harness/log/permit.jsonl")).unwrap();
     assert!(appended.contains("the-retired-agent"), "{appended}");
     assert_eq!(
         fs::read_to_string(root.join("target/harness/clippy/xtask.toml")).unwrap(),

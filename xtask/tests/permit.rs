@@ -1531,7 +1531,7 @@ fn a_denial_carries_the_session_of_the_call() {
         ],
     );
     assert_eq!(code, 0, "{err}");
-    let log = Store::of_workspace(&root).log().unwrap();
+    let log = Store::of_workspace(&root).history("permit").unwrap();
     assert_eq!(
         log.readings.last().unwrap().session,
         "",

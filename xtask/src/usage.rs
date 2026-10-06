@@ -193,20 +193,15 @@ impl Spent {
         }
     }
 
-    /// The last usage reading under `scope` in the first of `stores` whose
-    /// log holds one, oldest store first: the worktree's own where one
-    /// still stands, then the main checkout's, which a retire appended
-    /// into. None where no store has one.
+    /// The last usage reading under `scope` in the first of `stores` that
+    /// holds one, oldest store first: the worktree's own where one still
+    /// stands, then the main checkout's, which a retire landed in. Read
+    /// off the scope's file and its index ([`Store::last_of`]), and never
+    /// the log (#2164). None where no store has one.
     pub fn last(stores: &[&Store], scope: &str) -> Result<Option<Spent>> {
         for store in stores {
-            let log = store.log()?;
-            let last = log
-                .readings
-                .iter()
-                .rev()
-                .find(|r| r.instrument == INSTRUMENT && r.scope == scope);
-            if let Some(reading) = last {
-                return Ok(Some(Spent::of(reading)));
+            if let Some(reading) = store.last_of(INSTRUMENT, scope)? {
+                return Ok(Some(Spent::of(&reading)));
             }
         }
         Ok(None)

@@ -77,7 +77,7 @@ pub(crate) enum Command {
         #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "uncut"])]
         every: bool,
         /// The log `--every` renders in place of the store's: another
-        /// store's `log.jsonl` or the published history, whose lean rows
+        /// store's log file or the published history, whose lean rows
         /// `{i,s,t,a,c,n}` read too; `-` is the standard input. A line that
         /// is no reading is counted on stderr and skipped.
         #[arg(long, value_name = "FILE", requires = "every")]

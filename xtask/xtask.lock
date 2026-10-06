@@ -226,9 +226,12 @@ reading::Chain::standing
 reading::DIR
 reading::Files
 reading::Files::unreadable_note
+reading::KEPT
+reading::LEGACY
 reading::LOG
 reading::Log
 reading::Log::unreadable_note
+reading::MIGRATED
 reading::Number
 reading::Number::as_f64
 reading::Number::count
@@ -250,9 +253,11 @@ reading::Reading::under
 reading::Status
 reading::Status::as_str
 reading::Store
-reading::Store::append
 reading::Store::at
-reading::Store::log
+reading::Store::history
+reading::Store::history_all
+reading::Store::land
+reading::Store::migrate
 reading::Store::of_workspace
 reading::Store::path
 reading::Store::read
@@ -261,6 +266,7 @@ reading::Store::record
 reading::Store::record_measurement
 reading::Store::root
 reading::UNDER_RECIPE
+reading::UNREAD
 reading::epoch_seconds
 reading::now
 run

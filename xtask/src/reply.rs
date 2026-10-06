@@ -113,7 +113,7 @@ pub(crate) fn closed_by(store: &Store, session_id: &str) -> Result<Vec<Ticket>> 
         return Ok(Vec::new());
     }
     let previous_stop = store
-        .log()?
+        .history(crate::done::INSTRUMENT)?
         .readings
         .iter()
         .filter(|r| {

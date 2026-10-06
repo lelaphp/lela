@@ -1,10 +1,11 @@
 //! The reading and its store (harness-design.md §4.2). Every instrument ends
 //! by writing its readings through [`Store::record`], the one writer; every
 //! rendering reads them; nothing else touches the store. The store is
-//! `target/harness/<instrument>/<scope>.toml`, one file per key, overwritten
-//! on each run, and `target/harness/log.jsonl`, append-only, one line per
-//! reading. The clock a reading's `at` is taken from, and the calendar that
-//! reads it back, live here too.
+//! `target/harness/<instrument>/<scope>.toml`, the scope's last reading,
+//! overwritten on each run; the index beside it, one file per key; and the
+//! log, `target/harness/log/<instrument>.jsonl`, append-only, one line per
+//! reading ([`Store`], revision 83). The clock a reading's `at` is taken
+//! from, and the calendar that reads it back, live here too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -23,8 +24,16 @@ use crate::sources;
 
 /// Where the store lives, relative to the workspace root.
 pub const DIR: &str = "target/harness";
-/// The append-only log, inside the store.
-pub const LOG: &str = "log.jsonl";
+/// The log's directory, inside the store: one append-only file per
+/// instrument (revision 83; #2164).
+pub const LOG: &str = "log";
+/// The one log a store kept before revision 83, split into [`LOG`] and the
+/// index by the first record or read that finds it ([`Store::migrate`]).
+pub const LEGACY: &str = "log.jsonl";
+/// What a split [`LEGACY`] log is kept as, inside the store.
+pub const MIGRATED: &str = "log.migrated.jsonl";
+/// The file of the log a line that is no reading is kept in, as it was.
+pub const UNREAD: &str = "unread";
 
 /// One reading, the one shape every instrument writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -220,18 +229,57 @@ impl Reading {
 }
 
 impl Reading {
-    /// One line of the log back into a reading; the inverse of `to_json`.
+    /// One line of the log back into a reading; the inverse of `to_json`,
+    /// in one pass: the line is read into [`Line`], whose `at` is the text
+    /// `to_json` writes, and only `at` is parsed again (#2164). A field
+    /// the reading has not is refused, as the reading's own `Deserialize`
+    /// refuses one.
     pub fn from_json(line: &str) -> Result<Reading> {
-        let mut value: serde_json::Value =
-            serde_json::from_str(line).context("parsing a log line")?;
-        let at = value["at"]
-            .as_str()
-            .context("a log line without `at`")?
+        let line: Line = serde_json::from_str(line).context("a log line that is not a reading")?;
+        let at = line
+            .at
             .parse::<Datetime>()
             .context("a log line whose `at` is not a datetime")?;
-        value["at"] = serde_json::to_value(at).context("the datetime as toml's value")?;
-        serde_json::from_value(value).context("a log line that is not a reading")
+        Ok(Reading {
+            instrument: line.instrument,
+            scope: line.scope,
+            rule: line.rule,
+            status: line.status,
+            numbers: line.numbers,
+            message: line.message,
+            adr: line.adr,
+            tree: line.tree,
+            commit: line.commit,
+            at,
+            session: line.session,
+            groups: line.groups,
+            recipe: line.recipe,
+        })
     }
+}
+
+/// A reading as one line of the log holds it: [`Reading`]'s fields, with
+/// `at` the text `to_json` writes in place of toml's datetime, whose own
+/// `Deserialize` reads only toml's form of it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Line {
+    instrument: String,
+    scope: String,
+    rule: String,
+    status: Status,
+    numbers: BTreeMap<String, Number>,
+    message: String,
+    adr: String,
+    tree: String,
+    commit: String,
+    at: String,
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    groups: BTreeMap<String, Number>,
+    #[serde(default)]
+    recipe: Option<String>,
 }
 
 /// A line of a log handed in, in either shape the published history has
@@ -402,11 +450,36 @@ impl std::fmt::Display for Number {
     }
 }
 
-/// The store: a directory of readings and its log.
+/// The store: a directory of readings, their index and their log
+/// (harness-design.md §4.2, revision 83; #2164).
+///
+/// - `<instrument>/<scope>.toml`, the last reading of each scope,
+///   overwritten on each run.
+/// - `<instrument>/<scope>/<key>.toml`, the index: the latest reading of
+///   a scope over each key it was taken over, the newest [`KEPT`] keys of
+///   a scope kept. A reading taken under an oracle pin is kept per pin
+///   too, `<key>-<pin>.toml`. Each file is written whole by a rename, so
+///   two writers at once need no lock and a reader sees one or the
+///   other. "The latest reading over a key" is one file read.
+/// - `log/<instrument>.jsonl`, the log: append-only history, one line per
+///   reading, one file per instrument, read by the renderings of history
+///   (the permits section, usage, the dashboard) and by no instrument's
+///   question about a key.
+///
+/// A store written before revision 83 kept one `log.jsonl`; the first
+/// record or read that finds one splits it into the log and the index and
+/// keeps it as [`MIGRATED`] ([`Store::migrate`]).
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
 }
+
+/// How many keys of one scope the index keeps, newest first: `done`
+/// asks for the key of the tree now, which the last run wrote, and a key
+/// older than this many runs of the scope is one no tree returns to often
+/// enough to keep. A key the index has let go reads as never measured, so
+/// the instrument runs again.
+pub const KEPT: usize = 32;
 
 impl Store {
     /// The store of the workspace at `root`.
@@ -425,6 +498,15 @@ impl Store {
 
     /// The file of one instrument and scope.
     pub fn path(&self, instrument: &str, scope: &str) -> Result<PathBuf> {
+        let dir = self.dir_of(instrument, scope)?;
+        let mut name = dir.clone().into_os_string();
+        name.push(".toml");
+        Ok(PathBuf::from(name))
+    }
+
+    /// `<instrument>/<scope>` under the store: the index's directory of
+    /// the scope, beside the scope's file.
+    fn dir_of(&self, instrument: &str, scope: &str) -> Result<PathBuf> {
         for part in [instrument, scope] {
             let clean = Path::new(part)
                 .components()
@@ -435,17 +517,42 @@ impl Store {
                 );
             }
         }
-        Ok(self.root.join(instrument).join(format!("{scope}.toml")))
+        Ok(self.root.join(instrument).join(scope))
+    }
+
+    /// The log of one instrument.
+    fn shard(&self, instrument: &str) -> Result<PathBuf> {
+        let clean = Path::new(instrument)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)));
+        if instrument.is_empty() || !clean || instrument.contains('/') {
+            bail!("an instrument names a file of the log; {instrument:?} does not");
+        }
+        Ok(self.root.join(LOG).join(format!("{instrument}.jsonl")))
+    }
+
+    /// Where the index keeps `reading`: none for one whose tree is empty,
+    /// which names no content.
+    fn indexed(&self, reading: &Reading) -> Result<Option<PathBuf>> {
+        if reading.tree.is_empty() {
+            return Ok(None);
+        }
+        let dir = self.dir_of(&reading.instrument, &reading.scope)?;
+        Ok(Some(dir.join(format!(
+            "{}.toml",
+            index_name(&reading.tree, reading.recipe.as_deref())
+        ))))
     }
 
     /// Record what an instrument held: every reading written, in order,
-    /// as its file, overwritten, and one line of the log, and the exit
-    /// the instrument owes for them. The one writer of the store
-    /// (harness-design.md §4.2); an instrument that ignores the outcome
-    /// says so, as `permit` does, whose exit is 0 whatever it decides
-    /// (§4.4), and a measurement records through
+    /// as its file, overwritten, its index entry and one line of its log,
+    /// and the exit the instrument owes for them. The one writer of the
+    /// store (harness-design.md §4.2); an instrument that ignores the
+    /// outcome says so, as `permit` does, whose exit is 0 whatever it
+    /// decides (§4.4), and a measurement records through
     /// [`Store::record_measurement`], which owes none.
     pub fn record(&self, readings: &[Reading]) -> Result<Outcome> {
+        self.migrate()?;
         for reading in readings {
             self.write(reading)?;
         }
@@ -465,42 +572,148 @@ impl Store {
         self.record(readings).map(|_| ())
     }
 
-    /// One reading: its file, replaced whole through [`replace`], and its
-    /// line of the log, which goes through [`Store::append_line`], the one
-    /// append.
+    /// One reading: its file, replaced whole through [`replace`], its
+    /// index entry, and its line of the log, which goes through
+    /// [`Store::append_line`], the one append.
     fn write(&self, reading: &Reading) -> Result<()> {
         let path = self.path(&reading.instrument, &reading.scope)?;
         let text = toml::to_string(reading).context("rendering the reading")?;
         replace(&path, text.as_bytes())?;
-
+        if let Some(entry) = self.indexed(reading)? {
+            replace(&entry, text.as_bytes())?;
+            prune(entry.parent().unwrap_or(&self.root))?;
+        }
         let mut line = reading.to_json()?.to_string();
         line.push('\n');
-        self.append_line(line.as_bytes())
+        Self::append_line(&self.shard(&reading.instrument)?, line.as_bytes())
     }
 
-    /// Every line of `lines`, a log another store wrote, appended to this
-    /// store's log, each through [`Store::append_line`]: the retire of a
-    /// worktree (`xtask worktree retire`) lands its log here, and a retire
-    /// during a run cannot tear a line of either. A line is appended as
-    /// it is, bytes and not text, so one the worktree tore stays torn and
-    /// tears nothing beside it; a last line without its newline is given
-    /// one. How many lines were appended.
-    pub fn append(&self, lines: &[u8]) -> Result<usize> {
-        let mut count = 0;
-        for line in lines.split_inclusive(|b| *b == b'\n') {
-            if line.ends_with(b"\n") {
-                self.append_line(line)?;
-            } else {
-                let mut whole = line.to_vec();
-                whole.push(b'\n');
-                self.append_line(&whole)?;
+    /// Every reading another store's log holds, landed in this one's log
+    /// and index, and that log emptied: the retire of a worktree (`xtask
+    /// worktree retire`) lands its readings here, so a branch's passes
+    /// stand at its merge, found by the key they were taken over (#1252).
+    /// The other store's files of each scope stay where they are: each is
+    /// a scope's last run over a tree the store landed in may not have
+    /// (#35). Its log is read whole, the one file a store kept before
+    /// revision 83 and the files of each instrument after it, and each is
+    /// emptied once landed, so a retire that refuses after this and the
+    /// call that follows cannot land a reading twice. How many lines
+    /// were landed.
+    pub fn land(&self, from: &Store) -> Result<usize> {
+        self.migrate()?;
+        let mut sources = vec![from.root.join(LEGACY)];
+        sources.extend(shards(&from.root.join(LOG))?);
+        let mut landed = 0;
+        for source in sources {
+            let bytes = match fs::read(&source) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    return Err(err).with_context(|| format!("reading {}", source.display()));
+                }
+            };
+            landed += self.split(&bytes)?;
+            fs::write(&source, "").with_context(|| format!("emptying {}", source.display()))?;
+        }
+        Ok(landed)
+    }
+
+    /// The one log of a store written before revision 83, split into the
+    /// log and the index, and kept beside them as [`MIGRATED`]: done by the
+    /// first record or read that finds it, and done once, since the rename
+    /// that claims the file is what decides which process splits it. A
+    /// harness built before revision 83 that writes `log.jsonl` again
+    /// leaves one the next record splits the same way, its lines added to
+    /// [`MIGRATED`]. A line that is no reading, which a write the kernel
+    /// split leaves behind, is kept as it was in [`UNREAD`].
+    pub fn migrate(&self) -> Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let legacy = self.root.join(LEGACY);
+        if !legacy.exists() {
+            return Ok(());
+        }
+        let claimed = self.root.join(format!(
+            ".{LEGACY}.{}.{}.splitting",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::rename(&legacy, &claimed) {
+            Ok(()) => {}
+            // Another process claimed it between the look and the rename.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(err).with_context(|| format!("claiming {}", legacy.display()));
             }
+        }
+        let bytes = fs::read(&claimed).with_context(|| format!("reading {}", claimed.display()))?;
+        self.split(&bytes)?;
+        let kept = self.root.join(MIGRATED);
+        // The first split's file becomes the kept one whole; a later one,
+        // a stale harness's, is added to it.
+        if fs::hard_link(&claimed, &kept).is_err() {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&kept)
+                .with_context(|| format!("opening {}", kept.display()))?;
+            file.write_all(&bytes)
+                .with_context(|| format!("appending to {}", kept.display()))?;
+        }
+        fs::remove_file(&claimed).with_context(|| format!("removing {}", claimed.display()))
+    }
+
+    /// Every line of `lines` added to the log of its instrument as it is,
+    /// and the latest reading of each scope over each key put in the
+    /// index unless the index holds a later one: what [`Store::migrate`]
+    /// and [`Store::land`] share. The index is written once per key, the
+    /// newest [`KEPT`] of each scope, after the lines. How many lines.
+    fn split(&self, lines: &[u8]) -> Result<usize> {
+        let mut latest: BTreeMap<PathBuf, Reading> = BTreeMap::new();
+        let mut count = 0;
+        for line in lines.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
             count += 1;
+            let mut whole = line.to_vec();
+            whole.push(b'\n');
+            let read = std::str::from_utf8(line)
+                .ok()
+                .and_then(|text| Reading::from_json(text).ok());
+            let Some(reading) = read else {
+                Self::append_line(&self.shard(UNREAD)?, &whole)?;
+                continue;
+            };
+            Self::append_line(&self.shard(&reading.instrument)?, &whole)?;
+            if let Some(entry) = self.indexed(&reading)? {
+                let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
+                if latest.get(&entry).is_none_or(later) {
+                    latest.insert(entry, reading);
+                }
+            }
+        }
+        // The newest of each scope, by the time each reading was taken.
+        let mut by_dir: BTreeMap<PathBuf, Vec<(String, PathBuf, Reading)>> = BTreeMap::new();
+        for (entry, reading) in latest {
+            let dir = entry.parent().unwrap_or(&self.root).to_path_buf();
+            by_dir
+                .entry(dir)
+                .or_default()
+                .push((reading.at.to_string(), entry, reading));
+        }
+        for (dir, mut entries) in by_dir {
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+            for (_, entry, reading) in entries.into_iter().take(KEPT) {
+                let held = Self::read_file(&entry).ok();
+                if held.is_none_or(|held| reading.at.to_string() >= held.at.to_string()) {
+                    let text = toml::to_string(&reading).context("rendering the reading")?;
+                    replace(&entry, text.as_bytes())?;
+                }
+            }
+            prune(&dir)?;
         }
         Ok(count)
     }
 
-    /// The one append to the log, and the rule that a line reaches it whole
+    /// The one append to a log, and the rule that a line reaches it whole
     /// or not at all (#56): `line`, rendered whole with its newline, is
     /// handed to the file in one `write` on a descriptor opened with
     /// `O_APPEND`, so two instruments appending at once, which pre-commit
@@ -510,18 +723,17 @@ impl Store {
     /// `O_APPEND` write to a regular file whole in practice; a reading
     /// longer than `PIPE_BUF` is the one case not covered on paper: it is
     /// still handed over in one call, and if the kernel splits it the line
-    /// tears, which [`Store::log`] counts and names rather than fails on.
-    /// A short write is an error, never retried, since a retry could only
-    /// tear the line it means to finish.
-    fn append_line(&self, line: &[u8]) -> Result<()> {
-        let log = self.root.join(LOG);
+    /// tears, which [`Store::history`] counts and names rather than fails
+    /// on. A short write is an error, never retried, since a retry could
+    /// only tear the line it means to finish.
+    fn append_line(log: &Path, line: &[u8]) -> Result<()> {
         if let Some(dir) = log.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&log)
+            .open(log)
             .with_context(|| format!("opening {}", log.display()))?;
         let written = file
             .write(line)
@@ -546,14 +758,14 @@ impl Store {
     }
 
     /// Of `instrument`, the latest reading of each scope of `trees` taken
-    /// over the content its tree hash names, by scope: the scope's file when
-    /// the reading there is over it, since that one is the latest of all,
-    /// and otherwise the latest such line of the log, one pass over it for
-    /// every scope. The log is where a retired worktree's readings are:
-    /// `worktree retire` appends its log here and leaves its files, so a
-    /// branch's pass stands at its merge only when it is found by the tree
-    /// it was taken over (#1252). A scope with no reading over its tree is
-    /// absent, and so is one whose hash is empty, which names no content.
+    /// over the content its tree hash names, by scope: the scope's file
+    /// when the reading there is over it, since that one is the latest of
+    /// all, and otherwise the index's entry for the key. The index is
+    /// where a retired worktree's readings are: `worktree retire` lands
+    /// its log here and leaves its files, so a branch's pass stands at its
+    /// merge only when it is found by the tree it was taken over (#1252).
+    /// A scope with no reading over its tree is absent, and so is one
+    /// whose hash is empty, which names no content.
     pub(crate) fn latest_over(
         &self,
         instrument: &str,
@@ -572,75 +784,94 @@ impl Store {
     }
 
     /// [`Store::latest_over`] for several instruments at once, each sought
-    /// as `(instrument, scope, tree)` and found by instrument and scope,
-    /// the log passed over once for all of them: what `done` asks of a
-    /// touched crate whose file holds a reading over another tree, such as
-    /// a refused commit's, while a pass over the tree now is in the log
-    /// (#1312).
+    /// as `(instrument, scope, tree)` and found by instrument and scope:
+    /// what `done` asks of a touched crate whose file holds a reading over
+    /// another tree, such as a refused commit's, while a pass over the
+    /// tree now is in the index (#1312). A lookup reads the scope's file
+    /// and the index's entries for the key, and no log.
     pub(crate) fn latest_over_each(
         &self,
         sought: &[(String, String, String)],
         pin: &str,
     ) -> Result<BTreeMap<(String, String), Reading>> {
-        const TREE: &str = "\"tree\":\"";
+        self.migrate()?;
         let mut found = BTreeMap::new();
-        let mut by_tree: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
         for (instrument, scope, tree) in sought.iter().filter(|(_, _, tree)| !tree.is_empty()) {
             // A file that is no reading is no reading over the tree, and
-            // the log is asked instead, as for a stale one (#1235).
-            match self.read(instrument, scope).ok().flatten() {
-                Some(reading) if reading.fresh_for(tree, pin) => {
-                    found.insert((instrument.clone(), scope.clone()), reading);
-                }
-                _ => by_tree
-                    .entry(tree.as_str())
-                    .or_default()
-                    .push((instrument, scope)),
-            }
-        }
-        let sought = by_tree;
-        if sought.is_empty() {
-            return Ok(found);
-        }
-        let path = self.root.join(LOG);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-        };
-        // `tree` is the last key of a line (`to_json` writes them sorted),
-        // so the search from the end finds it at once; only a line over a
-        // sought tree is parsed.
-        for line in String::from_utf8_lossy(&bytes).lines() {
-            let Some(at) = line.rfind(TREE) else {
-                continue;
+            // the index is asked instead, as for a stale one (#1235).
+            let reading = match self.read(instrument, scope).ok().flatten() {
+                Some(reading) if reading.fresh_for(tree, pin) => Some(reading),
+                _ => self
+                    .entries(instrument, scope, tree)?
+                    .into_iter()
+                    .filter(|r| r.fresh_for(tree, pin))
+                    .max_by_key(|r| r.at.to_string()),
             };
-            let tree = line[at + TREE.len()..].split('"').next().unwrap_or("");
-            let Some(wanted) = sought.get(tree) else {
-                continue;
-            };
-            let Ok(reading) = Reading::from_json(line) else {
-                continue;
-            };
-            let key = (reading.instrument.clone(), reading.scope.clone());
-            let later = |held: &Reading| reading.at.to_string() >= held.at.to_string();
-            if reading.fresh_for(tree, pin)
-                && wanted.contains(&(key.0.as_str(), key.1.as_str()))
-                && found.get(&key).is_none_or(later)
-            {
-                found.insert(key, reading);
+            if let Some(reading) = reading {
+                found.insert((instrument.clone(), scope.clone()), reading);
             }
         }
         Ok(found)
     }
 
+    /// The last reading of `instrument` over `scope` this store holds,
+    /// by the time it was taken: the scope's file or, where a retired
+    /// worktree's later one was landed in the index and not the file, the
+    /// index's latest entry. None where the store holds neither.
+    pub(crate) fn last_of(&self, instrument: &str, scope: &str) -> Result<Option<Reading>> {
+        self.migrate()?;
+        let mut last = self.read(instrument, scope).ok().flatten();
+        for (_, path) in self.keys_of(instrument, scope)? {
+            if let Ok(entry) = Self::read_file(&path)
+                && last
+                    .as_ref()
+                    .is_none_or(|held| entry.at.to_string() > held.at.to_string())
+            {
+                last = Some(entry);
+            }
+        }
+        Ok(last)
+    }
+
+    /// The index's readings of `instrument` over `scope` taken over
+    /// `tree`, one per oracle pin they were taken under.
+    fn entries(&self, instrument: &str, scope: &str, tree: &str) -> Result<Vec<Reading>> {
+        Ok(self
+            .keys_of(instrument, scope)?
+            .into_iter()
+            .filter(|(key, _)| key == tree)
+            .filter_map(|(_, path)| Self::read_file(&path).ok())
+            .collect())
+    }
+
+    /// Each entry of the index of one scope: its key and its file.
+    fn keys_of(&self, instrument: &str, scope: &str) -> Result<Vec<(String, PathBuf)>> {
+        let dir = self.dir_of(instrument, scope)?;
+        let listing = match fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
+        };
+        let mut keys = Vec::new();
+        for entry in listing {
+            let path = entry
+                .with_context(|| format!("listing {}", dir.display()))?
+                .path();
+            if let Some(key) = index_key(&path) {
+                keys.push((key.to_owned(), path));
+            }
+        }
+        Ok(keys)
+    }
+
     /// Which of `trees` a reading of `instrument` over `scope` was taken
-    /// over, whatever its status or recipe: the scope's file, then every
-    /// line of the log, where a retired worktree's readings are. What
+    /// over, whatever its status or recipe: the scope's file, then the
+    /// index's keys of the scope, and for a tree neither holds, the log of
+    /// the instrument, where a key the index let go of still stands. What
     /// `permit`'s `unless` reads as evidence that an instrument measured a
     /// commit's content, by the key a commit's objects give
-    /// ([`crate::key::Snapshot::commit`], #1448). An empty hash names no
-    /// content and is never found.
+    /// ([`crate::key::Snapshot::commit`], #1448), however long ago. An
+    /// empty hash names no content and is never found.
     pub(crate) fn measured_over(
         &self,
         instrument: &str,
@@ -648,6 +879,7 @@ impl Store {
         trees: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>> {
         const TREE: &str = "\"tree\":\"";
+        self.migrate()?;
         let mut found = BTreeSet::new();
         if let Some(reading) = self.read(instrument, scope).ok().flatten()
             && !reading.tree.is_empty()
@@ -655,7 +887,15 @@ impl Store {
         {
             found.insert(reading.tree);
         }
-        let path = self.root.join(LOG);
+        for (key, _) in self.keys_of(instrument, scope)? {
+            if trees.contains(&key) {
+                found.insert(key);
+            }
+        }
+        if found.len() == trees.iter().filter(|t| !t.is_empty()).count() {
+            return Ok(found);
+        }
+        let path = self.shard(instrument)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
@@ -670,7 +910,6 @@ impl Store {
                 continue;
             }
             if let Ok(reading) = Reading::from_json(line)
-                && reading.instrument == instrument
                 && reading.scope == scope
             {
                 found.insert(reading.tree);
@@ -679,14 +918,15 @@ impl Store {
         Ok(found)
     }
 
-    /// The append-only log, oldest first: what the store held across every
-    /// run and every session, and the lines it could not read. A missing
-    /// log is empty. A line that is not a reading, which a write the kernel
-    /// split leaves behind (see [`Store::append_line`]), is counted by its
-    /// number and skipped rather than failing the whole log, so a torn line
-    /// degrades one section and never the session.
-    pub fn log(&self) -> Result<Log> {
-        let path = self.root.join(LOG);
+    /// The log of one instrument, oldest first: what the store held of it
+    /// across every run and every session, and the lines it could not
+    /// read. A missing log is empty. A line that is not a reading, which a
+    /// write the kernel split leaves behind (see [`Store::append_line`]),
+    /// is counted by its number and skipped rather than failing the whole
+    /// log, so a torn line degrades one section and never the session.
+    pub fn history(&self, instrument: &str) -> Result<Log> {
+        self.migrate()?;
+        let path = self.shard(instrument)?;
         if !path.exists() {
             return Ok(Log::default());
         }
@@ -695,12 +935,61 @@ impl Store {
         Ok(Log::of(&text, Reading::from_json))
     }
 
-    /// Every reading in the store, in path order, and every file of the
-    /// store that is not one, by its path. A missing store is empty. A file
-    /// a crash left empty or cut short, which [`replace`] no longer can
-    /// (#1235), is named and skipped rather than failing every rendering
-    /// of the store, as the log's torn line is: it costs its own row, and
-    /// the next run of its instrument writes it again.
+    /// Every instrument's log at once, in the order the readings were
+    /// taken: what `status --every` renders. The one reader of the whole
+    /// log; every other reads the instruments it renders.
+    pub fn history_all(&self) -> Result<Log> {
+        self.migrate()?;
+        let mut all = Log::default();
+        for path in shards(&self.root.join(LOG))? {
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let log = Log::of(&text, Reading::from_json);
+            all.readings.extend(log.readings);
+            all.unreadable.extend(log.unreadable);
+        }
+        all.readings.sort_by_cached_key(|r| r.at.to_string());
+        Ok(all)
+    }
+
+    /// Of each instrument's log, each line's status and time, read without
+    /// the rest of the line: what the permits section counts per
+    /// instrument, which reads every log and needs no reading whole.
+    pub(crate) fn tallies(&self) -> Result<BTreeMap<String, Vec<(Status, String)>>> {
+        #[derive(Deserialize)]
+        struct Brief {
+            status: Status,
+            at: String,
+        }
+        self.migrate()?;
+        let mut tallies = BTreeMap::new();
+        for path in shards(&self.root.join(LOG))? {
+            let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if name == UNREAD {
+                continue;
+            }
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let lines: Vec<(Status, String)> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Brief>(l).ok())
+                .map(|b| (b.status, b.at))
+                .collect();
+            tallies.insert(name, lines);
+        }
+        Ok(tallies)
+    }
+
+    /// Every reading in the store, the last of each scope, in path order,
+    /// and every file of the store that is not one, by its path; the
+    /// index's entries are no scope's last reading and are left out. A
+    /// missing store is empty. A file a crash left empty or cut short,
+    /// which [`replace`] no longer can (#1235), is named and skipped rather
+    /// than failing every rendering of the store, as the log's torn line
+    /// is: it costs its own row, and the next run of its instrument writes
+    /// it again.
     pub fn readings(&self) -> Result<Files> {
         let mut paths = Vec::new();
         if self.root.is_dir() {
@@ -710,7 +999,7 @@ impl Store {
         let mut files = Files::default();
         for path in paths
             .into_iter()
-            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+            .filter(|p| p.extension().is_some_and(|e| e == "toml") && index_key(p).is_none())
         {
             match Self::read_file(&path) {
                 Ok(reading) => files.readings.push(reading),
@@ -725,6 +1014,72 @@ impl Store {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
+}
+
+/// The index's file name of a key, without `.toml`: the key, and the pin
+/// a reading was taken under after a dash where it has one. A pin that is
+/// not a hex digest is named by its blob id, so the name stays a name.
+fn index_name(tree: &str, recipe: Option<&str>) -> String {
+    match recipe {
+        None => tree.to_owned(),
+        Some(pin) if pin.chars().all(|c| c.is_ascii_hexdigit()) => format!("{tree}-{pin}"),
+        Some(pin) => format!("{tree}-{}", crate::git::blob_id(pin.as_bytes())),
+    }
+}
+
+/// The key an index file is kept under, or none for a path that is no
+/// index entry: a `.toml` whose name is forty hex digits, the key, alone
+/// or before a dash and its pin.
+fn index_key(path: &Path) -> Option<&str> {
+    if path.extension().is_none_or(|e| e != "toml") {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let key = stem.get(..40)?;
+    let rest = &stem[40..];
+    (key.chars().all(|c| c.is_ascii_hexdigit()) && (rest.is_empty() || rest.starts_with('-')))
+        .then_some(key)
+}
+
+/// The index of one scope cut to its newest [`KEPT`] entries, by the time
+/// each was written. Another writer pruning at once may remove a file
+/// first, which is the same end.
+fn prune(dir: &Path) -> Result<()> {
+    let Ok(listing) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let mut entries: Vec<(SystemTime, PathBuf)> = listing
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| index_key(p).is_some())
+        .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    if entries.len() <= KEPT {
+        return Ok(());
+    }
+    entries.sort_by_key(|(written, _)| std::cmp::Reverse(*written));
+    for (_, path) in entries.into_iter().skip(KEPT) {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// The files of the log under `dir`, in name order; none where it is not.
+fn shards(dir: &Path) -> Result<Vec<PathBuf>> {
+    let listing = match fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
+    };
+    let mut paths: Vec<PathBuf> = listing
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    paths.sort();
+    Ok(paths)
 }
 
 /// The store's files as read: every one that is a reading, in path order,
@@ -827,7 +1182,7 @@ impl Log {
     }
 
     /// A log handed to a rendering rather than read off its store
-    /// (harness-design.md §4.6): another store's `log.jsonl`, or the
+    /// (harness-design.md §4.6): a file of another store's log, or the
     /// published history, whose older rows are lean (#1747). Any line
     /// shaped as a reading reads, a whole line with the fields this build
     /// does not know ignored or a lean row `{i,s,t,a,c,n}`; any other is
@@ -836,8 +1191,8 @@ impl Log {
         Log::of(text, Reading::from_kept)
     }
 
-    /// What a rendering says about the lines it could not read, `log.jsonl:
-    /// 1 line unreadable at 10019.`, at most five named and the rest
+    /// What a rendering says about the lines it could not read, `log: 1
+    /// line unreadable at 10019.`, at most five named and the rest
     /// counted; none when every line read. One string, so every section
     /// says it the same way.
     pub fn unreadable_note(&self) -> Option<String> {
@@ -1062,7 +1417,69 @@ pub(crate) fn listed(names: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, days_from_civil, listed};
+    use std::collections::BTreeSet;
+
+    use super::{KEPT, Reading, Status, Store, civil_from_days, days_from_civil, listed};
+    use crate::scratch::Tree;
+
+    /// A passing reading of `instrument` over `scope`, taken over `tree`
+    /// at `at`.
+    fn over(instrument: &str, scope: &str, tree: &str, at: &str) -> Reading {
+        let mut reading = Reading::new(instrument, scope);
+        tree.clone_into(&mut reading.tree);
+        reading.status = Status::Pass;
+        reading.commit = "0000000".into();
+        reading.at = at.parse().unwrap();
+        reading
+    }
+
+    /// The `n`th key, forty hex digits.
+    fn key(n: usize) -> String {
+        format!("{n:040x}")
+    }
+
+    /// A reading lands in the index under its key, the newest [`KEPT`] of
+    /// a scope stay, and the latest reading over a key is found there
+    /// while the scope's file has moved on to another (#2164). A key the
+    /// index let go reads as never measured to `done`, and is still found
+    /// in the instrument's log by `permit`'s look for evidence.
+    #[test]
+    fn a_reading_is_found_by_its_key_and_the_newest_keys_stay() {
+        let dir = Tree::new("store-index").unwrap();
+        let store = Store::at(dir.path());
+        for n in 0..KEPT + 8 {
+            let at = format!("2026-10-06T10:{n:02}:00Z");
+            store
+                .record(&[over("budget", "ext/pcre", &key(n), &at)])
+                .unwrap();
+        }
+        let kept: BTreeSet<String> = store
+            .keys_of("budget", "ext/pcre")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(kept.len(), KEPT);
+        assert!(kept.contains(&key(KEPT + 7)) && !kept.contains(&key(0)));
+        let sought = |n: usize| [("budget".to_owned(), "ext/pcre".to_owned(), key(n))];
+        let found = store.latest_over_each(&sought(KEPT + 1), "").unwrap();
+        assert_eq!(
+            found.values().next().map(Reading::tree),
+            Some(key(KEPT + 1).as_str()),
+            "found by its key while the scope's file holds the last"
+        );
+        assert!(store.latest_over_each(&sought(0), "").unwrap().is_empty());
+        let let_go: BTreeSet<String> = [key(0)].into();
+        assert_eq!(
+            store.measured_over("budget", "ext/pcre", &let_go).unwrap(),
+            let_go
+        );
+        assert_eq!(
+            store.readings().unwrap().readings.len(),
+            1,
+            "the index's entries are no scope's last reading"
+        );
+    }
 
     #[test]
     fn at_most_five_names_are_listed_and_the_rest_counted() {

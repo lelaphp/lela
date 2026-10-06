@@ -155,7 +155,7 @@ fn name(section: Section) -> String {
 /// reads it.
 fn read(store: &Store, path: Option<&Path>) -> Result<(Log, String)> {
     let (text, name) = match path {
-        None => return Ok((store.log()?, LOG.to_owned())),
+        None => return Ok((store.history_all()?, LOG.to_owned())),
         Some(path) if path == Path::new(STDIN) => {
             let mut text = String::new();
             std::io::stdin()
