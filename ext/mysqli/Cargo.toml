@@ -25,3 +25,7 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # a link in session's `RSHUTDOWN` (#1689).
 php_ext_session = { path = "../session" }
 php_ext_standard = { path = "../standard" }
+# openssl, whose natives mysqlnd's `sha256_password` and
+# `caching_sha2_password` encrypt the password with over a plain socket
+# (#2092).
+php_ext_openssl = { path = "../openssl" }

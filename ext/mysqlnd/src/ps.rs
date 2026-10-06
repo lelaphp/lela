@@ -623,7 +623,7 @@ fn prepare(
         return Ok(false);
     }
     // `mysqlnd_stmt_read_prepare_response`.
-    let Some(response) = conn.read_prepare_response(req)? else {
+    let Some(response) = conn.read_prepare_response(req) else {
         return Ok(false);
     };
     if let Some(e) = response.error {
@@ -641,20 +641,20 @@ fn prepare(
         // `mysqlnd_stmt_skip_metadata`: the parameters' columns read and
         // dropped, as libmysql does.
         for _ in 0..stmt.parameter_count {
-            if conn.read_packet(req, Prot::RsetField)?.is_none() {
+            if conn.read_packet(req, Prot::RsetField).is_none() {
                 return Ok(false);
             }
         }
-        if !prepare_read_eof(req, stmt, conn)? {
+        if !prepare_read_eof(req, stmt, conn) {
             return Ok(false);
         }
     }
     if stmt.field_count > 0 {
         let mut result = Box::new(Res::new(stmt.field_count));
         result.kind = ResType::PsBuffered;
-        let read = result.read_metadata(req, conn)?;
+        let read = result.read_metadata(req, conn);
         stmt.result = Some(result);
-        if !read || !prepare_read_eof(req, stmt, conn)? {
+        if !read || !prepare_read_eof(req, stmt, conn) {
             return Ok(false);
         }
     }
@@ -664,21 +664,17 @@ fn prepare(
 
 /// `mysqlnd_stmt_prepare_read_eof`: the EOF after the column definitions, its
 /// status the statement's; a failed read leaves the statement as new.
-fn prepare_read_eof(
-    req: &mut Request,
-    stmt: &mut StmtData,
-    conn: &mut ConnData,
-) -> Result<bool, Thrown> {
-    let Some(eof) = conn.read_eof(req)? else {
+fn prepare_read_eof(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> bool {
+    let Some(eof) = conn.read_eof(req) else {
         if stmt.result.take().is_some() {
             *stmt = StmtData::new();
         }
-        return Ok(false);
+        return false;
     };
     stmt.upsert.server_status = eof.server_status;
     stmt.upsert.warning_count = eof.warning_count;
     stmt.state = StmtState::Prepared;
-    Ok(true)
+    true
 }
 
 // ---- executing
@@ -1032,7 +1028,7 @@ fn store_result(
     let Some(result) = stmt.result.as_mut() else {
         return Ok(false);
     };
-    if result.store(req, conn, true)? {
+    if result.store(req, conn, true) {
         stmt.upsert.affected_rows = result.num_rows();
         stmt.state = StmtState::UseOrStoreCalled;
         return Ok(true);
@@ -1099,7 +1095,7 @@ fn get_result(
     }
     let mut result = Box::new(Res::new(stmt.field_count));
     result.fields = fields;
-    let stored = result.store(req, conn, true)?;
+    let stored = result.store(req, conn, true);
     stmt.state = StmtState::Prepared;
     if !stored {
         stmt.error.copy_from(&conn.error);
@@ -1269,7 +1265,7 @@ fn reset(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
     let mut ok = true;
     if conn.state == ConnState::Ready {
         ok = conn.send_command(req, Com::StmtReset, &stmt.stmt_id.to_le_bytes(), false)?
-            && conn.handle_response(req, false, false, Com::StmtReset, true)?;
+            && conn.handle_response(req, false, false, Com::StmtReset, true);
         if !ok {
             stmt.error.copy_from(&conn.error);
         }
