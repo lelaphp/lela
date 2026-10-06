@@ -636,11 +636,10 @@ impl Request {
     fn publish_tables(&mut self, rows: &[Row]) -> Result<Published, String> {
         let mut renumbered: HashMap<ClassId, ClassId> = HashMap::new();
         for local in self.publication_order(rows) {
-            let published = self.publish_class(local, &renumbered)?;
             // `zend_build_properties_info_table` at the link: the placed
-            // properties built before any request is handed the number,
-            // so no request writes the published row.
-            let _ = self.placed_properties(published);
+            // properties are built as the class binds, before any request
+            // is handed the number ([`Request::bound_as`]).
+            let published = self.publish_class(local, &renumbered)?;
             renumbered.insert(local, published);
         }
         let shared = |class: ClassId| renumbered.get(&class).copied().unwrap_or(class);
@@ -775,7 +774,6 @@ impl Request {
             unit: Arc::clone(&row.unit),
             at: row.at,
             composed: row.composed.clone(),
-            placed: std::sync::OnceLock::new(),
             bound,
         };
         if !self.arena.publish_class(class, row) {
@@ -936,6 +934,7 @@ mod tests {
     use super::{Request, Row};
     use crate::api::values::ClassId;
     use crate::engine::{Engine, RequestDescription};
+    use php_unit::decl::PropertyDecl;
 
     /// How many rounds each side runs.
     const ROUNDS: usize = 40;
@@ -1056,8 +1055,9 @@ mod tests {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         req.begin_preload();
-        let code = "trait T { function t() {} } class P { function p() {} } \
-                    class_alias('P', 'PA'); class C extends PA { use T; }";
+        let code = "trait T { public $t; function t() {} } \
+                    class P { public $p; private $q; function p() {} } \
+                    class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";
         assert!(req.eval_stringl(code.as_bytes(), b"preload").is_ok());
         let mut rows = req.class_rows(Vec::new(), 0);
         let child = req.class_named(b"c");
@@ -1077,12 +1077,25 @@ mod tests {
         assert_eq!(order, ["C", "T", "P"]);
         let child = names.first().map(|(class, _)| *class);
         assert!(child.is_some_and(ClassId::is_published));
-        for (class, name) in &names {
-            let row = req.arena.class(*class);
-            assert!(
-                row.is_some_and(|row| row.placed.get().is_some()),
-                "{name}'s placed properties"
-            );
+        // The placed properties came with the published row: the
+        // parent's slots first, the redeclared `$p` in the parent's,
+        // naming the published classes.
+        let placed = |class: ClassId| -> Vec<(ClassId, String)> {
+            req.arena.class(class).map_or_else(Vec::new, |row| {
+                let shown = |(holder, p): &(ClassId, PropertyDecl)| {
+                    (*holder, String::from_utf8_lossy(&p.name.0).into_owned())
+                };
+                row.bound.placed.iter().map(shown).collect()
+            })
+        };
+        let parent = names.last().map(|(class, _)| *class);
+        if let (Some(child), Some(parent)) = (child, parent) {
+            let expect = |pairs: &[(ClassId, &str)]| -> Vec<(ClassId, String)> {
+                pairs.iter().map(|(c, n)| (*c, (*n).to_string())).collect()
+            };
+            assert_eq!(placed(parent), expect(&[(parent, "p"), (parent, "q")]));
+            let own = [(child, "p"), (parent, "q"), (child, "c"), (child, "t")];
+            assert_eq!(placed(child), expect(&own));
         }
         for method in [&b"t"[..], b"p"] {
             let found = child.and_then(|child| req.method_named(child, method));
@@ -1093,7 +1106,6 @@ mod tests {
             .flat_map(|published| published.aliases.rows.iter())
             .map(|(_, alias, class)| (alias.clone(), *class))
             .next();
-        let parent = names.last().map(|(class, _)| *class);
         assert_eq!(alias, parent.map(|parent| (b"pa".to_vec(), parent)));
     }
 }

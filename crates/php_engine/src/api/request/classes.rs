@@ -6,7 +6,7 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use php_heap::{FrameRef, Heap};
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
@@ -407,7 +407,6 @@ impl Request {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
-            placed: OnceLock::new(),
             bound: Bound::default(),
         };
         if let Some(decl) = row.decl() {
@@ -468,7 +467,9 @@ impl Request {
     /// space, the request's own or the published arena's (design §5.14),
     /// an enum's own `cases`, `from` and `tryFrom` the functions that
     /// serve them, and `record`, or else the record made over the table
-    /// as it stands. `from` and `class` are the same class except where
+    /// as it stands; and the placed properties over its parent's, read
+    /// off the record ([`super::placed_of`]), so a publisher hands the
+    /// number on with them built. `from` and `class` are the same class except where
     /// the preload publishes a class its request declared: `from` the
     /// request's own number, `class` the published one. None where the
     /// arena has no room for its functions.
@@ -571,11 +572,19 @@ impl Request {
             }
         }
         let record = record.or_else(|| self.record_at_bind(from));
+        let above = parent.or_else(|| self.class_parent(from));
+        let placed = self
+            .class_decl(from)
+            .map_or_else(super::Placed::default, |decl| {
+                let parent = above.map_or(&[][..], |parent| self.placed_properties(parent));
+                super::objects::placed_of(class, decl, record.as_ref(), parent)
+            });
         Some(Bound {
             record,
             functions: functions.into_boxed_slice(),
             members,
             parent,
+            placed,
         })
     }
 
