@@ -148,16 +148,6 @@ pub(crate) struct Stage {
 /// int(0)
 /// string(1) "1"
 /// ```
-/// `PHP_RSHUTDOWN_FUNCTION(assert)` (`Z/ext/standard/assert.c:157`):
-/// `ASSERTG(callback)` given up as the request ends, the string the
-/// entry was made into or the callable `assert_options` set.
-pub(crate) fn rshutdown(req: &mut Request) {
-    if let Some(callback) = req.assert_callback().copied() {
-        req.set_assert_callback(None);
-        req.release(callback);
-    }
-}
-
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
     if req.ini_stage() == IniStage::Deactivate {
         return;
@@ -177,6 +167,16 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
             String::from_utf8_lossy(name)
         );
         docref(req, Level::Deprecated, &text);
+    }
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(assert)` (`Z/ext/standard/assert.c:157`):
+/// `ASSERTG(callback)` given up as the request ends, the string the
+/// entry was made into or the callable `assert_options` set.
+pub(crate) fn rshutdown(req: &mut Request) {
+    if let Some(callback) = req.assert_callback().copied() {
+        req.set_assert_callback(None);
+        req.release(callback);
     }
 }
 
