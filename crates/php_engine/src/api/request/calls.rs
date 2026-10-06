@@ -866,6 +866,22 @@ impl Request {
         Some((self.calls.trampolines.get(index)?, served))
     }
 
+    /// `fn_flags & (ZEND_ACC_CALL_VIA_TRAMPOLINE|ZEND_ACC_NEVER_CACHE)`:
+    /// a callee no cache slot may hold, since the next lookup of the
+    /// same name on the same class may answer another. A trampoline the
+    /// request made, `__call`'s, a closure's `__invoke` or an
+    /// extension's native, is one per name or per closure; and a method
+    /// a class's `get_method` synthesises ([`MethodAt::Trampoline`]) is
+    /// answered by the object and not by its class, as a method a `PDO`
+    /// connection's connector lays on it is by that connection, which
+    /// php marks `ZEND_ACC_NEVER_CACHE` (`Z/ext/pdo/pdo_dbh.c:1402`).
+    pub(crate) fn never_cached(&self, function: Function) -> bool {
+        self.trampoline_of(function).is_some()
+            || self
+                .native_method(function)
+                .is_some_and(|method| matches!(method.at, MethodAt::Trampoline { .. }))
+    }
+
     /// `zend_get_call_trampoline_func(ce, name, is_static)`
     /// (`Z/Zend/zend_object_handlers.c:1764`): the trampoline `class`'s
     /// `__call`, or its `__callStatic` where `is_static`, serves under

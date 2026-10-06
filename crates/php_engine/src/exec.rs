@@ -576,12 +576,16 @@ pub(crate) fn observer_slot_of<'map>(
 /// 3
 /// ```
 ///
-/// The slots a kernel primes here, a callee and a class, resolve the
-/// same in every scope, so a closure rebound to another scope reads the
-/// cache its op array has; php gives such a closure a cache of its own
-/// (`zend_create_closure`, `Z/Zend/zend_closures.c:793`) because its
-/// slots also hold property offsets, which are the scope's. The day a
-/// slot here holds one, a rebound closure takes its own cache there.
+/// A closure rebound to another scope, and a trait's method in each
+/// class that uses it, reads the cache its op array has, where php
+/// gives each a cache of its own (`zend_create_closure`,
+/// `Z/Zend/zend_closures.c:794`; `zend_add_trait_method`,
+/// `Z/Zend/zend_inheritance.c:2369`) because its
+/// slots hold what the scope decides. A function, a class and a
+/// constant resolve the same in every scope; a method's callee does
+/// not, so [`Cached::ClassAndCallee`] carries the scope it was resolved
+/// from and answers no other. The day a slot here holds a property
+/// offset, a rebound closure takes its own cache there.
 pub(crate) fn init_runtime_cache(map: &mut MapTable, code: &OpArray, body: Body) {
     let cache = map.map(runtime_cache_of(code));
     if body == Body::Main || cache.slots.is_none() {
@@ -630,15 +634,35 @@ pub(crate) enum Cached {
     /// primed answers every pass after.
     Class(ClassId),
     /// The class and the callee an `INIT_STATIC_METHOD_CALL` over two
-    /// constants resolved together on its first pass,
-    /// `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`: php writes
-    /// the class into the slot the opline names and the callee into the
-    /// one after it, and reads the callee back only where the class it
-    /// resolved is the one written (`CACHED_FCC_CE`,
-    /// `CACHED_FCC_FUNCTION`, `Z/Zend/zend_vm_def.h:3738`). One variant
-    /// holds both, so the pair is written and read as one, and the
-    /// second slot the compiler reserves stands as php's dump has it.
-    ClassAndCallee { class: ClassId, function: Function },
+    /// constants, or an `INIT_METHOD_CALL` over a constant name,
+    /// resolved together, `CACHE_POLYMORPHIC_PTR(opline->result.num,
+    /// ce, fbc)`: php writes the class into the slot the opline names
+    /// and the callee into the one after it, and reads the callee back
+    /// only where the class of this pass, the one named or the
+    /// receiver's, is the one written (`Z/Zend/zend_vm_def.h:3670`,
+    /// `:3778`). One variant holds both, so the pair is written and
+    /// read as one, and the second slot the compiler reserves stands as
+    /// php's dump has it.
+    ///
+    /// `scope` is the calling scope the callee was resolved from, which
+    /// the access rule reads, and the private method of the scope that
+    /// stands in for another class's (`zend_std_get_method`,
+    /// `Z/Zend/zend_object_handlers.c:1939`). php keys on no scope
+    /// because its cache is one per scope: a trait's method is copied
+    /// into each class that uses it with a cache of its own
+    /// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`), and
+    /// a closure bound to another scope is given a fresh one
+    /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). This
+    /// engine's cache is one per op array, so the pair is read back only
+    /// in the scope that wrote it, and two scopes calling through one
+    /// opline take the slot in turn where php's keep one each. What the
+    /// slot holds is what was asked and what answered, never how the
+    /// answer was found.
+    ClassAndCallee {
+        class: ClassId,
+        scope: Option<ClassId>,
+        function: Function,
+    },
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
@@ -756,8 +780,9 @@ pub(crate) struct Vm {
     /// The sites standing, `zend_get_attribute_object`'s dummy frames.
     sites: Vec<Site>,
     /// How many times a kernel has looked a name up among the linked
-    /// functions or the linked classes, which is what a primed cache
-    /// slot spares: the tests count it across two passes of one opline.
+    /// functions, the linked classes or a receiver's methods, which is
+    /// what a primed cache slot spares: the tests count it across two
+    /// passes of one opline.
     #[cfg(test)]
     pub(crate) lookups: u32,
 }
