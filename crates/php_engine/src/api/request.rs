@@ -152,6 +152,18 @@ pub struct ExtensionId(pub(crate) u32);
 impl ExtensionId {
     /// `Core`, the engine's own natives, classes, constants and ini.
     pub(crate) const CORE: ExtensionId = ExtensionId(0);
+
+    /// The extension at `at` in `module_registry`.
+    pub(crate) fn at(at: usize) -> ExtensionId {
+        ExtensionId(u32::try_from(at).unwrap_or(u32::MAX))
+    }
+
+    /// The origin a debug build's heap tags what it allocates for this
+    /// extension with ([`php_heap::Origin`]): its number.
+    #[cfg(debug_assertions)]
+    pub(crate) fn origin(self) -> php_heap::Origin {
+        php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
+    }
 }
 
 pub use crate::interrupt::Periodic;

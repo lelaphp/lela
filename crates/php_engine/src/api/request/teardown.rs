@@ -66,6 +66,13 @@ impl Request {
         self.stack = stack;
         self.free_hash_tables();
         self.drop_request_states();
-        self.heap.sense_leaks();
+        let extensions = &self.shared.extensions;
+        self.heap.sense_leaks(&|origin| {
+            let at = usize::from(origin.number());
+            extensions.get(at).map_or_else(
+                || format!("the extension numbered {at}"),
+                |extension| extension.name.clone(),
+            )
+        });
     }
 }
