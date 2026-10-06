@@ -8,8 +8,9 @@
 //! time limit suspended (#1814), allocations as an extension observes
 //! them (design §7.1), the statements a Zend extension is told of
 //! under extended info (#1823), and a debug build's freed-use guard
-//! as a program meets it (#1990), and the owner type as one
-//! meets it (#1995).
+//! as a program meets it (#1990), the owner type as one
+//! meets it (#1995), and the callback walks as a native meets them
+//! (#1980).
 
 use crate::api;
 
@@ -30,3 +31,4 @@ mod statements;
 mod stepped;
 pub(crate) mod test_ext;
 mod time_limit;
+mod walks;

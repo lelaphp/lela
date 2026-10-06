@@ -51,6 +51,7 @@ mod emalloc;
 mod fresh;
 mod owner;
 mod smart_str;
+pub mod walk;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
 pub use owner::{Owner, View};
