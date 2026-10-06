@@ -691,9 +691,45 @@ mod tests {
         );
         assert_eq!(
             (unit.main.oplines[0].op1, unit.main.oplines[1].op1),
-            (0, 0),
-            "php keeps one slot for it"
+            (0, 1),
+            "zend_add_literal gives each its own slot"
         );
+    }
+
+    /// A constant subject over a jump table: `zend_emit_op` sets `op1`
+    /// before `op2`, so the subject's slot comes before the table's.
+    #[test]
+    fn a_constant_subject_takes_its_slot_before_the_jump_table() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php switch ('z') { case 'a': echo 1; break; case 'b': echo 2; }");
+        let switch = unit
+            .main
+            .oplines
+            .iter()
+            .find(|op| op.opcode == Opcode::SwitchString)
+            .map(|op| (op.op1_type, op.op1, op.op2_type, op.op2));
+        assert_eq!(
+            switch,
+            Some((OperandKind::Const, 0, OperandKind::Const, 1)),
+            "a string jump table over two cases"
+        );
+        assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"z"[..]));
+        assert!(unit.main.literals[1].as_arr().is_some());
+    }
+
+    /// `zend_resolve_goto_label` nulls the label's slot once it has found
+    /// the label (`Z/Zend/zend_compile.c:5907`), and every later
+    /// constant is appended after it (`zend_add_literal`), the
+    /// same `'a'` twice in two slots, as phpdbg's `info literal` shows
+    /// php's table.
+    #[test]
+    fn a_goto_s_label_slot_is_nulled_and_no_slot_is_shared() {
+        let (unit, _strings) = unit_and_strings(b"<?php goto a; a: echo 'a'; echo 'a';");
+        assert_eq!(unit.main.literals.len(), 4);
+        assert_eq!(unit.main.literals[0], php_heap::Zval::null());
+        assert_eq!(literal_text(&unit, 1).as_deref(), Some(&b"a"[..]));
+        assert_eq!(literal_text(&unit, 2).as_deref(), Some(&b"a"[..]));
+        assert_eq!(unit.main.literals[3].as_long(), Some(1));
     }
 
     /// The implicit final return stands on the file's last line, where
@@ -865,14 +901,14 @@ mod tests {
             main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n")
         );
         assert_eq!(echoed_literal(b"<?php echo true + 1;").as_long(), Some(2));
-        // The folded 1 and the return's 1 are one literal, as
-        // `zend_add_literal` keeps them.
+        // The folded 1 and the return's 1 are two literals, as
+        // `zend_add_literal` appends each.
         let (unit, _strings) = unit_and_strings(b"<?php echo null + 1;");
         assert_eq!(
             unit.dump(&[]),
             main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
         );
-        assert_eq!(unit.main.literals.len(), 1);
+        assert_eq!(unit.main.literals.len(), 2);
         assert_eq!(echoed_literal(b"<?php echo null + 1;").as_long(), Some(1));
         assert_eq!(echoed_literal(b"<?php echo false + 1;").as_long(), Some(1));
         // `_is_numeric_string_ex`: whitespace on either side, a sign, a
@@ -1077,19 +1113,15 @@ mod tests {
         // `zend_binary_op_produces_error`: a string that opens with no
         // number, or carries anything past the one it opens with, is left
         // to the opcode, which throws or warns where it stands.
-        // The return's `1` shares the slot of an operand that is the
-        // same `1`, as `zend_add_literal` keeps them.
-        for (source, left, right, returned) in [
-            (
-                &b"<?php echo \"abc\" + 1;"[..],
-                "string(\"abc\")",
-                "int(1)",
-                1,
-            ),
-            (b"<?php echo \"1abc\" + 1;", "string(\"1abc\")", "int(1)", 1),
-            (b"<?php echo \"0x1A\" + 1;", "string(\"0x1A\")", "int(1)", 1),
-            (b"<?php echo \"1e\" + 1;", "string(\"1e\")", "int(1)", 1),
-            (b"<?php echo 1 + \"\";", "int(1)", "string(\"\")", 0),
+        // The return's `1` is a slot of its own after the operands',
+        // even beside an operand that is the same `1`, as
+        // `zend_add_literal` appends it.
+        for (source, left, right) in [
+            (&b"<?php echo \"abc\" + 1;"[..], "string(\"abc\")", "int(1)"),
+            (b"<?php echo \"1abc\" + 1;", "string(\"1abc\")", "int(1)"),
+            (b"<?php echo \"0x1A\" + 1;", "string(\"0x1A\")", "int(1)"),
+            (b"<?php echo \"1e\" + 1;", "string(\"1e\")", "int(1)"),
+            (b"<?php echo 1 + \"\";", "int(1)", "string(\"\")"),
         ] {
             let (unit, _strings) = unit_and_strings(source);
             assert_eq!(
@@ -1105,7 +1137,7 @@ mod tests {
             );
             assert_eq!(
                 unit.main.oplines[2].op1,
-                returned,
+                2,
                 "{}",
                 String::from_utf8_lossy(source)
             );
@@ -2153,10 +2185,10 @@ mod tests {
                 (Opcode::Mul, Cv, 0, Const, 1, 1),
                 (Opcode::Echo, Tmp, 1, Unused, 0, 0),
                 (Opcode::Echo, Cv, 1, Unused, 0, 0),
-                (Opcode::Add, Cv, 0, Const, 0, 2),
+                (Opcode::Add, Cv, 0, Const, 2, 2),
                 (Opcode::Assign, Cv, 3, Tmp, 2, 3),
                 (Opcode::Assign, Cv, 2, Tmp, 3, 4),
-                (Opcode::Return, Const, 0, Unused, 0, 1),
+                (Opcode::Return, Const, 3, Unused, 0, 1),
             ]
         );
     }

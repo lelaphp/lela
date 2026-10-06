@@ -169,7 +169,7 @@ impl Emit<'_> {
             };
             if let Some(stack) = stack {
                 let lowered = self.string(&name)?;
-                let op2 = self.constant(lowered);
+                let op2 = self.literal(lowered);
                 let out = self.cache_slot();
                 self.push(Opline {
                     opcode: Opcode::InitFcall,
@@ -186,7 +186,7 @@ impl Emit<'_> {
         let value = self.expr(callback)?;
         let (op2_type, op2) = self.operand(value);
         let native = self.string(native)?;
-        let op1 = self.constant(native);
+        let op1 = self.literal(native);
         self.push(Opline {
             opcode: Opcode::InitUserCall,
             op1_type: OperandKind::Const,

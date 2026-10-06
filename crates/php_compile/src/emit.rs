@@ -3,7 +3,7 @@
 //! php's constant table and php's safepoint numbering (design §5.7).
 //!
 //! One op array is built at a time. Constants are added as
-//! `zend_add_literal` adds them, the same value twice keeping one slot;
+//! `zend_add_literal` adds them, each in a slot of its own;
 //! CVs are numbered as `lookup_cv` numbers them, one per name in the
 //! order the names are met; temporaries are numbered as
 //! `get_temporary_variable` numbers them, and a temporary's slot on the
@@ -1432,30 +1432,15 @@ impl Emit<'_> {
         at
     }
 
-    /// The slot holding `value`, the same value twice keeping one slot.
-    /// The long of a numeric-dimension pair is not one of them: its
-    /// meaning is the slot after it ([`Self::dim_operand`]), so `$o[10]`
-    /// beside `$o["10"]` would read the written `"10"` if the two shared
-    /// a slot, where php gives every constant a slot of its own
-    /// (`zend_add_literal`) and they never do.
-    fn constant(&mut self, value: Zval) -> u32 {
-        let paired = |at: usize| self.numeric_dims.iter().any(|pair| pair.0 as usize == at);
-        if let Some(at) = self
-            .constants
-            .iter()
-            .position(|held| *held == value)
-            .filter(|at| !paired(*at))
-        {
-            return u32::try_from(at).unwrap_or(0);
-        }
-        let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
-        self.constants.push(value);
-        at
-    }
-
-    /// `zend_add_literal` as it stands: a slot of its own for `value`,
-    /// whether or not the table holds the value already, which a name's
-    /// constant pair needs where the name is its own lowered form.
+    /// `zend_add_literal` (`Z/Zend/zend_compile.c:588`): a slot of its
+    /// own for `value`, appended whether or not the table holds the value
+    /// already. php never shares a slot at compile time (opcache's
+    /// `compact_literals` is an optimizer pass, after the dump), and
+    /// phpdbg's `info literal` prints the table as it stands. A slot
+    /// reserved and laid later, a jump table's ([`Self::lay_table`]) or a
+    /// `goto`'s label ([`Self::resolve_goto`]), and a name's constant
+    /// pair, read by its adjacency, each rely on no other operand ever
+    /// being handed its slot.
     fn literal(&mut self, value: Zval) -> u32 {
         let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
         self.constants.push(value);
@@ -1691,7 +1676,7 @@ impl Emit<'_> {
             Stmt::InlineHtmlStmt(id) => {
                 let text = tree[id].body.map(|body| self.text(body).to_vec());
                 let text = self.string(&text.unwrap_or_default())?;
-                let at = self.constant(text);
+                let at = self.literal(text);
                 self.push(Opline {
                     opcode: Opcode::Echo,
                     op1_type: OperandKind::Const,
@@ -2823,7 +2808,7 @@ impl Emit<'_> {
         self.cv_fetched(&name, Fetch::Read);
         let cv = self.lookup_cv(&name);
         let name = self.string(&name)?;
-        let at = self.constant(name);
+        let at = self.literal(name);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::BindGlobal,
@@ -4319,7 +4304,7 @@ impl Emit<'_> {
                 );
             }
             let default = if let (Some(folded), true) = (folded, keeps_default) {
-                let slot = self.constant(folded);
+                let slot = self.literal(folded);
                 self.push(Opline {
                     opcode: Opcode::RecvInit,
                     op1: number.saturating_add(1),
@@ -9412,10 +9397,9 @@ impl Emit<'_> {
     /// and one `FAST_CALL` for each `finally` whose `try` holds both
     /// ends. The `JMP` lands on the label; where that is a backward
     /// jump it is a back-edge and carries a safepoint number of its own
-    /// (design §5.7). php nulls the constant's slot here; this compiler
-    /// leaves the string, since [`Self::constant`] may have handed the
-    /// slot to a later operand, and a slot nothing reads is observable
-    /// by nothing.
+    /// (design §5.7). The label's slot is nulled once found, as php
+    /// nulls it (`Z/Zend/zend_compile.c:5907`), which phpdbg's
+    /// `info literal` shows by leaving it out.
     ///
     /// ```php
     /// goto missing;
@@ -9483,6 +9467,9 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         };
+        if let Some(held) = self.constants.get_mut(label as usize) {
+            *held = Zval::null();
+        }
         let mut remove = emitted;
         let mut current = r#loop;
         while current != dest.r#loop {
@@ -9815,10 +9802,29 @@ impl Emit<'_> {
     /// The opline over a jump table, `SWITCH_LONG`, `SWITCH_STRING` or
     /// `MATCH`: the constant slot the array will take, reserved as
     /// `zend_emit_op` adds the constant when the opline is emitted, and
-    /// the opline over the subject and it.
+    /// the opline over the subject and it. A constant subject takes its
+    /// slot first, `zend_emit_op` setting `op1` before `op2`
+    /// (`Z/Zend/zend_compile.c:2294`, `:2298`).
+    ///
+    /// ```php
+    /// function c($t) { return match ($t) { 'x' => 1, 'y' => 2, default => null }; }
+    /// var_dump(c('x'), c('z'));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// NULL
+    /// ```
+    /// ```php
+    /// function s($t) { switch ($t) { case 'a': return 1; case 'b': return 2; default: return null; } }
+    /// var_dump(s('b'), s('z'));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// NULL
+    /// ```
     fn emit_table(&mut self, opcode: Opcode, subject: Where) -> Table {
-        let slot = self.literal(Zval::null());
         let (op1_type, op1) = self.operand(subject);
+        let slot = self.literal(Zval::null());
         let at = self.push(Opline {
             opcode,
             op1_type,
@@ -10464,7 +10470,7 @@ impl Emit<'_> {
     /// slots in php's own order.
     fn operand(&mut self, value: Where) -> (OperandKind, u32) {
         match value {
-            Where::Constant(value) => (OperandKind::Const, self.constant(value)),
+            Where::Constant(value) => (OperandKind::Const, self.literal(value)),
             Where::Returned(at) => (OperandKind::Var, at),
             Where::Temporary(at) => (OperandKind::Tmp, at),
             Where::Cv(at) => (OperandKind::Cv, at),
@@ -15570,7 +15576,7 @@ impl Emit<'_> {
         let known = self.native_index(name).is_some();
         if known {
             let lowered = self.string(name)?;
-            let lowered = self.constant(lowered);
+            let lowered = self.literal(lowered);
             let slot = self.cache_slot();
             self.push(Opline {
                 opcode: Opcode::InitFcall,
@@ -15695,7 +15701,7 @@ impl Emit<'_> {
             },
         };
         let lowered = self.string(&lowered)?;
-        let lowered = self.constant(lowered);
+        let lowered = self.literal(lowered);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcall,
@@ -17716,7 +17722,7 @@ impl Emit<'_> {
             }
             self.return_type_check(Where::Constant(Zval::null()), false, true)?;
         }
-        let value = self.constant(if return_one {
+        let value = self.literal(if return_one {
             Zval::long(1)
         } else {
             Zval::null()
