@@ -68,3 +68,26 @@ foreach (T as $k => $v) { echo $k, '=', $v, "\n"; }
     assert_eq!(stdout, "ok\nfoo=1\nb=ar\n");
     assert_eq!(exit, 0);
 }
+
+/// A compound assignment over a property the class's pair of handlers
+/// serves, a dynamic one, one bound to another by reference, one a
+/// `__get` answers by reference and one named by a variable, hands the
+/// stepped value to `write_property` and gives up nothing else; the
+/// variable naming it keeps its string (#2071).
+#[test]
+fn a_compound_assignment_through_the_handlers_hands_on_its_result() {
+    let (stdout, exit) = armed(
+        r#"<?php
+$c = 'c'; $q = 'q';
+$o = new stdClass; $o->a = 'ab' . $c; $o->b =& $o->a; $o->b .= 'x'; echo $o->a, "\n";
+$o->c = 1; $o->c += 1; $o->c .= 'x'; echo $o->c, "\n";
+$a = ['k' => [1 => $o]]; $a['k'][1]->a .= 'y'; echo $o->a, "\n";
+#[AllowDynamicProperties]
+class G { private $d = ['p' => 'abc']; function &__get($n) { return $this->d[$n]; } }
+$g = new G; $g->p .= 'x'; echo $g->p, "\n";
+$n = 'p' . $q; $o->$n = 'a'; $o->$n .= 'x'; unset($o, $a); echo $n, "\n";
+"#,
+    );
+    assert_eq!(stdout, "abcx\n2x\nabcxy\nabcx\npq\n");
+    assert_eq!(exit, 0);
+}

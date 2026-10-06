@@ -14623,13 +14623,13 @@ fn served_property_step(
         req.release(stepped);
         return Ok(());
     }
-    req.addref(&stepped);
+    // `write_property` takes an owner of the value and of the name, on
+    // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
+    // gives up after the write, and one more of the name, which the
+    // operand keeps its own of.
+    req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
-    let written = table.write_property(req, object, name, stepped);
-    if written.is_err() {
-        req.release(stepped);
-    }
-    written
+    table.write_property(req, object, name, stepped)
 }
 
 /// Where a compound write or a step over a property the class serves
