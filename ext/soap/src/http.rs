@@ -739,9 +739,7 @@ fn in_domain(host: &[u8], domain: &[u8]) -> bool {
 
 /// `add_soap_fault(this_ptr, "HTTP", text, NULL, NULL, soap_lang_en)`.
 fn fault(req: &mut Request, this: PhpObject, text: &[u8]) -> R<()> {
-    let fault = add_soap_fault(req, this, b"HTTP", text, None, None, b"en")?;
-    req.release(Value::object(fault));
-    Ok(())
+    add_soap_fault(req, this, b"HTTP", text, None, None, b"en")
 }
 
 /// `ZVAL_NULL(Z_CLIENT_HTTPSOCKET_P(this_ptr)); php_stream_close(stream);`
