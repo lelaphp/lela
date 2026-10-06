@@ -155,6 +155,14 @@ pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
     string
 }
 
+/// `zval_get_string` of a value read for its bytes, the string given up.
+pub(crate) fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let string = to_string(req, value)?;
+    let bytes = string.as_bytes().to_vec();
+    req.release(Value::string(string));
+    Ok(bytes)
+}
+
 /// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`
 /// (`Z/ext/standard/string.c:2650`): the first byte of the string, with
 /// the 8.5 deprecation for a string that is not one byte long, and the
