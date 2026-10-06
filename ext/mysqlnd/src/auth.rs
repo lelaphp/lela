@@ -663,7 +663,12 @@ fn read_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> 
     };
     let read = stream.copy_to_mem(req, None);
     stream.free(req);
-    Ok(Some(read?.as_bytes().to_vec()))
+    // The string `copy_to_mem` answers is the caller's: its bytes
+    // copied, it is given back.
+    let read = read?;
+    let bytes = read.as_bytes().to_vec();
+    req.release(Value::string(read));
+    Ok(Some(bytes))
 }
 
 /// `EVP_PKEY_size`: the key's modulus in bytes, through

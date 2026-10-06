@@ -362,3 +362,39 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
         "bool(true)\nstring(8) \"stdClass\"\n"
     );
 }
+
+/// The server's public key read from the file `MYSQLI_SERVER_PUBLIC_KEY`
+/// names, as `caching_sha2_password`'s full authentication reads it over
+/// a plain socket, is copied out of the string the stream's
+/// `copy_to_mem` answered and the string given back, so an armed
+/// request whose connect reads the file leaves no block of its heap held
+/// (#2092). Against the server of `ci/mysql/compose.yaml`; with none
+/// listening the test says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let file = std::env::temp_dir().join(format!("t2092-{}.pem", std::process::id()));
+    std::fs::write(&file, "not a key\n").expect("the key file");
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = format!(
+        "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        $l = mysqli_init();
+        mysqli_options($l, MYSQLI_SERVER_PUBLIC_KEY, '{}');
+        var_dump(@mysqli_real_connect($l, '127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());",
+        file.display()
+    );
+    let served = engine.serve_capture(&source, Capture::default());
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(false)\nint(1045)\n"
+    );
+}
