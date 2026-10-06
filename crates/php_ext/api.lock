@@ -1118,6 +1118,7 @@ values::Owner::into_instance
 values::Owner::into_raw
 values::Owner::into_resource
 values::Owner::into_static
+values::Owner::into_typed
 values::Owner::into_value
 values::Owner::replace
 values::Owner::separate
