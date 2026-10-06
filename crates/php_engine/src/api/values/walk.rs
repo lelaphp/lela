@@ -9,6 +9,11 @@
 //!   [`held_guarded`] guards its recursion beside, php's
 //!   `GC_PROTECT_RECURSION`. The default for a body that needs the
 //!   request mutably: `extract`, `serialize`, `print_r`.
+//! - [`live`] follows php's hash iterator over what a reference holds,
+//!   the iterator `foreach` by reference stands on: the holder read again
+//!   after each step, a row unset ahead skipped and one appended
+//!   visited, and php's `TypeError` once the holder holds no array or
+//!   object. `array_walk` and `extract` under `EXTR_REFS`.
 //!
 //! A walk takes the table and lends the body each row's key and value
 //! for that step. The body answers a [`Step`]: std's `ControlFlow` to go
@@ -21,9 +26,11 @@
 
 use std::ops::ControlFlow;
 
-use crate::api::raising::Thrown;
+use php_heap::{Arr, PropertyTable, TableRow};
+
+use crate::api::raising::{Thrown, fatal, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{Key, Owner, PhpArray, PhpRef, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, Value};
 
 /// What a walk's body answers for one row: `Continue` to go on to the
 /// next, `Break` to end the walk there with what the walk answers, and
@@ -182,4 +189,332 @@ fn rows<B>(
         }
     }
     Ok(None)
+}
+
+/// One row a [`live`] walk lends its body: the key and the value as the
+/// table held them when the walk stepped onto them, each owned by the
+/// walk for the step, so a body whose code unsets the row can still
+/// read it, and where the row stands, so the body can make it a
+/// reference in place ([`Row::make_ref`]).
+#[derive(Debug)]
+pub struct Row {
+    key: Owner<Key>,
+    value: Owner<Value>,
+    at: At,
+    holder: PhpRef,
+}
+
+/// Where a [`Row`] stands, and what the holder named when the walk read
+/// it.
+#[derive(Debug, Clone, Copy)]
+enum At {
+    /// Bucket `pos` of the array the holder holds.
+    Bucket(Arr, u32),
+    /// Declared slot `slot` of `owner`, the instance of the object the
+    /// holder holds (a lazy object's is its own once initialised).
+    Slot {
+        held: PhpObject,
+        owner: PhpObject,
+        slot: u32,
+    },
+    /// Bucket `pos` of the dynamic table `table` of the object the holder
+    /// holds.
+    Entry {
+        held: PhpObject,
+        table: Arr,
+        pos: u32,
+    },
+}
+
+impl Row {
+    /// The row's key, as the table held it.
+    #[must_use]
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+
+    /// The row's value, a reference where the table holds one.
+    #[must_use]
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    /// The row made a reference in place, php's `ZVAL_MAKE_REF` over the
+    /// bucket: the reference the table holds there already, or a new one
+    /// holding the value, written into the table as it stands, shared or
+    /// not, as php writes it, and into a typed property's slot with the
+    /// property as its type source (`ZEND_REF_ADD_TYPE_SOURCE`). From
+    /// here the walk owns the reference for the step. Asked before the
+    /// body runs any code of the program, as php's walk makes it before
+    /// its call; once that code has moved the row, the answer is the
+    /// `InternalError` it is, never a write elsewhere.
+    pub fn make_ref(&mut self, req: &mut Request) -> Result<PhpRef, Thrown> {
+        if let Some(cell) = self.value.as_php_ref() {
+            return Ok(*cell);
+        }
+        let stands = |req: &mut Request| {
+            fatal(
+                req,
+                "InternalError: a live walk's row was made a reference after its table moved",
+            )
+        };
+        let now = self.holder.get();
+        let place = match self.at {
+            At::Bucket(table, pos) => now
+                .as_array()
+                .filter(|held| held.heap().is_same(table))
+                .and_then(|_| table.value_ref_at(pos)),
+            At::Entry { held, table, pos } => now
+                .as_object()
+                .filter(|object| **object == held)
+                .and_then(|_| table.value_ref_at(pos)),
+            At::Slot { held, owner, slot } => {
+                if now.as_object() != Some(&held) {
+                    return Err(stands(req));
+                }
+                let Some(at) = owner.heap().slot_ref(slot) else {
+                    return Err(stands(req));
+                };
+                if let Some((typed, name)) = req.slot_typed_property(owner.class(), slot) {
+                    if !at.read().is_same_value(self.value.to_zval()) {
+                        return Err(stands(req));
+                    }
+                    req.fetch_typed_slot_ref(at, &typed, &name)?;
+                    let Some(cell) = Value::of_zval(at.read()).as_php_ref().copied() else {
+                        return Err(stands(req));
+                    };
+                    return Ok(self.lend(req, cell));
+                }
+                Some(at)
+            }
+        };
+        let Some(place) = place.filter(|place| place.read().is_same_value(self.value.to_zval()))
+        else {
+            return Err(stands(req));
+        };
+        let cell = req.reference(*self.value)?;
+        place.write(cell.as_value().to_zval());
+        Ok(self.lend(req, cell))
+    }
+
+    /// The reference `cell`, which the row's place holds from here, lent
+    /// in place of the value it holds: the walk's owner of the value
+    /// given up for one of the reference.
+    fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
+        let owned = Owner::take(req, cell.as_value());
+        let value = std::mem::replace(&mut self.value, owned);
+        value.give_up(req);
+        cell
+    }
+
+    /// The walk's owners of the row given up as the step ends.
+    fn give_up(self, req: &mut Request) {
+        self.value.give_up(req);
+        self.key.give_up(req);
+    }
+}
+
+/// php's walk by hash iterator over what the reference `holder` holds,
+/// `php_array_walk`'s loop (`Z/ext/standard/array.c:1438`): an array,
+/// separated first as php's parser separates a by-reference array
+/// argument, or an object's property table, from its first row. One hash
+/// iterator registered at the table (`zend_hash_iterator_add`) carries
+/// the walk: it is moved past each row before the body runs, as
+/// `foreach` moves it, and the holder is read again after every step, so
+/// a row the body unset ahead is not visited, one it appended is, and
+/// one it unset and wrote again is visited again where it now stands.
+/// Another array in the holder is walked on from where the iterator
+/// stands in it, a copy of the walked one at the copy's position and any
+/// other at its own pointer, separated first where it is shared
+/// (`zend_hash_iterator_pos_ex`); another object from its table's
+/// pointer; anything else is php's `TypeError`, "Iterated value is no
+/// longer an array or object". The table is not held: the holder holds
+/// it, as php's walk holds none, and the iterator is given back on
+/// every way out (`zend_hash_iterator_del`).
+///
+/// The answer is what `body` broke with, `None` where the walk went past
+/// the last row; a throwable a step left pending ends the walk too, as
+/// php's `while (!EG(exception))` does. What holds no array or object at
+/// the start is the `InternalError` it is.
+///
+/// ```php
+/// $a = ['a' => 1, 'b' => 2, 'c' => 3];
+/// array_walk($a, function ($v, $k) use (&$a) { echo $k; if ($k === 'a') { unset($a['b']); $a['d'] = 4; } });
+/// $o = new stdClass; $o->a = 1; $o->b = 2;
+/// array_walk($o, function ($v, $k) { global $o; echo $k; if ($k === 'a') { $o = [9 => 'x']; } });
+/// try { array_walk($o, function () { global $o; $o = 1; }); } catch (TypeError $e) { echo ' ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// acda9 Iterated value is no longer an array or object
+/// ```
+pub fn live<B>(
+    req: &mut Request,
+    holder: PhpRef,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    let Some(at) = registered(req, holder)? else {
+        return Ok(None);
+    };
+    let walked = steps(req, holder, at, &mut body);
+    req.heap_mut().iterator_del(at);
+    walked
+}
+
+/// The hash iterator a live walk over `holder` stands on, registered at
+/// its first row: `None` for a table with no row, which php walks not at
+/// all.
+fn registered(req: &mut Request, holder: PhpRef) -> Result<Option<u32>, Thrown> {
+    let now = holder.get();
+    if let Some(object) = now.as_object().copied() {
+        let (_, table) = req.pointer_table(object, false)?;
+        if table.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(req.heap_mut().iterator_add(table.table(), 0)));
+    }
+    if now.as_array().is_none() {
+        return Err(fatal(
+            req,
+            "InternalError: a live walk's reference holds no array or object",
+        ));
+    }
+    let Some(table) = holder.separate_array(req)? else {
+        return Err(fatal(req, "InternalError: a live walk's array is gone"));
+    };
+    let Some((first, _, _)) = table.live_from(0) else {
+        return Ok(None);
+    };
+    Ok(Some(req.heap_mut().iterator_add(table.heap(), first)))
+}
+
+/// [`live`]'s loop over iterator `at`, until a step finds no row, the
+/// body breaks or throws, or a step leaves a throwable pending.
+fn steps<B>(
+    req: &mut Request,
+    holder: PhpRef,
+    at: u32,
+    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    loop {
+        let Some(mut row) = next_row(req, holder, at)? else {
+            return Ok(None);
+        };
+        let step = body(req, &mut row);
+        row.give_up(req);
+        if let ControlFlow::Break(broke) = step? {
+            return Ok(Some(broke));
+        }
+        if req.is_pending() {
+            return Err(Thrown::of(None));
+        }
+    }
+}
+
+/// The row iterator `at` stands at in what `holder` holds now, the
+/// iterator moved past it; `None` past the last row.
+fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, Thrown> {
+    let now = holder.get();
+    if let Some(array) = now.as_array().copied() {
+        let moved = req.heap_mut().iterator_pos_ex(at, array.heap());
+        let (pos, table) = req.fatal_of(moved)?;
+        if !table.is_same(array.heap()) {
+            // `ZVAL_ARR(array, zend_array_dup(ht))`: the reference holds
+            // the copy from here, the shared table one owner fewer.
+            holder.heap().val_ref().write(php_heap::Zval::array(table));
+        }
+        let Some((found, key, value)) = table.live_from(pos) else {
+            return Ok(None);
+        };
+        // `zend_hash_move_forward_ex`: the next live bucket, or the end.
+        let next = found.saturating_add(1);
+        let next = table.live_from(next).map_or(next, |(next, _, _)| next);
+        req.heap_mut().iterator_set_pos(at, next);
+        return Ok(Some(Row {
+            key: Owner::take(req, Key::of(key)),
+            value: Owner::take(req, Value::of_zval(value)),
+            at: At::Bucket(table, found),
+            holder,
+        }));
+    }
+    if let Some(held) = now.as_object().copied() {
+        let (owner, table) = req.pointer_table(held, false)?;
+        return object_row(req, holder, at, held, owner, table);
+    }
+    Err(throw_error(
+        req,
+        "TypeError",
+        "Iterated value is no longer an array or object",
+    ))
+}
+
+/// [`next_row`] over an object's property table in php's positions: the
+/// declared slots, then the dynamic table, the iterator's place among
+/// the slots its lead and its place in the table its position. A slot
+/// nothing holds is stepped over, as php steps over an `IS_UNDEF` behind
+/// an `IS_INDIRECT`; a declared row's key is its mangled name.
+fn object_row(
+    req: &mut Request,
+    holder: PhpRef,
+    at: u32,
+    held: PhpObject,
+    owner: PhpObject,
+    table: PropertyTable,
+) -> Result<Option<Row>, Thrown> {
+    let declared = table.declared();
+    let pos = req.heap_mut().iterator_pos(at, table.table());
+    let lead = req.heap_mut().iterator_lead(at);
+    let mut found = if lead < declared {
+        lead
+    } else {
+        declared + pos
+    };
+    let (row, value) = loop {
+        if found >= table.used() {
+            return Ok(None);
+        }
+        match table.row_at(found) {
+            Some((row, value)) if !value.is_undef() => break (row, value),
+            _ => found = found.saturating_add(1),
+        }
+    };
+    // `zend_hash_move_forward_ex`: the next live position, or the end.
+    let mut next = found.saturating_add(1);
+    while next < table.used() && table.row_at(next).is_none() {
+        next = next.saturating_add(1);
+    }
+    let heap = req.heap_mut();
+    if next < declared {
+        heap.iterator_set_lead(at, next);
+    } else {
+        heap.iterator_set_lead(at, declared);
+        heap.iterator_set_pos(at, next - declared);
+    }
+    let (key, at) = match row {
+        TableRow::Slot(slot) => {
+            let Some(name) = req.slot_name(owner.class(), slot)? else {
+                return Err(fatal(
+                    req,
+                    "InternalError: a declared slot of an object's table with no name",
+                ));
+            };
+            (
+                Key::Str(crate::api::values::PhpString::of(name)),
+                At::Slot { held, owner, slot },
+            )
+        }
+        TableRow::Entry(key) => (
+            Key::of(key),
+            At::Entry {
+                held,
+                table: table.table(),
+                pos: found - declared,
+            },
+        ),
+    };
+    Ok(Some(Row {
+        key: Owner::take(req, key),
+        value: Owner::take(req, Value::of_zval(value)),
+        at,
+        holder,
+    }))
 }

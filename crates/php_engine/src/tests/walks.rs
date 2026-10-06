@@ -2,17 +2,19 @@
 //! walk took is given back on every way out, past the last row, at a
 //! row the body broke at and at one it threw from through `?`, so the
 //! table is freed where the program lets it go, and a guarded walk
-//! leaves the table unmarked.
+//! leaves the table unmarked; a live walk's row stands for its step
+//! whatever the step's code does to the table.
 
 use std::ops::ControlFlow;
 
 use php_macros::php_function;
 
-use crate::api::abi::{Extension, ExtensionBuilder, Ref};
+use crate::api::abi::{Callable, Extension, ExtensionBuilder, Ref};
+use crate::api::call::call;
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Guarded, Reached};
-use crate::api::values::{Key, PhpArray};
+use crate::api::values::{Key, PhpArray, PhpString, Value};
 use crate::engine::Engine;
 use crate::test::Capture;
 
@@ -90,6 +92,30 @@ fn guarded(req: &mut Request, array: Ref<PhpArray>) -> Result<bool, Thrown> {
     Ok(walked == Guarded::Recursive)
 }
 
+/// `live_reads(array &$array, callable $f): string`: a live walk that
+/// calls `$f` with each row's key and then reads the row's value, which
+/// `$f` may have unset.
+#[php_function]
+fn live_reads(req: &mut Request, array: Ref<PhpArray>, f: Callable) -> Result<PhpString, Thrown> {
+    let Some(holder) = array.reference() else {
+        return Err(throw_error(req, "Exception", "no reference"));
+    };
+    let mut read = String::new();
+    walk::live(req, holder, |req, row| -> walk::Step {
+        let key = match row.key() {
+            Key::Int(n) => Value::int(*n),
+            Key::Str(s) => Value::string(*s),
+        };
+        let answer = call(req, &f, &[key])?;
+        req.release(answer);
+        let bytes = row.value().as_str_bytes().unwrap_or_default();
+        read.push_str(&String::from_utf8_lossy(bytes));
+        read.push(' ');
+        Ok(ControlFlow::Continue(()))
+    })?;
+    PhpString::new(req, read.as_bytes())
+}
+
 fn walks() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -97,6 +123,7 @@ fn walks() -> Extension {
             held_throws::declared(),
             guarded_throws::declared(),
             guarded::declared(),
+            live_reads::declared(),
         ])
         .build("walks")
 }
@@ -128,6 +155,25 @@ fn a_held_walk_gives_back_what_it_took_on_every_way_out() {
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "2 100\ngone after\nthrown at the first row gone after\ninside walked gone after\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A live walk owns each row's key and value for its step: a callback
+/// that unsets the row and allocates a string of its size leaves the
+/// native reading the value the row held, not the slot the string took.
+#[test]
+fn a_live_walk_s_row_stands_after_the_callback_unsets_it() {
+    let engine = Engine::cli_builder().extensions(&[walks()]).build();
+    let served = engine.serve_capture(
+        "<?php function s($c) { return $c . PHP_INT_MAX; }\n\
+         $a = ['k' => s('v'), 'l' => s('w')];\n\
+         echo live_reads($a, function ($k) { global $a; unset($a[$k]); $GLOBALS['x' . $k] = s('z'); }), $a === [] ? 'emptied' : 'not emptied', \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "v9223372036854775807 w9223372036854775807 emptied\n"
     );
     assert_eq!(served.exit_code, 0);
 }
