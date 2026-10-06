@@ -44,3 +44,22 @@ fn an_html_document_from_a_file_keeps_no_read() {
         "x\n",
     );
 }
+
+/// The string an `XPath` PHP function answers, and the name an int-keyed
+/// `registerPhpFunctions` entry is read off, are given up once their
+/// bytes are copied, as php's `zval_ptr_dtor(&retval)` and
+/// `zend_string_release` give them up (#2094).
+#[test]
+fn an_xpath_callback_s_answer_is_given_up() {
+    served(
+        "<?php $d = new DOMDocument; $d->loadXML('<r><a>x</a></r>');\n\
+         $x = new DOMXPath($d);\n\
+         $x->registerNamespace('php', 'http://php.net/xpath');\n\
+         $x->registerPhpFunctions(['up' => fn($s) => $s . '!']);\n\
+         echo $x->evaluate('php:functionString(\"up\", //a)'), \"\\n\";\n\
+         function gh($s) { return $s . '?'; }\n\
+         $g = 'g'; $h = 'h'; $x->registerPhpFunctions([$g . $h]);\n\
+         echo $x->evaluate('php:functionString(\"gh\", //a)'), \"\\n\";\n",
+        "x!\nx?\n",
+    );
+}

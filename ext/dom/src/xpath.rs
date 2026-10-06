@@ -318,6 +318,16 @@ fn operand_value(
 /// string.
 const NOT_A_NAME: &str = "Handler name must be a string";
 
+/// `zval_try_get_tmp_string` and `zend_tmp_string_release`: the bytes
+/// `value` converts to, the string the conversion answered given up once
+/// they are copied.
+fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let text = to_string(req, value)?;
+    let bytes = text.as_bytes().to_vec();
+    req.release(Value::string(text));
+    Ok(bytes)
+}
+
 /// `php_dom_xpath_callback_dispatch`.
 fn dispatch(
     req: &mut Request,
@@ -424,7 +434,7 @@ fn dispatch(
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }
-        _ => Returned::Str(to_string(req, &answer)?.as_bytes().to_vec()),
+        _ => Returned::Str(string_bytes(req, &answer)?),
     };
     req.release(answer);
     Ok(returned)
@@ -607,7 +617,7 @@ fn register_into(
         for (key, value) in &array {
             let name = match key {
                 Key::Str(s) => s.as_bytes().to_vec(),
-                Key::Int(_) => to_string(req, &value)?.as_bytes().to_vec(),
+                Key::Int(_) => string_bytes(req, &value)?,
             };
             if name.is_empty() || name.contains(&0) {
                 return Err(arg_value_error(
