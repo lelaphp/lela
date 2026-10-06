@@ -354,10 +354,11 @@ impl Request {
         self.release_symbol(symbol);
     }
 
-    /// `zend_unwrap_reference`: a reference a call handed back, which a
-    /// method declared `&__toString` or `&__debugInfo` does, given up for
-    /// the value it holds, one owner of that the caller's; any other
-    /// value as it stands.
+    /// `zend_unwrap_reference` (`Z/Zend/zend_operators.h:1009`): a
+    /// reference a call handed back, which a method declared
+    /// `&__toString` or `&__debugInfo` does, given up for the value it
+    /// holds, one owner of that the caller's; any other value as it
+    /// stands.
     ///
     /// ```php
     /// class S { private $s = 'x'; function &__toString(): string { return $this->s; } }
@@ -377,9 +378,12 @@ impl Request {
         let Some(cell) = value.as_php_ref() else {
             return value;
         };
+        // `ZVAL_UNREF` where the cell had this one owner, and `Z_DELREF`
+        // with the value copied out otherwise: neither makes anything a
+        // possible root of the collector.
         let held = cell.get();
         self.addref(&held);
-        self.release(value);
+        self.release_nogc(value);
         held
     }
 
