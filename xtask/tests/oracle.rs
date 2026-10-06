@@ -1000,11 +1000,36 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
     assert!(why.contains(&stale.display().to_string()), "{why}");
     assert!(why.contains("crates/php_engine/src/lib.rs"), "{why}");
     assert!(
-        why.contains("cargo build -p php_sapi_cli -p php_sapi_cgi"),
-        "{why}"
+        why.contains("cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi"),
+        "the repair builds the lanes' profile: {why}"
     );
     assert_eq!(behind.binary(), None, "nothing runs under it");
     assert_eq!(behind.stamp(), None, "and no reading is stamped with it");
+}
+
+/// Every correctness lane runs `release-da` (harness-design.md §7,
+/// revision 82; #1994), so the lane looks for that build first: one the
+/// tree has not moved past is the engine over a release binary beside it,
+/// and one the tree has moved past is passed over for the release binary,
+/// as #475 passes over a binary of any profile that is behind.
+#[test]
+fn the_lanes_build_is_the_engine_before_release_and_passed_over_when_behind() {
+    let root = fixture_tree("lanes-build-first");
+    engine_sources(root.path());
+    let release = built(root.path(), "release", 0);
+    let lanes = built(root.path(), "release-da", 0);
+    let pin = pin_with_path(root.path());
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(lanes),
+        "the lanes' build is the engine before a release binary as fresh"
+    );
+    built(root.path(), "release-da", 3600);
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(release),
+        "a lanes' build the tree has moved past leaves the release binary the engine"
+    );
 }
 
 /// Since ADR-0008 `php-cgi` is a crate's of its own, so building `php`

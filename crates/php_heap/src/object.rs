@@ -667,6 +667,31 @@ impl Store {
     }
 }
 
+impl Store {
+    /// `zend_objects_store_destroy` (`Z/Zend/zend_objects_API.c:37`): the
+    /// buckets given back to `mm`, a debug build's teardown before the
+    /// request leak sensor. An object still standing is the sensor's to
+    /// name, as php leaves it for `zend_mm_check_leaks`; its payload is
+    /// dropped here, as the sweep would drop it, since no bucket names
+    /// it after this.
+    #[cfg(debug_assertions)]
+    pub(crate) fn destroy(&mut self, mm: &mut Mm) {
+        for handle in 1..self.top {
+            if let Some(o) = self.get(handle) {
+                o.drop_payload();
+            }
+        }
+        if let Some(buckets) = self.buckets.take() {
+            // SAFETY: the buckets came from this heap's `mm` and
+            // `buckets` was their only name.
+            unsafe { mm.free(buckets.cast()) };
+        }
+        self.size = 0;
+        self.top = 1;
+        self.free_list_head = None;
+    }
+}
+
 impl Drop for Store {
     /// The sweep of what no free reached: every payload still on an
     /// object is dropped, so a payload's own resources go with the

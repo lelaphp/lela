@@ -155,6 +155,7 @@ Heap::resource_persistent
 Heap::resource_sized
 Heap::resource_with
 Heap::resources
+Heap::sense_leaks
 Heap::sensor
 Heap::separate
 Heap::set_memory_limit
