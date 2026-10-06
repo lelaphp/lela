@@ -19,7 +19,7 @@
 use php_ext::call;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::constants::{
     JSON_BIGINT_AS_STRING, JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH,
@@ -384,8 +384,8 @@ fn utf8_length(input: &[u8], at: usize) -> Option<usize> {
 /// `stdClass`, its array under `JSON_OBJECT_AS_ARRAY`, and nothing
 /// under the validating methods.
 enum Holder {
-    Object(PhpObject),
-    Array(PhpArray),
+    Object(Owner<PhpObject>),
+    Array(Owner<PhpArray>),
     Nothing,
 }
 
@@ -395,7 +395,7 @@ enum Holder {
 enum Open {
     Array {
         at: usize,
-        array: Option<PhpArray>,
+        array: Option<Owner<PhpArray>>,
     },
     Object {
         at: usize,
@@ -406,8 +406,8 @@ enum Open {
 
 /// What [`Parser::begin`] made of the lookahead.
 enum Begun {
-    /// A scalar, or a pair with nothing inside, whole.
-    Value(Value),
+    /// A scalar, or a pair with nothing inside, whole, one owner.
+    Value(Owner<Value>),
     /// A bracket left open on the walk's stack, its first value next.
     Opened,
     /// The parse refused, the code the scanner's.
@@ -426,19 +426,22 @@ enum Attached {
 
 impl Open {
     /// What the bracket became, `null` where nothing was built.
-    fn into_value(self) -> Value {
+    fn into_value(self, req: &Request) -> Owner<Value> {
         match self {
-            Open::Array { array, .. } => array.map_or_else(Value::null, PhpArray::to_value),
-            Open::Object { holder, .. } => holder.into_value(),
+            Open::Array { array, .. } => match array {
+                Some(array) => array.into_value(),
+                None => Owner::take(req, Value::null()),
+            },
+            Open::Object { holder, .. } => holder.into_value(req),
         }
     }
 
     /// The owner given up where the parse was refused inside it.
-    fn give_up(&self, req: &mut Request) {
+    fn give_up(self, req: &mut Request) {
         match self {
             Open::Array { array, .. } => {
                 if let Some(array) = array {
-                    req.release(array.to_value());
+                    array.give_up(req);
                 }
             }
             Open::Object { holder, .. } => holder.give_up(req),
@@ -522,7 +525,7 @@ impl Parser<'_> {
     /// a nest costs memory and never the machine's stack; where the
     /// parse is refused, each is given up innermost first, bison's
     /// `%destructor` over what it had built.
-    fn value(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
+    fn value(&mut self, req: &mut Request) -> Result<Option<Owner<Value>>, Thrown> {
         let mut open = Vec::new();
         let parsed = self.walk(req, &mut open);
         while let Some(frame) = open.pop() {
@@ -534,7 +537,11 @@ impl Parser<'_> {
     /// [`Parser::value`]'s loop: a value begun, then handed to the
     /// bracket it is inside, which asks for the next or closes and is
     /// itself the value handed on.
-    fn walk(&mut self, req: &mut Request, open: &mut Vec<Open>) -> Result<Option<Value>, Thrown> {
+    fn walk(
+        &mut self,
+        req: &mut Request,
+        open: &mut Vec<Open>,
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         'value: loop {
             let mut done = match self.begin(req, open)? {
                 Begun::Value(value) => value,
@@ -591,19 +598,17 @@ impl Parser<'_> {
             return Ok(Begun::Refused);
         }
         let built = match token {
-            Token::True => Value::bool(true),
-            Token::False => Value::bool(false),
-            Token::Int(n) => Value::int(n),
-            Token::Double(d) => Value::float(d),
-            Token::Str(bytes) if !self.validating => {
-                Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated())
-            }
+            Token::True => Owner::take(req, Value::bool(true)),
+            Token::False => Owner::take(req, Value::bool(false)),
+            Token::Int(n) => Owner::take(req, Value::int(n)),
+            Token::Double(d) => Owner::take(req, Value::float(d)),
+            Token::Str(bytes) if !self.validating => PhpString::new(req, &bytes)?.into_value(),
             Token::ArrayOpen => {
                 self.advance();
                 let array = if self.validating {
                     None
                 } else {
-                    Some(PhpArray::new(req)?.hand_on_unmigrated())
+                    Some(PhpArray::new(req)?)
                 };
                 let frame = Open::Array { at, array };
                 return self.opened(req, frame, open);
@@ -617,7 +622,7 @@ impl Parser<'_> {
                 };
                 return self.opened(req, frame, open);
             }
-            _ => Value::null(),
+            _ => Owner::take(req, Value::null()),
         };
         self.advance();
         Ok(Begun::Value(built))
@@ -683,23 +688,36 @@ impl Parser<'_> {
         &mut self,
         req: &mut Request,
         frame: &mut Open,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<Attached, Thrown> {
         let at = match frame {
             Open::Array { at, array } => {
-                if let Some(array) = array.as_mut() {
-                    array.append(req, value)?;
+                match array.as_mut() {
+                    Some(array) => array.append(req, value.hand_on_unmigrated())?,
+                    None => value.give_up(req),
                 }
                 *at
             }
             Open::Object { at, holder, key } => {
                 if matches!(holder, Holder::Nothing) {
-                    *holder = self.holder(req)?;
+                    *holder = match self.holder(req) {
+                        Ok(holder) => holder,
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    };
                 }
                 match holder {
                     Holder::Array(array) => {
-                        let name = Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
-                        array.set(req, name, value)?;
+                        let name = match PhpString::new(req, key) {
+                            Ok(name) => Key::from_string(name.hand_on_unmigrated()),
+                            Err(thrown) => {
+                                value.give_up(req);
+                                return Err(thrown);
+                            }
+                        };
+                        array.set(req, name, value.hand_on_unmigrated())?;
                     }
                     Holder::Object(object) => {
                         if key.first() == Some(&0) {
@@ -707,13 +725,19 @@ impl Parser<'_> {
                             // property into; `zend_std_write_property`
                             // may not be handed one.
                             self.scanner.errcode = JSON_ERROR_INVALID_PROPERTY_NAME;
-                            req.release(value);
+                            value.give_up(req);
                             return Ok(Attached::Refused);
                         }
-                        let name = PhpString::new(req, key)?;
-                        object.set_prop(req, name.hand_on_unmigrated(), value)?;
+                        let name = match PhpString::new(req, key) {
+                            Ok(name) => name,
+                            Err(thrown) => {
+                                value.give_up(req);
+                                return Err(thrown);
+                            }
+                        };
+                        object.set_prop(req, name, value)?;
                     }
-                    Holder::Nothing => req.release(value),
+                    Holder::Nothing => value.give_up(req),
                 }
                 *at
             }
@@ -739,7 +763,7 @@ impl Parser<'_> {
     /// `array_end` or `object_end` shifted and the rule reduced to the
     /// one `value` it is: the other bracket is the state mismatch and
     /// anything else a syntax error, the bracket given up on either.
-    fn close(&mut self, frame: Open, req: &mut Request) -> Option<Value> {
+    fn close(&mut self, frame: Open, req: &mut Request) -> Option<Owner<Value>> {
         let (at, closes, other) = match &frame {
             Open::Array { at, .. } => (*at, Token::ArrayClose, Token::ObjectClose),
             Open::Object { at, .. } => (*at, Token::ObjectClose, Token::ArrayClose),
@@ -763,7 +787,7 @@ impl Parser<'_> {
         self.advance();
         self.depth -= 1;
         self.stack = at + 1;
-        Some(frame.into_value())
+        Some(frame.into_value(req))
     }
 
     /// `PHP_JSON_DEPTH_INC`: one level deeper, or the depth refusal.
@@ -784,33 +808,31 @@ impl Parser<'_> {
             return Ok(Holder::Nothing);
         }
         if self.scanner.options & JSON_OBJECT_AS_ARRAY != 0 {
-            return Ok(Holder::Array(PhpArray::new(req)?.hand_on_unmigrated()));
+            return Ok(Holder::Array(PhpArray::new(req)?));
         }
         let Some(class) = call::lookup_class(req, b"stdClass")? else {
             return Ok(Holder::Nothing);
         };
-        Ok(Holder::Object(
-            call::new_object(req, class)?.hand_on_unmigrated(),
-        ))
+        Ok(Holder::Object(call::new_object(req, class)?))
     }
 }
 
 impl Holder {
     /// What the holder became, `null` where nothing was built.
-    fn into_value(self) -> Value {
+    fn into_value(self, req: &Request) -> Owner<Value> {
         match self {
-            Holder::Object(object) => object.as_value(),
-            Holder::Array(array) => array.to_value(),
-            Holder::Nothing => Value::null(),
+            Holder::Object(object) => object.into_value(),
+            Holder::Array(array) => array.into_value(),
+            Holder::Nothing => Owner::take(req, Value::null()),
         }
     }
 
     /// The owner given up where the parse was refused past the create,
     /// which is `%destructor` over the rule's value.
-    fn give_up(&self, req: &mut Request) {
+    fn give_up(self, req: &mut Request) {
         match self {
-            Holder::Object(object) => req.release(object.as_value()),
-            Holder::Array(array) => req.release(array.to_value()),
+            Holder::Object(object) => object.give_up(req),
+            Holder::Array(array) => array.give_up(req),
             Holder::Nothing => {}
         }
     }
@@ -824,7 +846,7 @@ fn parse(
     options: i64,
     depth: i64,
     validating: bool,
-) -> Result<Result<Value, i64>, Thrown> {
+) -> Result<Result<Owner<Value>, i64>, Thrown> {
     let mut parser = Parser {
         scanner: Scanner {
             input: text,
@@ -844,7 +866,7 @@ fn parse(
         Some(value) if matches!(parser.token, Token::Eoi) => Ok(Ok(value)),
         Some(value) => {
             parser.syntax();
-            req.release(value);
+            value.give_up(req);
             Ok(Err(parser.scanner.errcode))
         }
         None => {
@@ -861,7 +883,7 @@ pub(super) fn decode(
     text: &[u8],
     options: i64,
     depth: i64,
-) -> Result<Result<Value, i64>, Thrown> {
+) -> Result<Result<Owner<Value>, i64>, Thrown> {
     parse(req, text, options, depth, false)
 }
 
@@ -872,6 +894,6 @@ pub(super) fn validate(
     text: &[u8],
     options: i64,
     depth: i64,
-) -> Result<Result<Value, i64>, Thrown> {
+) -> Result<Result<Owner<Value>, i64>, Thrown> {
     parse(req, text, options, depth, true)
 }

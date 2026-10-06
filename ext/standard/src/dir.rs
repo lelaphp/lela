@@ -300,10 +300,23 @@ fn dir(
             "InternalError: dir() without its Directory class",
         ));
     };
-    let object = new_object(req, class)?;
-    req.addref(&Value::string(directory));
-    object.set_slot(req, 0, Value::string(directory))?;
-    object.set_slot(req, 1, stream.into_value().hand_on_unmigrated())?;
+    let object = match new_object(req, class) {
+        Ok(object) => object,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let path = Owner::take(req, Value::string(directory));
+    if let Err(thrown) = object.set_slot(req, 0, path) {
+        stream.give_up(req);
+        object.give_up(req);
+        return Err(thrown);
+    }
+    if let Err(thrown) = object.set_slot(req, 1, stream.into_value()) {
+        object.give_up(req);
+        return Err(thrown);
+    }
     Ok(OrFalse::Value(object.into_instance()))
 }
 

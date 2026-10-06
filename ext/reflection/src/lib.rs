@@ -4577,13 +4577,13 @@ impl ObjectHandlers for ReflectorHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let held = name.as_bytes().to_vec();
         if read_only(req, object, &held) {
-            req.release(value);
-            req.release(Value::string(name));
+            value.give_up(req);
+            name.give_up(req);
             let class = class_name_of(req, object.class());
             return Err(throw(
                 req,
@@ -4994,7 +4994,9 @@ fn set_string_prop(
 ) -> Result<(), Thrown> {
     let key = PhpString::interned(req, prop)?;
     let value = PhpString::interned(req, value)?;
-    Std.write_property(req, this, key, Value::string(value))
+    let key = Owner::take(req, key);
+    let value = Owner::take(req, Value::string(value));
+    Std.write_property(req, this, key, value)
 }
 
 /// A string of the request's as a native's return.

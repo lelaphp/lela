@@ -30,13 +30,6 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
-/// `ZVAL_COPY`: one more owner of `value`, the caller's to give away.
-pub(crate) fn copied(req: &mut Request, value: Value) -> Value {
-    let value = value.deref();
-    req.addref(&value);
-    value
-}
-
 // ---- SoapParam
 
 /// `SoapParam`: a value sent under a name of its own.
@@ -76,9 +69,9 @@ impl SoapParam {
             return Err(arg_value_error(req, 2, "not be empty"));
         }
         let object = this.object();
-        req.addref(&Value::string(name));
-        object.set_slot(req, 0, Value::string(name))?;
-        let data = copied(req, data);
+        let name = Owner::take(req, Value::string(name));
+        object.set_slot(req, 0, name)?;
+        let data = Owner::take(req, data.deref());
         object.set_slot(req, 1, data)
     }
 }
@@ -148,27 +141,29 @@ impl SoapHeader {
             return Err(arg_value_error(req, 2, "not be empty"));
         }
         let object = this.object();
-        req.addref(&Value::string(namespace));
-        object.set_slot(req, 0, Value::string(namespace))?;
-        req.addref(&Value::string(name));
-        object.set_slot(req, 1, Value::string(name))?;
+        let namespace = Owner::take(req, Value::string(namespace));
+        object.set_slot(req, 0, namespace)?;
+        let name = Owner::take(req, Value::string(name));
+        object.set_slot(req, 1, name)?;
         if let Passed::Given(data) = data {
-            let data = copied(req, data);
+            let data = Owner::take(req, data.deref());
             object.set_slot(req, 2, data)?;
         }
-        object.set_slot(req, 3, Value::bool(mustUnderstand))?;
+        let must_understand = Owner::take(req, Value::bool(mustUnderstand));
+        object.set_slot(req, 3, must_understand)?;
         match actor {
             Some(Union::A(s)) => {
                 if s.len() > 2 {
-                    req.addref(&Value::string(s));
-                    object.set_slot(req, 4, Value::string(s))?;
+                    let s = Owner::take(req, Value::string(s));
+                    object.set_slot(req, 4, s)?;
                 } else {
                     return Err(arg_value_error(req, 5, "be longer than 2 characters"));
                 }
             }
             Some(Union::B(n)) => {
                 if (1..=3).contains(&n) {
-                    object.set_slot(req, 4, Value::int(n))?;
+                    let n = Owner::take(req, Value::int(n));
+                    object.set_slot(req, 4, n)?;
                 } else {
                     return Err(arg_value_error(
                         req,
@@ -208,7 +203,12 @@ impl FaultSlot {
     }
 }
 
-fn set_fault_slot(req: &mut Request, object: PhpObject, slot: FaultSlot, value: Value) -> R<()> {
+fn set_fault_slot(
+    req: &mut Request,
+    object: PhpObject,
+    slot: FaultSlot,
+    value: Owner<Value>,
+) -> R<()> {
     object.set_slot(req, slot.index(), value)
 }
 
@@ -330,7 +330,7 @@ impl SoapFault {
             },
         )?;
         if !matches!(headerFault.as_ref(), ValueRef::Null | ValueRef::Undef) {
-            let h = copied(req, headerFault);
+            let h = Owner::take(req, headerFault.deref());
             set_fault_slot(req, object, FaultSlot::HeaderFault, h)?;
         }
         Ok(())
@@ -423,7 +423,7 @@ pub(crate) struct Fault<'a> {
 /// `soap_fault_dtor_properties`: the eight slots back to their defaults.
 fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
     let empty = string(req, b"")?;
-    set_fault_slot(req, object, FaultSlot::String, empty.hand_on_unmigrated())?;
+    set_fault_slot(req, object, FaultSlot::String, empty)?;
     for slot in [
         FaultSlot::Code,
         FaultSlot::CodeNs,
@@ -432,10 +432,11 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
         FaultSlot::Name,
         FaultSlot::HeaderFault,
     ] {
-        set_fault_slot(req, object, slot, Value::null())?;
+        let null = Owner::take(req, Value::null());
+        set_fault_slot(req, object, slot, null)?;
     }
     let empty = string(req, b"")?;
-    set_fault_slot(req, object, FaultSlot::Lang, empty.hand_on_unmigrated())
+    set_fault_slot(req, object, FaultSlot::Lang, empty)
 }
 
 /// `set_soap_fault`: the string (and `Exception::$message`), the code
@@ -443,9 +444,9 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
 /// language written into `object`.
 pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>) -> R<()> {
     let text = string(req, f.string.unwrap_or_default())?;
-    set_fault_slot(req, object, FaultSlot::String, text.hand_on_unmigrated())?;
+    set_fault_slot(req, object, FaultSlot::String, text)?;
     let message = string(req, f.string.unwrap_or_default())?;
-    php_ext::call::write_prop(req, &object, b"message", message.hand_on_unmigrated())?;
+    php_ext::call::write_prop(req, &object, b"message", message)?;
     if let Some(code) = f.code {
         let version = req.state::<State>().soap_version;
         let (code, ns): (&[u8], Option<&[u8]>) = if let Some(ns) = f.code_ns {
@@ -471,29 +472,29 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
         };
         if version == SOAP_1_1 || version == SOAP_1_2 || f.code_ns.is_some() {
             let c = string(req, code)?;
-            set_fault_slot(req, object, FaultSlot::Code, c.hand_on_unmigrated())?;
+            set_fault_slot(req, object, FaultSlot::Code, c)?;
             if let Some(ns) = ns {
                 let n = string(req, ns)?;
-                set_fault_slot(req, object, FaultSlot::CodeNs, n.hand_on_unmigrated())?;
+                set_fault_slot(req, object, FaultSlot::CodeNs, n)?;
             }
         }
     }
     if let Some(actor) = f.actor {
         let a = string(req, actor)?;
-        set_fault_slot(req, object, FaultSlot::Actor, a.hand_on_unmigrated())?;
+        set_fault_slot(req, object, FaultSlot::Actor, a)?;
     }
     if let Some(detail) = f.detail
         && !matches!(detail.as_ref(), ValueRef::Undef)
     {
-        let d = copied(req, detail);
+        let d = Owner::take(req, detail.deref());
         set_fault_slot(req, object, FaultSlot::Detail, d)?;
     }
     if let Some(name) = f.name {
         let n = string(req, name)?;
-        set_fault_slot(req, object, FaultSlot::Name, n.hand_on_unmigrated())?;
+        set_fault_slot(req, object, FaultSlot::Name, n)?;
     }
     let lang = string(req, f.lang)?;
-    set_fault_slot(req, object, FaultSlot::Lang, lang.hand_on_unmigrated())
+    set_fault_slot(req, object, FaultSlot::Lang, lang)
 }
 
 // ---- SoapVar
@@ -556,7 +557,10 @@ impl SoapVar {
     ) -> R<()> {
         let object = this.object();
         match encoding {
-            None => object.set_slot(req, 0, Value::int(model::ty::UNKNOWN_TYPE.into()))?,
+            None => {
+                let unknown = Owner::take(req, Value::int(model::ty::UNKNOWN_TYPE.into()));
+                object.set_slot(req, 0, unknown)?;
+            }
             Some(t) => {
                 let known = i32::try_from(t)
                     .is_ok_and(|t| model::DEFAULT_ENCODING.iter().any(|b| b.type_ == t));
@@ -568,11 +572,12 @@ impl SoapVar {
                         "is not a valid encoding",
                     ));
                 }
-                object.set_slot(req, 0, Value::int(t))?;
+                let t = Owner::take(req, Value::int(t));
+                object.set_slot(req, 0, t)?;
             }
         }
         if !matches!(data.as_ref(), ValueRef::Null | ValueRef::Undef) {
-            let d = copied(req, data);
+            let d = Owner::take(req, data.deref());
             object.set_slot(req, 1, d)?;
         }
         for (slot, given) in [
@@ -584,8 +589,8 @@ impl SoapVar {
             if let Some(s) = given
                 && !s.is_empty()
             {
-                req.addref(&Value::string(s));
-                object.set_slot(req, slot, Value::string(s))?;
+                let s = Owner::take(req, Value::string(s));
+                object.set_slot(req, slot, s)?;
             }
         }
         Ok(())

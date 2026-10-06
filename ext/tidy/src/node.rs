@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Instance, This};
 use php_ext::attr::php_class;
-use php_ext::call::{lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object, write_prop};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -29,11 +29,6 @@ pub(crate) fn text(req: &mut Request, object: PhpObject) -> Result<Option<Vec<u8
         return Ok(None);
     };
     Ok(with_doc(req, id, |req, doc| doc.node_text(req, node))?.flatten())
-}
-
-fn write(req: &mut Request, object: PhpObject, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?;
-    object.set_prop(req, name.hand_on_unmigrated(), value)
 }
 
 /// `zend_string_init`, which `zend_update_property_string` and
@@ -80,18 +75,23 @@ fn properties(
         return Ok(());
     };
     let value = string(req, fixed(&facts.text.unwrap_or_default()))?;
-    write(req, object, b"value", value.hand_on_unmigrated())?;
+    write_prop(req, &object, b"value", value)?;
     let name = string(req, &facts.name.unwrap_or_default())?;
-    write(req, object, b"name", name.hand_on_unmigrated())?;
-    write(req, object, b"type", Value::int(facts.kind))?;
-    write(req, object, b"line", Value::int(facts.line))?;
-    write(req, object, b"column", Value::int(facts.column))?;
-    write(req, object, b"proprietary", Value::bool(facts.proprietary))?;
+    write_prop(req, &object, b"name", name)?;
     let id_value = match facts.kind {
         NODE_ROOT | NODE_DOCTYPE | NODE_TEXT | NODE_COMMENT => Value::null(),
         _ => Value::int(facts.id),
     };
-    write(req, object, b"id", id_value)?;
+    for (field, scalar) in [
+        (&b"type"[..], Value::int(facts.kind)),
+        (b"line", Value::int(facts.line)),
+        (b"column", Value::int(facts.column)),
+        (b"proprietary", Value::bool(facts.proprietary)),
+        (b"id", id_value),
+    ] {
+        let scalar = Owner::take(req, scalar);
+        write_prop(req, &object, field, scalar)?;
+    }
     let attribute = match facts.attributes {
         Some(rows) => {
             let mut array = PhpArray::new(req)?;
@@ -103,13 +103,13 @@ fn properties(
                 };
                 array.set(req, key, value.hand_on_unmigrated())?;
             }
-            Value::array(array.hand_on_unmigrated())
+            array.into_value()
         }
-        None => Value::null(),
+        None => Owner::take(req, Value::null()),
     };
-    write(req, object, b"attribute", attribute)?;
+    write_prop(req, &object, b"attribute", attribute)?;
     let child = if facts.children.is_empty() {
-        Value::null()
+        Owner::take(req, Value::null())
     } else {
         let mut array = PhpArray::new(req)?;
         for child in facts.children {
@@ -122,9 +122,9 @@ fn properties(
             };
             array.append(req, made.into_value().hand_on_unmigrated())?;
         }
-        Value::array(array.hand_on_unmigrated())
+        array.into_value()
     };
-    write(req, object, b"child", child)
+    write_prop(req, &object, b"child", child)
 }
 
 /// The node `to` walks to from the object's, as a new `tidyNode`.

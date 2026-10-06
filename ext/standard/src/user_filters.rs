@@ -414,8 +414,7 @@ impl StreamFilter for UserFilter {
         let object = self.object;
         let has_stream = object.prop(req, b"stream").is_some();
         if has_stream {
-            let value = stream.as_value();
-            req.addref(&value);
+            let value = Owner::take(req, stream.as_value());
             // A property update that threw skips the call: php's warning
             // where input buckets remain, and `PSFS_ERR_FATAL` with the
             // throwable pending (`Z/ext/standard/user_filters.c:161`).
@@ -461,7 +460,8 @@ impl StreamFilter for UserFilter {
             }
             unprocessed(req, input);
             if has_stream {
-                write_prop(req, &object, b"stream", Value::null())?;
+                let null = Owner::take(req, Value::null());
+                write_prop(req, &object, b"stream", null)?;
             }
             Ok(status)
         })();
@@ -543,16 +543,10 @@ fn user_filter_factory(
         return Ok(None);
     };
     let object = new_object(req, class)?;
-    let filtername = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
+    let filtername = PhpString::new(req, name)?.into_value();
     write_prop(req, &object, b"filtername", filtername)?;
-    let params = match params {
-        Some(value) => {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }
-        None => Value::null(),
-    };
+    let params = params.map_or_else(Value::null, Value::deref);
+    let params = Owner::take(req, params);
     write_prop(req, &object, b"params", params)?;
     match call_if_exists(req, *object, b"oncreate") {
         Ok(Some(value)) if matches!(value.as_ref(), ValueRef::Bool(false)) => {
@@ -602,18 +596,15 @@ fn bucket_object(
     };
     let kind = bucket_type(req);
     let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let data = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+    let data = PhpString::new(req, &bytes)?.into_value();
     let res = Resource::new(req, kind, BucketCell(bytes, None))?;
     let object = new_object(req, class)?;
-    write_prop(
-        req,
-        &object,
-        b"bucket",
-        res.into_value().hand_on_unmigrated(),
-    )?;
+    write_prop(req, &object, b"bucket", res.into_value())?;
     write_prop(req, &object, b"data", data)?;
-    write_prop(req, &object, b"datalen", Value::int(len))?;
-    write_prop(req, &object, b"dataLength", Value::int(len))?;
+    for name in [&b"datalen"[..], b"dataLength"] {
+        let len = Owner::take(req, Value::int(len));
+        write_prop(req, &object, name, len)?;
+    }
     Ok(object.into_instance())
 }
 

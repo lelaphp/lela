@@ -817,13 +817,8 @@ pub(super) fn restore_properties(
             None => (object.class(), bytes),
         };
         let plain = PhpString::new(req, plain)?;
-        req.addref(&value);
-        object.write_prop_in(
-            req,
-            PropertyScope::Of(ClassRef(scope)),
-            plain.hand_on_unmigrated(),
-            value,
-        )?;
+        let value = Owner::take(req, value);
+        object.write_prop_in(req, PropertyScope::Of(ClassRef(scope)), plain, value)?;
     }
     Ok(())
 }
@@ -1493,8 +1488,8 @@ impl DateTime {
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let time = time_of(req, object)?;
-        let fields = date_fields(req, &time)?;
         let own = std_rows(req, object)?;
+        let fields = date_fields(req, &time)?;
         rows_array(req, &own, fields, true)
     }
 

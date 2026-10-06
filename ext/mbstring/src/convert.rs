@@ -877,7 +877,7 @@ fn convert_value(
                         return Ok(Walk::Stopped);
                     }
                     Walk::Kept => {}
-                    Walk::Replace(new) => object.set_row(req, &key, new.hand_on_unmigrated())?,
+                    Walk::Replace(new) => object.set_row(req, &key, new)?,
                 }
             }
             object.unprotect();

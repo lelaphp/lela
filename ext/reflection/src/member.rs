@@ -279,21 +279,21 @@ fn set_raw_value(
     prop: Option<&(ClassId, PropertyDecl)>,
     object: PhpObject,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     let key = match PhpString::new(req, name) {
         Ok(key) => key,
         Err(thrown) => {
-            req.release(value);
+            value.give_up(req);
             return Err(thrown);
         }
     };
     if prop.is_some_and(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some()) {
-        return php_ext::call::write_raw_property(req, &object, key.hand_on_unmigrated(), value);
+        return php_ext::call::write_raw_property(req, &object, key, value);
     }
     let handlers = object.handlers(req);
     req.with_fake_scope(asked, |req| {
-        handlers.write_property(req, object, key.hand_on_unmigrated(), value)
+        handlers.write_property(req, object, key, value)
     })
 }
 
@@ -899,7 +899,7 @@ impl ReflectionProperty {
                 .this()
                 .and_then(|this| kept_class(req, this))
                 .unwrap_or(class);
-            req.addref(&value);
+            let value = Owner::take(req, value);
             write_static_prop(req, asked, &name, value)?;
             return Ok(());
         }
@@ -912,11 +912,11 @@ impl ReflectionProperty {
             return Ok(());
         };
         let key = PhpString::new(req, &name)?;
-        req.addref(&value);
+        let value = Owner::take(req, value);
         let (object, handlers) = (*object, object.handlers(req));
         let asked = asked_class(req, this.object(), class);
         req.with_fake_scope(asked, |req| {
-            handlers.write_property(req, object, key.hand_on_unmigrated(), value)
+            handlers.write_property(req, object, key, value)
         })
     }
 
@@ -1013,7 +1013,7 @@ impl ReflectionProperty {
                 "May not use setRawValue on static properties",
             ));
         }
-        req.addref(&value);
+        let value = Owner::take(req, value);
         set_raw_value(req, asked, prop.as_ref(), object, &name, value)
     }
 
@@ -1064,10 +1064,11 @@ impl ReflectionProperty {
         let prop = effective_prop(req, asked, object, reflected, &name);
         let method = "setRawValueWithoutLazyInitialization";
         lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
-        req.addref(&value);
         if !object.is_lazy() {
+            let value = Owner::take(req, value);
             return set_raw_value(req, asked, prop.as_ref(), object, &name, value);
         }
+        req.addref(&value);
         skip_lazy_initialization(req, &object, &name, Some(value))?;
         Ok(())
     }

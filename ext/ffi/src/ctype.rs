@@ -524,11 +524,11 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         _: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.release(value);
-        req.release(Value::string(name));
+        value.give_up(req);
+        name.give_up(req);
         Err(bad_array_access(req))
     }
 

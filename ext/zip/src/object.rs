@@ -148,29 +148,29 @@ impl Prop {
     }
 
     /// `php_zip_property_reader`.
-    fn read(self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn read(self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some(i) = object.native::<Intern>(req) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let status = i.za.as_ref().map_or(i.err, |za| za.error);
-        let bytes = match self {
-            Prop::LastId => return Ok(Value::int(i.last_id.0)),
-            Prop::Status => return Ok(Value::int(i64::from(status.zip))),
-            Prop::StatusSys => return Ok(Value::int(i64::from(status.sys))),
+        let scalar = match self {
+            Prop::LastId => Value::int(i.last_id.0),
+            Prop::Status => Value::int(i64::from(status.zip)),
+            Prop::StatusSys => Value::int(i64::from(status.sys)),
             Prop::NumFiles => {
                 let n = i.za.as_ref().map_or(0, |za| za.num_entries());
-                return Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)));
+                Value::int(i64::try_from(n).unwrap_or(i64::MAX))
             }
-            Prop::Filename => i.filename.clone().unwrap_or_default(),
+            Prop::Filename => {
+                let bytes = i.filename.clone().unwrap_or_default();
+                return Ok(PhpString::new(req, &bytes)?.into_value());
+            }
             Prop::Comment => {
-                i.za.as_ref()
-                    .map(|za| za.archive_comment(0))
-                    .unwrap_or_default()
+                let bytes = i.za.as_ref().map(|za| za.archive_comment(0));
+                return Ok(PhpString::new(req, &bytes.unwrap_or_default())?.into_value());
             }
         };
-        Ok(PhpString::new(req, &bytes)?
-            .into_value()
-            .hand_on_unmigrated())
+        Ok(Owner::take(req, scalar))
     }
 }
 
@@ -224,7 +224,7 @@ impl ObjectHandlers for Handlers {
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
         match Prop::of(name) {
-            Some(p) => p.read(req, object),
+            Some(p) => Ok(p.read(req, object)?.hand_on_unmigrated()),
             None => Std.read_property(req, object, name, read),
         }
     }
@@ -234,15 +234,15 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if Prop::of(name.as_bytes()).is_none() {
             return Std.write_property(req, object, name, value);
         }
         let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-        req.release(Value::string(name));
-        req.release(value);
+        name.give_up(req);
+        value.give_up(req);
         let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
         let message = format!("Cannot write read-only property {class}::${shown}");
         Err(throw(req, "Error", &message))
@@ -279,7 +279,7 @@ impl ObjectHandlers for Handlers {
             PropertyTest::NotEmpty => truthy(req, &value),
             _ => !matches!(value.as_ref(), ValueRef::Null),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 

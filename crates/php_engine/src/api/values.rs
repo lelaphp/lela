@@ -1511,7 +1511,7 @@ impl PhpObject {
     /// ([`php_heap::DeclaredRows::Copied`]); the table the object held is
     /// released. A lazy object is initialised first and its instance
     /// takes the table.
-    pub fn replace_table(&self, req: &mut Request, table: PhpArray) -> Result<(), Thrown> {
+    pub fn replace_table(&self, req: &mut Request, table: Owner<PhpArray>) -> Result<(), Thrown> {
         req.replace_table(*self, table)
     }
 
@@ -1547,6 +1547,19 @@ impl PhpObject {
     /// table's from here, and what the row held is released after the
     /// write.
     ///
+    /// A sink: the value is an owner, and a view is refused, so a value
+    /// the caller holds no owner of never reaches the table.
+    ///
+    /// ```compile_fail,E0308
+    /// # use php_engine::api::raising::Thrown;
+    /// # use php_engine::api::request::Request;
+    /// # use php_engine::api::values::{Key, PhpObject, Value};
+    /// fn viewed(req: &mut Request, object: PhpObject, key: &Key, value: Value) -> Result<(), Thrown> {
+    ///     object.set_row(req, key, value)
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
     /// ```php
     /// class M { public $a = 1; public int $n = 0; public function __set($k, $v) { echo "__set $k\n"; } }
     /// $o = new M;
@@ -1564,8 +1577,8 @@ impl PhpObject {
     ///   string(3) "new"
     /// }
     /// ```
-    pub fn set_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
-        req.table_set_row(*self, key, value)
+    pub fn set_row(&self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
+        req.table_set_row(*self, key, value.hand_on())
     }
 
     /// One row appended to the property table under its next integer
@@ -1574,8 +1587,8 @@ impl PhpObject {
     /// and no deprecation raised. The key is the table's
     /// `nNextFreeElement`, one past the greatest integer key it has
     /// held, which a declared property's or a dynamic one's name never
-    /// moves. `value` is the table's from here; `false`, and `value`
-    /// given up, where the next element is taken, as
+    /// moves. A sink: `value`'s owner is the table's from here; `false`,
+    /// and the owner given up, where the next element is taken, as
     /// [`PhpArray::try_append`] answers. A lazy object is initialised
     /// first, and a table a cast shares is separated before the write.
     ///
@@ -1606,8 +1619,8 @@ impl PhpObject {
     ///   string(1) "y"
     /// }
     /// ```
-    pub fn append_row(&self, req: &mut Request, value: Value) -> Result<bool, Thrown> {
-        req.table_append_row(*self, value)
+    pub fn append_row(&self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
+        req.table_append_row(*self, value.hand_on())
     }
 
     /// `zend_hash_update` over the property table, where
@@ -1648,8 +1661,13 @@ impl PhpObject {
     /// }
     /// Cannot assign array to property Z::$n of type int
     /// ```
-    pub fn update_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
-        req.table_update_row(*self, key, value)
+    pub fn update_row(
+        &self,
+        req: &mut Request,
+        key: &Key,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        req.table_update_row(*self, key, value.hand_on())
     }
 
     /// One row of the property table removed by key,
@@ -1776,7 +1794,12 @@ impl PhpObject {
     /// released last, after the write, which is where a destructor is
     /// served (`zend_assign_to_variable`). The `Err` is the memory
     /// limit refusing the dynamic table.
-    pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
+    pub fn set_prop(
+        &self,
+        req: &mut Request,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
         req.write_property_as_declared(*self, name, value)
     }
 
@@ -1790,8 +1813,8 @@ impl PhpObject {
         &self,
         req: &mut Request,
         scope: PropertyScope,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         match scope {
             PropertyScope::Declaring => req.write_property_as_declared(*self, name, value),
@@ -1809,14 +1832,15 @@ impl PhpObject {
     /// written into the dynamic table under the key; the value and the
     /// key are the object's from here. `false` is a key naming a virtual
     /// property, which php's `is_property_visibility_changed` refuses
-    /// with its warning, and which fails the unserialization.
+    /// with its warning, and which fails the unserialization. A sink of
+    /// both owners.
     pub fn unserialize_prop(
         &self,
         req: &mut Request,
-        key: PhpString,
-        value: Value,
+        key: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<bool, Thrown> {
-        req.unserialize_property(*self, key, value)
+        req.unserialize_property(*self, key.hand_on(), value.hand_on())
     }
 
     /// What `unserialize()` holds a declared typed property to once the
@@ -1888,8 +1912,13 @@ impl PhpObject {
     /// the declared count is refused as the internal-error fatal, the
     /// value released; a native that knows its class's layout never
     /// reaches it.
-    pub fn set_slot(&self, req: &mut Request, index: u32, value: Value) -> Result<(), Thrown> {
-        req.write_declared_slot(self.0, index, value)
+    pub fn set_slot(
+        &self,
+        req: &mut Request,
+        index: u32,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        req.write_declared_slot(self.0, index, value.hand_on())
     }
 
     /// `GC_IS_RECURSIVE`: whether a walk is already inside this object,
@@ -2894,12 +2923,14 @@ mod tests {
             return;
         };
         let (Ok(name), Ok(text)) = (
-            PhpString::new(&mut req, b"message").map(Owner::hand_on),
-            PhpString::new(&mut req, b"a string the object holds").map(Owner::hand_on),
+            PhpString::new(&mut req, b"message"),
+            PhpString::new(&mut req, b"a string the object holds"),
         ) else {
             return;
         };
-        assert!(object.set_prop(&mut req, name, Value::string(text)).is_ok());
+        let text_view = *text;
+        assert!(object.set_prop(&mut req, name, text.into_value()).is_ok());
+        let text = text_view;
         assert_eq!(text.heap().refcount(), 1, "the table holds the one owner");
         assert_eq!(
             object

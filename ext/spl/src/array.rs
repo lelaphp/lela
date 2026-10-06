@@ -1338,18 +1338,18 @@ impl Table {
 
     /// `zend_hash_update_ind`: `value` is the table's from here, and
     /// `key` a view, the array taking its own owner of a string key.
-    fn set(self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
+    fn set(self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
                 let key = crate::owned_key(req, key);
-                array.set(req, key, value)?;
+                array.set(req, key, value.hand_on_unmigrated())?;
                 store(req, owner, array)
             }
             Table::Props(object) => {
                 let name = match key.to_prop_name(req) {
                     Ok(name) => name,
                     Err(thrown) => {
-                        req.release(value);
+                        value.give_up(req);
                         return Err(thrown);
                     }
                 };
@@ -1360,7 +1360,7 @@ impl Table {
         }
     }
 
-    /// `zend_hash_next_index_insert`: `value` is the table's from here,
+    /// `zend_hash_next_index_insert`: `value`'s owner is the table's from here,
     /// laid down at the table's `nNextFreeElement`, an object's property
     /// table's among them. An integer offset over an object is the
     /// string that spells it ([`hash_key`] then [`Table::set`]), so it
@@ -1418,12 +1418,12 @@ impl Table {
     /// int(2)
     /// int(1)
     /// ```
-    fn append(self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+    fn append(self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         // php ignores what `zend_hash_next_index_insert` answers, so a
         // taken next element is no `Error` here, as it is for `$a[]`.
         match self {
             Table::Array(owner, mut array) => {
-                array.try_append(req, value)?;
+                array.try_append(req, value.hand_on_unmigrated())?;
                 store(req, owner, array)
             }
             Table::Props(object) => object.append_row(req, value).map(drop),
@@ -1757,17 +1757,24 @@ fn write(
     value: Value,
 ) -> Result<(), Thrown> {
     sorting_refused(req, object)?;
-    let value = crate::copied(req, value);
     let table = table(req, object)?;
+    let value = Owner::take(req, value);
     // `if (!offset || Z_TYPE_P(offset) == IS_NULL)`: a reference to
     // `null` is no `null` here, and is the key `""` below.
     let offset = offset.filter(|o| !matches!(o.as_ref(), ValueRef::Null | ValueRef::Undef));
     let Some(offset) = offset else {
         return table.append(req, value);
     };
-    let Some(key) = hash_key(req, offset)? else {
-        req.release(value);
-        return Err(illegal(req, object, offset, "write"));
+    let key = match hash_key(req, offset) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            value.give_up(req);
+            return Err(illegal(req, object, offset, "write"));
+        }
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
     };
     table.set(req, &key, value)
 }
@@ -2117,7 +2124,8 @@ impl ObjectHandlers for Handlers {
             if fetch == DimensionRead::ReadWrite {
                 warning(req, &format!("Undefined array key {}", shown(&key)));
             }
-            table.set(req, &key, Value::null())?;
+            let null = Owner::take(req, Value::null());
+            table.set(req, &key, null)?;
         }
         match table {
             Table::Array(owner, mut array) => {
@@ -2210,12 +2218,25 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        if as_props(req, object, name.as_bytes())? {
-            let member = Value::string(name);
-            return self.write_dimension(req, object, Some(&member), value);
+        let props = match as_props(req, object, name.as_bytes()) {
+            Ok(props) => props,
+            Err(thrown) => {
+                name.give_up(req);
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if props {
+            // The name an `ArrayObject` writes a property under is the
+            // offset's, a view; the slot gives the value up.
+            let member = Value::string(*name);
+            let written =
+                self.write_dimension(req, object, Some(&member), value.hand_on_unmigrated());
+            name.give_up(req);
+            return written;
         }
         Std.write_property(req, object, name, value)
     }
@@ -2633,9 +2654,10 @@ fn sort_through(
 /// string(1) "x"
 /// ```
 fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
-    req.addref(&Value::array(sorted));
+    let sorted = Owner::take(req, sorted);
     match table {
         Table::Array(owner, _) => {
+            let sorted = sorted.hand_on_unmigrated();
             let old = with(req, owner, |p| {
                 std::mem::replace(&mut p.storage, Storage::Array(sorted))
             })?;

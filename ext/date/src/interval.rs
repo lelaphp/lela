@@ -530,8 +530,8 @@ impl DateInterval {
         let text = object
             .native::<IntervalObj>(req)
             .and_then(|i| i.date_string.clone());
-        let fields = interval_fields(req, &diff, text.as_deref())?;
         let own = std_rows(req, object)?;
+        let fields = interval_fields(req, &diff, text.as_deref())?;
         rows_array(req, &own, fields, true)
     }
 

@@ -753,8 +753,13 @@ fn columns(
                 }
             }
             Kind::Class | Kind::Obj | Kind::Into => {
-                if let Some(made) = out.as_object().copied() {
-                    write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
+                match out.as_object().copied() {
+                    Some(made) => {
+                        // The fetch engine's value is its one owner.
+                        let fetched = crate::owned(req, fetched);
+                        write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
+                    }
+                    None => req.release(fetched),
                 }
             }
             Kind::Func => arguments.push(fetched),
@@ -794,9 +799,15 @@ fn write_column(
     made: PhpObject,
     scope: PropertyScope,
     name: &[u8],
-    fetched: Value,
+    fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?.hand_on_unmigrated();
+    let name = match PhpString::new(req, name) {
+        Ok(name) => name,
+        Err(thrown) => {
+            fetched.give_up(req);
+            return Err(thrown);
+        }
+    };
     let wrote = match pending {
         Some(standing) => while_pending(req, standing, |req| {
             made.write_prop_in(req, scope, name, fetched)

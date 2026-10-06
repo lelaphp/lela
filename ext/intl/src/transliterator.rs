@@ -567,7 +567,7 @@ fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Owner<Instance<Transl
     }
     let written = match id {
         Ok(id) => PhpString::new(req, &id)
-            .and_then(|id| write_prop(req, &object, b"id", Value::string(id.hand_on_unmigrated())))
+            .and_then(|id| write_prop(req, &object, b"id", id.into_value()))
             .map(|()| true),
         Err(code) => {
             error::set_code(req, code);

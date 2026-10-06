@@ -41,12 +41,12 @@ fn encoding(req: &mut Request) -> Option<Vec<u8>> {
 }
 
 /// `to_zval_string`, `to_zval_stringr` and `to_zval_stringc`.
-pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res<Value> {
+pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let Some(child) = data.children() else {
-        return string(req, b"").map(Owner::hand_on_unmigrated);
+        return string(req, b"");
     };
     let single = child.next().is_none();
     match child.kind() {
@@ -67,22 +67,20 @@ pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res
                 Some(enc) => Library::from_utf8(&enc, &content).unwrap_or(content),
                 None => content,
             };
-            string(req, &out).map(Owner::hand_on_unmigrated)
+            string(req, &out)
         }
-        Kind::CData if single => {
-            string(req, &child.content().unwrap_or_default()).map(Owner::hand_on_unmigrated)
-        }
+        Kind::CData if single => string(req, &child.content().unwrap_or_default()),
         _ => Err(violation()),
     }
 }
 
 /// `to_zval_base64`.
-pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Value> {
+pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let Some(child) = data.children() else {
-        return string(req, b"").map(Owner::hand_on_unmigrated);
+        return string(req, b"");
     };
     let content = match child.kind() {
         Kind::Text if child.next().is_none() => collapse_in_place(child),
@@ -90,7 +88,7 @@ pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Value> {
         _ => return Err(violation()),
     };
     match php_ext_standard::base64::decode(&content, false) {
-        Some(bytes) => string(req, &bytes).map(Owner::hand_on_unmigrated),
+        Some(bytes) => string(req, &bytes),
         None => Err(violation()),
     }
 }
@@ -114,12 +112,12 @@ fn hex_decode(content: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// `to_zval_hexbin`.
-pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Value> {
+pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let Some(child) = data.children() else {
-        return string(req, b"").map(Owner::hand_on_unmigrated);
+        return string(req, b"");
     };
     let content = match child.kind() {
         Kind::Text if child.next().is_none() => collapse_in_place(child),
@@ -127,7 +125,7 @@ pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Value> {
         _ => return Err(violation()),
     };
     match hex_decode(&content) {
-        Some(bytes) => string(req, &bytes).map(Owner::hand_on_unmigrated),
+        Some(bytes) => string(req, &bytes),
         None => Err(violation()),
     }
 }
@@ -635,7 +633,7 @@ fn list_items(
 // ---- `<anyXML>`
 
 /// `to_zval_any`.
-pub(super) fn to_zval_any(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Value> {
+pub(super) fn to_zval_any(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Owner<Value>> {
     if let Some(s) = sdl(req)
         && let Some(elements) = s.elements.as_ref()
         && data.has_name()
@@ -654,7 +652,7 @@ pub(super) fn to_zval_any(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Val
     }
     let dumped = Save::bare(data).unwrap_or_default();
     let end = dumped.iter().position(|&b| b == 0).unwrap_or(dumped.len());
-    string(req, &dumped[..end]).map(Owner::hand_on_unmigrated)
+    string(req, &dumped[..end])
 }
 
 /// `to_xml_any`.
@@ -754,9 +752,9 @@ pub(super) fn to_xml_user(
 }
 
 /// `to_zval_user`.
-pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Value> {
+pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Owner<Value>> {
     let Some(f) = map_fn(req, e, false) else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let dumped = match node.copy(None, 1) {
         Some(copy) => {
@@ -773,7 +771,7 @@ pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Value>
     let arg = string(req, &dumped[..end])?;
     let out = call(req, &callable, &[*arg]);
     arg.give_up(req);
-    Ok(out?.hand_on_unmigrated())
+    Ok(out?)
 }
 
 #[cfg(test)]

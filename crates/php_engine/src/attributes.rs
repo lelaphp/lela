@@ -20,7 +20,7 @@ use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, eval_declared_made, instantiate_named_made};
 use crate::api::raising::{Thrown, raise, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
 /// `fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)` of a
 /// function, and `CONST_DEPRECATED` of a constant: what the
@@ -583,7 +583,8 @@ impl Attribute {
         this: This<Self>,
         #[php(default = Attribute::TARGET_ALL)] flags: i64,
     ) -> Result<(), Thrown> {
-        this.object().set_slot(req, 0, Value::int(flags))
+        let flags = Owner::take(req, Value::int(flags));
+        this.object().set_slot(req, 0, flags)
     }
 }
 
@@ -681,7 +682,7 @@ impl SensitiveParameterValue {
     /// }
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         initialise(
             req,
             this.object(),
@@ -782,11 +783,9 @@ impl Deprecated {
         #[php(default = null)] since: Option<PhpString>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        let message = message.map_or_else(Value::null, Value::string);
-        req.addref(&message);
+        let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
         initialise(req, this, "Deprecated", b"message", message)?;
-        let since = since.map_or_else(Value::null, Value::string);
-        req.addref(&since);
+        let since = Owner::take(req, since.map_or_else(Value::null, Value::string));
         initialise(req, this, "Deprecated", b"since", since)
     }
 }
@@ -825,8 +824,7 @@ impl NoDiscard {
         this: This<Self>,
         #[php(default = null)] message: Option<PhpString>,
     ) -> Result<(), Thrown> {
-        let message = message.map_or_else(Value::null, Value::string);
-        req.addref(&message);
+        let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
         initialise(req, this.object(), "NoDiscard", b"message", message)
     }
 }
@@ -851,10 +849,10 @@ fn initialise(
     this: PhpObject,
     class: &str,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     if this.prop(req, name).is_some() {
-        req.release(value);
+        value.give_up(req);
         return Err(throw_error(
             req,
             "Error",
@@ -864,6 +862,5 @@ fn initialise(
             ),
         ));
     }
-    let key = PhpString::new(req, name)?.hand_on_unmigrated();
-    this.set_prop(req, key, value)
+    crate::api::call::write_prop(req, &this, name, value)
 }

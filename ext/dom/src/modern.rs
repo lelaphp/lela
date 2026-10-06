@@ -369,9 +369,9 @@ pub(crate) fn keep(
     name: &[u8],
     value: &Value,
 ) -> Result<(), Thrown> {
-    req.addref(value);
     let key = PhpString::new(req, name)?;
-    Std.write_property(req, object, key.hand_on_unmigrated(), *value)
+    let value = Owner::take(req, *value);
+    Std.write_property(req, object, key, value)
 }
 
 /// Forget what the slot `name` keeps, as a clone does with `ZVAL_UNDEF`.
