@@ -351,6 +351,11 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     // Nothing else of the file moved.
     assert_eq!(written.lines().count(), text.lines().count());
     assert!(written.contains("/// nope();"), "{written}");
+    // Stamped over the tree `--accept` left, a snapshot taken after it
+    // wrote, so `done` finds the reading fresh for the line it pinned
+    // (#2163).
+    let now = xtask::key::Snapshot::disk(&root).unwrap();
+    assert_eq!(reading.tree(), now.key(Path::new("ext/fixture")).unwrap());
 
     // The witness now pins the status, so a second run accepts nothing.
     let again = run(&root, &registry(""), true);

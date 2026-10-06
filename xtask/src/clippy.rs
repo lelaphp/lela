@@ -10,6 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store};
 use crate::sources;
@@ -25,6 +26,9 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
             bail!("the manifest has no crate named {name:?}");
         }
     }
+    // The key each reading carries is the tree's before cargo built it,
+    // so a file written while the crates are measured stales the reading.
+    let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
@@ -33,7 +37,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         if !sources::exists(root, krate) {
             continue;
         }
-        readings.push(check(root, krate)?);
+        readings.push(check(&snapshot, krate)?);
     }
     Ok(readings)
 }
@@ -68,7 +72,8 @@ pub(crate) fn command(
 
 /// One crate's reading: pass when cargo exits 0, fail with the tail of
 /// what clippy printed otherwise.
-pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
+pub(crate) fn check(snapshot: &Snapshot, krate: &Crate) -> Result<Reading> {
+    let root = snapshot.root();
     let package = krate.package();
     let out = Command::new("cargo")
         .args([
@@ -84,7 +89,7 @@ pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
         .current_dir(root)
         .output()
         .with_context(|| format!("running cargo clippy -p {package}"))?;
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     if out.status.success() {
         reading.status = Status::Pass;
         reading.message = format!("{}: clippy clean, warnings denied", krate.name);

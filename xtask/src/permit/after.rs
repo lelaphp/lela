@@ -59,6 +59,7 @@ use super::INSTRUMENT;
 use super::argv;
 use super::call::Call;
 use super::writes::{self, Place};
+use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
 use crate::reading::{self, Number, Reading, Status, Store};
 use crate::{git, manifest, steer};
@@ -341,8 +342,10 @@ fn resolved(path: &Path) -> PathBuf {
 /// note that passes for one kept.
 fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
     for one in moved {
-        let mut reading =
-            Reading::stamped_over(INSTRUMENT, RULE, &one.checkout, Path::new(&one.path))?;
+        // After the file was put back or kept: the stamp is over it as it
+        // stands now.
+        let now = Snapshot::disk_over(&one.checkout, Path::new(&one.path))?;
+        let mut reading = Reading::stamped_over(INSTRUMENT, RULE, &now, Path::new(&one.path))?;
         RULE.clone_into(&mut reading.rule);
         reading.status = one.verdict.status();
         reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), one.said);

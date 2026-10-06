@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use super::INSTRUMENT;
 use crate::git::git;
+use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
@@ -187,6 +188,7 @@ pub(crate) fn run_bench(
     runs: usize,
     bar_ms: f64,
 ) -> Result<()> {
+    let snapshot = Snapshot::disk(root)?;
     let measured = bench(root, runs)?;
     let verdict = if measured.meets_the_bar(bar_ms) {
         "pass"
@@ -207,7 +209,7 @@ pub(crate) fn run_bench(
     for (name, q) in &measured.shapes {
         println!("  {}", line(name, q));
     }
-    let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, root)?;
+    let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, &snapshot)?;
     reading.status = if measured.meets_the_bar(bar_ms) {
         Status::Pass
     } else {

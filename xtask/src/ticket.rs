@@ -173,6 +173,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
@@ -1028,7 +1029,7 @@ pub fn parent(root: &Path, gh: &Gh, sheet: Ticket, session_id: Option<&str>) -> 
     let mut reading = Reading::stamped_over(
         INSTRUMENT,
         &parent_scope(sheet),
-        root,
+        &Snapshot::disk(root)?,
         Path::new(STAMPED_OVER),
     )?;
     reading.count("subissues", held)?;
@@ -1101,8 +1102,12 @@ pub fn run(
     // writes, which are a note and not a refusal.
     let (denied, steered): (Vec<&Denied>, Vec<&Denied>) =
         rows.iter().partition(|row| row.mislabelled());
-    let mut reading =
-        Reading::stamped_over(INSTRUMENT, &scope(ticket), root, Path::new(STAMPED_OVER))?;
+    let mut reading = Reading::stamped_over(
+        INSTRUMENT,
+        &scope(ticket),
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )?;
     reading.count("criteria", criteria.count() as u64)?;
     reading.count("ticked", criteria.ticked.len() as u64)?;
     reading.count("unticked", criteria.unticked.len() as u64)?;
