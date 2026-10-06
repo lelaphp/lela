@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, OrFalse, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
@@ -952,7 +952,7 @@ pub(crate) fn options(
     };
     let as_long = |_: &mut Request| long;
     let text = match option {
-        3 | 4 | 5 | 7 | 35 | 43 => Some(to_string(req, &value)?.as_bytes().to_vec()),
+        3 | 4 | 5 | 7 | 35 | 43 => Some(crate::string_of(req, &value)?),
         _ => None,
     };
     let text = text.unwrap_or_default();
@@ -1693,7 +1693,7 @@ impl Props for LinkProps {
             "affected_rows" => affected(req, s.affected_rows)?,
             "errno" => Value::int(i64::from(s.errno)),
             "error" => string(req, &s.error)?,
-            "error_list" => props::error_list(req, &s.error_list)?,
+            "error_list" => Value::array(props::error_list(req, &s.error_list)?),
             "field_count" => Value::int(i64::from(s.field_count)),
             "host_info" => string(req, s.host_info.as_deref().unwrap_or_default())?,
             "info" => match s.info {
