@@ -46,6 +46,7 @@ use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::{ClassKind, Name};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_standard::Serializer;
 
@@ -622,7 +623,8 @@ fn serialized_parts(
 /// the key the table holds it by, mangled for a protected or a private
 /// property; views, no owner taken.
 fn std_properties(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-    object.entries(req)
+    let table = object.property_table(req)?;
+    Ok(walk::rows(req, table).collect())
 }
 
 /// The members, `zend_std_get_properties` as an array of its own, a

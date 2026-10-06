@@ -6,6 +6,7 @@
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
+use php_ext::values::walk;
 use php_ext::values::{Key, Value, ValueRef};
 
 use crate::encode::MAX_MEM_LEVEL;
@@ -186,10 +187,8 @@ fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>
     match params.as_ref() {
         ValueRef::Array(array) => Ok(array.find(name).map(|value| value.deref())),
         ValueRef::Object(object) => {
-            let object = *object;
-            Ok(object
-                .entries(req)?
-                .into_iter()
+            let table = object.property_table(req)?;
+            Ok(walk::rows(req, table)
                 .find(|(key, _)| matches!(key, Key::Str(k) if k.as_bytes() == name))
                 .map(|(_, value)| value.deref()))
         }
