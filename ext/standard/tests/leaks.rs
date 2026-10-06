@@ -77,3 +77,25 @@ echo php_strip_whitespace('{path}'), "\n";
     assert_eq!(fatal, None);
     assert_eq!(stdout, "252\n<?php  echo 1; \n");
 }
+
+/// The URL rewriter's query pairs and hidden inputs go back to the heap
+/// at the request's end, as `PHP_RSHUTDOWN_FUNCTION(url_scanner)`
+/// `smart_str_free`s them, whether or not the program reset them, and
+/// whatever their length (#2069).
+#[test]
+fn the_url_rewriter_gives_its_buffers_back_at_the_request_s_end() {
+    for (source, written) in [
+        (
+            "<?php output_add_rewrite_var('a', 'b'); echo '<form action=\"x.php\"></form>';",
+            "<form action=\"x.php\"><input type=\"hidden\" name=\"a\" value=\"b\" /></form>",
+        ),
+        (
+            "<?php output_add_rewrite_var('a', str_repeat('b', 300)); output_reset_rewrite_vars(); echo 'x';",
+            "x",
+        ),
+    ] {
+        let (stdout, fatal) = armed(source);
+        assert_eq!(fatal, None, "{source}");
+        assert_eq!(stdout, written);
+    }
+}

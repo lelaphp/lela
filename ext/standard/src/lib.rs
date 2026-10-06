@@ -837,11 +837,13 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `PHP_RSHUTDOWN(basic)`'s share here: the syslog closed and
-/// `BG(last_http_headers)` given back.
+/// `PHP_RSHUTDOWN(basic)`'s share here: the syslog closed,
+/// `BG(last_http_headers)` given back and the URL rewriter's buffers
+/// freed.
 fn rshutdown(req: &mut Request) {
     syslog::close(req);
     http_fopen_wrapper::clear_last_headers(req);
+    url_scanner::rshutdown(req);
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
