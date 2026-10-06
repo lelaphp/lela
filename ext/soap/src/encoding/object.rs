@@ -156,73 +156,16 @@ fn model_to_zval_any(
     let mut name: Option<Vec<u8>> = None;
     while let Some(mut n) = node {
         if get_zval_property(req, ret, &n.name()).is_none() {
-            let mut val = master_to_zval(req, cx, Some(anyxml), n)?;
-            if any.as_ref().is_some_and(|a| a.as_array().is_none())
-                && let Some(a) = any.take()
-            {
-                let mut arr = PhpArray::new(req)?;
-                match &name {
-                    Some(nm) => {
-                        let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
-                        arr.set(req, key, a.hand_on_unmigrated())?;
+            let stepped = any_step(req, cx, anyxml, n, &mut any, &mut name);
+            n = match stepped {
+                Ok(n) => n,
+                Err(err) => {
+                    if let Some(a) = any.take() {
+                        a.give_up(req);
                     }
-                    None => arr.append(req, a.hand_on_unmigrated())?,
+                    return Err(err);
                 }
-                any = Some(arr.into_value());
-            }
-            if val.as_str_bytes().is_some_and(|s| s.first() == Some(&b'<')) {
-                name = None;
-                while let Some(next) = n.next() {
-                    let val2 = master_to_zval(req, cx, Some(anyxml), next)?;
-                    let Some(tail) = val2.as_str_bytes().map(<[u8]>::to_vec) else {
-                        val2.give_up(req);
-                        break;
-                    };
-                    let mut joined = val.as_str_bytes().unwrap_or_default().to_vec();
-                    joined.extend_from_slice(&tail);
-                    let fresh = super::string(req, &joined)?;
-                    val.give_up(req);
-                    val2.give_up(req);
-                    val = fresh;
-                    n = next;
-                }
-            } else {
-                name = Some(n.name());
-            }
-            match any {
-                None => {
-                    if let Some(nm) = name.take() {
-                        let mut arr = PhpArray::new(req)?;
-                        let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
-                        arr.set(req, key, val.hand_on_unmigrated())?;
-                        any = Some(arr.into_value());
-                    } else {
-                        any = Some(val);
-                    }
-                }
-                Some(a) => {
-                    let mut arr = a.as_array().copied().unwrap_or_else(PhpArray::empty);
-                    if let Some(nm) = &name {
-                        match arr.find(nm) {
-                            Some(el) if el.as_array().is_some() => {
-                                let mut inner =
-                                    el.as_array().copied().unwrap_or_else(PhpArray::empty);
-                                inner.append(req, val.hand_on_unmigrated())?;
-                            }
-                            // php puts the old element and this one in an
-                            // array it keeps nowhere: the value is lost.
-                            Some(_) => val.give_up(req),
-                            None => add_assoc(req, &mut arr, nm, val)?,
-                        }
-                    } else {
-                        arr.append(req, val.hand_on_unmigrated())?;
-                    }
-                    // The rows went into the array `a` owns, written in
-                    // place: it has the one owner, so nothing separated.
-                    any = Some(a);
-                    name = None;
-                }
-            }
+            };
         }
         node = n.next();
     }
@@ -231,6 +174,93 @@ fn model_to_zval_any(
         set_zval_property(req, ret, &key, a)?;
     }
     Ok(())
+}
+
+/// One element `model_to_zval_any` reads into what it gathers, and the
+/// last node it read, the XML text of consecutive elements joined into
+/// one value. What is gathered stays the caller's to give up where this
+/// fails.
+fn any_step(
+    req: &mut Request,
+    cx: &mut Cx,
+    anyxml: EncRef,
+    mut n: Node,
+    any: &mut Option<Owner<Value>>,
+    name: &mut Option<Vec<u8>>,
+) -> Res<Node> {
+    let mut val = master_to_zval(req, cx, Some(anyxml), n)?;
+    if any.as_ref().is_some_and(|a| a.as_array().is_none())
+        && let Some(a) = any.take()
+    {
+        let mut arr = PhpArray::new(req)?;
+        match name.as_deref() {
+            Some(nm) => {
+                let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
+                arr.set(req, key, a.hand_on_unmigrated())?;
+            }
+            None => arr.append(req, a.hand_on_unmigrated())?,
+        }
+        *any = Some(arr.into_value());
+    }
+    if val.as_str_bytes().is_some_and(|s| s.first() == Some(&b'<')) {
+        *name = None;
+        while let Some(next) = n.next() {
+            let val2 = match master_to_zval(req, cx, Some(anyxml), next) {
+                Ok(val2) => val2,
+                Err(err) => {
+                    val.give_up(req);
+                    return Err(err);
+                }
+            };
+            let Some(tail) = val2.as_str_bytes().map(<[u8]>::to_vec) else {
+                val2.give_up(req);
+                break;
+            };
+            let mut joined = val.as_str_bytes().unwrap_or_default().to_vec();
+            joined.extend_from_slice(&tail);
+            let fresh = super::string(req, &joined)?;
+            val.give_up(req);
+            val2.give_up(req);
+            val = fresh;
+            n = next;
+        }
+    } else {
+        *name = Some(n.name());
+    }
+    match any.take() {
+        None => {
+            if let Some(nm) = name.take() {
+                let mut arr = PhpArray::new(req)?;
+                let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
+                arr.set(req, key, val.hand_on_unmigrated())?;
+                *any = Some(arr.into_value());
+            } else {
+                *any = Some(val);
+            }
+        }
+        Some(a) => {
+            let mut arr = a.as_array().copied().unwrap_or_else(PhpArray::empty);
+            if let Some(nm) = name.as_deref() {
+                match arr.find(nm) {
+                    Some(el) if el.as_array().is_some() => {
+                        let mut inner = el.as_array().copied().unwrap_or_else(PhpArray::empty);
+                        inner.append(req, val.hand_on_unmigrated())?;
+                    }
+                    // php puts the old element and this one in an
+                    // array it keeps nowhere: the value is lost.
+                    Some(_) => val.give_up(req),
+                    None => add_assoc(req, &mut arr, nm, val)?,
+                }
+            } else {
+                arr.append(req, val.hand_on_unmigrated())?;
+            }
+            // The rows went into the array `a` owns, written in
+            // place: it has the one owner, so nothing separated.
+            *any = Some(a);
+            *name = None;
+        }
+    }
+    Ok(n)
 }
 
 /// The value of one element of a content model, its `fixed` and

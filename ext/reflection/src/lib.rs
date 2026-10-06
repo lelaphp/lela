@@ -4993,8 +4993,8 @@ fn set_string_prop(
     value: &[u8],
 ) -> Result<(), Thrown> {
     let key = PhpString::interned(req, prop)?;
-    let key = Owner::take(req, key);
     let value = PhpString::interned(req, value)?;
+    let key = Owner::take(req, key);
     let value = Owner::take(req, Value::string(value));
     Std.write_property(req, this, key, value)
 }

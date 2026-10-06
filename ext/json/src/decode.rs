@@ -710,7 +710,13 @@ impl Parser<'_> {
                 }
                 match holder {
                     Holder::Array(array) => {
-                        let name = Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
+                        let name = match PhpString::new(req, key) {
+                            Ok(name) => Key::from_string(name.hand_on_unmigrated()),
+                            Err(thrown) => {
+                                value.give_up(req);
+                                return Err(thrown);
+                            }
+                        };
                         array.set(req, name, value.hand_on_unmigrated())?;
                     }
                     Holder::Object(object) => {
