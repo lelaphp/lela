@@ -1360,12 +1360,74 @@ impl Table {
         }
     }
 
+    /// `zend_hash_next_index_insert`: `value` is the table's from here,
+    /// laid down at the table's `nNextFreeElement`, an object's property
+    /// table's among them. An integer offset over an object is the
+    /// string that spells it ([`hash_key`] then [`Table::set`]), so it
+    /// moves no next free key, and an unset of one finds no integer row.
+    ///
+    /// ```php
+    /// $o = new stdClass; $ao = @new ArrayObject($o); $ao[] = str_repeat("a", 3); var_dump($o, count($ao));
+    /// $s = new stdClass; $s->x = 1; $as = @new ArrayObject($s);
+    /// $as[] = 'a'; $as[5] = 'five'; $as[] = 'b'; unset($as[1]); $as[] = 'c';
+    /// var_dump($s, count($as));
+    /// #[AllowDynamicProperties] class D { public $p = 1; protected $q = 2; }
+    /// $d = new D; $i = @new ArrayIterator($d); $i[] = 'x';
+    /// $c = clone $d; $over = @new ArrayObject(@new ArrayObject($c)); $over[] = 'y';
+    /// var_dump($d, $c, count($i));
+    /// $full = new ArrayObject([PHP_INT_MAX => 1]); $full[] = 2; $full->append(3);
+    /// var_dump(count($full));
+    /// ```
+    /// ```expect
+    /// object(stdClass)#1 (1) {
+    ///   [0]=>
+    ///   string(3) "aaa"
+    /// }
+    /// int(1)
+    /// object(stdClass)#3 (5) {
+    ///   ["x"]=>
+    ///   int(1)
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   ["5"]=>
+    ///   string(4) "five"
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   [2]=>
+    ///   string(1) "c"
+    /// }
+    /// int(5)
+    /// object(D)#5 (3) {
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["q":protected]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   string(1) "x"
+    /// }
+    /// object(D)#7 (4) {
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["q":protected]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   string(1) "x"
+    ///   [1]=>
+    ///   string(1) "y"
+    /// }
+    /// int(2)
+    /// int(1)
+    /// ```
     fn append(self, req: &mut Request, value: Value) -> Result<(), Thrown> {
-        if let Table::Array(owner, mut array) = self {
-            array.append(req, value)?;
-            store(req, owner, array)?;
+        // php ignores what `zend_hash_next_index_insert` answers, so a
+        // taken next element is no `Error` here, as it is for `$a[]`.
+        match self {
+            Table::Array(owner, mut array) => {
+                array.try_append(req, value)?;
+                store(req, owner, array)
+            }
+            Table::Props(object) => object.append_row(req, value).map(drop),
         }
-        Ok(())
     }
 
     fn unset(self, req: &mut Request, key: &Key) -> Result<(), Thrown> {

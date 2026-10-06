@@ -78,3 +78,21 @@ try { foreach (new RecursiveTreeIterator(new RecursiveArrayIterator($a, Recursiv
     );
     assert_eq!(stdout, "|-Array\n| |-aaa\n| \\-12\nno\n");
 }
+
+/// `$ao[] = $v` over an object appends to the object's property table,
+/// which keeps the value as its own (#2175), and `var_dump` prints the
+/// row under its integer key.
+#[test]
+fn a_value_appended_to_an_object_s_table_is_the_table_s() {
+    let stdout = armed(
+        r#"<?php
+$o = new stdClass; $ao = @new ArrayObject($o); $ao[] = str_repeat("a", 3);
+$i = @new ArrayIterator($o); $i[] = str_repeat("b", 2); $c = clone $o; unset($o);
+var_dump($c, count($ao));
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "object(stdClass)#4 (2) {\n  [0]=>\n  string(3) \"aaa\"\n  [1]=>\n  string(2) \"bb\"\n}\nint(2)\n"
+    );
+}

@@ -1170,6 +1170,7 @@ values::PhpArray::try_append
 values::PhpArray::unprotect
 values::PhpArray::unset
 values::PhpObject
+values::PhpObject::append_row
 values::PhpObject::as_value
 values::PhpObject::class
 values::PhpObject::clone_with
