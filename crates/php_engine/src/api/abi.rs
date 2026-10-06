@@ -633,7 +633,9 @@ pub struct IncludeSource {
 }
 
 /// [`StreamHooks::standard_handles`].
-pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Value; 3]>, Thrown>;
+/// Each stream's one owner the caller's, which the constant it registers
+/// holds.
+pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Owner<Value>; 3]>, Thrown>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.

@@ -933,13 +933,18 @@ pub struct StreamWrapper {
     /// `wrapper does not support stream open`; the opener's own `None`
     /// is the open that failed, which `php_stream_display_wrapper_errors`
     /// reports as `operation failed`. It is handed the path, the `mode` and
-    /// the [`Opening`] php hands it, `REPORT_ERRORS` cleared.
-    pub open: Option<fn(&mut Request, &[u8], &[u8], Opening) -> Result<Option<Stream>, Thrown>>,
+    /// the [`Opening`] php hands it, `REPORT_ERRORS` cleared, and answers
+    /// the stream's one owner, which the open hands its caller.
+    pub open:
+        Option<fn(&mut Request, &[u8], &[u8], Opening) -> Result<Option<Owner<Stream>>, Thrown>>,
     /// `dir_opener`: what the directory lists, which the engine serves
     /// as a directory stream under the wrapper's label (`rewinddir` back
     /// to the first); `None` is the open that failed.
     pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<DirListing>, Thrown>>,
-    pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
+    /// `url_stat`: the array `statbuf_from_array` reads the thirteen
+    /// fields out of, its one owner the caller's, which gives it up once
+    /// read; `None` is the stat that failed.
+    pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<Owner<PhpArray>>, Thrown>>,
     pub unlink: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
     pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,
     pub mkdir: Option<fn(&mut Request, &[u8], i64, bool) -> Result<bool, Thrown>>,

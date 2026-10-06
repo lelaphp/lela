@@ -329,7 +329,7 @@ impl PlainFiles for Request {
                         // `statbuf_from_array`
                         // (`Z/main/streams/userspace.c:799`): each of the
                         // thirteen read by its name, zero where it is not
-                        // there.
+                        // there, and the array given up once read.
                         let mut sb = [0; 13];
                         for (field, name) in sb.iter_mut().zip(STAT_NAMES) {
                             *field = array
@@ -337,6 +337,7 @@ impl PlainFiles for Request {
                                 .and_then(|value| value.deref().as_int())
                                 .unwrap_or(0);
                         }
+                        array.give_up(self);
                         UrlStat::Found(sb)
                     }
                     None => UrlStat::Failed,
