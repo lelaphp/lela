@@ -115,31 +115,34 @@ fn render(ops: &[Op]) -> Result<String, String> {
         cells.join(", ")
     };
     let mut out = String::new();
-    let _ = writeln!(
+    writeln!(
         out,
         "/// One of php's opcodes, numbered as `Zend/zend_vm_opcodes.h` numbers it."
-    );
-    let _ = writeln!(
+    )
+    .ok();
+    writeln!(
         out,
         "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]\n#[repr(u8)]\npub enum Opcode {{"
-    );
+    ).ok();
     for op in ops {
-        let _ = writeln!(out, "    /// `ZEND_{}`", op.name);
-        let _ = writeln!(out, "    {} = {},", op.variant, op.num);
+        writeln!(out, "    /// `ZEND_{}`", op.name).ok();
+        writeln!(out, "    {} = {},", op.variant, op.num).ok();
     }
-    let _ = writeln!(out, "}}");
-    let _ = writeln!(out, "pub(crate) const COUNT: usize = {};", ops.len());
-    let _ = writeln!(out, "pub(crate) const LAST: usize = {last};");
-    let _ = writeln!(
+    writeln!(out, "}}").ok();
+    writeln!(out, "pub(crate) const COUNT: usize = {};", ops.len()).ok();
+    writeln!(out, "pub(crate) const LAST: usize = {last};").ok();
+    writeln!(
         out,
         "pub(crate) static BY_NUM: [Option<Opcode>; LAST + 1] = [{}];",
         by_num(&|op| format!("Some(Opcode::{})", op.variant), "None")
-    );
-    let _ = writeln!(
+    )
+    .ok();
+    writeln!(
         out,
         "pub(crate) static NAMES: [&str; LAST + 1] = [{}];",
         by_num(&|op| format!("\"ZEND_{}\"", op.name), "\"\"")
-    );
+    )
+    .ok();
     let effect_bits = |op: &Op| -> Result<String, String> {
         let mut bits = Vec::new();
         for effect in &op.effects {
@@ -166,40 +169,45 @@ fn render(ops: &[Op]) -> Result<String, String> {
     for op in ops {
         effects.push(effect_bits(op)?);
     }
-    let _ = writeln!(
+    writeln!(
         out,
         "pub(crate) static EFFECTS: [u8; LAST + 1] = [{}];",
         by_num(
             &|op| effects[ops.iter().position(|o| o.num == op.num).unwrap_or(0)].clone(),
             "0"
         )
-    );
-    let _ = writeln!(
+    )
+    .ok();
+    writeln!(
         out,
         "pub(crate) static RESULT_USED: [bool; LAST + 1] = [{}];",
         by_num(&|op| op.result_used.to_string(), "false")
-    );
-    let _ = writeln!(
+    )
+    .ok();
+    writeln!(
         out,
         "pub(crate) static SAFEPOINT: [bool; LAST + 1] = [{}];",
         by_num(&|op| op.safepoint.to_string(), "false")
-    );
-    let _ = writeln!(
+    )
+    .ok();
+    writeln!(
         out,
         "pub(crate) static COMMUTATIVE: [bool; LAST + 1] = [{}];",
         by_num(&|op| op.commutative.to_string(), "false")
-    );
+    )
+    .ok();
     // php's `zend_vm_opcodes_flags` without its two top bits, which
     // name a specialisation and not a field: every other bit agrees
     // with the table in `Zend/zend_vm_opcodes.c` at the tag.
-    let _ = writeln!(
+    writeln!(
         out,
         "pub(crate) static FLAGS: [u32; LAST + 1] = [{}];",
         by_num(
             &|op| format!("0x{:04x}_{:04x}", op.flags >> 16, op.flags & 0xffff),
             "0"
         )
-    );
+    )
+    .ok();
     Ok(out)
 }
 

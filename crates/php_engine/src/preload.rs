@@ -81,10 +81,10 @@ impl Engine {
     /// cached; then the request shut down. A file that fails fails the
     /// startup, and the process ends with status 1, as php's does.
     fn preload(&self, mut req: Request, script: &[u8], sink: &mut dyn OutputSink) -> Started {
-        let _ = req.hash_environment();
+        req.hash_environment().ok();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
-                let _ = rinit(&mut req);
+                rinit(&mut req).ok();
             }
         }
         // "don't send headers": `SG(headers_sent)` and

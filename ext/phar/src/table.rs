@@ -164,7 +164,7 @@ mod tests {
         t.update(b"a", 4);
         assert_eq!(t.keys(), vec![b"a".to_vec(), b"b".to_vec()]);
         t.remove(b"a");
-        let _ = t.add(b"a", 5);
+        t.add(b"a", 5).ok();
         assert_eq!(t.keys(), vec![b"b".to_vec(), b"a".to_vec()]);
         let slot = t.slot(b"b").unwrap_or(0);
         t.rekey(slot, b"c");

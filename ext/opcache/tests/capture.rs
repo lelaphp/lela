@@ -26,7 +26,7 @@ fn the_extension_is_loaded_under_php_s_name() {
 #[test]
 fn a_cached_file_deleted_since_exists_under_the_file_override() {
     let dir = std::env::temp_dir().join(format!("opcache-override-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let probe = r"<?php
 $f = __DIR__ . '/held.inc';
 file_put_contents($f, '<?php return 1;');
@@ -46,7 +46,7 @@ var_dump(file_exists($f), is_file($f), is_readable($f), file_exists($f . 'x'));
     };
     let on = served("1");
     let off = served("0");
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(on, "bool(true)\nbool(true)\nbool(true)\nbool(false)\n");
     assert_eq!(off, "bool(false)\nbool(false)\nbool(false)\nbool(false)\n");
 }
@@ -69,16 +69,16 @@ fn engine(ini: &[(&str, &str)]) -> Engine {
 #[test]
 fn the_preload_s_declarations_stand_in_every_request() {
     let dir = std::env::temp_dir().join(format!("opcache-preload-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(
+    std::fs::create_dir_all(&dir).ok();
+    std::fs::write(
         dir.join("compiled.inc"),
         "<?php\nclass Kept {}\nclass Unlinked extends Missing {}\nfunction compiled() { return 'compiled'; }\n",
-    );
+    ).ok();
     let script = dir.join("preload.inc");
-    let _ = std::fs::write(
+    std::fs::write(
         &script,
         "<?php\necho \"preloading\\n\";\nopcache_compile_file(__DIR__ . '/compiled.inc');\nfunction preloaded() { return 'preloaded'; }\n",
-    );
+    ).ok();
     let script = script.to_string_lossy().into_owned();
     let engine = engine(&[("opcache.enable_cli", "1"), ("opcache.preload", &script)]);
     let program = r"<?php
@@ -89,7 +89,7 @@ echo implode(' ', $s['functions']), ' | ', implode(' ', $s['classes']), ' | ', c
     let first = engine.serve_capture_in(&dir, b"first.php", program, Capture::default());
     let second = engine.serve_capture_in(&dir, b"second.php", program, Capture::default());
     let compiled = dir.join("compiled.inc").canonicalize().unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let listed = "compiled preloaded | Kept Unlinked | 2\n";
     assert_eq!(
         String::from_utf8_lossy(&first.stdout),
@@ -138,8 +138,8 @@ fn a_fatal_startup_serves_nothing_and_the_cache_logs_its_own_events() {
         "{stderr}"
     );
     let dir = std::env::temp_dir().join(format!("opcache-logging-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join("held.inc"), "<?php return 1;");
+    std::fs::create_dir_all(&dir).ok();
+    std::fs::write(dir.join("held.inc"), "<?php return 1;").ok();
     let events = engine(&[
         ("opcache.enable_cli", "1"),
         ("opcache.file_update_protection", "0"),
@@ -152,7 +152,7 @@ fn a_fatal_startup_serves_nothing_and_the_cache_logs_its_own_events() {
         Capture::default(),
     );
     let held = dir.join("held.inc").canonicalize().unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let stderr = String::from_utf8_lossy(&events.stderr);
     let lines: Vec<&str> = stderr
         .lines()

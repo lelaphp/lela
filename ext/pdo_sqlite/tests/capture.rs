@@ -56,7 +56,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
         ])
         .build();
     let path = std::env::temp_dir().join(format!("t1695-{}.sqlite", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     let dsn = format!("sqlite:{}", path.display());
     let written = format!(
         "<?php ini_set('session.use_cookies', '0'); ini_set('session.cache_limiter', '');
@@ -85,7 +85,7 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
         "<?php var_dump((new PDO('{dsn}'))->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));"
     );
     let served = engine.serve_capture(&read, Capture::default());
-    let _ = std::fs::remove_file(&path);
+    std::fs::remove_file(&path).ok();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "array(1) {\n  [0]=>\n  string(6) \"a|i:1;\"\n}\n"

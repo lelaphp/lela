@@ -398,7 +398,7 @@ pub fn php_mail(
     }
     body.extend_from_slice(line_sep);
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(&body);
+        stdin.write_all(&body).ok();
     }
     let status = match child.wait() {
         Ok(status) => status,

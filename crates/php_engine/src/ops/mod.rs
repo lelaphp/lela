@@ -5702,7 +5702,7 @@ mod tests {
             return Value::null();
         };
         for (k, v) in entries {
-            let _ = a.set(req, k, v);
+            a.set(req, k, v).ok();
         }
         Value::array(a)
     }

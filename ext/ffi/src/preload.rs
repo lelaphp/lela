@@ -320,6 +320,10 @@ pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
             };
             let name = loaded.scope_name.unwrap_or_else(|| b"C".to_vec());
             if let Some(lib) = loaded.lib {
+                #[expect(
+                    clippy::mem_forget,
+                    reason = "a preloaded library stays loaded for the process's life, its symbols named by the scope"
+                )]
                 std::mem::forget(lib);
             }
             merge(&mut scopes, name, loaded.scope);
@@ -504,6 +508,10 @@ pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
         }
     };
     if let Some(lib) = loaded.lib {
+        #[expect(
+            clippy::mem_forget,
+            reason = "a preloaded library stays loaded for the process's life, its symbols named by the scope"
+        )]
         std::mem::forget(lib);
     }
     let name = loaded.scope_name.unwrap_or_else(|| b"C".to_vec());

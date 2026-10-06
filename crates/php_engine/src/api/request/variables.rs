@@ -297,7 +297,7 @@ impl Request {
     /// ```
     pub fn superglobal(&mut self, name: &[u8]) -> Option<PhpArray> {
         let global = AutoGlobal::of(name)?;
-        let _ = self.arm(global);
+        self.arm(global).ok();
         self.http_globals.track(global).and_then(|track| *track)
     }
 

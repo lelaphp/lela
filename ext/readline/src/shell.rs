@@ -67,7 +67,7 @@ pub(crate) fn write(req: &mut Request, bytes: &[u8]) {
             .map(BufWriter::new);
     }
     if let Some(pager) = &mut state.pager {
-        let _ = pager.write_all(&bytes[..bytes.len().min(16384)]);
+        pager.write_all(&bytes[..bytes.len().min(16384)]).ok();
     }
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn write(req: &mut Request, bytes: &[u8]) {
 /// the pipe closed, the pager left to finish on its own.
 pub(crate) fn close_pager(req: &mut Request) {
     if let Some(mut pager) = state(req).pager.take() {
-        let _ = pager.flush();
+        pager.flush().ok();
     }
 }
 
@@ -118,7 +118,7 @@ fn prompt(req: &mut Request, block: &[u8], prompt: u8) -> Vec<u8> {
                 state(req).capture = Some(Vec::new());
                 // php leaves what the code threw pending; it is given up.
                 if let Err(thrown) = req.eval_stringl(&code, b"php prompt code") {
-                    let _ = clear(req, thrown);
+                    clear(req, thrown).ok();
                 }
                 if let Some(captured) = state(req).capture.take() {
                     out.extend_from_slice(&captured);
@@ -505,7 +505,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             && line.get(1) != Some(&b'[')
             && let Some(eq) = line.iter().position(|&b| b == b'=')
         {
-            let _ = req.ini_set(&line[1..eq], &line[eq + 1..]);
+            req.ini_set(&line[1..eq], &line[eq + 1..]).ok();
             ffi::add_history(&line);
             next = prompt(req, b"php", b'>');
             continue;
@@ -532,7 +532,7 @@ pub(crate) fn run(req: &mut Request) -> i32 {
             req.write(b"\n");
         }
         if let Err(thrown) = left {
-            let _ = uncaught_at(req, thrown, Level::Warning);
+            uncaught_at(req, thrown, Level::Warning).ok();
         }
         close_pager(req);
         state(req).last = 0;

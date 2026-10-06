@@ -288,7 +288,7 @@ impl Handle {
             None => None,
         };
         if let Some(mut conn) = taken {
-            let _ = conn.send_close(req);
+            conn.send_close(req).ok();
             flush(req, &mut conn);
         }
     }

@@ -144,7 +144,7 @@ impl Answer {
             } else {
                 "unchanged"
             };
-            let _ = writeln!(lines, "{file}: {action}");
+            writeln!(lines, "{file}: {action}").ok();
         }
         lines
     }

@@ -77,14 +77,14 @@ fn line(row: &Value) -> Result<String> {
         .and_then(Value::as_integer)
         .with_context(|| format!("{name}: an [[op]] row without a num"))?;
     let mut out = String::new();
-    let _ = write!(out, "{name:<NAME$} {num:>NUM$}");
-    let _ = write!(out, " {:<OPERAND$}", operands(row, "op1"));
-    let _ = write!(out, " {:<OPERAND$}", operands(row, "op2"));
+    write!(out, "{name:<NAME$} {num:>NUM$}").ok();
+    write!(out, " {:<OPERAND$}", operands(row, "op1")).ok();
+    write!(out, " {:<OPERAND$}", operands(row, "op2")).ok();
     let result = row.get("result").and_then(Value::as_str).unwrap_or(NONE);
-    let _ = write!(out, " {result:<RESULT$}");
-    let _ = write!(out, " {:<EFFECTS$}", effects(row));
+    write!(out, " {result:<RESULT$}").ok();
+    write!(out, " {:<EFFECTS$}", effects(row)).ok();
     let safepoint = row.get("safepoint").and_then(Value::as_str).unwrap_or(NONE);
-    let _ = write!(out, " {safepoint}");
+    write!(out, " {safepoint}").ok();
     Ok(out)
 }
 

@@ -123,7 +123,7 @@ fn unref_single(req: &mut Request, id: u32, holder: Holder) {
             let entries = stored(req, at)
                 .and_then(|map| map.native::<ZendWeakMap>(req).and_then(|m| m.entries));
             if let Some(mut entries) = entries {
-                let _ = entries.unset(req, &Key::Int(i64::from(id)));
+                entries.unset(req, &Key::Int(i64::from(id))).ok();
             }
         }
     }

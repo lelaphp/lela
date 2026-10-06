@@ -133,7 +133,7 @@ impl<'a> Database<'a> {
         let code = statements
             .iter()
             .fold(String::new(), |mut code, statement| {
-                let _ = writeln!(code, "$db->exec('{statement}');");
+                writeln!(code, "$db->exec('{statement}');").ok();
                 code
             });
         said(oracle, &code)

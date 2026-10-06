@@ -58,7 +58,7 @@ pub(crate) fn defer(req: &mut Request, thrown: Thrown) {
     if state.thrown.is_none() {
         state.thrown = Some(thrown);
     } else {
-        let _ = php_ext::raising::clear(req, thrown);
+        php_ext::raising::clear(req, thrown).ok();
     }
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn finish<T>(
     match req.state::<State>().thrown.take() {
         Some(thrown) => {
             if let Err(other) = out {
-                let _ = php_ext::raising::clear(req, other);
+                php_ext::raising::clear(req, other).ok();
             }
             Err(thrown)
         }

@@ -36,8 +36,8 @@ fn merged(code: &str) -> String {
         .spawn()
         .unwrap_or_else(|e| panic!("running php: {e}"));
     let mut text = String::new();
-    let _ = reader.read_to_string(&mut text);
-    let _ = child.wait();
+    reader.read_to_string(&mut text).ok();
+    child.wait().ok();
     text
 }
 

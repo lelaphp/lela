@@ -855,14 +855,15 @@ fn emit_token_sets(buf: &mut String, model: &Model<'_>) {
             .iter()
             .map(|k| format!("SyntaxKind::{k}"))
             .collect();
-        let _ = write!(
+        write!(
             buf,
             "/// The token set of `{0}` (token-only alternation, convention A1).\n\
              pub const {1}_TOKENS: &[SyntaxKind] = &[{2}];\n",
             info.def.name,
             screaming_snake(&info.def.name),
             list.join(", "),
-        );
+        )
+        .ok();
         any = true;
     }
     if !any {
@@ -873,7 +874,7 @@ fn emit_token_sets(buf: &mut String, model: &Model<'_>) {
         if info.class != DefClass::TokenAlt {
             continue;
         }
-        let _ = write!(
+        write!(
             buf,
             "    /// Is this kind in the `{0}` token set?\n    \
              #[must_use]\n    \
@@ -883,7 +884,8 @@ fn emit_token_sets(buf: &mut String, model: &Model<'_>) {
             info.def.name,
             snake_case(&info.def.name),
             screaming_snake(&info.def.name),
-        );
+        )
+        .ok();
     }
     buf.push_str("}\n\n");
 }
@@ -897,7 +899,7 @@ fn emit_struct(
 ) {
     let name = &def.name;
     let kind = screaming_snake(name);
-    let _ = write!(
+    write!(
         buf,
         "/// `{name}` (php.ungram): one node of kind `{kind}`, its children the fields the\n\
          /// builder resolved, no scan behind any of them.\n\
@@ -907,24 +909,25 @@ fn emit_struct(
              pub range: TextRange,\n    \
              /// php's `zend_ast.lineno`, as the builder records it (design §4.9).\n    \
              pub line: u32,\n"
-    );
+    ).ok();
     for field in fields {
         let from = field
             .mixin
             .as_ref()
             .map(|m| format!(" (`{m}`)"))
             .unwrap_or_default();
-        let _ = write!(
+        write!(
             buf,
             "    /// `{}`: {}{from}.\n    pub {}: {},\n",
             field.name,
             field.doc,
             rust_label(&field.name),
             field.ty
-        );
+        )
+        .ok();
     }
     buf.push_str("}\n");
-    let _ = write!(
+    write!(
         buf,
         "impl Node for {name} {{\n    \
              const KIND: SyntaxKind = SyntaxKind::{kind};\n    \
@@ -933,24 +936,26 @@ fn emit_struct(
              fn all(nodes: &Nodes) -> &[Self] {{\n        &nodes.{field}\n    }}\n\
          }}\n",
         field = snake_case(name)
-    );
+    )
+    .ok();
     emit_resolver(buf, model, def, fields, errors);
     for trait_name in &def.traits {
         if model.class_of(trait_name) != Some(DefClass::Trait) {
             continue;
         }
-        let _ = writeln!(buf, "impl {trait_name} for {name} {{");
+        writeln!(buf, "impl {trait_name} for {name} {{").ok();
         for field in fields
             .iter()
             .filter(|f| f.mixin.as_deref() == Some(trait_name))
         {
-            let _ = write!(
+            write!(
                 buf,
                 "    fn {}(&self) -> {} {{\n        {}\n    }}\n",
                 rust_label(&field.name),
                 method_type(field),
                 method_body(field)
-            );
+            )
+            .ok();
         }
         buf.push_str("}\n");
     }
@@ -1042,7 +1047,7 @@ fn emit_resolver(
     } else {
         ("", "Self", "Self {")
     };
-    let _ = write!(
+    write!(
         buf,
         "impl {name} {{\n    \
              /// The node from its children, resolved once (ADR-0003){doc}.\n    \
@@ -1052,7 +1057,8 @@ fn emit_resolver(
                  {children_param}: &[Element],\n        \
                  {doc_param}: Option<TokenId>,\n    \
              ) -> {ret} {{\n"
-    );
+    )
+    .ok();
     for field in fields {
         let label = rust_label(&field.name);
         let Some(slot) = &field.slot else {
@@ -1067,23 +1073,24 @@ fn emit_resolver(
             }
         };
         if slot.required && !slot.repeated {
-            let _ = writeln!(
+            writeln!(
                 buf,
                 "        let Some({label}) = {read} else {{\n            \
                      return Err(\"{}.{}\");\n        \
                  }};",
                 name, field.name
-            );
+            )
+            .ok();
         } else {
-            let _ = writeln!(buf, "        let {label} = {read};");
+            writeln!(buf, "        let {label} = {read};").ok();
         }
     }
-    let _ = writeln!(buf, "        {ok}\n            range,\n            line,");
+    writeln!(buf, "        {ok}\n            range,\n            line,").ok();
     for field in fields {
-        let _ = writeln!(buf, "            {},", rust_label(&field.name));
+        writeln!(buf, "            {},", rust_label(&field.name)).ok();
     }
     let close = if fallible { "})" } else { "}" };
-    let _ = write!(buf, "        {close}\n    }}\n}}\n");
+    write!(buf, "        {close}\n    }}\n}}\n").ok();
 }
 
 /// Does one of `fields` hold a required child (`!`), so that resolving
@@ -1108,12 +1115,13 @@ fn emit_nodes(buf: &mut String, model: &Model<'_>) {
         if info.class != DefClass::StructNode {
             continue;
         }
-        let _ = writeln!(
+        writeln!(
             buf,
             "    {}: Vec<{}>,",
             snake_case(&info.def.name),
             info.def.name
-        );
+        )
+        .ok();
     }
     buf.push_str("}\n\n");
 }
@@ -1147,12 +1155,12 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
         // struct was emitted.
         let fallible = has_required(&fields_of(model, info.def, &mut Vec::new()));
         let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
-        let _ = writeln!(
+        writeln!(
             buf,
             "        SyntaxKind::{} => push(&mut nodes.{}, {open}{name}::resolve(range, line, children, doc_comment){close}),",
             screaming_snake(name),
             snake_case(name)
-        );
+        ).ok();
     }
     buf.push_str("        _ => Resolved::Untyped,\n    }\n}\n\n");
 }
@@ -1169,29 +1177,31 @@ fn emit_enum(
     what: &str,
     errors: &mut Vec<Error>,
 ) {
-    let _ = write!(
+    write!(
         buf,
         "/// `{name}` ({what}; convention A1): which node or token stands here, resolved\n\
          /// once by the builder.\n\
          #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\n\
          pub enum {name} {{\n"
-    );
+    )
+    .ok();
     for r in node_refs {
         match ref_type(model, r) {
             Ok(ty) if ty == "TokenId" => {
-                let _ = writeln!(
+                writeln!(
                     buf,
                     "    /// A bare `{r}` token (A1 token-only alternation).\n    {r}(TokenId),"
-                );
+                )
+                .ok();
             }
             Ok(ty) => {
-                let _ = writeln!(buf, "    /// `{r}`.\n    {r}({ty}),");
+                writeln!(buf, "    /// `{r}`.\n    {r}({ty}),").ok();
             }
             Err(e) => errors.push(e),
         }
     }
     for (variant, kind) in token_variants {
-        let _ = writeln!(buf, "    /// The `{kind}` token.\n    {variant}(TokenId),");
+        writeln!(buf, "    /// The `{kind}` token.\n    {variant}(TokenId),").ok();
     }
     buf.push_str("}\n");
 
@@ -1203,33 +1213,35 @@ fn emit_enum(
     } else {
         ""
     };
-    let _ = write!(
+    write!(
         buf,
         "impl Child for {name} {{\n\
          {long}    \
              fn of(element: &Element) -> Option<Self> {{\n"
-    );
+    )
+    .ok();
     for r in node_refs {
         match model.class_of(r) {
             Some(DefClass::StructNode) => {
-                let _ = writeln!(
+                writeln!(
                     buf,
                     "        if let Element::Node {{ kind: SyntaxKind::{}, index, .. }} = *element {{\n            \
                          return Some(Self::{r}(NodeId::new(index)));\n        \
                      }}",
                     screaming_snake(r)
-                );
+                ).ok();
             }
             Some(DefClass::Enum) => {
-                let _ = writeln!(
+                writeln!(
                     buf,
                     "        if let Some(inner) = {r}::of(element) {{\n            \
                          return Some(Self::{r}(inner));\n        \
                      }}"
-                );
+                )
+                .ok();
             }
             Some(DefClass::TokenAlt) => {
-                let _ = writeln!(
+                writeln!(
                     buf,
                     "        if let Element::Token {{ kind, id }} = *element\n            \
                          && kind.is_{}()\n        \
@@ -1237,18 +1249,19 @@ fn emit_enum(
                          return Some(Self::{r}(id));\n        \
                      }}",
                     snake_case(r)
-                );
+                )
+                .ok();
             }
             Some(DefClass::Trait) | None => {}
         }
     }
     for (variant, kind) in token_variants {
-        let _ = writeln!(
+        writeln!(
             buf,
             "        if let Element::Token {{ kind: SyntaxKind::{kind}, id }} = *element {{\n            \
                  return Some(Self::{variant}(id));\n        \
              }}"
-        );
+        ).ok();
     }
     buf.push_str("        None\n    }\n}\n");
     emit_enum_place(buf, model, name, node_refs, token_variants);
@@ -1277,24 +1290,28 @@ fn emit_enum_place(
     for r in node_refs {
         match model.class_of(r) {
             Some(DefClass::StructNode) => {
-                let _ = writeln!(
+                writeln!(
                     range_arms,
                     "            Self::{r}(id) => parsed.tree[id].range(),"
-                );
-                let _ = writeln!(
+                )
+                .ok();
+                writeln!(
                     line_arms,
                     "            Self::{r}(id) => parsed.tree[id].line(),"
-                );
+                )
+                .ok();
             }
             Some(DefClass::Enum) => {
-                let _ = writeln!(
+                writeln!(
                     range_arms,
                     "            Self::{r}(inner) => inner.range(parsed),"
-                );
-                let _ = writeln!(
+                )
+                .ok();
+                writeln!(
                     line_arms,
                     "            Self::{r}(inner) => inner.line(parsed),"
-                );
+                )
+                .ok();
             }
             Some(DefClass::TokenAlt) => tokens.push(format!("Self::{r}(id)")),
             Some(DefClass::Trait) | None => {}
@@ -1307,16 +1324,18 @@ fn emit_enum_place(
     );
     if !tokens.is_empty() {
         let pattern = tokens.join(" | ");
-        let _ = writeln!(
+        writeln!(
             range_arms,
             "            {pattern} => token_range(parsed, id),"
-        );
-        let _ = writeln!(
+        )
+        .ok();
+        writeln!(
             line_arms,
             "            {pattern} => token_line(parsed, id),"
-        );
+        )
+        .ok();
     }
-    let _ = write!(
+    write!(
         buf,
         "impl {name} {{\n    \
              /// Where the child is in the source: the node's range, or the token's.\n    \
@@ -1331,7 +1350,8 @@ fn emit_enum_place(
                  match self {{\n{line_arms}        }}\n    \
              }}\n\
          }}\n"
-    );
+    )
+    .ok();
 }
 
 /// The mixin traits (A5): one method per injected field, over the nodes
@@ -1342,32 +1362,35 @@ fn emit_traits(buf: &mut String, model: &Model<'_>, errors: &mut Vec<Error>) {
             continue;
         }
         let def = info.def;
-        let _ = write!(
+        write!(
             buf,
             "/// Mixin `{0}` (convention A5): the fields it injects into every node that\n\
              /// opts in, read through one trait.\n\
              pub trait {0} {{\n",
             def.name
-        );
+        )
+        .ok();
         if def.rule.is_none() {
-            let _ = write!(
+            write!(
                 buf,
                 "    /// The doc comment the node took where php's grammar takes it \
                  (`backup_doc_comment`).\n    \
                  fn {DOC_COMMENT}(&self) -> Option<TokenId>;\n"
-            );
+            )
+            .ok();
         } else {
             for slot in slots_for(model, def, errors) {
                 match Field::of(model, def, &slot, Some(&def.name)) {
                     Ok(field) => {
-                        let _ = write!(
+                        write!(
                             buf,
                             "    /// `{}`: {}.\n    fn {}(&self) -> {};\n",
                             field.name,
                             field.doc,
                             rust_label(&field.name),
                             method_type(&field)
-                        );
+                        )
+                        .ok();
                     }
                     Err(e) => errors.push(e),
                 }
@@ -1502,28 +1525,30 @@ pub fn generate_display(grammar: &Grammar) -> Result<String, Vec<Error>> {
     for (symbol, _) in symbols {
         if let Some(variant) = punct_variant(&symbol) {
             let display = symbol.replace('\\', "\\\\").replace('"', "\\\"");
-            let _ = writeln!(buf, "            SyntaxKind::{variant} => \"`{display}`\",");
+            writeln!(buf, "            SyntaxKind::{variant} => \"`{display}`\",").ok();
         }
     }
     if grammar.has_comma_lists() {
         buf.push_str("            SyntaxKind::COMMA => \"`,`\",\n");
     }
     for keyword in grammar.keyword_tokens() {
-        let _ = writeln!(
+        writeln!(
             buf,
             "            SyntaxKind::{} => \"`{keyword}`\",",
             keyword_variant(&keyword)
-        );
+        )
+        .ok();
     }
     for (class, display) in CLASS_DISPLAY {
-        let _ = writeln!(
+        writeln!(
             buf,
             "            SyntaxKind::{} => \"{display}\",",
             class.to_ascii_uppercase()
-        );
+        )
+        .ok();
     }
     for (extra, display) in EXTRA_DISPLAY {
-        let _ = writeln!(buf, "            SyntaxKind::{extra} => \"{display}\",");
+        writeln!(buf, "            SyntaxKind::{extra} => \"{display}\",").ok();
     }
     buf.push_str("            _ => return None,\n        };\n        Some(name)\n    }\n}\n");
     Ok(buf)

@@ -570,7 +570,7 @@ impl PlainFiles for Request {
                     success = error.raw_os_error() == Some(EPERM);
                 }
                 if success {
-                    let _ = std::fs::remove_file(&source);
+                    std::fs::remove_file(&source).ok();
                 }
                 success
             }
@@ -589,10 +589,11 @@ impl PlainFiles for Request {
         if let Ok(meta) = std::fs::metadata(path) {
             let have = meta.permissions().mode();
             if have & 0o777 != want {
-                let _ = std::fs::set_permissions(
+                std::fs::set_permissions(
                     path,
                     std::fs::Permissions::from_mode((have & !0o777 & 0o7777) | want),
-                );
+                )
+                .ok();
             }
         }
     }

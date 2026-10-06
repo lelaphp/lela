@@ -54,15 +54,15 @@ fn end(n: u8, name: &str, returned: Option<&str>) -> Event {
 pub(super) fn scratch(name: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("php_engine_observer_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).ok();
     dir
 }
 
 /// `source` served as `main.php` in `dir`.
 pub(super) fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
-    let _ = std::fs::write(&main, source);
+    std::fs::write(&main, source).ok();
     engine.serve_capture_in(
         dir,
         main.to_string_lossy().as_bytes(),
@@ -187,10 +187,11 @@ fn an_include_and_an_eval_are_begun_and_ended_inside_their_includer() {
         .extensions(&[TestExt::<0>::observing()])
         .build();
     let dir = scratch("include");
-    let _ = std::fs::write(
+    std::fs::write(
         dir.join("inc.php"),
         "<?php\nfunction h() { return 'h'; }\nreturn h();\n",
-    );
+    )
+    .ok();
     rec.mark("built");
     let served = serve_main(
         &engine,

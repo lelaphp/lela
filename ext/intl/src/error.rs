@@ -244,26 +244,26 @@ pub(crate) fn parse_error_text(line: i32, offset: i32, pre: &[u8], post: &[u8]) 
     let mut out = String::from("parse error ");
     let mut any = false;
     if line > 0 {
-        let _ = write!(out, "on line {line}");
+        write!(out, "on line {line}").ok();
         any = true;
     }
     if offset >= 0 {
         out.push_str(if any { ", " } else { "at " });
-        let _ = write!(out, "offset {offset}");
+        write!(out, "offset {offset}").ok();
         any = true;
     }
     if !pre.is_empty() {
         if any {
             out.push_str(", ");
         }
-        let _ = write!(out, "after \"{}\"", String::from_utf8_lossy(pre));
+        write!(out, "after \"{}\"", String::from_utf8_lossy(pre)).ok();
         any = true;
     }
     if !post.is_empty() {
         if any {
             out.push_str(", ");
         }
-        let _ = write!(out, "before or at \"{}\"", String::from_utf8_lossy(post));
+        write!(out, "before or at \"{}\"", String::from_utf8_lossy(post)).ok();
         any = true;
     }
     if !any {

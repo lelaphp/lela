@@ -123,7 +123,7 @@ impl Drop for Sem {
                 flags: UNDO,
             });
         }
-        let _ = ffi::op(self.id, &ops);
+        ffi::op(self.id, &ops).ok();
     }
 }
 

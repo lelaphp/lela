@@ -648,7 +648,7 @@ fn retval_info(
                 let level = depth.saturating_mul(2).saturating_add(3);
                 // What the walk threw stands pending, as php's smart_str
                 // is left with what was written before it.
-                let _ = php_var_export_ex(req, &mut info, value, level);
+                php_var_export_ex(req, &mut info, value, level).ok();
             }
         }
         Some(value) => info.extend_from_slice(type_name(req, value).as_bytes()),
@@ -724,7 +724,7 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
     );
     for (tag, fiber) in [(entered, to), (left, from)] {
         if let Some(tag) = tag {
-            let _ = writeln!(out, "<{tag} '{}'>", address(fiber));
+            writeln!(out, "<{tag} '{}'>", address(fiber)).ok();
         }
     }
     req.write(out.as_bytes());

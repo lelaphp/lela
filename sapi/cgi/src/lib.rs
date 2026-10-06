@@ -380,7 +380,7 @@ impl OutputSink for Process {
     }
 
     fn flush(&mut self) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
     }
 
     /// `sapi_cgi_send_headers`, the head [`php_sapi::cgi::head`] writes.
@@ -424,17 +424,17 @@ impl OutputSink for Process {
     /// x
     /// ```
     fn send_headers(&mut self, head: &ResponseHead) {
-        let _ = self.write(&php_sapi::cgi::head(head));
+        self.write(&php_sapi::cgi::head(head)).ok();
     }
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(entry);
-        let _ = stderr.write_all(b"\n");
+        stderr.write_all(entry).ok();
+        stderr.write_all(b"\n").ok();
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
@@ -524,7 +524,11 @@ fn describe(
     let mut body = Vec::new();
     if info.content_length > 0 && !matches!(program, Program::Stdin(_)) {
         let length = u64::try_from(info.content_length).unwrap_or(0);
-        let _ = std::io::stdin().lock().take(length).read_to_end(&mut body);
+        std::io::stdin()
+            .lock()
+            .take(length)
+            .read_to_end(&mut body)
+            .ok();
     }
     let (response_code, failed) = match &program {
         Program::Refused { code, .. } => (*code, true),
@@ -618,7 +622,7 @@ impl Program {
                 },
                 Origin::Shell => {
                     let mut source = Vec::new();
-                    let _ = std::io::stdin().lock().read_to_end(&mut source);
+                    std::io::stdin().lock().read_to_end(&mut source).ok();
                     Program::Stdin(source)
                 }
             };
@@ -699,7 +703,7 @@ pub fn environment() -> Environment {
 /// ```
 pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 {
     if invocation.interactive {
-        let _ = Process.write(b"Interactive mode enabled\n\n");
+        Process.write(b"Interactive mode enabled\n\n").ok();
     }
     if invocation.behavior == Behavior::Lint {
         return lint(engine, invocation, &env);
@@ -707,7 +711,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     let (description, failed) = match describe(engine, invocation, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
-            let _ = Process.write(SECURITY_ALERT.as_bytes());
+            Process.write(SECURITY_ALERT.as_bytes()).ok();
             return 255;
         }
     };
@@ -739,7 +743,7 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         let (description, failed) = match describe(engine, &this, env.clone()) {
             Ok(described) => described,
             Err(Refusal::Redirect) => {
-                let _ = Process.write(SECURITY_ALERT.as_bytes());
+                Process.write(SECURITY_ALERT.as_bytes()).ok();
                 return 255;
             }
         };
@@ -762,7 +766,7 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         };
         line.extend_from_slice(&name);
         line.push(b'\n');
-        let _ = Process.write(&line);
+        Process.write(&line).ok();
         if this.words.len() < 2 {
             return exit_code;
         }
@@ -794,10 +798,11 @@ pub fn main() -> ExitCode {
         // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
             let _ = engine(&options.ini, Origin::Shell, false);
-            let _ = std::io::stderr().lock().write_all(stderr.as_bytes());
-            let _ = std::io::stdout()
+            std::io::stderr().lock().write_all(stderr.as_bytes()).ok();
+            std::io::stdout()
                 .lock()
-                .write_all(usage_text(&argv0).as_bytes());
+                .write_all(usage_text(&argv0).as_bytes())
+                .ok();
             *exit_code
         }
         // `-v` and `-m` are read by the pass a shell's line alone is given.
@@ -818,7 +823,7 @@ pub fn main() -> ExitCode {
 
 /// `text` on stdout, and the status 0.
 fn print(text: &str) -> i32 {
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    std::io::stdout().lock().write_all(text.as_bytes()).ok();
     0
 }
 

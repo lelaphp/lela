@@ -238,56 +238,59 @@ fn shaped(
     body: &OpArray,
     frameless: &[Name],
 ) {
-    let _ = writeln!(
+    writeln!(
         out,
         "\n{name}:\n     ; (lines={}, args={args}, vars={}, tmps={})",
         body.oplines.len(),
         body.num_cvs,
         body.num_tmps
-    );
+    )
+    .ok();
     if shape == Shape::BeforeOptimizer {
-        let _ = writeln!(out, "     ; (before optimizer)");
+        writeln!(out, "     ; (before optimizer)").ok();
     }
-    let _ = writeln!(
+    writeln!(
         out,
         "     ; {}:{}-{}",
         String::from_utf8_lossy(&body.filename.0),
         body.line_start,
         body.line_end
-    );
+    )
+    .ok();
     if shape == Shape::BeforeOptimizer {
-        let _ = writeln!(out, "     ; return  [] RANGE[0..0]");
+        writeln!(out, "     ; return  [] RANGE[0..0]").ok();
     }
     for (at, op) in body.oplines.iter().enumerate() {
         if shape == Shape::LineNumbers {
-            let _ = write!(out, "L{:04} ", op.lineno);
+            write!(out, "L{:04} ", op.lineno).ok();
         }
-        let _ = write!(out, "{at:04} ");
+        write!(out, "{at:04} ").ok();
         opline(out, body, op, frameless);
         out.push('\n');
     }
     if shape == Shape::BeforeOptimizer && !body.live_ranges.is_empty() {
-        let _ = writeln!(out, "LIVE RANGES:");
+        writeln!(out, "LIVE RANGES:").ok();
         for range in &body.live_ranges {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "     {}: {:04} - {:04} ({})",
                 body.num_cvs.saturating_add(range.var),
                 range.start.0,
                 range.end.0,
                 live_kind(range.kind)
-            );
+            )
+            .ok();
         }
     }
     if !body.try_catch.is_empty() {
-        let _ = writeln!(out, "EXCEPTION TABLE:");
+        writeln!(out, "EXCEPTION TABLE:").ok();
         for range in &body.try_catch {
-            let _ = write!(out, "     {:04}", range.try_op.0);
+            write!(out, "     {:04}", range.try_op.0).ok();
             for at in [range.catch_op.0, range.finally_op.0, range.finally_end.0] {
                 if at == 0 {
                     out.push_str(", -");
                 } else {
-                    let _ = write!(out, ", {at:04}");
+                    write!(out, ", {at:04}").ok();
                 }
             }
             out.push('\n');
@@ -310,7 +313,7 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline, frameless: &[Name]) {
         out.push_str(" = ");
     }
     if name.is_empty() {
-        let _ = write!(out, "OP_{}", op.opcode.num());
+        write!(out, "OP_{}", op.opcode.num()).ok();
     } else {
         out.push_str(name.trim_start_matches("ZEND_"));
     }
@@ -329,7 +332,7 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline, frameless: &[Name]) {
         false,
     );
     if flags & ext::MASK == ext::JMP_ADDR {
-        let _ = write!(out, " {:04}", op.extended_value);
+        write!(out, " {:04}", op.extended_value).ok();
     }
     // A constant `result`, which no opline of `zend_compile.c` has, is
     // printed last where php prints it.
@@ -395,7 +398,7 @@ fn operand(
                 // A `CATCH` that is the last of its try prints no target
                 // in `op2`, where php's compiler left none.
                 if first || op.opcode != Opcode::Catch || op.extended_value & LAST_CATCH == 0 {
-                    let _ = write!(out, " {field:04}");
+                    write!(out, " {field:04}").ok();
                 }
             } else {
                 unused(out, op, field, flags);
@@ -417,15 +420,15 @@ fn jump_table(out: &mut String, value: Option<Zval>) {
     for (key, target) in &table {
         match key {
             php_heap::Key::Long(n) => {
-                let _ = write!(out, " {n}:");
+                write!(out, " {n}:").ok();
             }
             php_heap::Key::Str(s) => {
                 let bytes = s.bytes();
                 let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-                let _ = write!(out, " \"{}\":", String::from_utf8_lossy(&bytes[..end]));
+                write!(out, " \"{}\":", String::from_utf8_lossy(&bytes[..end])).ok();
             }
         }
-        let _ = write!(out, " {:04},", target.as_long().unwrap_or(0));
+        write!(out, " {:04},", target.as_long().unwrap_or(0)).ok();
     }
     out.push_str(" default:");
 }
@@ -443,14 +446,15 @@ fn constant(out: &mut String, value: Option<Zval>) {
         ZvalType::False => out.push_str(" bool(false)"),
         ZvalType::True => out.push_str(" bool(true)"),
         ZvalType::Long => {
-            let _ = write!(out, " int({})", value.as_long().unwrap_or(0));
+            write!(out, " int({})", value.as_long().unwrap_or(0)).ok();
         }
         ZvalType::Double => {
-            let _ = write!(
+            write!(
                 out,
                 " float({})",
                 percent_g(value.as_double().unwrap_or(0.0))
-            );
+            )
+            .ok();
         }
         ZvalType::String => {
             out.push_str(" string(\"");
@@ -461,7 +465,7 @@ fn constant(out: &mut String, value: Option<Zval>) {
         }
         ZvalType::Array => out.push_str(" array(...)"),
         kind => {
-            let _ = write!(out, " zval(type={})", kind as u8);
+            write!(out, " zval(type={})", kind as u8).ok();
         }
     }
 }
@@ -477,16 +481,16 @@ fn var(out: &mut String, body: &OpArray, kind: OperandKind, number: u32) {
                 .get(number as usize)
                 .map(|n| &*n.0)
                 .unwrap_or_default();
-            let _ = write!(out, "CV{number}(${})", String::from_utf8_lossy(name));
+            write!(out, "CV{number}(${})", String::from_utf8_lossy(name)).ok();
         }
         OperandKind::Var => {
-            let _ = write!(out, "V{}", body.num_cvs.saturating_add(number));
+            write!(out, "V{}", body.num_cvs.saturating_add(number)).ok();
         }
         OperandKind::Tmp => {
-            let _ = write!(out, "T{}", body.num_cvs.saturating_add(number));
+            write!(out, "T{}", body.num_cvs.saturating_add(number)).ok();
         }
         _ => {
-            let _ = write!(out, "X{number}");
+            write!(out, "X{number}").ok();
         }
     }
 }
@@ -496,13 +500,13 @@ fn var(out: &mut String, body: &OpArray, kind: OperandKind, number: u32) {
 fn unused(out: &mut String, op: &Opline, field: u32, flags: u32) {
     match flags & op::MASK {
         op::NUM => {
-            let _ = write!(out, " {field}");
+            write!(out, " {field}").ok();
         }
         op::TRY_CATCH if field != u32::MAX => {
-            let _ = write!(out, " try-catch({field})");
+            write!(out, " try-catch({field})").ok();
         }
         op::LOOP_END if op.extended_value & FREE_ON_RETURN != 0 => {
-            let _ = write!(out, " loop-end(+{field})");
+            write!(out, " loop-end(+{field})").ok();
         }
         op::THIS => out.push_str(" THIS"),
         op::NEXT => out.push_str(" NEXT"),
@@ -544,14 +548,14 @@ fn extended_value(out: &mut String, op: &Opline, flags: u32) {
     let value = op.extended_value;
     match flags & ext::MASK {
         ext::NUM => {
-            let _ = write!(out, " {value}");
+            write!(out, " {value}").ok();
         }
         ext::OP => {
             let name = u8::try_from(value)
                 .ok()
                 .and_then(Opcode::from_u8)
                 .map_or("", Opcode::name);
-            let _ = write!(out, " ({})", name.trim_start_matches("ZEND_"));
+            write!(out, " ({})", name.trim_start_matches("ZEND_")).ok();
         }
         ext::TYPE => out.push_str(match value {
             1 => " (null)",
@@ -618,7 +622,7 @@ fn extended_value(out: &mut String, op: &Opline, flags: u32) {
                 });
             }
             if flags & ext::ARRAY_INIT != 0 {
-                let _ = write!(out, " {}", value >> 2);
+                write!(out, " {}", value >> 2).ok();
                 if value & 2 == 0 {
                     out.push_str(" (packed)");
                 }
@@ -669,7 +673,7 @@ fn type_info(out: &mut String, info: u32) {
             }
         }
     }
-    let _ = write!(out, " [{}]", words.join(", "));
+    write!(out, " [{}]", words.join(", ")).ok();
 }
 
 /// `smart_str_append_escaped` with `"` escaped besides, as
@@ -688,7 +692,7 @@ fn escaped(out: &mut String, bytes: &[u8]) {
             b'\\' => out.push_str("\\\\"),
             0x1b => out.push_str("\\e"),
             c if !(32..=126).contains(&c) => {
-                let _ = write!(out, "\\x{c:02X}");
+                write!(out, "\\x{c:02X}").ok();
             }
             c => out.push(char::from(c)),
         }

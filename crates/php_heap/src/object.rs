@@ -543,7 +543,7 @@ impl Store {
             free_list_head: None,
             no_reuse: false,
         };
-        let _ = store.lay_down(mm);
+        store.lay_down(mm).ok();
         store
     }
 
