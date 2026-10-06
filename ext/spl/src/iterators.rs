@@ -3122,14 +3122,16 @@ fn regex_run(
             regex_replace_data(req, this, None)?;
             let global = regex.mode == Mode::AllMatches;
             let (count, matches) = pattern.match_impl(req, subject, global, regex.preg_flags, 0)?;
+            let found = count.as_int().is_some_and(|n| n > 0);
+            count.give_up(req);
             regex_replace_data(req, this, Some(matches.into_value().hand_on_unmigrated()))?;
-            Ok(Some(count.as_int().is_some_and(|n| n > 0)))
+            Ok(Some(found))
         }
         Mode::Split => {
             regex_replace_data(req, this, None)?;
             let pieces = pattern.split_impl(req, subject.as_bytes(), -1, regex.preg_flags)?;
             let count = pieces.as_array().map_or(0, PhpArray::len);
-            regex_replace_data(req, this, Some(pieces))?;
+            regex_replace_data(req, this, Some(pieces.hand_on_unmigrated()))?;
             Ok(Some(count > 1))
         }
         Mode::Replace => {

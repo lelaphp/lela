@@ -9,7 +9,7 @@ use php_ext::call::passthrough;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};
 use crate::path::{self, Create, Exec};
@@ -230,13 +230,13 @@ fn find_in_include_path(
 /// The first argument replaced by `name` and the replaced native served,
 /// what the interceptors that open a stream do: php's opens the name
 /// with the arguments the call gave.
-fn serve_named(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
+fn serve_named(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Thrown> {
     let name = archive::string(req, name)?;
-    passthrough(req, Some(name.hand_on_unmigrated()))
+    passthrough(req, Some(name))
 }
 
 /// `phar_fopen`.
-fn fopen(req: &mut Request) -> Result<Value, Thrown> {
+fn fopen(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     if !active(req) {
         return passthrough(req, None);
     }
@@ -259,7 +259,7 @@ fn fopen(req: &mut Request) -> Result<Value, Thrown> {
 /// `phar_file_get_contents` and `phar_readfile`: a relative path, or any
 /// path under `$use_include_path`, that the archive being served holds,
 /// served by the replaced native under its `phar://` name.
-fn named_open(req: &mut Request) -> Result<Value, Thrown> {
+fn named_open(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     if !active(req) {
         return passthrough(req, None);
     }
@@ -275,17 +275,17 @@ fn named_open(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
+fn file_get_contents(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     named_open(req)
 }
 
-fn readfile(req: &mut Request) -> Result<Value, Thrown> {
+fn readfile(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     named_open(req)
 }
 
 /// `phar_opendir`: a relative directory in the archive being served
 /// opened as `phar://<arch>/<fixed>`, whether the archive holds it or not.
-fn opendir(req: &mut Request) -> Result<Value, Thrown> {
+fn opendir(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     if !active(req) {
         return passthrough(req, None);
     }
@@ -337,7 +337,7 @@ impl Fs {
 
 /// `PharFileFunction`: the replaced native where nothing is intercepted,
 /// else `p` read as the native reads it and `phar_file_stat`.
-fn file_function(req: &mut Request, kind: Fs) -> Result<Value, Thrown> {
+fn file_function(req: &mut Request, kind: Fs) -> Result<Owner<Value>, Thrown> {
     if !req.state::<crate::State>().intercepted {
         return passthrough(req, None);
     }
@@ -350,9 +350,9 @@ fn file_function(req: &mut Request, kind: Fs) -> Result<Value, Thrown> {
 /// `phar_file_stat`: an entry, or a directory entries stand under, of the
 /// archive being served, stated for a relative path; the replaced native
 /// for any other.
-fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Value, Thrown> {
+fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value>, Thrown> {
     if filename.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if !relative(filename) {
         return passthrough(req, None);
@@ -387,7 +387,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Value, Thro
                 .is_some_and(|a| a.virtual_dirs.contains(&entry)) =>
             {
                 if kind.exists_check() {
-                    return Ok(Value::bool(true));
+                    return Ok(Owner::take(req, Value::bool(true)));
                 }
                 dir_stat(req)
             }
@@ -408,7 +408,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Value, Thro
         .is_some_and(|a| a.virtual_dirs.contains(&held))
     {
         if kind.exists_check() {
-            return Ok(Value::bool(true));
+            return Ok(Owner::take(req, Value::bool(true)));
         }
         dir_stat(req)
     } else {
@@ -420,14 +420,14 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Value, Thro
             );
             docref(req, Level::Warning, &text);
         }
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     if kind.exists_check() {
-        return Ok(Value::bool(true));
+        return Ok(Owner::take(req, Value::bool(true)));
     }
     match stated {
         Some(sb) => fancy_stat(req, sb, kind),
-        None => Ok(Value::bool(false)),
+        None => Ok(Owner::take(req, Value::bool(false))),
     }
 }
 
@@ -507,7 +507,7 @@ fn finish(a: &archive::Archive, mut sb: [i64; 13], e: Option<&archive::Entry>) -
 /// bool(false)
 /// bool(false)
 /// ```
-fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Thrown> {
+fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>, Thrown> {
     const NAMES: [&[u8]; 13] = [
         b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
         b"ctime", b"blksize", b"blocks",
@@ -519,7 +519,7 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
     } else {
         0
     };
-    Ok(match kind {
+    let answer = match kind {
         Fs::Perms => Value::int(mode),
         Fs::Inode => Value::int(sb[1]),
         Fs::Size => Value::int(sb[7]),
@@ -543,7 +543,7 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
                 );
                 b"unknown"
             };
-            PhpString::new(req, name)?.into_value().hand_on_unmigrated()
+            return Ok(PhpString::new(req, name)?.into_value());
         }
         Fs::IsW => Value::bool(mode & (0o2 << triad) != 0),
         Fs::IsR => Value::bool(mode & (0o4 << triad) != 0),
@@ -559,9 +559,10 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
                 let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                 out.set(req, key, Value::int(field))?;
             }
-            out.into_value().hand_on_unmigrated()
+            return Ok(out.into_value());
         }
-    })
+    };
+    Ok(Owner::take(req, answer))
 }
 
 /// The shift of the permission triad an access check reads of an entry
@@ -587,7 +588,7 @@ fn access_triad(owner: i64, group: i64) -> u32 {
 /// `phar_is_file` and `phar_is_link`: whether a relative path names an
 /// entry of the archive being served that is not a directory, or that is
 /// a link.
-fn is_entry(req: &mut Request, link: bool) -> Result<Value, Thrown> {
+fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
     if !active(req) {
         return passthrough(req, None);
     }
@@ -601,7 +602,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Value, Thrown> {
         return passthrough(req, None);
     };
     let Ok(id) = archive::get_archive(req, &arch, None) else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     let entry = fixed(req, &filename);
     let held = entry.strip_prefix(b"/").unwrap_or(&entry);
@@ -609,77 +610,77 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Value, Thrown> {
         .get(id)
         .and_then(|a| a.manifest.get(held))
         .is_some_and(|e| if link { e.link.is_some() } else { !e.is_dir });
-    Ok(Value::bool(answer))
+    Ok(Owner::take(req, Value::bool(answer)))
 }
 
-fn is_file(req: &mut Request) -> Result<Value, Thrown> {
+fn is_file(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     is_entry(req, false)
 }
 
-fn is_link(req: &mut Request) -> Result<Value, Thrown> {
+fn is_link(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     is_entry(req, true)
 }
 
-fn is_dir(req: &mut Request) -> Result<Value, Thrown> {
+fn is_dir(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::IsDir)
 }
 
-fn file_exists(req: &mut Request) -> Result<Value, Thrown> {
+fn file_exists(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Exists)
 }
 
-fn fileperms(req: &mut Request) -> Result<Value, Thrown> {
+fn fileperms(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Perms)
 }
 
-fn fileinode(req: &mut Request) -> Result<Value, Thrown> {
+fn fileinode(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Inode)
 }
 
-fn filesize(req: &mut Request) -> Result<Value, Thrown> {
+fn filesize(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Size)
 }
 
-fn fileowner(req: &mut Request) -> Result<Value, Thrown> {
+fn fileowner(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Owner)
 }
 
-fn filegroup(req: &mut Request) -> Result<Value, Thrown> {
+fn filegroup(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Group)
 }
 
-fn fileatime(req: &mut Request) -> Result<Value, Thrown> {
+fn fileatime(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Atime)
 }
 
-fn filemtime(req: &mut Request) -> Result<Value, Thrown> {
+fn filemtime(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Mtime)
 }
 
-fn filectime(req: &mut Request) -> Result<Value, Thrown> {
+fn filectime(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Ctime)
 }
 
-fn filetype(req: &mut Request) -> Result<Value, Thrown> {
+fn filetype(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Type)
 }
 
-fn is_writable(req: &mut Request) -> Result<Value, Thrown> {
+fn is_writable(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::IsW)
 }
 
-fn is_readable(req: &mut Request) -> Result<Value, Thrown> {
+fn is_readable(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::IsR)
 }
 
-fn is_executable(req: &mut Request) -> Result<Value, Thrown> {
+fn is_executable(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::IsX)
 }
 
-fn lstat(req: &mut Request) -> Result<Value, Thrown> {
+fn lstat(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Lstat)
 }
 
-fn stat(req: &mut Request) -> Result<Value, Thrown> {
+fn stat(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     file_function(req, Fs::Stat)
 }

@@ -496,7 +496,7 @@ fn answer<T: IntoReturn>(req: &mut Request, value: T) -> Result<T, Thrown> {
     match req.state::<State>().thrown.take() {
         Some(thrown) => {
             if let Ok(value) = value.into_return(req) {
-                req.release(value);
+                value.give_up(req);
             }
             Err(thrown)
         }

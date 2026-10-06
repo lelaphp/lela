@@ -154,7 +154,7 @@ impl<T: IntoReturn> IntoReturn for AsIs<T> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self.0.into_return(req)
     }
 }

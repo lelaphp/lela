@@ -970,30 +970,28 @@ fn trampoline_call(
 /// `zend_parent_hook_get_trampoline`: the property read through the
 /// object's `read_property`, which finds the trampoline running and so
 /// reads what the parent's property holds.
-fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
+fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Get, 0)?;
     let table = req.object_handlers(this.heap());
-    table
-        .read_property(req, this, &name, PropertyRead::Warning)
-        .map(Owner::hand_on)
+    table.read_property(req, this, &name, PropertyRead::Warning)
 }
 
 /// `zend_parent_hook_set_trampoline`: the value written through the
 /// object's `write_property`, and returned.
-fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
+fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
     let key = Owner::adopt(req, key);
     // The return's owner, and the write's.
-    req.addref(&value);
+    let returned = Owner::take(req, value);
     let written = Owner::take(req, value);
     let table = req.object_handlers(this.heap());
     if let Err(thrown) = table.write_property(req, this, key, written) {
-        req.release(value);
+        returned.give_up(req);
         return Err(thrown);
     }
-    Ok(value)
+    Ok(returned)
 }
 
 /// One row of [`Request::hooked_object_rows`]: the name as declared,

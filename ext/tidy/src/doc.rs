@@ -1070,7 +1070,10 @@ fn tidy_get_body(
 
 /// The functions in `tidy.stub.php`'s order.
 /// A function's declaration and its entry.
-type Entry = (FunctionDecl, fn(&mut Request) -> Result<Value, Thrown>);
+type Entry = (
+    FunctionDecl,
+    fn(&mut Request) -> Result<Owner<Value>, Thrown>,
+);
 
 pub(crate) fn functions() -> Vec<Entry> {
     vec![

@@ -1030,7 +1030,9 @@ impl Request {
         let outer = self
             .function_origin(function)
             .map(|extension| self.heap.set_origin(extension.origin()));
-        let served = entry(self);
+        // The entry's owner is the handler layer's from here: the frame's
+        // return slot holds the count.
+        let served = entry(self).map(Owner::hand_on);
         #[cfg(debug_assertions)]
         if let Some(outer) = outer {
             self.heap.set_origin(outer);
@@ -1158,7 +1160,7 @@ impl Request {
     pub fn native_trampoline(
         &mut self,
         name: &[u8],
-        entry: fn(&mut Request) -> Result<Value, crate::api::raising::Thrown>,
+        entry: crate::api::abi::Entry,
     ) -> Option<Function> {
         let held = self.calls.trampolines.iter().position(|made| {
             matches!(made.via, crate::trampoline::Via::Native(made_entry)

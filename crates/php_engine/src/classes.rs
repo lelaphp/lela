@@ -1263,7 +1263,7 @@ pub(crate) fn const_expr_closure(
 /// as `Z_PARAM_VARIADIC_WITH_NAMED` hands them, on the payload's
 /// receiver where the closure is bound and as a function where it is
 /// not (`zend_call_known_fcc`); what it returns is the call's.
-pub(crate) fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.this() else {
         return Err(throw_error(
             req,
@@ -1275,7 +1275,8 @@ pub(crate) fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
         .filter_map(|position| req.argument(position))
         .collect();
     let named = req.named_arguments();
-    req.serve_closure(this, &arguments, &named)
+    let served = req.serve_closure(this, &arguments, &named);
+    adopted(req, served)
 }
 
 /// `interface Stringable`, `zend_interfaces.stub.php`'s: what

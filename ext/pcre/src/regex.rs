@@ -61,13 +61,20 @@ impl Regex {
         global: bool,
         flags: i64,
         offset: i64,
-    ) -> Result<(Value, Owner<PhpArray>), Thrown> {
+    ) -> Result<(Owner<Value>, Owner<PhpArray>), Thrown> {
         let (value, matches) = match_impl(req, &self.0, subject, true, global, flags, offset)?;
         let matches = match matches {
             Some(matches) => matches,
             None => PhpArray::new(req)?,
         };
-        Ok((value.into_return(req)?, matches))
+        let value = match value.into_return(req) {
+            Ok(value) => value,
+            Err(thrown) => {
+                matches.give_up(req);
+                return Err(thrown);
+            }
+        };
+        Ok((value, matches))
     }
 
     /// `php_pcre_split_impl`: what `preg_split` answers.
@@ -77,7 +84,7 @@ impl Regex {
         subject: &[u8],
         limit: i64,
         flags: i64,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         split_impl(req, &self.0, subject, limit, flags)?.into_return(req)
     }
 

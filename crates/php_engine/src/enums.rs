@@ -21,7 +21,7 @@ use php_unit::decl::{ClassKind, EnumBacking, Type};
 use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
 use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, Owner, Value, adopted};
 
 /// Where the function numbers of a program's enum methods begin: past
 /// every native, native method and user function a request can number,
@@ -165,7 +165,7 @@ pub(crate) fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
 /// }
 /// bool(true)
 /// ```
-fn cases(req: &mut Request) -> Result<Value, Thrown> {
+fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     exactly(req, 0)?;
     let class = called_enum(req)?;
     let mut out = req.array()?;
@@ -173,7 +173,7 @@ fn cases(req: &mut Request) -> Result<Value, Thrown> {
         let case = req.enum_case(class, &name)?;
         out.append(req, case.as_value())?;
     }
-    Ok(Value::array(out))
+    Ok(Owner::adopt(req, Value::array(out)))
 }
 
 /// `BackedEnum::from()`, `zend_enum_from_base` with `try_from` clear:
@@ -196,13 +196,15 @@ fn cases(req: &mut Request) -> Result<Value, Thrown> {
 /// 7 is not a valid backing value for enum Level
 /// Level::from(): Argument #1 ($value) must be of type int, string given
 /// ```
-fn from(req: &mut Request) -> Result<Value, Thrown> {
-    by_value(req, false)
+fn from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
+    let made = by_value(req, false);
+    adopted(req, made)
 }
 
 /// `BackedEnum::tryFrom()`: `null` where `from` raises its `ValueError`.
-fn try_from(req: &mut Request) -> Result<Value, Thrown> {
-    by_value(req, true)
+fn try_from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
+    let made = by_value(req, true);
+    adopted(req, made)
 }
 
 /// The key `zend_enum_from_base` parses the argument into, one owner

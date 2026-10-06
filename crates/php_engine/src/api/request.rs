@@ -1011,7 +1011,9 @@ mod tests {
 
     /// The entry of the `__destruct` above: the branch under test
     /// refuses the call, so a raise here is the test failing.
-    fn never_served(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
+    fn never_served(
+        req: &mut Request,
+    ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
         Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -1022,11 +1024,14 @@ mod tests {
     /// The same entry, serving: what a native class's `__destruct` is,
     /// a Rust body on the request that served it, which gives up the
     /// string it made once it is written.
-    fn writes_d(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
+    fn writes_d(
+        req: &mut Request,
+    ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
         let text = req.string(b"d\n")?;
         req.write(text.as_bytes());
         req.release(crate::api::values::Value::string(text));
-        Ok(crate::api::values::Value::null())
+        let null = crate::api::values::Value::null();
+        Ok(crate::api::values::Owner::take(req, null))
     }
 
     /// Design §5.10 and seam 1: a native class's `__destruct` is served

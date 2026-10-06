@@ -22944,8 +22944,8 @@ mod tests {
     fn with_a_nullary_frameless_native() -> Engine {
         use crate::api::abi::ExtensionBuilder;
         use php_unit::decl::{FunctionDecl, Name};
-        fn seven(_: &mut Request) -> Result<Value, Thrown> {
-            Ok(Value::int(7))
+        fn seven(req: &mut Request) -> Result<Owner<Value>, Thrown> {
+            Ok(Owner::take(req, Value::int(7)))
         }
         let decl = FunctionDecl {
             name: Name::from("seven"),

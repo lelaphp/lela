@@ -1651,11 +1651,7 @@ impl ExtensionBuilder {
     /// order. A name no extension declares, or one `disable_functions`
     /// took out, is intercepted by nothing.
     #[must_use]
-    pub fn intercept(
-        mut self,
-        name: &[u8],
-        entry: fn(&mut Request) -> Result<Value, Thrown>,
-    ) -> ExtensionBuilder {
+    pub fn intercept(mut self, name: &[u8], entry: Entry) -> ExtensionBuilder {
         self.supplies.intercepts.push((Name(name.into()), entry));
         self
     }
