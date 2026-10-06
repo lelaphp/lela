@@ -163,3 +163,20 @@ echo "done\n";
     assert_eq!(stdout, "done\n");
     assert_eq!(exit, 0);
 }
+
+/// `Closure::call` of a closure returning by reference gives up the
+/// cell it handed back for the value the cell holds (#2074).
+#[test]
+fn closure_call_unwraps_the_reference_it_was_returned() {
+    let (stdout, exit) = armed(
+        r#"<?php
+$closure = function &($x) { return $x; };
+echo $closure->call(new class {}, 42), "\n";
+class K { private $v = 'v'; }
+$get = function &() { return $this->v; };
+$v = $get->call(new K); echo $v, "\n";
+"#,
+    );
+    assert_eq!(stdout, "42\nv\n");
+    assert_eq!(exit, 0);
+}
