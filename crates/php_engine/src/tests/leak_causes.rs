@@ -145,3 +145,21 @@ $f->resume(); $e->resume();
     assert_eq!(stdout, "1\ngone a\ngone a\ngone a\nA a\nA a\n");
     assert_eq!(exit, 0);
 }
+
+/// An object whose destructor ran a collection while the store's walk
+/// held it is a possible root again after the destructor, so the
+/// collection at the request's end frees its cycle (#2073).
+#[test]
+fn an_object_served_by_the_walk_is_a_possible_root_again() {
+    let (stdout, exit) = armed(
+        r#"<?php
+class A { public $data = []; function __destruct() { gc_collect_cycles(); }
+    function b() { $this->data[] = new B($this); $this->data[] = new B($this); return $this->data[0]; } }
+class B { function __construct(public $a) {} function __destruct() {} }
+$a = new A; $b = $a->b(); unset($b, $a);
+echo "done\n";
+"#,
+    );
+    assert_eq!(stdout, "done\n");
+    assert_eq!(exit, 0);
+}
