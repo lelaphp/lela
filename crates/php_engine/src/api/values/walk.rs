@@ -54,7 +54,10 @@ use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ArrayIter, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
+use crate::api::values::{
+    ArrayIter, Held, HeldProperties, HeldRow, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString,
+    Value,
+};
 
 /// What a walk's body answers for one row: `Continue` to go on to the
 /// next, `Break` to end the walk there with what the walk answers, and
@@ -325,6 +328,129 @@ pub fn foreach_guarded<B>(
     walked.map(Guarded::Walked)
 }
 
+/// php's walk over the table `zend_get_properties_for` handed a reader
+/// ([`PhpObject::props_held`]), from that call to its
+/// `zend_release_properties`, as `print_hash` walks it with
+/// `ZEND_HASH_FOREACH_KEY_VAL_IND`: a [`foreach`] walk, each row lent to
+/// `body` as a [`Row`], and the properties given back on every way out.
+/// What the walk holds is what php's reader holds: the object's own
+/// table one owner more, `zend_std_get_properties_for`'s
+/// `GC_TRY_ADDREF` ([`Hold::Owner`]), so a write the body's code makes
+/// to a dynamic property separates the table and the walk reads the
+/// rows it began with, while a declared row is read in its slot as it
+/// stands; the class's debug table by the owner the answer holds; and
+/// rows the class built, or the rows its own `get_properties` answers,
+/// one owner of each for the walk, so a row the body's code gives up
+/// is still read. A typed property nothing has written is no row. The
+/// answer is what `body` broke with, `None` past the last row; what the
+/// class's `get_debug_info` left pending is handed on after the rows,
+/// a throwable the body answered chained onto it, as php raised that
+/// one first.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class O { public $a; public $b = 'b'; }
+/// class N { function __debugInfo() { global $o; unset($o->b, $o->d); $o->e = 'e'; return []; } }
+/// $o = new O; $o->a = new N; $o->d = str_repeat('d', 3);
+/// print_r($o); echo "\n"; print_r($o);
+/// ```
+/// ```expect
+/// O Object
+/// (
+///     [a] => N Object
+///         (
+///         )
+///
+///     [d] => ddd
+/// )
+///
+/// O Object
+/// (
+///     [a] => N Object
+///         (
+///         )
+///
+///     [e] => e
+/// )
+/// ```
+pub fn properties<B>(
+    req: &mut Request,
+    held: HeldProperties,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    match held.held {
+        Held::Table(table) => foreach(req, table, Hold::Owner, body),
+        Held::Debug(table, thrown) => {
+            let watch = if table.heap().is_immutable() {
+                Watch::Immutable
+            } else {
+                Watch::Held
+            };
+            let walked = foreach_steps(req, &Table::Array(table), watch, &mut body);
+            let pending = Held::Debug(table, thrown).release(req);
+            match (pending, walked) {
+                (Err(earlier), Err(later)) => Err(earlier.chain(req, later)),
+                (Err(thrown), Ok(_)) => Err(thrown),
+                (Ok(()), walked) => walked,
+            }
+        }
+        Held::Own(rows) => {
+            let rows = rows.into_iter().filter_map(|(key, row)| match row {
+                HeldRow::Value(value) => Some((key, value)),
+                HeldRow::Uninitialized(_) => None,
+            });
+            lent(req, rows.collect(), &mut body)
+        }
+        Held::Rows(rows) => {
+            let walked = lent(req, rows.clone(), &mut body);
+            let given = Held::Rows(rows).release(req);
+            given.and(walked)
+        }
+    }
+}
+
+/// [`properties`] over rows a class answered, views of values nothing
+/// here holds: one owner of each key and value taken for the walk, each
+/// row lent in turn, and every owner given back however the walk ends.
+fn lent<B>(
+    req: &mut Request,
+    rows: Vec<(Key, Value)>,
+    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
+) -> Result<Option<B>, Thrown> {
+    let owned: Vec<(Owner<Key>, Owner<Value>)> = rows
+        .into_iter()
+        .map(|(key, value)| (Owner::take(req, key), Owner::take(req, value)))
+        .collect();
+    let mut rest = owned.into_iter();
+    let mut walked = Ok(None);
+    for (key, value) in rest.by_ref() {
+        let mut row = Row {
+            key,
+            value,
+            at: At::Lent,
+            watch: Watch::Held,
+        };
+        let step = body(req, &mut row);
+        row.give_up(req);
+        match step {
+            Ok(ControlFlow::Continue(())) => {}
+            Ok(ControlFlow::Break(broke)) => {
+                walked = Ok(Some(broke));
+                break;
+            }
+            Err(thrown) => {
+                walked = Err(thrown);
+                break;
+            }
+        }
+    }
+    for (key, value) in rest {
+        value.give_up(req);
+        key.give_up(req);
+    }
+    walked
+}
+
 /// What a [`foreach`] walk reads: an array, or an object's property
 /// table laid down for the walk.
 #[derive(Debug, Clone)]
@@ -457,6 +583,50 @@ impl ObjectTable {
     fn slot_key(&self, slot: u32) -> Option<Key> {
         let name = self.names.get(usize::try_from(slot).ok()?)?;
         Some(Key::Str(PhpString::of(*name)))
+    }
+
+    /// The rows that hold a value, in php's positions: views, no owner
+    /// taken.
+    pub(crate) fn rows(&self) -> impl Iterator<Item = (Key, Value)> + '_ {
+        let end = self.table.used();
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            let (found, key, value, _) = self.held_from(pos, end)?;
+            pos = found.saturating_add(1);
+            Some((key, Value::of_zval(value)))
+        })
+    }
+
+    /// How many rows hold a value.
+    pub(crate) fn held(&self) -> usize {
+        self.rows().count()
+    }
+
+    /// The rows as php's debug dumpers walk them, `ZEND_HASH_FOREACH`
+    /// without `_IND`: a slot nothing holds shown as `uninitialized(T)`
+    /// where its property is typed (`zend_get_typed_property_info_for_slot`)
+    /// and stepped over where it is not. Views, no owner taken.
+    pub(crate) fn shown(&self, req: &Request) -> Vec<(Key, HeldRow)> {
+        let placed = req.placed_properties(self.owner.class());
+        (0..self.table.used())
+            .filter_map(|pos| {
+                let (row, value) = self.table.row_at(pos)?;
+                match row {
+                    TableRow::Slot(slot) if value.is_undef() => {
+                        let (_, property) = placed.get(usize::try_from(slot).ok()?)?;
+                        let ty = property.ty.as_ref()?;
+                        let shown = HeldRow::Uninitialized(crate::natives::type_text(ty));
+                        Some((self.slot_key(slot)?, shown))
+                    }
+                    TableRow::Slot(slot) => {
+                        Some((self.slot_key(slot)?, HeldRow::Value(Value::of_zval(value))))
+                    }
+                    TableRow::Entry(key) => {
+                        Some((Key::of(key), HeldRow::Value(Value::of_zval(value))))
+                    }
+                }
+            })
+            .collect()
     }
 }
 
@@ -618,6 +788,9 @@ enum At {
         table: Arr,
         slot: u32,
     },
+    /// A row of rows a class built for its reader, which stands in no
+    /// table a write could reach.
+    Lent,
 }
 
 impl Row {
@@ -696,7 +869,7 @@ impl Row {
                 }
                 at
             }
-            At::Bucket(..) | At::Slot { .. } => None,
+            At::Bucket(..) | At::Slot { .. } | At::Lent => None,
         };
         let Some(place) = place.filter(|place| place.read().is_same_value(self.value.to_zval()))
         else {

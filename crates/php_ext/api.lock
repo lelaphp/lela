@@ -1309,5 +1309,6 @@ values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded
 values::walk::live
+values::walk::properties
 values::walk::rows
 values::zend_sort

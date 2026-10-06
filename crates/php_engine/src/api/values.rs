@@ -900,29 +900,33 @@ impl ArrayIter {
 }
 
 /// The table `zend_get_properties_for` hands a reader, held until
-/// `zend_release_properties`: [`PhpObject::props_held`]'s rows, each one
-/// more owner of its value where the class built the rows for the
-/// reader, views of the class's debug table while it is held, and views
-/// of the object's own rows otherwise.
+/// `zend_release_properties`: [`PhpObject::props_held`]'s answer, the
+/// object's own table laid down, rows the class built for the reader
+/// with one more owner of each value, the class's debug table while it
+/// is held, or the rows a class's own `get_properties` answers, views.
+/// [`walk::properties`] walks it and gives it back.
 #[derive(Debug)]
 #[must_use = "the rows are held until they are released"]
 pub struct HeldProperties {
-    rows: Vec<(Key, HeldRow)>,
     held: Held,
     count: usize,
 }
 
-/// What [`HeldProperties`] gives back at its release, php's `*is_temp`
-/// table and what `zend_release_properties` does to it.
+/// What [`HeldProperties`] holds and gives back at its release, php's
+/// table and its `*is_temp`.
 #[derive(Debug)]
 enum Held {
-    /// The object's own table: nothing taken.
-    Own,
+    /// The object's own table as `get_properties` lays it down: nothing
+    /// taken until a walk takes its owner of it.
+    Table(walk::ObjectTable),
+    /// The rows a class's own `get_properties` answers, views: nothing
+    /// taken.
+    Own(Vec<(Key, HeldRow)>),
     /// Rows the class built: one owner of each row's value.
-    Rows,
+    Rows(Vec<(Key, Value)>),
     /// The class's debug table, one owner of the table, and what the
     /// class left pending while it built it.
-    Table(PhpArray, Option<Thrown>),
+    Debug(PhpArray, Option<Thrown>),
 }
 
 /// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
@@ -937,10 +941,22 @@ pub enum HeldRow {
 }
 
 impl HeldProperties {
-    /// The rows in the table's order.
+    /// The rows in the table's order, read under the request as a rows
+    /// walk reads them: views, which stand while the request is
+    /// borrowed and the properties held.
     #[must_use]
-    pub fn rows(&self) -> &[(Key, HeldRow)] {
-        &self.rows
+    pub fn rows(&self, req: &Request) -> Vec<(Key, HeldRow)> {
+        match &self.held {
+            Held::Table(table) => table.shown(req),
+            Held::Own(rows) => rows.clone(),
+            Held::Rows(rows) => rows
+                .iter()
+                .map(|(key, value)| (key.clone(), HeldRow::Value(*value)))
+                .collect(),
+            Held::Debug(table, _) => walk::rows(req, *table)
+                .map(|(key, value)| (key, HeldRow::Value(value.deref())))
+                .collect(),
+        }
     }
 
     /// `zend_array_count` over the table (`Z/Zend/zend_hash.c:519`), the
@@ -958,17 +974,22 @@ impl HeldProperties {
     /// `php_var_dump` and `php_debug_zval_dump` leave `EG(exception)`
     /// standing after the dump (`Z/ext/standard/var.c:184`).
     pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
-        match self.held {
-            Held::Own => Ok(()),
-            Held::Rows => {
-                for (_, row) in self.rows {
-                    if let HeldRow::Value(value) = row {
-                        req.release(value);
-                    }
+        self.held.release(req)
+    }
+}
+
+impl Held {
+    /// [`HeldProperties::release`].
+    fn release(self, req: &mut Request) -> Result<(), Thrown> {
+        match self {
+            Held::Table(_) | Held::Own(_) => Ok(()),
+            Held::Rows(rows) => {
+                for (_, value) in rows {
+                    req.release(value);
                 }
                 Ok(())
             }
-            Held::Table(table, thrown) => {
+            Held::Debug(table, thrown) => {
                 req.release(Value::array(table));
                 thrown.map_or(Ok(()), Err)
             }
@@ -1370,34 +1391,44 @@ impl PhpObject {
         purpose: PropertyPurpose,
     ) -> Result<HeldProperties, Thrown> {
         use crate::ops::Answered;
-        let (rows, held) = match crate::ops::properties_answered(req, *self, purpose)? {
+        let (held, count) = match crate::ops::properties_answered(req, *self, purpose)? {
+            Answered::Table(table) => {
+                let count = if purpose == PropertyPurpose::Debug
+                    && self.0.laziness() == php_heap::Laziness::Eager
+                {
+                    req.property_count(*self)?
+                } else {
+                    table.held()
+                };
+                (Held::Table(table), count)
+            }
             Answered::Own(rows) if purpose == PropertyPurpose::Debug => {
                 let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
-                let held = Held::Own;
-                return Ok(HeldProperties { rows, held, count });
+                (Held::Own(rows), count)
             }
-            Answered::Own(rows) => (rows, Held::Own),
+            Answered::Own(rows) => {
+                let count = rows.len();
+                let rows = rows
+                    .into_iter()
+                    .map(|(key, value)| (key, HeldRow::Value(value)))
+                    .collect();
+                (Held::Own(rows), count)
+            }
             Answered::Built(rows) => {
                 for (_, value) in &rows {
                     req.addref(value);
                 }
-                (rows, Held::Rows)
+                let count = rows.len();
+                (Held::Rows(rows), count)
             }
-            // Views of the class's debug table, which the rows hold one
-            // owner of until their release.
+            // The class's debug table, which the answer holds one owner
+            // of until its release.
             Answered::Debug(info) => {
-                let rows = walk::rows(req, info.table)
-                    .map(|(key, value)| (key, value.deref()))
-                    .collect();
-                (rows, Held::Table(info.table, info.thrown))
+                let count = info.table.len();
+                (Held::Debug(info.table, info.thrown), count)
             }
         };
-        let count = rows.len();
-        let rows = rows
-            .into_iter()
-            .map(|(key, value)| (key, HeldRow::Value(value)))
-            .collect();
-        Ok(HeldProperties { rows, held, count })
+        Ok(HeldProperties { held, count })
     }
 
     /// php's `Z_OBJPROP_P`, `zend_std_get_properties`: the object's

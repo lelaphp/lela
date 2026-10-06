@@ -309,6 +309,23 @@ impl Request {
         Ok(ObjectTable::of(owner, table, names.into_boxed_slice()))
     }
 
+    /// `zend_std_get_debug_info` past `__debugInfo`: the table
+    /// `get_properties` lays down, the class's `get_properties` called
+    /// first, or for a lazy object the table of the object its reader
+    /// reads, laid down and nothing initialised
+    /// (`zend_lazy_object_debug_info`, through
+    /// [`Request::lay_properties_no_lazy_init`]).
+    pub(crate) fn debug_table(&mut self, object: PhpObject) -> Result<ObjectTable, Thrown> {
+        let owner = if object.heap().laziness() == php_heap::Laziness::Eager {
+            let handlers = self.object_handlers(object.heap());
+            handlers.get_properties(self, object)?;
+            object
+        } else {
+            self.lay_properties_no_lazy_init(object)?
+        };
+        self.object_table(owner)
+    }
+
     /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`
     /// over the table `get_ht_for_iap` answers with its separation,
     /// nothing moved and `false` for a table with no row, php's

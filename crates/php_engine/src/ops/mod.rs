@@ -1611,6 +1611,7 @@ pub(crate) fn properties_for(
 ) -> Result<Vec<(Key, Value)>, Thrown> {
     match properties_answered(req, object, purpose)? {
         Answered::Own(rows) | Answered::Built(rows) => Ok(rows),
+        Answered::Table(table) => Ok(table.rows().collect()),
         // A table of the class's own dies with its one owner, so no view
         // of it outlives this call; the reader that holds it is
         // `PhpObject::props_held`.
@@ -1627,7 +1628,10 @@ pub(crate) fn properties_for(
 /// What `zend_get_properties_for` hands one reader: the table and its
 /// `*is_temp`, as three shapes of owner.
 pub(crate) enum Answered {
-    /// The object's own table, views of its rows.
+    /// The object's own table, laid down as `get_properties` lays it.
+    Table(crate::api::values::walk::ObjectTable),
+    /// The rows of the object a reader sees, views: what the class's own
+    /// `get_properties` answers, or the hooked properties' rows.
     Own(Vec<(Key, Value)>),
     /// Rows the class's `get_properties_for` built for the reader
     /// (`*is_temp`), views of values the object holds elsewhere.
@@ -1698,6 +1702,9 @@ pub(crate) fn properties_answered(
             // other reader initialises.
             PropertyPurpose::Debug => match table.get_debug_info(req, object)? {
                 Some(info) => return Ok(Answered::Debug(info)),
+                None if !table.answers_properties() => {
+                    return Ok(Answered::Table(req.debug_table(object)?));
+                }
                 None => req.properties_no_lazy_init(object)?,
             },
             PropertyPurpose::ArrayCast => req.properties_no_lazy_init(object)?,
