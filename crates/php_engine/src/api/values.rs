@@ -1581,6 +1581,48 @@ impl PhpObject {
         req.table_set_row(*self, key, value.hand_on())
     }
 
+    /// One row appended to the property table under its next integer
+    /// key, `zend_hash_next_index_insert`: what `$ao[] = $v` writes
+    /// through an `ArrayObject` over the object, with no `__set` served
+    /// and no deprecation raised. The key is the table's
+    /// `nNextFreeElement`, one past the greatest integer key it has
+    /// held, which a declared property's or a dynamic one's name never
+    /// moves. A sink: `value`'s owner is the table's from here; `false`,
+    /// and the owner given up, where the next element is taken, as
+    /// [`PhpArray::try_append`] answers. A lazy object is initialised
+    /// first, and a table a cast shares is separated before the write.
+    ///
+    /// ```php
+    /// class G { public $a = 1; }
+    /// $g = (new ReflectionClass(G::class))->newLazyGhost(function ($g) { echo "init\n"; });
+    /// $ag = @new ArrayObject($g); $ag[] = 'x';
+    /// $o = new stdClass; $o->k = 'v'; $cast = (array) $o;
+    /// $ao = @new ArrayObject($o); $ao[] = 'y';
+    /// var_dump($g, $cast, $o);
+    /// ```
+    /// ```expect
+    /// init
+    /// object(G)#3 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   [0]=>
+    ///   string(1) "x"
+    /// }
+    /// array(1) {
+    ///   ["k"]=>
+    ///   string(1) "v"
+    /// }
+    /// object(stdClass)#2 (2) {
+    ///   ["k"]=>
+    ///   string(1) "v"
+    ///   [0]=>
+    ///   string(1) "y"
+    /// }
+    /// ```
+    pub fn append_row(&self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
+        req.table_append_row(*self, value.hand_on())
+    }
+
     /// `zend_hash_update` over the property table, where
     /// [`PhpObject::set_row`] is `zend_hash_update_ind`: a declared row
     /// under its mangled name is written raw as there and left a plain
