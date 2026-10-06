@@ -41,6 +41,18 @@ pub(super) enum FunctionRef {
     Invoke(Option<PhpObject>),
 }
 
+impl FunctionRef {
+    /// The closure a reflector over this function holds as php's
+    /// `intern->obj`: the closure itself, or the one its `__invoke` was
+    /// made over, which the declaration is read back off.
+    fn closure(&self) -> Option<PhpObject> {
+        match *self {
+            FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) => Some(closure),
+            FunctionRef::Global(_) | FunctionRef::Method(..) | FunctionRef::Invoke(None) => None,
+        }
+    }
+}
+
 /// php's `parameter_reference`: the function, the offset in its
 /// parameter list, and whether the offset is below
 /// `required_num_args`.
@@ -306,7 +318,40 @@ pub(super) fn closure_decl(req: &mut Request, object: PhpObject) -> Option<Funct
 
 /// One `ReflectionParameter` over `offset` of `function`, php's
 /// `reflection_parameter_factory`: `$name` written from the declared
-/// parameter and the reference kept where php keeps `intern->ptr`.
+/// parameter, the reference kept where php keeps `intern->ptr`, and
+/// the closure the function's reflector holds kept as one more owner,
+/// `ZVAL_OBJ_COPY(&intern->obj, ...)`, so the parameter outlives that
+/// reflector and gives the closure up in `free_obj`.
+///
+/// ```php
+/// class EC { public function __invoke(Throwable $exception): string { return 'x'; } }
+/// function ctl() { return new EC; }
+/// $r = new ReflectionFunction(ctl()(...));
+/// $r = $r->getParameters()[0] ?? null;
+/// var_dump($r->getName());
+/// $p = (new ReflectionMethod(fn (int $n) => $n, '__invoke'))->getParameters()[0];
+/// var_dump($p->getPosition(), (string) $p->getType());
+/// ```
+/// ```expect
+/// string(9) "exception"
+/// int(0)
+/// string(3) "int"
+/// ```
+///
+/// The owner is given up with the parameter, so what the closure binds
+/// is destroyed then:
+///
+/// ```php
+/// class G { function __destruct() { echo "gone\n"; } }
+/// $o = new G; $c = function (int $x) use ($o) {}; unset($o);
+/// $p = (new ReflectionFunction($c))->getParameters()[0]; unset($c);
+/// echo "held\n"; unset($p); echo "given up\n";
+/// ```
+/// ```expect
+/// held
+/// gone
+/// given up
+/// ```
 pub(super) fn parameter_factory(
     req: &mut Request,
     function: &FunctionRef,
@@ -321,6 +366,9 @@ pub(super) fn parameter_factory(
         .map(|p| p.name.0.to_vec())
         .unwrap_or_default();
     set_name(req, *object, &name)?;
+    if let Some(closure) = function.closure() {
+        super::keep_closure(req, *object, closure);
+    }
     let reference = ParameterRef {
         function: function.clone(),
         offset,
@@ -825,9 +873,7 @@ impl ReflectionParameter {
         // `intern->obj`: a parameter of a closure keeps the closure, as
         // php's does, so the row's `FunctionRef::Closure` names an
         // object that stands for as long as the reflector does.
-        if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
-            reference.function
-        {
+        if let Some(closure) = reference.function.closure() {
             super::keep_closure(req, this, closure);
         }
         super::keep_parameter(req, this, reference)
