@@ -336,35 +336,55 @@ impl Request {
     }
 
     /// `instanceof_function`: whether `class` is `of`, extends it, or
-    /// implements it, the parents walked and each one's interfaces with
-    /// it. A chain longer than any declaration can make is cut, so a
-    /// declaration naming itself as its parent ends here rather than
-    /// never.
+    /// implements it. An interface is one scan of the class's linked
+    /// `ce->interfaces`, which holds every interface it implements
+    /// directly, through its parents and through their parents; a class
+    /// is a walk up the linked parents. Nothing is looked up by name. A
+    /// chain longer than any declaration can make is cut.
+    ///
+    /// ```php
+    /// interface I0 {} interface I1 extends I0 {} interface J {} interface K extends J {}
+    /// class G implements I1 {} class P extends G {} class C extends P implements K {}
+    /// $c = new C;
+    /// var_dump($c instanceof I0, $c instanceof I1, $c instanceof J, $c instanceof G, $c instanceof Countable, new P instanceof K);
+    /// echo implode(",", class_implements($c)), "\n";
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// I0,I1,K,J
+    /// ```
     pub(crate) fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
-        let mut at = Some(class);
-        let mut depth = 0;
-        while let Some(class) = at {
-            if class == of {
-                return true;
+        if class == of {
+            return true;
+        }
+        if self
+            .class_decl(of)
+            .is_some_and(|decl| decl.kind == ClassKind::Interface)
+        {
+            return self.interfaces(class).contains(&of);
+        }
+        let mut at = class;
+        for _ in 0..64 {
+            match self.linked_parent(at) {
+                Some(parent) if parent == of => return true,
+                Some(parent) => at = parent,
+                None => return false,
             }
-            let Some(decl) = self.class_decl(class) else {
-                return false;
-            };
-            if decl
-                .interfaces
-                .iter()
-                .filter_map(|name| self.class_named(&name.0))
-                .any(|interface| depth < 64 && self.instance_of(interface, of))
-            {
-                return true;
-            }
-            depth += 1;
-            if depth > 64 {
-                return false;
-            }
-            at = self.class_parent(class);
         }
         false
+    }
+
+    /// `ce->interfaces` of a linked class: every interface it implements,
+    /// each once, in php's order, which `class_implements` lists;
+    /// nothing for a class with no linked record.
+    pub fn interfaces(&self, class: ClassId) -> &[ClassId] {
+        self.linked_class(class)
+            .map_or(&[][..], |record| &record.interfaces)
     }
 
     /// `ce->parent`: the linked parent of a class, none at a root; an
@@ -385,6 +405,16 @@ impl Request {
             .parent
             .as_ref()
             .and_then(|name| self.class_named(&name.0))
+    }
+
+    /// `ce->parent` as the link left it, read by number: an engine's
+    /// class's as startup linked it, a declared class's as it bound.
+    fn linked_parent(&self, class: ClassId) -> Option<ClassId> {
+        let at = usize::try_from(class.0).ok()?;
+        match self.shared.parents.get(at) {
+            Some(parent) => *parent,
+            None => self.declared_row(class)?.bound.parent,
+        }
     }
 
     /// `zend_check_protected`: whether `scope` is `class` or one of its

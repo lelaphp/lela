@@ -25,6 +25,9 @@ pub struct LinkedClass<H> {
     /// constants nothing above declared. A row, never a value: the
     /// value is the request's to evaluate.
     pub constants: Rows<Row<H>, Exact>,
+    /// `ce->interfaces`: every interface the class implements, each once
+    /// and in php's order, so `instanceof` scans one slice.
+    pub interfaces: Box<[H]>,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -32,6 +35,7 @@ impl<H> Default for LinkedClass<H> {
         LinkedClass {
             methods: Rows::default(),
             constants: Rows::default(),
+            interfaces: Box::default(),
         }
     }
 }

@@ -1457,7 +1457,7 @@ struct Linker<'a, H = ()> {
 /// traits bound first ([`traits`]), then every refusal
 /// `zend_do_inheritance_ex` and `do_interface_implementation` make, the
 /// first in php's order; and the class's record where it links.
-pub fn link<'a, H: Copy>(
+pub fn link<'a, H: Copy + PartialEq>(
     child: &'a ClassDecl,
     lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
     holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
@@ -1542,7 +1542,7 @@ pub fn link<'a, H: Copy>(
 /// class under way is. [`link`]'s answer carries it; this is the record
 /// alone, of a class whose checks were made elsewhere, at the early
 /// bind.
-pub fn linked_class<'b, H: Copy>(
+pub fn linked_class<'b, H: Copy + PartialEq>(
     child: &'b ClassDecl,
     abstracts: usize,
     lookup: &dyn Fn(&[u8]) -> Option<Held<'b, H>>,
@@ -1756,10 +1756,14 @@ impl<'a, H: Copy> Linker<'a, H> {
 
     /// [`linked_class`] of `child`, whose last `abstracts` methods are
     /// its traits' abstract ones.
-    fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
+    fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>>
+    where
+        H: PartialEq,
+    {
         Some(LinkedClass {
             methods: self.method_rows(child, abstracts)?,
             constants: self.constant_rows(child)?,
+            interfaces: self.interface_list(child)?,
         })
     }
 
@@ -1952,6 +1956,63 @@ impl<'a, H: Copy> Linker<'a, H> {
             out.push(interface);
             self.interfaces_of(&interface.interfaces, out, depth + 1);
         }
+    }
+
+    /// `ce->interfaces` as `zend_do_link_class` leaves it, each once: a
+    /// user class naming some keeps its parent's, adds them, then each
+    /// one's own reversed (`zend_do_implement_interfaces`); one naming
+    /// none takes its parent's reversed (`zend_do_inherit_interfaces`).
+    /// An internal class takes `Stringable` for a `__toString`, its
+    /// parent's reversed, then each it names with that one's own
+    /// reversed after it (`zend_class_implements`). None where the
+    /// parent or an interface is held with no record.
+    fn interface_list(&self, child: &'a ClassDecl) -> Option<Box<[H]>>
+    where
+        H: PartialEq,
+    {
+        let record =
+            |name: &[u8]| (self.lookup)(name).map_or(Some(None), |held| held.record.map(Some));
+        let mut named = Vec::new();
+        for name in &child.interfaces {
+            named.extend(record(&name.0)?);
+        }
+        let parent = match &child.parent {
+            Some(name) => record(&name.0)?,
+            None => None,
+        };
+        let inherited = parent.map_or(&[][..], |(_, parent)| &*parent.interfaces);
+        let internal = child.file.0.is_empty();
+        let mut list = Vec::new();
+        let to_string = |m: &MethodDecl| m.function.name.0.eq_ignore_ascii_case(b"__toString");
+        if internal
+            && child.kind != ClassKind::Trait
+            && !child.name.0.eq_ignore_ascii_case(b"Stringable")
+            && child.methods.iter().any(to_string)
+            && let Some((key, _)) = record(b"Stringable")?
+        {
+            list.push(key);
+        }
+        if internal || named.is_empty() {
+            extend_new(&mut list, inherited.iter().rev());
+        } else {
+            list.extend_from_slice(inherited);
+        }
+        let mut added = Vec::new();
+        for (key, interface) in named {
+            if !list.contains(&key) {
+                list.push(key);
+                added.push(interface);
+            }
+            if internal {
+                for interface in added.drain(..) {
+                    extend_new(&mut list, interface.interfaces.iter().rev());
+                }
+            }
+        }
+        for interface in added {
+            extend_new(&mut list, interface.interfaces.iter().rev());
+        }
+        Some(list.into_boxed_slice())
     }
 
     /// `lookup_class` while `child` links.
@@ -3648,6 +3709,15 @@ impl<'a, H: Copy> Linker<'a, H> {
         self.class_named(b"serializable")
             .is_some_and(|interface| self.instance_of(child, interface))
             .then_some(Refusal::EnumSerializable { class })
+    }
+}
+
+/// Each of `keys` the list does not hold, at its end.
+fn extend_new<'k, H: Copy + PartialEq + 'k>(list: &mut Vec<H>, keys: impl Iterator<Item = &'k H>) {
+    for key in keys {
+        if !list.contains(key) {
+            list.push(*key);
+        }
     }
 }
 
