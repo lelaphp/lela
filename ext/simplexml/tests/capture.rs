@@ -12,3 +12,27 @@ fn the_extension_is_loaded() {
     let served = engine.serve_capture("<?php var_dump(extension_loaded('simplexml'));", sink);
     assert_eq!(served.stdout, b"bool(true)\n");
 }
+
+/// `current()`, `key()` and the movers over an element read the table
+/// the `(array)` cast builds of its children, as php reads the one
+/// `sxe_get_properties` keeps on the object, and give it up once read:
+/// armed, the request ends with no block of its heap held (#2081).
+#[cfg(debug_assertions)]
+#[test]
+fn the_pointer_natives_over_an_element_give_up_the_table_they_read() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_libxml::extension(),
+            php_ext_simplexml::extension(),
+        ])
+        .sense_leaks(php_ext::test::LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        r#"<?php $x = simplexml_load_string('<a><b>1</b><c>2</c></a>');
+echo @current($x), @key($x), @next($x), @reset($x), @end($x), @prev($x), "\n";"#,
+        Capture::default(),
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "1b212\n");
+}
