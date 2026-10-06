@@ -26,6 +26,7 @@ use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
+    PropertyDecl,
 };
 use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Unit, frameless_table};
@@ -36,7 +37,9 @@ use crate::api::abi::{
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{BuildDefs, Ending, ExtensionId, Request, Sink, ini_truth};
+use crate::api::request::{
+    BuildDefs, Ending, ExtensionId, Placed, Request, Sink, ini_truth, placed_of,
+};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
@@ -636,10 +639,10 @@ pub(crate) struct Shared {
     /// class's parent is a native class.
     pub(crate) parents: Vec<Option<ClassId>>,
     /// Each class's placed properties, one row per row of `classes`,
-    /// built at the first read by any request
+    /// built at startup ([`native_placed`]) and read as plain data
     /// ([`Request::placed_properties`]): what the class and its native
     /// parents declare, which never changes.
-    pub(crate) placed: Vec<OnceLock<crate::api::request::Placed>>,
+    pub(crate) placed: Vec<crate::api::request::Placed>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: States<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
@@ -1033,6 +1036,49 @@ fn native_records(
                 .or_else(|| php_unit::link::linked_class(decl, 0, &|_| None, &|_| None))
                 .unwrap_or_default()
         })
+        .collect()
+}
+
+/// Each native class's placed properties ([`placed_of`]), built as
+/// `zend_register_internal_class_ex` builds them when it links the
+/// class: each after its parent's, a class standing before its
+/// parent waiting a round, and one whose parent never resolves placed
+/// over none.
+fn native_placed(
+    classes: &[ClassDecl],
+    records: &[LinkedClass<ClassId>],
+    parents: &[Option<ClassId>],
+) -> Vec<Placed> {
+    let mut placed: Vec<Option<Placed>> = vec![None; classes.len()];
+    let place = |at: usize, parent: &[(ClassId, PropertyDecl)]| {
+        let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
+        let decl = classes.get(at)?;
+        Some(placed_of(class, decl, records.get(at), parent))
+    };
+    let mut progress = true;
+    while progress {
+        progress = false;
+        for at in 0..classes.len() {
+            if placed.get(at).is_none_or(Option::is_some) {
+                continue;
+            }
+            let parent = match parents.get(at).copied().flatten() {
+                None => Some(Placed::default()),
+                Some(parent) => usize::try_from(parent.0)
+                    .ok()
+                    .and_then(|parent| placed.get(parent)?.clone()),
+            };
+            let built = parent.and_then(|parent| place(at, &parent));
+            if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
+                *slot = Some(built);
+                progress = true;
+            }
+        }
+    }
+    placed
+        .into_iter()
+        .enumerate()
+        .map(|(at, built)| built.or_else(|| place(at, &[])).unwrap_or_default())
         .collect()
 }
 
@@ -2919,14 +2965,14 @@ impl EngineBuilder {
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
-        let parents = classes
+        let parents: Vec<Option<ClassId>> = classes
             .iter()
             .map(|decl| {
                 let parent = decl.parent.as_ref()?;
                 class_keys.get(&*lowered(&parent.0)).copied()
             })
             .collect();
-        let placed = classes.iter().map(|_| OnceLock::new()).collect();
+        let placed = native_placed(&classes, &records, &parents);
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.

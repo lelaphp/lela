@@ -10,7 +10,8 @@
 use std::any::Any;
 
 use php_heap::{Fatal, Heap, Obj, Zval};
-use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
+use php_unit::link::{LinkedClass, Row};
 
 use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
@@ -245,64 +246,110 @@ impl Request {
     /// }
     /// ```
     ///
-    /// The table is built once per class, at the first read, and read
-    /// from the class's row after, as php builds it once at the link
-    /// (`zend_build_properties_info_table`): what a linked class
-    /// declares, and the chain above it, never changes.
+    /// The table is built where the class binds, and the engine's own
+    /// classes' at startup ([`placed_of`]), as php builds it once at the
+    /// link (`zend_build_properties_info_table`), and read as plain data
+    /// after: what a linked class declares, and the chain above it,
+    /// never changes.
     pub(crate) fn placed_properties(&self, class: ClassId) -> &[(ClassId, PropertyDecl)] {
-        let row = match self.native_class_at(class) {
-            Some(native) => self.shared.placed.get(native),
-            None => self.declared_row(class).map(|row| &row.placed),
-        };
-        match row {
-            Some(row) => row.get_or_init(|| self.place_properties(class)),
-            None => &[],
+        match self.native_class_at(class) {
+            Some(native) => self.shared.placed.get(native).map_or(&[], |placed| placed),
+            None => self
+                .declared_row(class)
+                .map_or(&[], |row| &row.bound.placed),
         }
     }
+}
 
-    /// [`Request::placed_properties`] built from the declarations.
-    fn place_properties(&self, class: ClassId) -> Placed {
-        let mut chain = Vec::new();
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(here) = at else { break };
-            chain.push(here);
-            at = self.class_parent(here);
-        }
-        // Each row beside whether it is still `ZEND_ACC_VIRTUAL`, which
-        // a virtual property is while no declaration of it up the chain
-        // is backed, and which has no slot (`ZEND_VIRTUAL_PROPERTY_OFFSET`):
-        // a backed redeclaration of a virtual one takes a slot of its
-        // own where the child's properties are, as
-        // `do_inherit_property` leaves the child's offset alone over a
-        // virtual parent.
-        let mut table: Vec<(ClassId, PropertyDecl, bool)> = Vec::new();
-        for here in chain.into_iter().rev() {
-            let Some(decl) = self.class_decl(here) else {
-                continue;
-            };
-            for property in decl.properties.iter().filter(|p| p.is_instance) {
-                let declared_virtual = property.is_virtual;
-                let inherited = table.iter().position(|(_, p, _)| {
-                    p.name == property.name && p.visibility != Visibility::Private
-                });
-                match inherited {
-                    Some(i) if !table[i].2 => table[i] = (here, property.clone(), false),
-                    Some(i) => {
-                        table.remove(i);
-                        table.push((here, property.clone(), declared_virtual));
-                    }
-                    None => table.push((here, property.clone(), declared_virtual)),
-                }
+/// `zend_build_properties_info_table` over what `zend_do_inheritance`
+/// left (`Z/Zend/zend_inheritance.c:1686`): the placed properties of
+/// `class`, declared by `decl`, read off its record's property rows and
+/// its parent's placed properties, `parent`, with no walk of the chain.
+/// The parent's slots come first, in their order, as inheritance copies
+/// the parent's table to the front; a slot whose property is not
+/// private is taken by the class's own property of that name, which
+/// `do_inherit_property` gives the parent's offset (a virtual one
+/// stops being virtual there); then each of the class's own instance
+/// properties that took no slot and is backed, in declaration order.
+/// A backed redeclaration of a parent's virtual property finds no slot
+/// to keep, since the virtual one has none, and takes a new one. The
+/// record's rows are `properties_info`, the class's own first, so its
+/// order is not the slots'; it answers, in one lookup, whether the
+/// class declares a slot's name itself. Without a record, which a class
+/// bound with none has, the declaration answers instead.
+///
+/// Through three levels: the parent's redeclared `$a` keeps the
+/// grandparent's slot, the grandparent's private `$p` keeps its own
+/// beside the child's, the child's backed `$v` over a virtual one takes
+/// a new slot, and a static takes none:
+///
+/// ```php
+/// class G { public $a = 1; private $p = 2; public $v { get => 0; } }
+/// class P extends G { public $b = 3; public $a = 4; }
+/// class C extends P { public $v = 5; public $c = 6; public $p = 7; public static $s = 8; }
+/// var_dump(new C);
+/// ```
+/// ```expect
+/// object(C)#1 (6) {
+///   ["a"]=>
+///   int(4)
+///   ["p":"G":private]=>
+///   int(2)
+///   ["b"]=>
+///   int(3)
+///   ["v"]=>
+///   int(5)
+///   ["c"]=>
+///   int(6)
+///   ["p"]=>
+///   int(7)
+/// }
+/// ```
+pub(crate) fn placed_of(
+    class: ClassId,
+    decl: &ClassDecl,
+    record: Option<&LinkedClass<ClassId>>,
+    parent: &[(ClassId, PropertyDecl)],
+) -> Placed {
+    let own_name = |row: &Row<ClassId>| match row.holder {
+        None => decl
+            .properties
+            .get(usize::try_from(row.at).unwrap_or(usize::MAX))
+            .map_or(&[][..], |property| &property.name.0),
+        Some(_) => &[][..],
+    };
+    let own = |name: &[u8]| match record {
+        Some(record) => record
+            .properties
+            .find(name, own_name)
+            .filter(|row| row.holder.is_none())
+            .and_then(|row| usize::try_from(row.at).ok()),
+        None => decl.properties.iter().position(|p| &*p.name.0 == name),
+    };
+    let mut took = vec![false; decl.properties.len()];
+    let mut placed = Vec::with_capacity(parent.len().saturating_add(decl.properties.len()));
+    for (holder, inherited) in parent {
+        let redeclared = (inherited.visibility != Visibility::Private)
+            .then(|| own(&inherited.name.0))
+            .flatten()
+            .filter(|at| decl.properties.get(*at).is_some_and(|p| p.is_instance));
+        match redeclared.and_then(|at| Some((took.get_mut(at)?, decl.properties.get(at)?))) {
+            Some((took, property)) => {
+                *took = true;
+                placed.push((class, property.clone()));
             }
+            None => placed.push((*holder, inherited.clone())),
         }
-        table
-            .into_iter()
-            .filter(|(_, _, is_virtual)| !is_virtual)
-            .map(|(class, property, _)| (class, property))
-            .collect()
     }
+    for (property, took) in decl.properties.iter().zip(took) {
+        if property.is_instance && !property.is_virtual && !took {
+            placed.push((class, property.clone()));
+        }
+    }
+    placed.into_boxed_slice()
+}
 
+impl Request {
     /// [`Request::new_object`] by the class's name, what `object_init_ex`
     /// is over a class entry an extension holds. php's caller cannot
     /// name a class nothing registered, since it hands over the entry
