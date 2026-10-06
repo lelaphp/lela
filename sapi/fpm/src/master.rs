@@ -1073,6 +1073,10 @@ impl Fpm {
         if cfg!(target_os = "linux") {
             drop(poller);
         } else {
+            #[expect(
+                clippy::mem_forget,
+                reason = "a kqueue is not inherited across `fork`, so its number is no descriptor of the child's and is left unclosed"
+            )]
             std::mem::forget(poller);
         }
     }

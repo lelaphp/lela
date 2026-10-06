@@ -119,6 +119,10 @@ impl Thread {
     /// there is nothing to join, and the child's copy of the number
     /// counted it.
     pub(crate) fn forget(self) {
+        #[expect(
+            clippy::mem_forget,
+            reason = "a forked child's copy of a thread that is not there: there is nothing to join"
+        )]
         std::mem::forget(self.handle);
     }
 

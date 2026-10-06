@@ -438,6 +438,10 @@ impl Timer {
             if let Some(thread) = self.thread.take() {
                 thread.forget();
             }
+            #[expect(
+                clippy::mem_forget,
+                reason = "the forked child's copy of the schedule, whose mutex may have been copied held, is neither woken nor dropped"
+            )]
             std::mem::forget(std::mem::take(&mut self.shared));
             self.started_in = Process::current();
         }
