@@ -257,10 +257,17 @@ impl PhpToken {
                     return Err(thrown);
                 }
             };
-            let text = texts.make_str(req, text)?;
             let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
             let line = i64::from(token.line);
-            fill_token(req, *object, id, text.hand_on_unmigrated(), line, pos)?;
+            let filled = match texts.make_str(req, text) {
+                Ok(text) => fill_token(req, *object, id, text, line, pos),
+                Err(thrown) => Err(thrown),
+            };
+            if let Err(thrown) = filled {
+                object.give_up(req);
+                rows.give_up(req);
+                return Err(thrown);
+            }
             rows.append(req, object.into_value().hand_on_unmigrated())?;
         }
         Ok(rows)
@@ -320,10 +327,9 @@ impl PhpToken {
         #[php(default = -1)] line: i64,
         #[php(default = -1)] pos: i64,
     ) -> Result<(), Thrown> {
-        let text = Value::string(text);
         // `ZVAL_STR_COPY`: the argument keeps its owner and the property
         // takes one of its own, once every argument has been read.
-        req.addref(&text);
+        let text = Owner::take(req, Value::string(text));
         fill_token(req, this.object(), id, text, line, pos)
     }
 
@@ -542,14 +548,20 @@ fn fill_token(
     req: &mut Request,
     object: PhpObject,
     id: i64,
-    text: Value,
+    text: Owner<Value>,
     line: i64,
     pos: i64,
 ) -> Result<(), Thrown> {
-    object.set_slot(req, 0, Value::int(id))?;
+    let id = Owner::take(req, Value::int(id));
+    if let Err(thrown) = object.set_slot(req, 0, id) {
+        text.give_up(req);
+        return Err(thrown);
+    }
     object.set_slot(req, 1, text)?;
-    object.set_slot(req, 2, Value::int(line))?;
-    object.set_slot(req, 3, Value::int(pos))
+    let line = Owner::take(req, Value::int(line));
+    object.set_slot(req, 2, line)?;
+    let pos = Owner::take(req, Value::int(pos));
+    object.set_slot(req, 3, pos)
 }
 
 /// `php_token_get_id`: `id` off the receiver, and php's `Error` for a

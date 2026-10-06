@@ -200,8 +200,8 @@ impl Request {
     pub(crate) fn write_property_as_declared(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let table = self.object_handlers(object.heap());
         let bytes = name.as_bytes().to_vec();
@@ -217,8 +217,8 @@ impl Request {
         &mut self,
         object: PhpObject,
         scope: Option<ClassId>,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let table = self.object_handlers(object.heap());
         let saved = std::mem::replace(&mut self.properties.fake_scope, scope);

@@ -530,8 +530,7 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
             return Err(thrown);
         }
     }
-    let name = PhpString::new(req, b"trace")?.hand_on_unmigrated();
-    object.set_prop(req, name, copy.into_value().hand_on_unmigrated())
+    php_ext::call::write_prop(req, &object, b"trace", copy.into_value())
 }
 
 /// `zend_throw_exception(sodium_exception_ce, message, 0)`.

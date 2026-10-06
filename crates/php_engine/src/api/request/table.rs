@@ -32,7 +32,7 @@ use super::{Hooks, Request};
 use crate::api::raising::Thrown;
 use crate::api::values::walk::{BuiltRows, ObjectTable, Table};
 use crate::api::values::{
-    ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
 };
 
 /// Where a key of the table stands: a declared slot, or a key of the
@@ -435,11 +435,17 @@ impl Request {
     pub(crate) fn replace_table(
         &mut self,
         object: PhpObject,
-        table: PhpArray,
+        table: Owner<PhpArray>,
     ) -> Result<(), Thrown> {
-        let object = self.table_owner(object)?;
+        let object = match self.table_owner(object) {
+            Ok(object) => object,
+            Err(thrown) => {
+                table.give_up(self);
+                return Err(thrown);
+            }
+        };
         let o = object.heap();
-        let mut table = table;
+        let mut table = table.hand_on();
         if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
             let mut spelt = self.array()?;
             for (key, value) in table.snapshot_refs() {

@@ -792,9 +792,14 @@ fn array_shape(req: &mut Request, e: &Enc, data: Node) -> Res<Shape> {
 }
 
 /// `to_zval_array`.
-pub(super) fn to_zval_array(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Value> {
+pub(super) fn to_zval_array(
+    req: &mut Request,
+    cx: &mut Cx,
+    e: &Enc,
+    data: Node,
+) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let shape = array_shape(req, e, data)?;
     let dims = match shape.dims {
@@ -812,7 +817,7 @@ pub(super) fn to_zval_array(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node)
     }
     let ret = PhpArray::new(req)?;
     match fill_array(req, cx, *ret, shape.found, data, &dims, &mut pos) {
-        Ok(()) => Ok(ret.into_value().hand_on_unmigrated()),
+        Ok(()) => Ok(ret.into_value()),
         Err(err) => {
             ret.give_up(req);
             Err(err)
@@ -843,7 +848,7 @@ fn fill_array(
             let content = attr_content(p);
             let (_, end) = split_bracket(&content);
             if let Err(err) = get_position_ex(end.unwrap_or(&content), pos) {
-                req.release(tmp);
+                tmp.give_up(req);
                 return Err(err);
             }
         }
@@ -860,7 +865,11 @@ fn fill_array(
                 }
             }
         }
-        ar.set(req, Key::Int(i64::from(pos[dimension - 1])), tmp)?;
+        ar.set(
+            req,
+            Key::Int(i64::from(pos[dimension - 1])),
+            tmp.hand_on_unmigrated(),
+        )?;
         let mut i = dimension;
         while i > 0 {
             i -= 1;
@@ -938,13 +947,13 @@ pub(super) fn to_xml_map(
 }
 
 /// `to_zval_map`.
-pub(super) fn to_zval_map(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Value> {
+pub(super) fn to_zval_map(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) || data.children().is_none() {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let ret = PhpArray::new(req)?;
     match fill_map(req, cx, *ret, data) {
-        Ok(()) => Ok(ret.into_value().hand_on_unmigrated()),
+        Ok(()) => Ok(ret.into_value()),
         Err(err) => {
             ret.give_up(req);
             Err(err)
@@ -971,7 +980,7 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
         let value = match master_to_zval(req, cx, None, xml_value) {
             Ok(v) => v,
             Err(err) => {
-                req.release(key);
+                key.give_up(req);
                 return Err(err);
             }
         };
@@ -983,11 +992,11 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
             ValueRef::Int(n) => Some(Key::Int(n)),
             _ => None,
         };
-        req.release(key);
+        key.give_up(req);
         match k {
-            Some(k) => ret.set(req, k, value)?,
+            Some(k) => ret.set(req, k, value.hand_on_unmigrated())?,
             None => {
-                req.release(value);
+                value.give_up(req);
                 return Err(soap_error(
                     "Encoding: Can't decode apache map, only Strings or Longs are allowed as keys",
                 ));

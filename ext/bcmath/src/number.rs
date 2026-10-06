@@ -1201,13 +1201,13 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if is_virtual(name.as_bytes()) {
-            req.release(value);
+            value.give_up(req);
             let thrown = readonly(req, &String::from_utf8_lossy(name.as_bytes()));
-            req.release(Value::string(name));
+            name.give_up(req);
             return Err(thrown);
         }
         Std.write_property(req, object, name, value)

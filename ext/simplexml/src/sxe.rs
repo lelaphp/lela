@@ -1453,13 +1453,13 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let member = Member::Name(c_name(name.as_bytes()));
-        req.release(Value::string(name));
+        name.give_up(req);
         let written = prop_dim_write(req, object, &member, Some(&value), Access::Elements);
-        req.release(value);
+        value.give_up(req);
         written.map(|_| ())
     }
 

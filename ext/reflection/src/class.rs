@@ -2616,7 +2616,7 @@ impl ReflectionClass {
             ));
         };
         held.give_up(req);
-        req.addref(&value);
+        let value = Owner::take(req, value);
         write_static_prop(req, class, &name, value)?;
         Ok(())
     }

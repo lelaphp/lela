@@ -503,12 +503,11 @@ pub(crate) fn sql_exception(
     }
     let value = new_throwable(req, "mysqli_sql_exception", &message)?;
     if let Some(object) = value.as_object().copied() {
-        let written = string(req, sqlstate).and_then(|text| {
-            let name = PhpString::new(req, b"sqlstate")?.hand_on_unmigrated();
-            object.set_prop(req, name, text.hand_on_unmigrated())?;
-            let name = PhpString::new(req, b"code")?.hand_on_unmigrated();
-            object.set_prop(req, name, Value::int(i64::from(errno)))
-        });
+        let facts = [
+            ("sqlstate", Fact::Text(sqlstate)),
+            ("code", Fact::Int(i64::from(errno))),
+        ];
+        let written = add_facts(req, object, &facts);
         if let Err(thrown) = written {
             value.give_up(req);
             return Err(thrown);
@@ -607,6 +606,30 @@ pub(crate) fn affected(req: &mut Request, n: u64) -> Result<Owner<Value>, Thrown
 /// A string value of `bytes`.
 pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     Ok(PhpString::new(req, bytes)?.into_value())
+}
+
+/// One property of an object that describes something, as
+/// `add_property_stringl` and `add_property_long` write it.
+pub(crate) enum Fact<'a> {
+    Text(&'a [u8]),
+    Int(i64),
+}
+
+/// The facts written onto `object` in order, each value made as it is
+/// written.
+pub(crate) fn add_facts(
+    req: &mut Request,
+    object: PhpObject,
+    facts: &[(&str, Fact<'_>)],
+) -> Result<(), Thrown> {
+    for (name, fact) in facts {
+        let value = match fact {
+            Fact::Text(bytes) => string(req, bytes)?,
+            Fact::Int(n) => Owner::take(req, Value::int(*n)),
+        };
+        php_ext::call::write_prop(req, &object, name.as_bytes(), value)?;
+    }
+    Ok(())
 }
 
 /// `zval_get_string`'s bytes: the string it answers is the caller's, so

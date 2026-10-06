@@ -127,15 +127,15 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if Property::of(name.as_bytes()).is_none() {
             return Std.write_property(req, object, name, value);
         }
         let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-        req.release(Value::string(name));
-        req.release(value);
+        name.give_up(req);
+        value.give_up(req);
         let class = class_name(req, object.class());
         let message = format!("Cannot modify readonly property {class}::${shown}");
         Err(throw_error(req, "Error", &message))

@@ -1883,9 +1883,8 @@ pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, T
             if value.as_float().is_some_and(f64::is_nan) {
                 warning(req, "unexpected NAN value was coerced to object");
             }
-            let name = req.string(b"scalar")?;
-            req.addref(&value);
-            object.set_prop(req, name, value)?;
+            let scalar = Owner::take(req, value);
+            crate::api::call::write_prop(req, &object, b"scalar", scalar)?;
         }
     }
     Ok(object)

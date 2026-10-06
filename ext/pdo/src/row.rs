@@ -206,12 +206,12 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let _ = object;
-        req.release(value);
-        req.release(Value::string(name));
+        value.give_up(req);
+        name.give_up(req);
         Err(throw_error(req, "Error", "Cannot write to PDORow property"))
     }
 

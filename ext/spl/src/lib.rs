@@ -723,13 +723,13 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
         for (key, value) in members.snapshot() {
             if let Key::Int(h) = key {
                 integer_member(req, object, h)?;
-                req.addref(&value);
+                let value = Owner::take(req, value);
                 object.set_row(req, &key, value)?;
                 continue;
             }
             let name = key.to_prop_name(req)?;
-            req.addref(&value);
-            object.unserialize_prop(req, name.hand_on_unmigrated(), value)?;
+            let value = Owner::take(req, value);
+            object.unserialize_prop(req, name, value)?;
         }
     }
     Ok(())

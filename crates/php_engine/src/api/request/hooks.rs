@@ -18,7 +18,7 @@ use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::engine::MethodAt;
 
 /// A hooked property as an object's class holds it, what
@@ -978,10 +978,12 @@ fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
+    let key = Owner::adopt(req, key);
+    // The return's owner, and the write's.
     req.addref(&value);
-    req.addref(&value);
+    let written = Owner::take(req, value);
     let table = req.object_handlers(this.heap());
-    if let Err(thrown) = table.write_property(req, this, key, value) {
+    if let Err(thrown) = table.write_property(req, this, key, written) {
         req.release(value);
         return Err(thrown);
     }

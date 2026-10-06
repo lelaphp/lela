@@ -153,16 +153,12 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
         return Ok(None);
     }
     let object = crate::api::call::new_object(req, user.class)?.hand_on_unmigrated();
-    let name = PhpString::new(req, b"context")?.hand_on_unmigrated();
     let context = match req.streams().stream_ctx {
-        Some(context) => {
-            let value = context.resource().as_value();
-            req.addref(&value);
-            value
-        }
+        Some(context) => context.resource().as_value(),
         None => Value::null(),
     };
-    if let Err(thrown) = object.set_prop(req, name, context) {
+    let context = Owner::take(req, context);
+    if let Err(thrown) = crate::api::call::write_prop(req, &object, b"context", context) {
         req.release(object.as_value());
         return Err(thrown);
     }

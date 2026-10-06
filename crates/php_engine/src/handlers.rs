@@ -12054,7 +12054,8 @@ fn assign_property(
                 )));
             };
             write_out(req, frame, code, op, &value);
-            req.addref(name);
+            let key = Owner::take(req, key);
+            let value = Owner::adopt(req, value);
             let table = req.object_handlers(object.heap());
             Ok(table.write_property(req, object, key, value))
         }
@@ -14788,7 +14789,8 @@ fn served_property_step(
     // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
     // gives up after the write, and one more of the name, which the
     // operand keeps its own of.
-    req.addref(&Value::string(name));
+    let name = Owner::take(req, name);
+    let stepped = Owner::adopt(req, stepped);
     let table = req.object_handlers(object.heap());
     table.write_property(req, object, name, stepped)
 }
@@ -15396,7 +15398,8 @@ fn served_incdec(
     }
     // `write_property` takes an owner of the value and of the name,
     // the stepped value's own and one more of the name.
-    req.addref(&Value::string(name));
+    let name = Owner::take(req, name);
+    let stepped = Owner::adopt(req, stepped);
     let table = req.object_handlers(object.heap());
     let wrote = table.write_property(req, object, name, stepped);
     match (refused, wrote) {

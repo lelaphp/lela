@@ -59,19 +59,19 @@ pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) 
 }
 
 /// `set_zval_property`: `val` is the property's from here.
-fn set_zval_property(req: &mut Request, object: &Value, name: &[u8], val: Value) -> Res<()> {
+fn set_zval_property(req: &mut Request, object: &Value, name: &[u8], val: Owner<Value>) -> Res<()> {
     let Some(o) = object.as_object().copied() else {
-        req.release(val);
+        val.give_up(req);
         return Ok(());
     };
     let name = match PhpString::new(req, name) {
         Ok(n) => n,
         Err(t) => {
-            req.release(val);
+            val.give_up(req);
             return Err(t.into());
         }
     };
-    Ok(o.set_prop(req, name.hand_on_unmigrated(), val)?)
+    Ok(o.set_prop(req, name, val)?)
 }
 
 /// `unset_zval_property`.
@@ -97,15 +97,27 @@ fn unset_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Res<()
 }
 
 /// `add_assoc_zval`: `val` is the array's from here.
-fn add_assoc(req: &mut Request, arr: &mut PhpArray, name: &[u8], val: Value) -> Res<()> {
-    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
-    Ok(arr.set(req, key, val)?)
+fn add_assoc(req: &mut Request, arr: &mut PhpArray, name: &[u8], val: Owner<Value>) -> Res<()> {
+    let key = match PhpString::new(req, name) {
+        Ok(name) => Key::from_string(name.hand_on_unmigrated()),
+        Err(thrown) => {
+            val.give_up(req);
+            return Err(thrown.into());
+        }
+    };
+    Ok(arr.set(req, key, val.hand_on_unmigrated())?)
 }
 
 /// `array_init` with one element, `val`.
-fn array_of(req: &mut Request, val: Value) -> Res<Owner<PhpArray>> {
-    let mut arr = PhpArray::new(req)?;
-    arr.append(req, val)?;
+fn array_of(req: &mut Request, val: Owner<Value>) -> Res<Owner<PhpArray>> {
+    let mut arr = match PhpArray::new(req) {
+        Ok(arr) => arr,
+        Err(thrown) => {
+            val.give_up(req);
+            return Err(thrown.into());
+        }
+    };
+    arr.append(req, val.hand_on_unmigrated())?;
     Ok(arr)
 }
 
@@ -116,12 +128,17 @@ fn append_to_prop(
     ret: &Value,
     name: &[u8],
     arr: PhpArray,
-    val: Value,
+    val: Owner<Value>,
 ) -> Res<()> {
     let mut a = arr;
-    a.append(req, val)?;
+    a.append(req, val.hand_on_unmigrated())?;
     if !a.is_same(arr) {
-        set_zval_property(req, ret, name, Value::array(a))?;
+        // The copy the append separated has one owner, this caller's,
+        // which a view's separation cannot name as an owner: it is taken
+        // again for the property and the separation's own given back.
+        let copy = Owner::take(req, Value::array(a));
+        req.release(Value::array(a));
+        set_zval_property(req, ret, name, copy)?;
     }
     Ok(())
 }
@@ -136,75 +153,20 @@ fn model_to_zval_any(
     mut node: Option<Node>,
 ) -> Res<()> {
     let anyxml = get_conversion(ty::XSD_ANYXML)?;
-    let mut any: Option<Value> = None;
+    let mut any: Option<Owner<Value>> = None;
     let mut name: Option<Vec<u8>> = None;
     while let Some(mut n) = node {
         if get_zval_property(req, ret, &n.name()).is_none() {
-            let mut val = master_to_zval(req, cx, Some(anyxml), n)?;
-            if let Some(a) = any
-                && a.as_array().is_none()
-            {
-                let mut arr = PhpArray::new(req)?;
-                match &name {
-                    Some(nm) => {
-                        let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
-                        arr.set(req, key, a)?;
+            let stepped = any_step(req, cx, anyxml, n, &mut any, &mut name);
+            n = match stepped {
+                Ok(n) => n,
+                Err(err) => {
+                    if let Some(a) = any.take() {
+                        a.give_up(req);
                     }
-                    None => arr.append(req, a)?,
+                    return Err(err);
                 }
-                any = Some(arr.into_value().hand_on_unmigrated());
-            }
-            if val.as_str_bytes().is_some_and(|s| s.first() == Some(&b'<')) {
-                name = None;
-                while let Some(next) = n.next() {
-                    let val2 = master_to_zval(req, cx, Some(anyxml), next)?;
-                    let Some(tail) = val2.as_str_bytes().map(<[u8]>::to_vec) else {
-                        req.release(val2);
-                        break;
-                    };
-                    let mut joined = val.as_str_bytes().unwrap_or_default().to_vec();
-                    joined.extend_from_slice(&tail);
-                    let fresh = super::string(req, &joined)?.hand_on_unmigrated();
-                    req.release(val);
-                    req.release(val2);
-                    val = fresh;
-                    n = next;
-                }
-            } else {
-                name = Some(n.name());
-            }
-            match any {
-                None => {
-                    if let Some(nm) = name.take() {
-                        let mut arr = PhpArray::new(req)?;
-                        let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
-                        arr.set(req, key, val)?;
-                        any = Some(arr.into_value().hand_on_unmigrated());
-                    } else {
-                        any = Some(val);
-                    }
-                }
-                Some(a) => {
-                    let mut arr = a.as_array().copied().unwrap_or_else(PhpArray::empty);
-                    if let Some(nm) = &name {
-                        match arr.find(nm) {
-                            Some(el) if el.as_array().is_some() => {
-                                let mut inner =
-                                    el.as_array().copied().unwrap_or_else(PhpArray::empty);
-                                inner.append(req, val)?;
-                            }
-                            // php puts the old element and this one in an
-                            // array it keeps nowhere: the value is lost.
-                            Some(_) => req.release(val),
-                            None => add_assoc(req, &mut arr, nm, val)?,
-                        }
-                    } else {
-                        arr.append(req, val)?;
-                    }
-                    any = Some(Value::array(arr));
-                    name = None;
-                }
-            }
+            };
         }
         node = n.next();
     }
@@ -215,6 +177,93 @@ fn model_to_zval_any(
     Ok(())
 }
 
+/// One element `model_to_zval_any` reads into what it gathers, and the
+/// last node it read, the XML text of consecutive elements joined into
+/// one value. What is gathered stays the caller's to give up where this
+/// fails.
+fn any_step(
+    req: &mut Request,
+    cx: &mut Cx,
+    anyxml: EncRef,
+    mut n: Node,
+    any: &mut Option<Owner<Value>>,
+    name: &mut Option<Vec<u8>>,
+) -> Res<Node> {
+    let mut val = master_to_zval(req, cx, Some(anyxml), n)?;
+    if any.as_ref().is_some_and(|a| a.as_array().is_none())
+        && let Some(a) = any.take()
+    {
+        let mut arr = PhpArray::new(req)?;
+        match name.as_deref() {
+            Some(nm) => {
+                let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
+                arr.set(req, key, a.hand_on_unmigrated())?;
+            }
+            None => arr.append(req, a.hand_on_unmigrated())?,
+        }
+        *any = Some(arr.into_value());
+    }
+    if val.as_str_bytes().is_some_and(|s| s.first() == Some(&b'<')) {
+        *name = None;
+        while let Some(next) = n.next() {
+            let val2 = match master_to_zval(req, cx, Some(anyxml), next) {
+                Ok(val2) => val2,
+                Err(err) => {
+                    val.give_up(req);
+                    return Err(err);
+                }
+            };
+            let Some(tail) = val2.as_str_bytes().map(<[u8]>::to_vec) else {
+                val2.give_up(req);
+                break;
+            };
+            let mut joined = val.as_str_bytes().unwrap_or_default().to_vec();
+            joined.extend_from_slice(&tail);
+            let fresh = super::string(req, &joined)?;
+            val.give_up(req);
+            val2.give_up(req);
+            val = fresh;
+            n = next;
+        }
+    } else {
+        *name = Some(n.name());
+    }
+    match any.take() {
+        None => {
+            if let Some(nm) = name.take() {
+                let mut arr = PhpArray::new(req)?;
+                let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
+                arr.set(req, key, val.hand_on_unmigrated())?;
+                *any = Some(arr.into_value());
+            } else {
+                *any = Some(val);
+            }
+        }
+        Some(a) => {
+            let mut arr = a.as_array().copied().unwrap_or_else(PhpArray::empty);
+            if let Some(nm) = name.as_deref() {
+                match arr.find(nm) {
+                    Some(el) if el.as_array().is_some() => {
+                        let mut inner = el.as_array().copied().unwrap_or_else(PhpArray::empty);
+                        inner.append(req, val.hand_on_unmigrated())?;
+                    }
+                    // php puts the old element and this one in an
+                    // array it keeps nowhere: the value is lost.
+                    Some(_) => val.give_up(req),
+                    None => add_assoc(req, &mut arr, nm, val)?,
+                }
+            } else {
+                arr.append(req, val.hand_on_unmigrated())?;
+            }
+            // The rows went into the array `a` owns, written in
+            // place: it has the one owner, so nothing separated.
+            *any = Some(a);
+            *name = None;
+        }
+    }
+    Ok(n)
+}
+
 /// The value of one element of a content model, its `fixed` and
 /// `default` read in where the element is empty.
 fn element_value(
@@ -223,7 +272,7 @@ fn element_value(
     el: &crate::model::Type,
     node: Node,
     first: bool,
-) -> Res<Value> {
+) -> Res<Owner<Value>> {
     let name = el.name.clone().unwrap_or_default();
     let r_node = if first {
         super::check_and_resolve_href(node)?
@@ -290,15 +339,15 @@ fn model_to_zval_object(
                             return Err(err);
                         }
                     };
-                    array.append(req, v)?;
+                    array.append(req, v.hand_on_unmigrated())?;
                     next = n.next().and_then(|m| get_node(Some(m), &name, None));
                 }
-                val = array.into_value().hand_on_unmigrated();
+                val = array.into_value();
             } else if (!matches!(val.as_ref(), ValueRef::Null) || !el.nillable)
                 && super::features(req) & SOAP_SINGLE_ELEMENT_ARRAYS != 0
                 && (model.max_occurs == -1 || model.max_occurs > 1)
             {
-                val = array_of(req, val)?.into_value().hand_on_unmigrated();
+                val = array_of(req, val)?.into_value();
             }
             set_zval_property(req, ret, &name, val)?;
         }
@@ -339,8 +388,8 @@ fn fetch_class(req: &mut Request, name: &[u8]) -> Res<ClassId> {
 }
 
 /// `object_init_ex`.
-fn object_init(req: &mut Request, ce: ClassId) -> Res<Value> {
-    Ok(new_object(req, ce)?.into_value().hand_on_unmigrated())
+fn object_init(req: &mut Request, ce: ClassId) -> Res<Owner<Value>> {
+    Ok(new_object(req, ce)?.into_value())
 }
 
 /// The encoder a restriction reads its base through: down the chain
@@ -370,7 +419,12 @@ fn simple_base(
 }
 
 /// `to_zval_object`.
-pub(super) fn to_zval_object(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Value> {
+pub(super) fn to_zval_object(
+    req: &mut Request,
+    cx: &mut Cx,
+    e: &Enc,
+    data: Node,
+) -> Res<Owner<Value>> {
     to_zval_object_ex(req, cx, e, data, None)
 }
 
@@ -430,7 +484,7 @@ fn to_zval_object_ex(
     e: &Enc,
     data: Node,
     pce: Option<ClassId>,
-) -> Res<Value> {
+) -> Res<Owner<Value>> {
     let ce = object_class(req, e, pce)?;
     let std = class(req, "stdClass")?;
     let sdl = super::sdl(req);
@@ -452,8 +506,7 @@ fn to_zval_object_ex(
             let ret = object_init(req, ce)?;
             let filled = master_to_zval_int(req, cx, base, data)
                 .and_then(|b| set_zval_property(req, &ret, b"_", b));
-            release_on_err(req, ret, filled)?;
-            ret
+            kept_or_given_up(req, ret, filled)?
         } else {
             match new_object_ref(req, cx, data, ce)? {
                 Fresh::Found(v) => return Ok(v),
@@ -470,7 +523,7 @@ fn to_zval_object_ex(
             !matches!(bt.kind, TypeKind::Simple | TypeKind::List | TypeKind::Union)
         }) {
             if xml_nil(data) {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
             if let Some(v) = soap_check_xml_ref(req, cx, data) {
                 return Ok(v);
@@ -503,8 +556,7 @@ fn to_zval_object_ex(
             soap_add_xml_ref(req, cx, &ret, data);
             let filled = master_to_zval_int(req, cx, te, data)
                 .and_then(|b| set_zval_property(req, &ret, b"_", b));
-            release_on_err(req, ret, filled)?;
-            ret
+            kept_or_given_up(req, ret, filled)?
         }
     } else {
         match new_object_ref(req, cx, data, ce)? {
@@ -513,29 +565,31 @@ fn to_zval_object_ex(
         }
     };
     let filled = fill_from_type(req, cx, &ret, t, data, &sdl_arc, redo_any);
-    release_on_err(req, ret, filled)?;
-    Ok(ret)
+    kept_or_given_up(req, ret, filled)
 }
 
-/// `ret` given back where `r` failed.
-fn release_on_err<T>(req: &mut Request, ret: Value, r: Res<T>) -> Res<T> {
-    if r.is_err() {
-        req.release(ret);
+/// `ret` where `filled` answered, and given up where it failed.
+fn kept_or_given_up(req: &mut Request, ret: Owner<Value>, filled: Res<()>) -> Res<Owner<Value>> {
+    match filled {
+        Ok(()) => Ok(ret),
+        Err(err) => {
+            ret.give_up(req);
+            Err(err)
+        }
     }
-    r
 }
 
 /// What `FIND_XML_NULL`, `soap_check_xml_ref` and `object_init_ex`
-/// answered.
+/// answered, each one owner, the caller's.
 enum Fresh {
-    Found(Value),
-    Made(Value),
+    Found(Owner<Value>),
+    Made(Owner<Value>),
 }
 
 /// `FIND_XML_NULL`, `soap_check_xml_ref`, `object_init_ex` and `soap_add_xml_ref`.
 fn new_object_ref(req: &mut Request, cx: &mut Cx, data: Node, ce: ClassId) -> Res<Fresh> {
     if xml_nil(data) {
-        return Ok(Fresh::Found(Value::null()));
+        return Ok(Fresh::Found(Owner::take(req, Value::null())));
     }
     if let Some(v) = soap_check_xml_ref(req, cx, data) {
         return Ok(Fresh::Found(v));
@@ -605,14 +659,13 @@ fn fill_from_type(
 
 /// `to_zval_object_ex` with no WSDL type: each element child a property,
 /// repeated ones an array.
-fn plain_object(req: &mut Request, cx: &mut Cx, data: Node, ce: ClassId) -> Res<Value> {
+fn plain_object(req: &mut Request, cx: &mut Cx, data: Node, ce: ClassId) -> Res<Owner<Value>> {
     let ret = match new_object_ref(req, cx, data, ce)? {
         Fresh::Found(v) => return Ok(v),
         Fresh::Made(v) => v,
     };
     let filled = plain_fill(req, cx, &ret, data);
-    release_on_err(req, ret, filled)?;
-    Ok(ret)
+    kept_or_given_up(req, ret, filled)
 }
 
 fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()> {
@@ -630,7 +683,7 @@ fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()
                     .is_some();
                 if repeated {
                     let arr = array_of(req, tmp)?;
-                    set_zval_property(req, ret, &name, arr.into_value().hand_on_unmigrated())?;
+                    set_zval_property(req, ret, &name, arr.into_value())?;
                 } else {
                     set_zval_property(req, ret, &name, tmp)?;
                 }
@@ -638,11 +691,20 @@ fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()
             Some(prop) => match prop.as_array().copied() {
                 Some(arr) => append_to_prop(req, ret, &name, arr, tmp)?,
                 None => {
-                    req.addref(&prop);
-                    let arr = array_of(req, prop)?;
+                    let prop = Owner::take(req, prop);
+                    let arr = match array_of(req, prop) {
+                        Ok(arr) => arr,
+                        Err(err) => {
+                            tmp.give_up(req);
+                            return Err(err);
+                        }
+                    };
                     let mut view = *arr;
-                    set_zval_property(req, ret, &name, arr.into_value().hand_on_unmigrated())?;
-                    view.append(req, tmp)?;
+                    if let Err(err) = set_zval_property(req, ret, &name, arr.into_value()) {
+                        tmp.give_up(req);
+                        return Err(err);
+                    }
+                    view.append(req, tmp.hand_on_unmigrated())?;
                 }
             },
         }

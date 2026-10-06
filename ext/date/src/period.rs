@@ -791,8 +791,8 @@ impl DatePeriod {
         {
             return Err(uninitialized(req, object.class()));
         }
-        let fields = period_fields(req, object)?;
         let own = std_rows(req, object)?;
+        let fields = period_fields(req, object)?;
         rows_array(req, &own, fields, true)
     }
 

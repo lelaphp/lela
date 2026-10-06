@@ -216,8 +216,8 @@ fn throw_json(req: &mut Request, code: i64) -> Thrown {
         Err(thrown) => return thrown,
     };
     if let Some(object) = value.as_object().copied() {
-        let written = PhpString::new(req, b"code")
-            .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), Value::int(code)));
+        let code = Owner::take(req, Value::int(code));
+        let written = php_ext::call::write_prop(req, &object, b"code", code);
         if let Err(thrown) = written {
             value.give_up(req);
             return thrown;
@@ -487,12 +487,7 @@ fn json_decode(
         None => {}
     }
     match decode::decode(req, json.as_bytes(), flags, depth)? {
-        // The decoder's value is the one owner its sinks were handed.
-        Ok(value) => {
-            let owner = Owner::take(req, value);
-            req.release(value);
-            Ok(owner)
-        }
+        Ok(value) => Ok(value),
         Err(code) => {
             if throwing {
                 return Err(throw_json(req, code));
@@ -571,7 +566,10 @@ fn json_validate(
     set_error(req, JSON_ERROR_NONE);
     depth_within(req, depth, 2)?;
     match decode::validate(req, json.as_bytes(), flags, depth)? {
-        Ok(_) => Ok(true),
+        Ok(built) => {
+            built.give_up(req);
+            Ok(true)
+        }
         Err(code) => {
             set_error(req, code);
             Ok(false)

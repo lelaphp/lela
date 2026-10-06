@@ -616,12 +616,7 @@ impl SoapClient {
                 )?;
             }
         }
-        set_client_slot(
-            req,
-            object,
-            ClientSlot::Cookies,
-            cookies.into_value().hand_on_unmigrated(),
-        )
+        set_client_slot(req, object, ClientSlot::Cookies, cookies.into_value())
     }
 
     /// `SoapClient::__getCookies(): array`.
@@ -669,7 +664,8 @@ impl SoapClient {
         let headers = headers.0.deref();
         match headers.as_ref() {
             ValueRef::Null | ValueRef::Undef => {
-                set_client_slot(req, object, ClientSlot::DefaultHeaders, Value::null())?;
+                let value = Owner::take(req, Value::null());
+                set_client_slot(req, object, ClientSlot::DefaultHeaders, value)?;
             }
             ValueRef::Array(a) => {
                 let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
@@ -677,19 +673,14 @@ impl SoapClient {
                     let e = docref_error(req, "Invalid SOAP header");
                     return unwrapped(req, object, Err(e));
                 }
-                req.addref(&headers);
+                let headers = Owner::take(req, headers);
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, headers)?;
             }
             ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => {
                 let mut list = PhpArray::new(req)?;
                 req.addref(&headers);
                 list.append(req, headers)?;
-                set_client_slot(
-                    req,
-                    object,
-                    ClientSlot::DefaultHeaders,
-                    list.into_value().hand_on_unmigrated(),
-                )?;
+                set_client_slot(req, object, ClientSlot::DefaultHeaders, list.into_value())?;
             }
             _ => {
                 let shown = value_name(req, &headers);
@@ -725,11 +716,8 @@ impl SoapClient {
         let object = this.object();
         let old = slot_string(object, ClientSlot::Location).map(|s| Owner::take(req, s));
         let new = match location {
-            Some(l) if !l.is_empty() => {
-                req.addref(&Value::string(l));
-                Value::string(l)
-            }
-            _ => Value::null(),
+            Some(l) if !l.is_empty() => Owner::take(req, Value::string(l)),
+            _ => Owner::take(req, Value::null()),
         };
         set_client_slot(req, object, ClientSlot::Location, new)?;
         Ok(old)
@@ -764,8 +752,158 @@ fn verify_soap_headers(req: &mut Request, list: &[Value]) -> bool {
 
 /// A string slot written from an option.
 fn set_str(req: &mut Request, this: PhpObject, which: ClientSlot, v: Value) -> R<()> {
-    let v = owned(req, v);
+    let v = Owner::take(req, v);
     set_client_slot(req, this, which, v)
+}
+
+/// The options `SoapClient::__construct` reads between making its
+/// `StreamCtx` and keeping it in the client's slot: `location` to
+/// `connection_timeout`, in php's order (`Z/ext/soap/soap.c:2061-2177`).
+/// The `StreamCtx` is the caller's, which gives it up where this fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one run of one C function, kept whole"
+)]
+fn context_options(
+    req: &mut Request,
+    this: PhpObject,
+    ht: PhpArray,
+    nonwsdl: bool,
+    context: StreamCtx,
+    soap_version: &mut i64,
+    typemap_ht: &mut Option<PhpArray>,
+) -> Res<()> {
+    match str_option(ht, b"location") {
+        Some(v) => set_str(req, this, ClientSlot::Location, v)?,
+        None if nonwsdl => {
+            return Err(docref_error(
+                req,
+                "'location' option is required in nonWSDL mode",
+            ));
+        }
+        None => {}
+    }
+    if let Some(ValueRef::Int(v)) = ht
+        .find(b"soap_version")
+        .map(|v| v.deref())
+        .as_ref()
+        .map(Value::as_ref)
+        && (v == SOAP_1_1 || v == SOAP_1_2)
+    {
+        *soap_version = v;
+    }
+    if let Some(login) = str_option(ht, b"login") {
+        set_str(req, this, ClientSlot::Login, login)?;
+        if let Some(p) = str_option(ht, b"password") {
+            set_str(req, this, ClientSlot::Password, p)?;
+        }
+        if let Some(ValueRef::Int(1)) = ht
+            .find(b"authentication")
+            .map(|v| v.deref())
+            .as_ref()
+            .map(Value::as_ref)
+        {
+            let value = Owner::take(req, Value::bool(true));
+            set_client_slot(req, this, ClientSlot::UseDigest, value)?;
+        }
+    }
+    if let Some(host) = str_option(ht, b"proxy_host") {
+        set_str(req, this, ClientSlot::ProxyHost, host)?;
+        if let Some(port) = ht.find(b"proxy_port").map(|v| v.deref()) {
+            let n = to_long(req, &port)?;
+            let value = Owner::take(req, Value::int(n));
+            set_client_slot(req, this, ClientSlot::ProxyPort, value)?;
+        }
+        if let Some(l) = str_option(ht, b"proxy_login") {
+            set_str(req, this, ClientSlot::ProxyLogin, l)?;
+            if let Some(p) = str_option(ht, b"proxy_password") {
+                set_str(req, this, ClientSlot::ProxyPassword, p)?;
+            }
+        }
+    }
+    if let Some(cert) = str_option(ht, b"local_cert") {
+        context.set_option(req, b"ssl", b"local_cert", &cert)?;
+        if let Some(pp) = str_option(ht, b"passphrase") {
+            context.set_option(req, b"ssl", b"passphrase", &pp)?;
+        }
+    }
+    if let Some(t) = ht.find(b"trace").map(|v| v.deref())
+        && matches!(t.as_ref(), ValueRef::Bool(true) | ValueRef::Int(1))
+    {
+        let value = Owner::take(req, Value::bool(true));
+        set_client_slot(req, this, ClientSlot::Trace, value)?;
+    }
+    if let Some(t) = ht.find(b"exceptions").map(|v| v.deref())
+        && matches!(t.as_ref(), ValueRef::Bool(false) | ValueRef::Int(0))
+    {
+        let value = Owner::take(req, Value::bool(false));
+        set_client_slot(req, this, ClientSlot::Exceptions, value)?;
+    }
+    if let Some(ValueRef::Int(c)) = ht
+        .find(b"compression")
+        .map(|v| v.deref())
+        .as_ref()
+        .map(Value::as_ref)
+        && [
+            &b"gzinflate"[..],
+            b"gzdeflate",
+            b"gzuncompress",
+            b"gzcompress",
+            b"gzencode",
+        ]
+        .iter()
+        .all(|f| lookup_function(req, f).is_some())
+    {
+        let value = Owner::take(req, Value::int(c));
+        set_client_slot(req, this, ClientSlot::Compression, value)?;
+    }
+    if let Some(enc) = str_option(ht, b"encoding") {
+        let name = enc.as_str_bytes().unwrap_or_default().to_vec();
+        if Library::known_encoding(&name) {
+            set_str(req, this, ClientSlot::Encoding, enc)?;
+        } else {
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            return Err(docref_error(
+                req,
+                &format!("Invalid 'encoding' option - '{shown}'"),
+            ));
+        }
+    }
+    if let Some(cm) = ht.find(b"classmap").map(|v| v.deref())
+        && let ValueRef::Array(a) = cm.as_ref()
+    {
+        if a.is_packed() {
+            return Err(docref_error(
+                req,
+                "'classmap' option must be an associative array",
+            ));
+        }
+        let cm = Owner::take(req, cm);
+        set_client_slot(req, this, ClientSlot::Classmap, cm)?;
+    }
+    if let Some(tm) = ht.find(b"typemap").map(|v| v.deref())
+        && let ValueRef::Array(a) = tm.as_ref()
+        && !a.is_empty()
+    {
+        *typemap_ht = Some(*a);
+    }
+    if let Some(ValueRef::Int(f)) = ht
+        .find(b"features")
+        .map(|v| v.deref())
+        .as_ref()
+        .map(Value::as_ref)
+    {
+        let value = Owner::take(req, Value::int(f));
+        set_client_slot(req, this, ClientSlot::Features, value)?;
+    }
+    if let Some(t) = ht.find(b"connection_timeout").map(|v| v.deref()) {
+        let n = to_long(req, &t)?;
+        if n > 0 {
+            let value = Owner::take(req, Value::int(n));
+            set_client_slot(req, this, ClientSlot::ConnectionTimeout, value)?;
+        }
+    }
+    Ok(())
 }
 
 /// `SoapClient::__construct`'s body.
@@ -797,7 +935,8 @@ fn construct(
                 .map(Value::as_ref)
                 && (s == 1 || s == 2)
             {
-                set_client_slot(req, this, ClientSlot::Style, Value::int(s))?;
+                let value = Owner::take(req, Value::int(s));
+                set_client_slot(req, this, ClientSlot::Style, value)?;
             }
             if let Some(ValueRef::Int(u)) = ht
                 .find(b"use")
@@ -806,7 +945,8 @@ fn construct(
                 .map(Value::as_ref)
                 && (u == 1 || u == 2)
             {
-                set_client_slot(req, this, ClientSlot::Use, Value::int(u))?;
+                let value = Owner::take(req, Value::int(u));
+                set_client_slot(req, this, ClientSlot::Use, value)?;
             }
         }
         // `php_stream_context_from_zval(tmp, 1)` and one owner more, or
@@ -815,136 +955,25 @@ fn construct(
             && let Some(r) = v.as_resource().copied()
         {
             let context = StreamCtx::fetch(req, r)?;
-            req.addref(&v);
-            context
+            Owner::take(req, context)
         } else {
             // The client's slot keeps it, as the fetched one's.
-            StreamCtx::alloc(req)?.hand_on_unmigrated()
+            StreamCtx::alloc(req)?
         };
-        match str_option(*ht, b"location") {
-            Some(v) => set_str(req, this, ClientSlot::Location, v)?,
-            None if wsdl.is_none() => {
-                return Err(docref_error(
-                    req,
-                    "'location' option is required in nonWSDL mode",
-                ));
-            }
-            None => {}
+        let configured = context_options(
+            req,
+            this,
+            *ht,
+            wsdl.is_none(),
+            *context,
+            &mut soap_version,
+            &mut typemap_ht,
+        );
+        if let Err(err) = configured {
+            context.give_up(req);
+            return Err(err);
         }
-        if let Some(ValueRef::Int(v)) = ht
-            .find(b"soap_version")
-            .map(|v| v.deref())
-            .as_ref()
-            .map(Value::as_ref)
-            && (v == SOAP_1_1 || v == SOAP_1_2)
-        {
-            soap_version = v;
-        }
-        if let Some(login) = str_option(*ht, b"login") {
-            set_str(req, this, ClientSlot::Login, login)?;
-            if let Some(p) = str_option(*ht, b"password") {
-                set_str(req, this, ClientSlot::Password, p)?;
-            }
-            if let Some(ValueRef::Int(1)) = ht
-                .find(b"authentication")
-                .map(|v| v.deref())
-                .as_ref()
-                .map(Value::as_ref)
-            {
-                set_client_slot(req, this, ClientSlot::UseDigest, Value::bool(true))?;
-            }
-        }
-        if let Some(host) = str_option(*ht, b"proxy_host") {
-            set_str(req, this, ClientSlot::ProxyHost, host)?;
-            if let Some(port) = ht.find(b"proxy_port").map(|v| v.deref()) {
-                let n = to_long(req, &port)?;
-                set_client_slot(req, this, ClientSlot::ProxyPort, Value::int(n))?;
-            }
-            if let Some(l) = str_option(*ht, b"proxy_login") {
-                set_str(req, this, ClientSlot::ProxyLogin, l)?;
-                if let Some(p) = str_option(*ht, b"proxy_password") {
-                    set_str(req, this, ClientSlot::ProxyPassword, p)?;
-                }
-            }
-        }
-        if let Some(cert) = str_option(*ht, b"local_cert") {
-            context.set_option(req, b"ssl", b"local_cert", &cert)?;
-            if let Some(pp) = str_option(*ht, b"passphrase") {
-                context.set_option(req, b"ssl", b"passphrase", &pp)?;
-            }
-        }
-        if let Some(t) = ht.find(b"trace").map(|v| v.deref())
-            && matches!(t.as_ref(), ValueRef::Bool(true) | ValueRef::Int(1))
-        {
-            set_client_slot(req, this, ClientSlot::Trace, Value::bool(true))?;
-        }
-        if let Some(t) = ht.find(b"exceptions").map(|v| v.deref())
-            && matches!(t.as_ref(), ValueRef::Bool(false) | ValueRef::Int(0))
-        {
-            set_client_slot(req, this, ClientSlot::Exceptions, Value::bool(false))?;
-        }
-        if let Some(ValueRef::Int(c)) = ht
-            .find(b"compression")
-            .map(|v| v.deref())
-            .as_ref()
-            .map(Value::as_ref)
-            && [
-                &b"gzinflate"[..],
-                b"gzdeflate",
-                b"gzuncompress",
-                b"gzcompress",
-                b"gzencode",
-            ]
-            .iter()
-            .all(|f| lookup_function(req, f).is_some())
-        {
-            set_client_slot(req, this, ClientSlot::Compression, Value::int(c))?;
-        }
-        if let Some(enc) = str_option(*ht, b"encoding") {
-            let name = enc.as_str_bytes().unwrap_or_default().to_vec();
-            if Library::known_encoding(&name) {
-                set_str(req, this, ClientSlot::Encoding, enc)?;
-            } else {
-                let shown = String::from_utf8_lossy(&name).into_owned();
-                return Err(docref_error(
-                    req,
-                    &format!("Invalid 'encoding' option - '{shown}'"),
-                ));
-            }
-        }
-        if let Some(cm) = ht.find(b"classmap").map(|v| v.deref())
-            && let ValueRef::Array(a) = cm.as_ref()
-        {
-            if a.is_packed() {
-                return Err(docref_error(
-                    req,
-                    "'classmap' option must be an associative array",
-                ));
-            }
-            req.addref(&cm);
-            set_client_slot(req, this, ClientSlot::Classmap, cm)?;
-        }
-        if let Some(tm) = ht.find(b"typemap").map(|v| v.deref())
-            && let ValueRef::Array(a) = tm.as_ref()
-            && !a.is_empty()
-        {
-            typemap_ht = Some(*a);
-        }
-        if let Some(ValueRef::Int(f)) = ht
-            .find(b"features")
-            .map(|v| v.deref())
-            .as_ref()
-            .map(Value::as_ref)
-        {
-            set_client_slot(req, this, ClientSlot::Features, Value::int(f))?;
-        }
-        if let Some(t) = ht.find(b"connection_timeout").map(|v| v.deref()) {
-            let n = to_long(req, &t)?;
-            if n > 0 {
-                set_client_slot(req, this, ClientSlot::ConnectionTimeout, Value::int(n))?;
-            }
-        }
-        let context = context.resource().as_value();
+        let context = context.into_resource().into_value();
         set_client_slot(req, this, ClientSlot::StreamCtx, context)?;
         if let Some(ValueRef::Int(c)) = ht
             .find(b"cache_wsdl")
@@ -960,7 +989,8 @@ fn construct(
         if let Some(t) = ht.find(b"keep_alive").map(|v| v.deref())
             && matches!(t.as_ref(), ValueRef::Bool(false) | ValueRef::Int(0))
         {
-            set_client_slot(req, this, ClientSlot::KeepAlive, Value::bool(false))?;
+            let value = Owner::take(req, Value::bool(false));
+            set_client_slot(req, this, ClientSlot::KeepAlive, value)?;
         }
         if let Some(ValueRef::Int(m)) = ht
             .find(b"ssl_method")
@@ -968,7 +998,8 @@ fn construct(
             .as_ref()
             .map(Value::as_ref)
         {
-            set_client_slot(req, this, ClientSlot::SslMethod, Value::int(m))?;
+            let value = Owner::take(req, Value::int(m));
+            set_client_slot(req, this, ClientSlot::SslMethod, value)?;
             docref(
                 req,
                 Level::Deprecated,
@@ -981,7 +1012,8 @@ fn construct(
             "'location' and 'uri' options are required in nonWSDL mode",
         ));
     }
-    set_client_slot(req, this, ClientSlot::SoapVersion, Value::int(soap_version))?;
+    let value = Owner::take(req, Value::int(soap_version));
+    set_client_slot(req, this, ClientSlot::SoapVersion, value)?;
     let mut sdl = None;
     if let Some(w) = &wsdl {
         let old = std::mem::replace(&mut req.state::<State>().soap_version, soap_version);
@@ -989,12 +1021,7 @@ fn construct(
         req.state::<State>().soap_version = old;
         let loaded = loaded?;
         let object = new_sdl_object(req, loaded.clone())?;
-        set_client_slot(
-            req,
-            this,
-            ClientSlot::Sdl,
-            object.into_value().hand_on_unmigrated(),
-        )?;
+        set_client_slot(req, this, ClientSlot::Sdl, object.into_value())?;
         sdl = Some(loaded);
     }
     if let Some(ht) = typemap_ht {
@@ -1007,12 +1034,7 @@ fn construct(
                         shown.set(req, key, Value::null())?;
                     }
                 }
-                set_client_slot(
-                    req,
-                    this,
-                    ClientSlot::Typemap,
-                    shown.into_value().hand_on_unmigrated(),
-                )?;
+                set_client_slot(req, this, ClientSlot::Typemap, shown.into_value())?;
                 let old = this
                     .native_mut::<Client>(req)
                     .and_then(|c| c.typemap.replace(t));
@@ -1104,8 +1126,8 @@ fn do_request(
         ValueRef::Bool(true)
     );
     if trace {
-        req.addref(&p0);
-        set_client_slot(req, this, ClientSlot::LastRequest, *p0)?;
+        let kept = Owner::take(req, *p0);
+        set_client_slot(req, this, ClientSlot::LastRequest, kept)?;
     }
     let response = call_method(req, &this, b"__dorequest", &params);
     for p in [p2, p1, p0] {
@@ -1130,8 +1152,8 @@ fn do_request(
         }
         ret = false;
     } else if trace {
-        req.addref(&response);
-        set_client_slot(req, this, ClientSlot::LastResponse, *response)?;
+        let kept = Owner::take(req, *response);
+        set_client_slot(req, this, ClientSlot::LastResponse, kept)?;
     }
     if ret
         && client_slot(this, ClientSlot::SoapFault)
@@ -1160,8 +1182,10 @@ fn do_soap_call(
         client_slot(this, ClientSlot::Trace).as_ref(),
         ValueRef::Bool(true)
     ) {
-        set_client_slot(req, this, ClientSlot::LastRequest, Value::null())?;
-        set_client_slot(req, this, ClientSlot::LastResponse, Value::null())?;
+        let value = Owner::take(req, Value::null());
+        set_client_slot(req, this, ClientSlot::LastRequest, value)?;
+        let value = Owner::take(req, Value::null());
+        set_client_slot(req, this, ClientSlot::LastResponse, value)?;
     }
     let soap_version = match client_slot(this, ClientSlot::SoapVersion).as_ref() {
         ValueRef::Int(2) => SOAP_1_2,
@@ -1175,7 +1199,8 @@ fn do_soap_call(
     let sdl = this_sdl(req, this);
     let typemap = this.native::<Client>(req).and_then(|c| c.typemap.clone());
     // `clear_soap_fault`.
-    set_client_slot(req, this, ClientSlot::SoapFault, Value::null())?;
+    let value = Owner::take(req, Value::null());
+    set_client_slot(req, this, ClientSlot::SoapFault, value)?;
     let encoding = client_slot(this, ClientSlot::Encoding)
         .as_str_bytes()
         .map(<[u8]>::to_vec);

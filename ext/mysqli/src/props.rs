@@ -96,8 +96,8 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let Some(handled) = handled::<P>(name.as_bytes()) else {
             return Std.write_property(req, object, name, value);
@@ -106,8 +106,8 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             Std.write_property(req, object, name, value)?;
             return P::wrote(req, object, handled);
         }
-        req.release(Value::string(name));
-        req.release(value);
+        name.give_up(req);
+        value.give_up(req);
         let class = class_name(req, object.class());
         let text = format!("Cannot write read-only property {class}::${handled}");
         Err(throw_error(req, "Error", &text))

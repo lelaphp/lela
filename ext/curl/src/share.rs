@@ -301,12 +301,7 @@ fn curl_share_init_persistent(
             options.append(req, Value::int(lock))?;
         }
     }
-    if let Err(thrown) = write_prop(
-        req,
-        &object,
-        b"options",
-        options.into_value().hand_on_unmigrated(),
-    ) {
+    if let Err(thrown) = write_prop(req, &object, b"options", options.into_value()) {
         object.give_up(req);
         return Err(thrown);
     }

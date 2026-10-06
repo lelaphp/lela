@@ -1306,8 +1306,8 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let sym = object
             .native::<Decls>(req)
@@ -1325,8 +1325,8 @@ impl ObjectHandlers for Handlers {
             )),
             Some(sym) => write_value(req, sym.addr, sym.ty, &value),
         };
-        req.release(value);
-        req.release(Value::string(name));
+        value.give_up(req);
+        name.give_up(req);
         written
     }
 

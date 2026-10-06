@@ -511,13 +511,12 @@ fn soap_check_zval_ref(req: &mut Request, cx: &mut Cx, data: &Value, node: Node)
 
 /// `soap_check_xml_ref`: the value a node was read as before, one more
 /// owner, the caller's.
-fn soap_check_xml_ref(req: &mut Request, cx: &Cx, node: Node) -> Option<Value> {
+fn soap_check_xml_ref(req: &mut Request, cx: &Cx, node: Node) -> Option<Owner<Value>> {
     if !cx.tracking {
         return None;
     }
     let v = *cx.read.get(&node)?;
-    req.addref(&v);
-    Some(v)
+    Some(Owner::take(req, v))
 }
 
 /// `soap_add_xml_ref`.
@@ -760,7 +759,7 @@ pub(crate) fn master_to_zval(
     cx: &mut Cx,
     enc: Option<EncRef>,
     data: Node,
-) -> Res<Value> {
+) -> Res<Owner<Value>> {
     let data = check_and_resolve_href(data)?;
     let encode = match enc {
         None => get_conversion(ty::UNKNOWN_TYPE)?,
@@ -808,7 +807,12 @@ fn loops_back(req: &mut Request, sdl: Option<&Arc<Sdl>>, start: EncRef) -> Res<b
 }
 
 /// `master_to_zval_int`.
-fn master_to_zval_int(req: &mut Request, cx: &mut Cx, encode: EncRef, data: Node) -> Res<Value> {
+fn master_to_zval_int(
+    req: &mut Request,
+    cx: &mut Cx,
+    encode: EncRef,
+    data: Node,
+) -> Res<Owner<Value>> {
     let mut e = enc(req, encode)?;
     if req.state::<State>().typemap.is_some() {
         if e.e.details.type_str.is_some() {
@@ -873,16 +877,16 @@ fn to_xml(
 }
 
 /// `encode->to_zval(ret, &encode->details, data)`.
-fn to_zval(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Value> {
+fn to_zval(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Owner<Value>> {
     match e.e.to_zval {
         ToZval::Guess => guess_zval_convert(req, cx, e, data),
-        ToZval::Null => Ok(Value::null()),
+        ToZval::Null => Ok(Owner::take(req, Value::null())),
         ToZval::String => scalar::to_zval_string(req, data, scalar::Space::Keep),
         ToZval::StringR => scalar::to_zval_string(req, data, scalar::Space::Replace),
         ToZval::StringC => scalar::to_zval_string(req, data, scalar::Space::Collapse),
-        ToZval::Long => scalar::to_zval_long(data),
-        ToZval::Double => scalar::to_zval_double(data),
-        ToZval::Bool => scalar::to_zval_bool(data),
+        ToZval::Long => Ok(Owner::take(req, scalar::to_zval_long(data)?)),
+        ToZval::Double => Ok(Owner::take(req, scalar::to_zval_double(data)?)),
+        ToZval::Bool => Ok(Owner::take(req, scalar::to_zval_bool(data)?)),
         ToZval::Base64 => scalar::to_zval_base64(req, data),
         ToZval::Hexbin => scalar::to_zval_hexbin(req, data),
         ToZval::Array => array::to_zval_array(req, cx, e, data),
@@ -914,7 +918,12 @@ fn guess_xml_convert(
 }
 
 /// `guess_zval_convert`.
-fn guess_zval_convert(req: &mut Request, cx: &mut Cx, type_: &Enc, data: Node) -> Res<Value> {
+fn guess_zval_convert(
+    req: &mut Request,
+    cx: &mut Cx,
+    type_: &Enc,
+    data: Node,
+) -> Res<Owner<Value>> {
     let data = check_and_resolve_href(data)?;
     let sdl = sdl(req);
     let mut type_name = None;
@@ -956,7 +965,13 @@ fn guess_zval_convert(req: &mut Request, cx: &mut Cx, type_: &Enc, data: Node) -
     let Some(type_name) = type_name else {
         return Ok(ret);
     };
-    let e = enc(req, found)?;
+    let e = match enc(req, found) {
+        Ok(e) => e,
+        Err(err) => {
+            ret.give_up(req);
+            return Err(err);
+        }
+    };
     if sdl.is_none() || e.e.details.sdl_type.is_none() {
         return Ok(ret);
     }
@@ -967,33 +982,37 @@ fn guess_zval_convert(req: &mut Request, cx: &mut Cx, type_: &Enc, data: Node) -
 fn wrap_soap_var(
     req: &mut Request,
     e: &Encoder,
-    ret: Value,
+    ret: Owner<Value>,
     type_name: &[u8],
     data: Node,
-) -> Res<Value> {
-    let class = class(req, "SoapVar")?;
-    let var = match php_ext::call::new_object(req, class) {
+) -> Res<Owner<Value>> {
+    let made = class(req, "SoapVar").and_then(|class| Ok(php_ext::call::new_object(req, class)?));
+    let var = match made {
         Ok(v) => v,
-        Err(t) => {
-            req.release(ret);
-            return Err(t.into());
+        Err(err) => {
+            ret.give_up(req);
+            return Err(err);
         }
     };
     let (cptype, ns) = parse_namespace(type_name);
     let nsptr = data.search_ns(ns);
     let fill = |req: &mut Request| -> Res<()> {
-        var.set_slot(req, VAR_ENC_TYPE, Value::int(i64::from(e.details.type_)))?;
+        let type_ = Owner::take(req, Value::int(i64::from(e.details.type_)));
+        if let Err(err) = var.set_slot(req, VAR_ENC_TYPE, type_) {
+            ret.give_up(req);
+            return Err(err.into());
+        }
         var.set_slot(req, crate::shared::VAR_ENC_VALUE, ret)?;
         let s = string(req, cptype)?;
-        var.set_slot(req, VAR_ENC_STYPE, s.hand_on_unmigrated())?;
+        var.set_slot(req, VAR_ENC_STYPE, s)?;
         if let Some(n) = nsptr {
             let s = string(req, &href(n))?;
-            var.set_slot(req, VAR_ENC_NS, s.hand_on_unmigrated())?;
+            var.set_slot(req, VAR_ENC_NS, s)?;
         }
         Ok(())
     };
     match fill(req) {
-        Ok(()) => Ok(var.into_value().hand_on_unmigrated()),
+        Ok(()) => Ok(var.into_value()),
         Err(err) => {
             var.give_up(req);
             Err(err)
@@ -1002,7 +1021,12 @@ fn wrap_soap_var(
 }
 
 /// `sdl_guess_convert_zval`.
-fn sdl_guess_convert_zval(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Value> {
+fn sdl_guess_convert_zval(
+    req: &mut Request,
+    cx: &mut Cx,
+    e: &Enc,
+    data: Node,
+) -> Res<Owner<Value>> {
     let sdl = sdl(req);
     let Some(t) = sdl_type(sdl.as_ref(), &e.e) else {
         return guess_zval_convert(req, cx, e, data);
