@@ -852,9 +852,10 @@ pub fn fgets(
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
-    Ok(stream
-        .get_line(req, maxlen)?
-        .map_or(OrFalse::False, OrFalse::Value))
+    Ok(match stream.get_line(req, maxlen)? {
+        Some(line) => OrFalse::Value(PhpString::new(req, &line)?),
+        None => OrFalse::False,
+    })
 }
 
 /// `fread($stream, int $length): string|false`, `PHP_FUNCTION(fread)`
@@ -2314,6 +2315,8 @@ fn file(
     let contents = stream.copy_to_mem(req, None)?;
     stream.free(req);
     let buf = contents.as_bytes().to_vec();
+    // `zend_string_free(target_buf)`: the lines are copies.
+    req.release(Value::string(contents));
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
     for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
@@ -2839,8 +2842,7 @@ fn fscanf(
     let Some(line) = stream.get_line(req, None)? else {
         return Ok(Some(OrFalse::False));
     };
-    let scanned =
-        crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, count)?;
+    let scanned = crate::scanf::php_sscanf_internal(req, &line, format.as_bytes(), 3, count)?;
     Ok(match scanned.as_ref() {
         ValueRef::Array(array) => Some(OrFalse::Value(Union::A(*array))),
         ValueRef::Int(n) => Some(OrFalse::Value(Union::B(n))),
@@ -3130,10 +3132,9 @@ fn fgetcsv(
     let Some(line) = stream.get_line(req, len)? else {
         return Ok(OrFalse::False);
     };
-    let line = line.as_bytes().to_vec();
     let mut failed = None;
     let mut more = || match stream.get_line(req, None) {
-        Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+        Ok(next) => next,
         Err(thrown) => {
             failed = Some(thrown);
             None

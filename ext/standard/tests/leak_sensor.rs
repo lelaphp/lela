@@ -1,0 +1,45 @@
+//! The request leak sensor (#1992) over this extension's natives: each
+//! request below gives up everything its natives took, so an armed
+//! engine ends it without the `InternalError` naming a block still held.
+#![cfg(debug_assertions)]
+
+use php_ext::test::{Capture, Engine, LeakSensor};
+
+/// What one request of an armed engine with this extension alone wrote.
+fn armed(source: &str) -> String {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(source, Capture::default());
+    String::from_utf8_lossy(&served.stdout).into_owned()
+}
+
+/// `fgetcsv` and `fscanf` read a line for their parser, `fgetcsv` the
+/// next one too where an enclosure runs past the first, and keep none
+/// of it (#2086).
+#[test]
+fn a_line_read_for_a_parser_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+$m = fopen('php://memory', 'r+'); fwrite($m, "a,\"b\nc\",d\n12 apples\n"); rewind($m);
+echo implode('|', fgetcsv($m, null, ',', '"', '')), "\n";
+echo implode('|', fscanf($m, "%d %s")), "\n";
+"#,
+    );
+    assert_eq!(stdout, "a|b\nc|d\n12|apples\n");
+}
+
+/// `file` splits the whole file it read into the lines it returns and
+/// keeps the whole no longer (#2086, `Zend/tests/foreach/bug34065.phpt`).
+#[test]
+fn the_file_file_splits_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+$f = sys_get_temp_dir() . '/leak-sensor-file-' . getmypid() . '.txt';
+file_put_contents($f, "a\nb\n");
+echo implode('|', file($f)), count(file($f, FILE_IGNORE_NEW_LINES)), "\n"; unlink($f);
+"#,
+    );
+    assert_eq!(stdout, "a\n|b\n2\n");
+}

@@ -1376,8 +1376,7 @@ fn send_stream(
                 let Some(line) = input.get_line(req, Some(room))? else {
                     break;
                 };
-                buf.extend_from_slice(line.as_bytes());
-                req.release(Value::string(line));
+                buf.extend_from_slice(&line);
                 if buf.last() == Some(&b'\n') {
                     buf.pop();
                     buf.extend_from_slice(b"\r\n");
