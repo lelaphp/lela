@@ -243,8 +243,15 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             Some((_, v)) => php_ext::coerce::to_long(req, v)?,
             None => 0,
         };
+        // `zval_get_string`'s string is the caller's: its bytes copied,
+        // it is given back.
         let message = match cells.get(2) {
-            Some((_, v)) => to_string(req, v)?.as_bytes().to_vec(),
+            Some((_, v)) => {
+                let text = to_string(req, v)?;
+                let bytes = text.as_bytes().to_vec();
+                req.release(Value::string(text));
+                bytes
+            }
             None => Vec::new(),
         };
         list.push(Warning { message, errno });

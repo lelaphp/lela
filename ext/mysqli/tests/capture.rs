@@ -245,3 +245,32 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
         "bool(true)\n1 a\n2 b\nint(42)\nfloat(1.5)\nstring(4) \"text\"\n"
     );
 }
+
+/// `mysqli_get_warnings()` reads `SHOW WARNINGS` off the connection and
+/// keeps each row's code and message, the message's string given back
+/// once its bytes are copied, so an armed request that reads a warning
+/// leaves no block of its heap held (#2092). Against the server of
+/// `ci/mysql/compose.yaml`; with none listening the test says so and
+/// passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_its_warnings_leaves_none_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        mysqli_query($l, 'SELECT 1/0');
+        $w = mysqli_get_warnings($l);
+        var_dump($w->errno, $w->message);";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "int(1365)\nstring(13) \"Division by 0\"\n"
+    );
+}
