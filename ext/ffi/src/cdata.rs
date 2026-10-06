@@ -78,14 +78,16 @@ pub(crate) fn hold(req: &mut Request, sizes: &[usize]) -> Result<Box<[usize]>, T
 }
 
 /// `FFI_G(weak_types)`: the table `zend_ffi_remember_type` allocates
-/// at its first use, by the address [`alloc`] gave its packed buckets,
-/// and how many rows it has room for and holds. What it keeps stays on
-/// the request's heap until `RSHUTDOWN`.
+/// at its first use, by the addresses [`alloc`] gave it and its packed
+/// buckets, how many rows it has room for, and the blocks of each type
+/// it remembers. What it keeps stays on the request's heap until
+/// `RSHUTDOWN`, which gives it back ([`forget_types`]).
 #[derive(Debug)]
 pub(crate) struct WeakTypes {
+    table: usize,
     data: usize,
     slots: usize,
-    count: usize,
+    types: Vec<Box<[usize]>>,
 }
 
 /// `HT_PACKED_SIZE_EX(slots, HT_MIN_MASK)`: a `zval` a slot and the two
@@ -95,22 +97,31 @@ fn packed_size(slots: usize) -> usize {
 }
 
 /// `zend_ffi_remember_type`: one row of `FFI_G(weak_types)` for a type
-/// whose owner hands it on, its held blocks never given back, the table
-/// (`emalloc(sizeof(HashTable))` and `zend_hash_init(..., 0, ...)`) made
-/// at the first, its packed buckets laid at its first insert and
-/// doubled, `zend_hash_packed_grow`, when full.
-pub(crate) fn remember(req: &mut Request) -> Result<(), Thrown> {
+/// whose owner hands it on, its held blocks kept to the request's end,
+/// the table (`emalloc(sizeof(HashTable))` and `zend_hash_init(..., 0,
+/// ...)`) made at the first, its packed buckets laid at its first insert
+/// and doubled, `zend_hash_packed_grow`, when full.
+pub(crate) fn remember(req: &mut Request, held: Box<[usize]>) -> Result<(), Thrown> {
     let mut weak = if let Some(weak) = req.state::<State>().weak_types.take() {
         weak
     } else {
-        alloc(req, 56, false)?;
+        let table = alloc(req, 56, false)?;
+        let data = match alloc(req, packed_size(8), false) {
+            Ok(data) => data,
+            Err(thrown) => {
+                free(req, table);
+                free_types(req, &held);
+                return Err(thrown);
+            }
+        };
         WeakTypes {
-            data: alloc(req, packed_size(8), false)?,
+            table,
+            data,
             slots: 8,
-            count: 0,
+            types: Vec::new(),
         }
     };
-    if weak.count == weak.slots {
+    if weak.types.len() == weak.slots {
         match alloc(req, packed_size(weak.slots * 2), false) {
             Ok(data) => {
                 free(req, weak.data);
@@ -119,13 +130,28 @@ pub(crate) fn remember(req: &mut Request) -> Result<(), Thrown> {
             }
             Err(thrown) => {
                 req.state::<State>().weak_types = Some(weak);
+                free_types(req, &held);
                 return Err(thrown);
             }
         }
     }
-    weak.count += 1;
+    weak.types.push(held);
     req.state::<State>().weak_types = Some(weak);
     Ok(())
+}
+
+/// `RSHUTDOWN`'s `zend_hash_destroy(FFI_G(weak_types))` and `efree`:
+/// every remembered type given back, then the packed buckets and the
+/// table.
+pub(crate) fn forget_types(req: &mut Request) {
+    let Some(weak) = req.state::<State>().weak_types.take() else {
+        return;
+    };
+    for held in &weak.types {
+        free_types(req, held);
+    }
+    free(req, weak.data);
+    free(req, weak.table);
 }
 
 /// The types a value held given back with it.

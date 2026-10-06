@@ -977,7 +977,7 @@ fn take_ctype_types(
         all.extend(owned);
         return Ok(all.into_boxed_slice());
     }
-    remember(req)?;
+    remember(req, owned)?;
     Ok(held)
 }
 
