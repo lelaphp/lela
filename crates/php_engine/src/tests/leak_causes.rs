@@ -199,3 +199,27 @@ echo "ok\n";
     assert_eq!(stdout, "ok\n");
     assert_eq!(exit, 0);
 }
+
+/// `+=` through a property the class's handlers serve, whose right
+/// operand's destructor throws as the operand is freed, gives up the
+/// union it wrote back, as `+` and `+=` on a variable do (#2083).
+#[test]
+fn an_array_union_written_back_through_the_handlers_is_given_up_when_a_destructor_throws() {
+    let (stdout, exit) = armed(
+        r#"<?php
+try { var_dump([0] + [new class { function __destruct() { throw new Exception; } }]); } catch (Exception $e) { print "caught 2\n"; }
+try { $foo = [0]; var_dump($foo += [new class { function __destruct() { throw new Exception; } }]); } catch (Exception $e) { print "caught 3\n"; }
+try { $foo = (object)["foo" => [0]]; var_dump($foo->foo += [new class { function __destruct() { throw new Exception; } }]); } catch (Exception $e) { print "caught 4\n"; }
+try { $foo = new class { function __get($x) { return [0]; } function __set($x, $y) {} };
+    var_dump($foo->foo += [new class { function __destruct() { throw new Exception; } }]); } catch (Exception $e) { print "caught 5\n"; }
+try { $foo = new class { public $bar = [0]; function &__get($x) { return $this->bar; } };
+    var_dump($foo->foo += [new class { function __destruct() { throw new Exception; } }]); } catch (Exception $e) { print "caught 6\n"; }
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "caught 2\ncaught 3\ncaught 4\ncaught 5\n\nDeprecated: Creation of dynamic property \
+         class@anonymous::$foo is deprecated in Standard input code on line 8\ncaught 6\n"
+    );
+    assert_eq!(exit, 0);
+}
