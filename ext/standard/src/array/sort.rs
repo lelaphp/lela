@@ -14,7 +14,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::compare;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, Value};
+use php_ext::values::{Key, Owner, PhpArray, Value, walk};
 
 use super::constants::{
     SORT_ASC, SORT_DESC, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
@@ -201,20 +201,12 @@ fn sort(
 /// ```
 #[php_function]
 fn usort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<True, Thrown> {
-    let Some(held) = array.get().copied() else {
-        return Ok(True);
-    };
-    if held.is_empty() {
-        return Ok(True);
-    }
-    let mut copy = held.copy(req)?;
     let mut deprecated = false;
-    let sorted = copy.sort_by(req, true, |req, (_, a), (_, b)| {
-        user_compare(req, &callback, &mut deprecated, a, b)
-    });
-    let written = array.set(req, copy);
-    sorted?;
-    written?;
+    walk::detached(req, &array, |req, copy| {
+        copy.sort_by(req, true, |req, (_, a), (_, b)| {
+            user_compare(req, &callback, &mut deprecated, a, b)
+        })
+    })?;
     Ok(True)
 }
 
@@ -612,36 +604,29 @@ fn uksort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result
     user_sort(req, &array, &callback, true)
 }
 
-/// `php_usort` keeping keys: the array copied, `zend_array_dup`, so the
-/// callback sees the caller's array unchanged, the copy sorted and
-/// written into the caller's variable after, whatever the sort raised.
+/// `php_usort` keeping keys, over the Detached walk
+/// ([`walk::detached`]): the callback sees the caller's array
+/// unchanged, and the sorted copy is written into the caller's variable
+/// after, whatever the sort raised.
 fn user_sort(
     req: &mut Request,
     array: &Ref<PhpArray>,
     callback: &Callable,
     by_key: bool,
 ) -> Result<True, Thrown> {
-    let Some(held) = array.get().copied() else {
-        return Ok(True);
-    };
-    if held.is_empty() {
-        return Ok(True);
-    }
-    let mut copy = held.copy(req)?;
     let mut deprecated = false;
-    let sorted = copy.sort_by(req, false, |req, (ka, a), (kb, b)| {
-        if by_key {
-            let (x, y) = (key_value(ka), key_value(kb));
-            // `php_array_user_key_compare_unstable`: the keys, read
-            // back as the value comparison reads its answer.
-            user_compare(req, callback, &mut deprecated, &x, &y)
-        } else {
-            user_compare(req, callback, &mut deprecated, a, b)
-        }
-    });
-    let written = array.set(req, copy);
-    sorted?;
-    written?;
+    walk::detached(req, array, |req, copy| {
+        copy.sort_by(req, false, |req, (ka, a), (kb, b)| {
+            if by_key {
+                let (x, y) = (key_value(ka), key_value(kb));
+                // `php_array_user_key_compare_unstable`: the keys, read
+                // back as the value comparison reads its answer.
+                user_compare(req, callback, &mut deprecated, &x, &y)
+            } else {
+                user_compare(req, callback, &mut deprecated, a, b)
+            }
+        })
+    })?;
     Ok(True)
 }
 
