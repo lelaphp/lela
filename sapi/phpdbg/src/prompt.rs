@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use php_sapi::tier::{self, Argument, FrameRef, Opcode, Request};
 
-use crate::bp::Kind;
+use crate::bp::{Kind, OpArray};
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
@@ -1793,7 +1793,7 @@ fn opline_break(
         Some(class) => format!("{}::{}#{num}", lossy(class), lossy(name)),
         None => format!("{}#{num}", lossy(name)),
     };
-    match found {
+    let resolved = match found {
         tier::Named::Code(code) if !code.user => {
             let message = match class {
                 Some(class) => format!(
@@ -1826,8 +1826,14 @@ fn opline_break(
             out::error(message.as_bytes());
             return;
         }
-        tier::Named::Code(_) => {
+        tier::Named::Code(code) => {
             out::notice(format!("Breakpoint #{id} added at {shown}").as_bytes());
+            let op = OpArray {
+                file: &code.file,
+                function: Some(&code.name),
+                class: code.class.as_deref(),
+            };
+            Some(crate::bp::address(op, opline))
         }
         tier::Named::NoFunction if class.is_some() => {
             out::error(
@@ -1842,8 +1848,9 @@ fn opline_break(
         }
         tier::Named::NoFunction | tier::Named::NoClass => {
             out::notice(format!("Pending breakpoint #{id} at {shown}").as_bytes());
+            None
         }
-    }
+    };
     let kind = match class {
         Some(class) => Kind::MethodOpline {
             class: class.clone(),
@@ -1856,6 +1863,9 @@ fn opline_break(
         },
     };
     s.breaks.push(id, kind);
+    if let Some(address) = resolved {
+        s.breaks.resolve_to(id, address);
+    }
 }
 
 /// `PHPDBG_BREAK(del)`.
