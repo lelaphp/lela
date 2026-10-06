@@ -78,3 +78,14 @@ try { foreach (new RecursiveTreeIterator(new RecursiveArrayIterator($a, Recursiv
     );
     assert_eq!(stdout, "|-Array\n| |-aaa\n| \\-12\nno\n");
 }
+
+/// An `ArrayObject` over an object takes the value `$ao[] = ...` hands
+/// it and gives it up, where it kept it unwritten and unreleased: its
+/// append is a sink taking an owner (#1997).
+#[test]
+fn an_append_to_an_object_s_table_keeps_nothing() {
+    let stdout = armed(
+        "<?php $o = new stdClass; $ao = @new ArrayObject($o); $ao[] = str_repeat('a', 3); echo \"ok\\n\";",
+    );
+    assert_eq!(stdout, "ok\n");
+}

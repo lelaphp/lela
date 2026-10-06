@@ -1094,7 +1094,10 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
                 req.addref(&Value::string(name));
                 copy.set_prop(req, name, value)?;
             }
-            Key::Int(_) => copy.set_row(req, &key, value)?,
+            Key::Int(_) => {
+                let value = Owner::take(req, value);
+                copy.set_row(req, &key, value)?;
+            }
         }
     }
     let running = Running::new(req, algo, state)?;

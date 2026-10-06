@@ -1511,7 +1511,7 @@ impl PhpObject {
     /// ([`php_heap::DeclaredRows::Copied`]); the table the object held is
     /// released. A lazy object is initialised first and its instance
     /// takes the table.
-    pub fn replace_table(&self, req: &mut Request, table: PhpArray) -> Result<(), Thrown> {
+    pub fn replace_table(&self, req: &mut Request, table: Owner<PhpArray>) -> Result<(), Thrown> {
         req.replace_table(*self, table)
     }
 
@@ -1547,6 +1547,19 @@ impl PhpObject {
     /// table's from here, and what the row held is released after the
     /// write.
     ///
+    /// A sink: the value is an owner, and a view is refused, so a value
+    /// the caller holds no owner of never reaches the table.
+    ///
+    /// ```compile_fail,E0308
+    /// # use php_engine::api::raising::Thrown;
+    /// # use php_engine::api::request::Request;
+    /// # use php_engine::api::values::{Key, PhpObject, Value};
+    /// fn viewed(req: &mut Request, object: PhpObject, key: &Key, value: Value) -> Result<(), Thrown> {
+    ///     object.set_row(req, key, value)
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
     /// ```php
     /// class M { public $a = 1; public int $n = 0; public function __set($k, $v) { echo "__set $k\n"; } }
     /// $o = new M;
@@ -1564,8 +1577,8 @@ impl PhpObject {
     ///   string(3) "new"
     /// }
     /// ```
-    pub fn set_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
-        req.table_set_row(*self, key, value)
+    pub fn set_row(&self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
+        req.table_set_row(*self, key, value.hand_on())
     }
 
     /// `zend_hash_update` over the property table, where
@@ -1606,8 +1619,13 @@ impl PhpObject {
     /// }
     /// Cannot assign array to property Z::$n of type int
     /// ```
-    pub fn update_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
-        req.table_update_row(*self, key, value)
+    pub fn update_row(
+        &self,
+        req: &mut Request,
+        key: &Key,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        req.table_update_row(*self, key, value.hand_on())
     }
 
     /// One row of the property table removed by key,

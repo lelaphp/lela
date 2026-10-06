@@ -1493,8 +1493,8 @@ impl DateTime {
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let time = time_of(req, object)?;
-        let fields = date_fields(req, &time)?;
         let own = std_rows(req, object)?;
+        let fields = date_fields(req, &time)?;
         rows_array(req, &own, fields, true)
     }
 

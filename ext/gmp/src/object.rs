@@ -164,6 +164,7 @@ impl GMP {
                         req,
                         &format!("Creation of dynamic property GMP::${n} is deprecated"),
                     );
+                    let value = Owner::take(req, value);
                     object.set_row(req, &Key::Int(n), value)?;
                 }
             }
@@ -539,7 +540,7 @@ fn read_custom(
         return Err(throw(req, "Exception", "Could not unserialize properties"));
     };
     for (key, value) in props.snapshot() {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         object.set_row(req, &key, value)?;
     }
     Ok(())

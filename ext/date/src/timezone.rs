@@ -671,8 +671,8 @@ impl DateTimeZone {
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let kind = tz_of(req, object)?;
-        let fields = tz_fields(req, &kind)?;
         let own = std_rows(req, object)?;
+        let fields = tz_fields(req, &kind)?;
         rows_array(req, &own, fields, true)
     }
 

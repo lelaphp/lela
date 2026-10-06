@@ -330,7 +330,7 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         }
     }
     if plain {
-        made.replace_table(req, table.hand_on_unmigrated())?;
+        made.replace_table(req, table)?;
     } else {
         table.give_up(req);
     }

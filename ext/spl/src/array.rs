@@ -1338,18 +1338,18 @@ impl Table {
 
     /// `zend_hash_update_ind`: `value` is the table's from here, and
     /// `key` a view, the array taking its own owner of a string key.
-    fn set(self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
+    fn set(self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
                 let key = crate::owned_key(req, key);
-                array.set(req, key, value)?;
+                array.set(req, key, value.hand_on_unmigrated())?;
                 store(req, owner, array)
             }
             Table::Props(object) => {
                 let name = match key.to_prop_name(req) {
                     Ok(name) => name,
                     Err(thrown) => {
-                        req.release(value);
+                        value.give_up(req);
                         return Err(thrown);
                     }
                 };
@@ -1360,12 +1360,19 @@ impl Table {
         }
     }
 
-    fn append(self, req: &mut Request, value: Value) -> Result<(), Thrown> {
-        if let Table::Array(owner, mut array) = self {
-            array.append(req, value)?;
-            store(req, owner, array)?;
+    /// `zend_hash_next_index_insert`: `value` is the array's from here.
+    /// An object's table takes nothing here, and the value is given up.
+    fn append(self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
+        match self {
+            Table::Array(owner, mut array) => {
+                array.append(req, value.hand_on_unmigrated())?;
+                store(req, owner, array)
+            }
+            Table::Props(_) => {
+                value.give_up(req);
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn unset(self, req: &mut Request, key: &Key) -> Result<(), Thrown> {
@@ -1695,17 +1702,24 @@ fn write(
     value: Value,
 ) -> Result<(), Thrown> {
     sorting_refused(req, object)?;
-    let value = crate::copied(req, value);
     let table = table(req, object)?;
+    let value = Owner::take(req, value);
     // `if (!offset || Z_TYPE_P(offset) == IS_NULL)`: a reference to
     // `null` is no `null` here, and is the key `""` below.
     let offset = offset.filter(|o| !matches!(o.as_ref(), ValueRef::Null | ValueRef::Undef));
     let Some(offset) = offset else {
         return table.append(req, value);
     };
-    let Some(key) = hash_key(req, offset)? else {
-        req.release(value);
-        return Err(illegal(req, object, offset, "write"));
+    let key = match hash_key(req, offset) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            value.give_up(req);
+            return Err(illegal(req, object, offset, "write"));
+        }
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
     };
     table.set(req, &key, value)
 }
@@ -2055,7 +2069,8 @@ impl ObjectHandlers for Handlers {
             if fetch == DimensionRead::ReadWrite {
                 warning(req, &format!("Undefined array key {}", shown(&key)));
             }
-            table.set(req, &key, Value::null())?;
+            let null = Owner::take(req, Value::null());
+            table.set(req, &key, null)?;
         }
         match table {
             Table::Array(owner, mut array) => {
@@ -2571,9 +2586,10 @@ fn sort_through(
 /// string(1) "x"
 /// ```
 fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
-    req.addref(&Value::array(sorted));
+    let sorted = Owner::take(req, sorted);
     match table {
         Table::Array(owner, _) => {
+            let sorted = sorted.hand_on_unmigrated();
             let old = with(req, owner, |p| {
                 std::mem::replace(&mut p.storage, Storage::Array(sorted))
             })?;

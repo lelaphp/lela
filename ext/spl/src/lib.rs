@@ -721,7 +721,7 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
         for (key, value) in members.snapshot() {
             if let Key::Int(h) = key {
                 integer_member(req, object, h)?;
-                req.addref(&value);
+                let value = Owner::take(req, value);
                 object.set_row(req, &key, value)?;
                 continue;
             }
