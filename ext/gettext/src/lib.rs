@@ -36,7 +36,7 @@ use php_ext::attr::php_function;
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// `PHP_GETTEXT_MAX_DOMAIN_LENGTH`.
 const MAX_DOMAIN_LENGTH: usize = 1024;
@@ -174,10 +174,10 @@ fn translated(
     req: &mut Request,
     found: Option<Vec<u8>>,
     msgid: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     match found {
         Some(text) => PhpString::new(req, &text),
-        None => Ok(msgid),
+        None => Ok(Owner::take(req, msgid)),
     }
 }
 
@@ -202,7 +202,7 @@ fn translated(
 fn textdomain(
     req: &mut Request,
     #[php(default = null)] domain: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let name = match &domain {
         Some(domain) => {
             let name = domain_check(req, 1, domain.as_bytes())?;
@@ -259,7 +259,7 @@ fn textdomain(
 /// gettext(): Argument #1 ($message) is too long
 /// ```
 #[php_function]
-fn gettext(req: &mut Request, message: PhpString) -> Result<PhpString, Thrown> {
+fn gettext(req: &mut Request, message: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let msgid = length_check(req, 1, message.as_bytes())?;
     let found = lookup(req, Domain::Current, &msgid);
     translated(req, found, message)
@@ -279,7 +279,11 @@ fn gettext(req: &mut Request, message: PhpString) -> Result<PhpString, Thrown> {
 /// dgettext(): Argument #2 ($message) is too long
 /// ```
 #[php_function]
-fn dgettext(req: &mut Request, domain: PhpString, message: PhpString) -> Result<PhpString, Thrown> {
+fn dgettext(
+    req: &mut Request,
+    domain: PhpString,
+    message: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let name = domain_check(req, 1, domain.as_bytes())?;
     let msgid = length_check(req, 2, message.as_bytes())?;
     let found = lookup(req, Domain::Named(&name), &msgid);
@@ -303,7 +307,7 @@ fn dcgettext(
     domain: PhpString,
     message: PhpString,
     category: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let name = domain_check(req, 1, domain.as_bytes())?;
     let msgid = length_check(req, 2, message.as_bytes())?;
     let category = category_check(req, 3, category)?;
@@ -337,7 +341,7 @@ fn bindtextdomain(
     req: &mut Request,
     domain: Path,
     #[php(default = null)] directory: Option<Path>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name = domain_check(req, 1, domain.0.as_bytes())?;
     let dir = match directory {
         None => None,
@@ -377,7 +381,7 @@ fn ngettext(
     singular: PhpString,
     plural: PhpString,
     count: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let one = length_check(req, 1, singular.as_bytes())?;
     let many = length_check(req, 2, plural.as_bytes())?;
     let form = form_of(req, Domain::Current, &one, &many, count);
@@ -402,7 +406,7 @@ fn dngettext(
     singular: PhpString,
     plural: PhpString,
     count: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let name = domain_check(req, 1, domain.as_bytes())?;
     let one = length_check(req, 2, singular.as_bytes())?;
     let many = length_check(req, 3, plural.as_bytes())?;
@@ -430,7 +434,7 @@ fn dcngettext(
     plural: PhpString,
     count: i64,
     category: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let name = domain_check(req, 1, domain.as_bytes())?;
     let one = length_check(req, 2, singular.as_bytes())?;
     let many = length_check(req, 3, plural.as_bytes())?;
@@ -459,7 +463,7 @@ fn bind_textdomain_codeset(
     req: &mut Request,
     domain: PhpString,
     #[php(default = null)] codeset: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name = domain_check(req, 1, domain.as_bytes())?;
     let codeset = codeset.map(|codeset| ffi::c_string(codeset.as_bytes()));
     match ffi::bind_codeset(&name, codeset.as_deref()) {

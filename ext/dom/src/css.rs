@@ -14,7 +14,7 @@
 
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, Value};
 use php_ext_lexbor::ffi::css::{
     Anb, AttributeMatch, Combinator, Kind as SelectorKind, List, Match, Modifier, PseudoClass,
     PseudoClassFunction, Selector,
@@ -1523,13 +1523,13 @@ pub(crate) fn query_selector(
     req: &mut Request,
     this: PhpObject,
     selectors: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (node, list, options) = selector_call(req, this, selectors)?;
     let answer = find(node, &list, options, Sink::First(None));
     raise(req, answer.status, answer.blank)?;
     match answer.sink {
         Sink::First(Some(found)) => object_for(req, found, Some(this)),
-        _ => Ok(Value::null()),
+        _ => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -1539,7 +1539,7 @@ pub(crate) fn query_selector_all(
     req: &mut Request,
     this: PhpObject,
     selectors: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (node, list, options) = selector_call(req, this, selectors)?;
     let options = Options {
         match_first: false,
@@ -1556,11 +1556,11 @@ pub(crate) fn query_selector_all(
         let v = match object_for(req, n, Some(this)) {
             Ok(v) => v,
             Err(thrown) => {
-                req.release(Value::array(array));
+                array.give_up(req);
                 return Err(thrown);
             }
         };
-        array.append(req, v)?;
+        array.append(req, v.hand_on_unmigrated())?;
     }
     crate::node_set(req, "Dom\\NodeList", array)
 }
@@ -1583,7 +1583,7 @@ pub(crate) fn closest(
     req: &mut Request,
     this: PhpObject,
     selectors: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (node, list, options) = selector_call(req, this, selectors)?;
     let mut blank = false;
     let mut at = Some(node);
@@ -1600,5 +1600,5 @@ pub(crate) fn closest(
         at = current.parent();
     }
     raise(req, Status::Ok, blank)?;
-    Ok(Value::null())
+    Ok(Owner::take(req, Value::null()))
 }

@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::decode::{Arg, raised};
 use crate::ffi::x509::Spki;
@@ -64,7 +64,7 @@ fn openssl_spki_new(
     #[php(sensitive)] private_key: Instance<OpenSSLAsymmetricKey>,
     challenge: PhpString,
     #[php(default = OPENSSL_ALGO_MD5)] digest_algo: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     check_int_len(req, challenge.as_bytes().len(), "challenge", 2)?;
     let object = Value::object(private_key.object());
     let arg = Arg::new(1, "private_key");
@@ -176,7 +176,10 @@ fn openssl_spki_verify(req: &mut Request, spki: PhpString) -> bool {
 /// bool(false)
 /// ```
 #[php_function]
-fn openssl_spki_export(req: &mut Request, spki: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn openssl_spki_export(
+    req: &mut Request,
+    spki: PhpString,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(decoded) = decoded(req, spki, "Unable to decode supplied SPKAC") else {
         return Ok(OrFalse::False);
     };
@@ -209,7 +212,7 @@ fn openssl_spki_export(req: &mut Request, spki: PhpString) -> Result<OrFalse<Php
 fn openssl_spki_export_challenge(
     req: &mut Request,
     spki: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(decoded) = decoded(req, spki, "Unable to decode SPKAC") else {
         return Ok(OrFalse::False);
     };

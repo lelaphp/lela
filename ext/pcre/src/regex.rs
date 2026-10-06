@@ -11,7 +11,7 @@ use std::sync::Arc;
 use php_ext::abi::IntoReturn;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::Subject;
 use crate::matching::{Scratch, match_impl};
@@ -61,7 +61,7 @@ impl Regex {
         global: bool,
         flags: i64,
         offset: i64,
-    ) -> Result<(Value, PhpArray), Thrown> {
+    ) -> Result<(Value, Owner<PhpArray>), Thrown> {
         let (value, matches) = match_impl(req, &self.0, subject, true, global, flags, offset)?;
         let matches = match matches {
             Some(matches) => matches,
@@ -91,7 +91,7 @@ impl Regex {
         replacement: &[u8],
         limit: i64,
         count: &mut usize,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         replace_impl(req, &self.0, subject, replacement, limit_of(limit), count)
     }
 }

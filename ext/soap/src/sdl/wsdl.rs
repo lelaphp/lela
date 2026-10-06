@@ -203,7 +203,7 @@ pub(crate) fn sdl_set_uri_credentials(
     ctx.old_header = Some(header);
     let value = string(req, &new_header)?;
     let set = resource.set_option(req, b"http", b"header", &value);
-    req.release(value);
+    value.give_up(req);
     set
 }
 

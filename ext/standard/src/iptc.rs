@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// The JPEG markers `iptcembed` reads.
 const M_EOI: u32 = 0xd9;
@@ -164,7 +164,7 @@ fn iptcembed(
     iptc_data: PhpString,
     filename: Path,
     #[php(default = 0)] spool: i64,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let (data, Path(file)) = (iptc_data.as_bytes().to_vec(), filename);
     let Ok(jpeg) = req.check_open_basedir(file.as_bytes(), true) else {
         return Ok(Union::B(false));
@@ -314,7 +314,7 @@ fn embed(s: &mut Embedding, data: &[u8]) -> bool {
 /// }
 /// ```
 #[php_function]
-fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let block = iptc_block;
     let buffer = block.as_bytes();
     let len = buffer.len();
@@ -363,11 +363,11 @@ fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<PhpArra
     for (key, values) in tags {
         let mut list = PhpArray::new(req)?;
         for value in values {
-            let value = Value::string(PhpString::new(req, &value)?);
+            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
             list.append(req, value)?;
         }
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?);
-        array.set(req, key, Value::array(list))?;
+        let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
+        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(array))
 }

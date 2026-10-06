@@ -12,7 +12,7 @@ use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
 
 /// `SXE_ITER`: what an object walks from the node it holds, matched
@@ -305,16 +305,16 @@ pub(crate) fn wrap(
     node: Node,
     walk: Walk,
     ns: Option<Ns>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let shared = sxe(req, of).and_then(|s| s.obj.shared_doc());
     let made = new_object(req, of.class())?;
-    if let Some(mut obj) = libxml_half(req, made) {
+    if let Some(mut obj) = libxml_half(req, *made) {
         if let (Some(shared), Some(doc)) = (shared, node.doc()) {
             obj.share(req, Some(shared), doc);
         }
         obj.hold_node(req, node);
     }
-    if let Some(s) = sxe_mut(req, made) {
+    if let Some(s) = sxe_mut(req, *made) {
         s.walk = walk;
         s.ns = ns;
     }
@@ -369,7 +369,7 @@ impl Member {
             _ => {
                 let s = to_string(req, &offset)?;
                 let bytes = s.as_bytes().to_vec();
-                req.release(Value::string(s));
+                s.give_up(req);
                 Ok(Member::Name(if trim { trimmed(&bytes) } else { bytes }))
             }
         }
@@ -444,7 +444,9 @@ fn prop_dim_read(
             (Member::Name(name), _) => view.attr_named(attr, name),
         };
         return match found {
-            Some(a) => Ok(wrap(req, object, a, Walk::Node, view.ns.clone())?.as_value()),
+            Some(a) => Ok(wrap(req, object, a, Walk::Node, view.ns.clone())?
+                .into_value()
+                .hand_on_unmigrated()),
             None => Ok(Value::null()),
         };
     }
@@ -453,7 +455,11 @@ fn prop_dim_read(
             if fetch == Fetch::Silent && view.find(node.children(), &name).is_none() {
                 return Ok(Value::null());
             }
-            Ok(wrap(req, object, node, Walk::Elements(name), view.ns.clone())?.as_value())
+            Ok(
+                wrap(req, object, node, Walk::Elements(name), view.ns.clone())?
+                    .into_value()
+                    .hand_on_unmigrated(),
+            )
         }
         Member::Append | Member::Index(_) => {
             let mine = node;
@@ -475,7 +481,9 @@ fn prop_dim_read(
                 Member::Append | Member::Name(_) => (None, 0),
             };
             if let Some(n) = found {
-                return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.as_value());
+                return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?
+                    .into_value()
+                    .hand_on_unmigrated());
             }
             if fetch != Fetch::Write {
                 return Ok(Value::null());
@@ -489,7 +497,9 @@ fn prop_dim_read(
                 .parent()
                 .and_then(|p| p.new_text_child(mine.ns(), &mine.name(), None));
             match made {
-                Some(n) => Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.as_value()),
+                Some(n) => Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?
+                    .into_value()
+                    .hand_on_unmigrated()),
                 None => Ok(Value::null()),
             }
         }
@@ -546,7 +556,7 @@ fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     }
     let s = to_string(req, &value)?;
     let bytes = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     Ok(bytes)
 }
 
@@ -900,12 +910,12 @@ fn prop_dim_delete(
 /// every value `sxe_properties_add` gave it, or the next integer key's
 /// value.
 enum Row {
-    Named(Vec<u8>, Vec<Value>),
-    Next(Value),
+    Named(Vec<u8>, Vec<Owner<Value>>),
+    Next(Owner<Value>),
 }
 
 /// `sxe_properties_add`.
-fn add_row(rows: &mut Vec<Row>, name: &[u8], value: Value) {
+fn add_row(rows: &mut Vec<Row>, name: &[u8], value: Owner<Value>) {
     for row in rows.iter_mut() {
         if let Row::Named(n, values) = row
             && n == name
@@ -919,32 +929,32 @@ fn add_row(rows: &mut Vec<Row>, name: &[u8], value: Value) {
 
 /// The rows as one array: a name given more than once is a list of its
 /// values.
-fn table(req: &mut Request, rows: Vec<Row>) -> Result<PhpArray, Thrown> {
+fn table(req: &mut Request, rows: Vec<Row>) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for row in rows {
         match row {
             Row::Named(name, mut values) => {
-                let key = Key::Str(PhpString::new(req, &name)?);
+                let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
                 let value = if values.len() == 1 {
                     values.remove(0)
                 } else {
                     let mut list = PhpArray::new(req)?;
                     for v in values {
-                        list.append(req, v)?;
+                        list.append(req, v.hand_on_unmigrated())?;
                     }
-                    Value::array(list)
+                    list.into_value()
                 };
-                out.set(req, key, value)?;
+                out.set(req, key, value.hand_on_unmigrated())?;
             }
-            Row::Next(value) => out.append(req, value)?,
+            Row::Next(value) => out.append(req, value.hand_on_unmigrated())?,
         }
     }
     Ok(out)
 }
 
 /// A string value of `bytes`.
-pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `get_base_node_value`: a node's text where its first child is text that
@@ -954,14 +964,14 @@ fn base_value(
     of: PhpObject,
     node: Node,
     ns: Option<&Ns>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if let Some(c) = node.children()
         && c.kind() == Kind::Text
         && !c.is_blank()
     {
         return string(req, &node.list_string().unwrap_or_default());
     }
-    Ok(wrap(req, of, node, Walk::Node, ns.cloned())?.as_value())
+    Ok(wrap(req, of, node, Walk::Node, ns.cloned())?.into_value())
 }
 
 /// `sxe_get_prop_hash`: the object's attributes under `@attributes`, then
@@ -994,11 +1004,11 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let key = Key::Str(PhpString::new(req, &name)?);
+                    let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
                     let value = string(req, &value)?;
-                    list.set(req, key, value)?;
+                    list.set(req, key, value.hand_on_unmigrated())?;
                 }
-                add_row(&mut rows, b"@attributes", Value::array(list));
+                add_row(&mut rows, b"@attributes", list.into_value());
             }
         }
     }
@@ -1132,7 +1142,7 @@ fn prop_is_empty(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 }
 
 /// `SimpleXMLElement::__debugInfo`'s table, `sxe_get_prop_hash(obj, 1)`.
-pub(crate) fn debug_table(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+pub(crate) fn debug_table(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let rows = prop_hash(req, object, true)?;
     table(req, rows)
 }
@@ -1144,7 +1154,8 @@ fn properties(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> 
         req.release(Value::array(old));
     }
     let rows = prop_hash(req, object, false)?;
-    let built = table(req, rows)?;
+    // The payload keeps the table's owner.
+    let built = table(req, rows)?.hand_on_unmigrated();
     if let Some(s) = sxe_mut(req, object) {
         s.properties = Some(built);
     }
@@ -1191,23 +1202,20 @@ fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Valu
     let text = cast_text(req, object)?;
     let value = match text {
         Some(t) => string(req, &t)?,
-        None => Value::null(),
+        None => Owner::take(req, Value::null()),
     };
     let converted = match to {
-        TypeTag::String => {
-            let s = to_string(req, &value)?;
-            Value::string(s)
-        }
-        TypeTag::Int => Value::int(to_long(req, &value)?),
-        TypeTag::Float => Value::float(to_double(req, &value)?),
-        TypeTag::Number => to_number(req, &value)?,
+        TypeTag::String => to_string(req, &value).map(|s| Value::string(s.hand_on_unmigrated())),
+        TypeTag::Int => to_long(req, &value).map(Value::int),
+        TypeTag::Float => to_double(req, &value).map(Value::float),
+        TypeTag::Number => to_number(req, &value),
         _ => {
-            req.release(value);
+            value.give_up(req);
             return Ok(None);
         }
     };
-    req.release(value);
-    Ok(Some(converted))
+    value.give_up(req);
+    converted.map(Some)
 }
 
 /// `php_sxe_count_elements_helper`.
@@ -1266,18 +1274,16 @@ pub(crate) fn move_forward(req: &mut Request, object: PhpObject) -> Result<(), T
     Ok(())
 }
 
-fn set_current(req: &mut Request, object: PhpObject, made: PhpObject) {
+fn set_current(req: &mut Request, object: PhpObject, made: Owner<PhpObject>) {
     match sxe_mut(req, object) {
-        Some(s) => s.current = Some(made),
-        None => req.release(made.as_value()),
+        Some(s) => s.current = Some(made.hand_on_unmigrated()),
+        None => made.give_up(req),
     }
 }
 
-/// `iter.data`, one more owner of it.
+/// `iter.data`, a view of it.
 pub(crate) fn current(req: &mut Request, object: PhpObject) -> Option<Value> {
-    let value = sxe(req, object)?.current?.as_value();
-    req.addref(&value);
-    Some(value)
+    Some(sxe(req, object)?.current?.as_value())
 }
 
 /// The name of the node `iter.data` stands for, `php_sxe_iterator_current_key`.
@@ -1300,12 +1306,15 @@ impl ClassIterator for Loop {
     }
 
     fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
-        Ok(current(req, object).unwrap_or_else(Value::null))
+        // The iterator's `current` hands its caller an owner.
+        let value = current(req, object).unwrap_or_else(Value::null);
+        req.addref(&value);
+        Ok(value)
     }
 
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
         match current_name(req, object) {
-            Some(name) => string(req, &name),
+            Some(name) => string(req, &name).map(Owner::hand_on_unmigrated),
             None => Ok(Value::null()),
         }
     }
@@ -1328,7 +1337,7 @@ fn clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         .node
         .and_then(Node::parent)
         .is_some_and(|p| p.kind().is_document());
-    let made = new_object(req, object.class())?;
+    let made = new_object(req, object.class())?.hand_on_unmigrated();
     let Some(mut obj) = libxml_half(req, made) else {
         return Ok(made);
     };
@@ -1420,7 +1429,12 @@ impl ObjectHandlers for Handlers {
                 let wrapped = wrap(req, object, n, Walk::Node, view.ns)?;
                 let value = wrapped.as_value();
                 req.addref(&value);
-                let old = sxe_mut(req, object).and_then(|s| s.made.replace(wrapped));
+                let old = if let Some(s) = sxe_mut(req, object) {
+                    s.made.replace(wrapped.hand_on_unmigrated())
+                } else {
+                    wrapped.give_up(req);
+                    None
+                };
                 if let Some(old) = old {
                     req.release(old.as_value());
                 }
@@ -1611,7 +1625,7 @@ impl ObjectHandlers for Handlers {
         if overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
             let n = to_long(req, &answered);
-            req.release(answered);
+            answered.give_up(req);
             return n.map(Some);
         }
         count(req, object).map(Some)

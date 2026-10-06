@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::State;
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
@@ -45,40 +45,48 @@ pub(crate) fn long(n: usize) -> i64 {
 }
 
 /// A string of the request's holding `bytes`.
-pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `zend_string_alloc(len)` before a read into it: the request's
 /// memory limit met as php meets it, then the room.
 pub(crate) fn room(req: &mut Request, len: usize) -> Result<Vec<u8>, Thrown> {
     let asked = PhpString::filled(req, len, |_| {})?;
-    req.release(Value::string(asked));
+    asked.give_up(req);
     Ok(vec![0; len])
 }
 
 /// Assign through a by-reference parameter.
-pub(crate) fn assign(req: &mut Request, out: &Out, value: Value) -> Result<(), Thrown> {
+pub(crate) fn assign(
+    req: &mut Request,
+    out: &Out,
+    value: impl php_ext::abi::IntoReturn,
+) -> Result<(), Thrown> {
     out.set(req, Untyped(value))
 }
 
 /// A socket laid down and not yet opened, `object_init_ex` before the
 /// call that opens it, so its object id is taken first as php takes it.
-fn laid(req: &mut Request) -> Result<PhpObject, Thrown> {
+fn laid(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     made(req, b"Socket")
 }
 
 /// The socket `laid` gave, opened over `sock`.
-fn opened(req: &mut Request, object: PhpObject, sock: Sock) -> OrFalse<Instance<Socket>> {
+fn opened(
+    req: &mut Request,
+    object: Owner<PhpObject>,
+    sock: Sock,
+) -> OrFalse<Owner<Instance<Socket>>> {
     if let Some(payload) = object.native_mut::<Sock>(req) {
         *payload = sock;
     }
-    OrFalse::Value(Instance::of(object))
+    OrFalse::Value(object.into_instance())
 }
 
 /// `zval_ptr_dtor(return_value); RETURN_FALSE`.
-fn dropped<T>(req: &mut Request, object: PhpObject) -> OrFalse<T> {
-    req.release(object.as_value());
+fn dropped<T>(req: &mut Request, object: Owner<PhpObject>) -> OrFalse<T> {
+    object.give_up(req);
     OrFalse::False
 }
 
@@ -271,11 +279,12 @@ fn socket_create_listen(
     req: &mut Request,
     port: i64,
     #[php(default = SOMAXCONN)] backlog: i64,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     if !(0..=65535).contains(&port) {
         return Err(arg_value_error(req, 1, "be between 0 and 65535"));
     }
-    let object = laid(req)?;
+    let owner = laid(req)?;
+    let object = *owner;
     let fd = match ffi::socket(libc::AF_INET, libc::SOCK_STREAM, 0) {
         Ok(fd) => fd,
         Err(errno) => {
@@ -285,7 +294,7 @@ fn socket_create_listen(
                 "unable to create listening socket",
                 errno as i32,
             );
-            return Ok(dropped(req, object));
+            return Ok(dropped(req, owner));
         }
     };
     let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
@@ -295,13 +304,13 @@ fn socket_create_listen(
     ));
     if let Err(errno) = ffi::bind(raw, &any) {
         socket_error(req, object, "unable to bind to given address", errno as i32);
-        return Ok(dropped(req, object));
+        return Ok(dropped(req, owner));
     }
     if let Err(errno) = ffi::listen(raw, c_int(backlog)) {
         socket_error(req, object, "unable to listen on socket", errno as i32);
-        return Ok(dropped(req, object));
+        return Ok(dropped(req, owner));
     }
-    Ok(opened(req, object, Sock::owning(fd, libc::AF_INET)))
+    Ok(opened(req, owner, Sock::owning(fd, libc::AF_INET)))
 }
 
 /// `socket_accept(Socket $socket): Socket|false`,
@@ -329,9 +338,10 @@ fn socket_create_listen(
 fn socket_accept(
     req: &mut Request,
     socket: Instance<Socket>,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     let fd = valid(req, socket)?;
-    let object = laid(req)?;
+    let owner = laid(req)?;
+    let object = *owner;
     let (new, family) = match ffi::accept(fd) {
         Ok(accepted) => accepted,
         Err(errno) => {
@@ -341,7 +351,7 @@ fn socket_accept(
                 "unable to accept incoming connection",
                 errno as i32,
             );
-            return Ok(dropped(req, object));
+            return Ok(dropped(req, owner));
         }
     };
     if let Err(errno) = ffi::set_cloexec(std::os::fd::AsRawFd::as_raw_fd(&new)) {
@@ -351,9 +361,9 @@ fn socket_accept(
             "unable to set cloexec mode on the socket",
             errno as i32,
         );
-        return Ok(dropped(req, object));
+        return Ok(dropped(req, owner));
     }
-    Ok(opened(req, object, Sock::owning(new, family)))
+    Ok(opened(req, owner, Sock::owning(new, family)))
 }
 
 /// `socket_set_nonblock` and `socket_set_block`: the stream's own
@@ -606,7 +616,7 @@ fn socket_read(
     socket: Instance<Socket>,
     length: i64,
     #[php(default = PHP_BINARY_READ)] mode: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let fd = valid(req, socket)?;
     if length <= 0 || length == i64::MAX {
         return Ok(OrFalse::False);
@@ -777,7 +787,7 @@ fn socket_create(
     domain: i64,
     r#type: i64,
     protocol: i64,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     if !inet_family(domain) {
         return Err(arg_value_error(
             req,
@@ -786,12 +796,12 @@ fn socket_create(
         ));
     }
     check_type(req, r#type)?;
-    let object = laid(req)?;
+    let owner = laid(req)?;
     match ffi::socket(c_int(domain), c_int(r#type), c_int(protocol)) {
-        Ok(fd) => Ok(opened(req, object, Sock::owning(fd, c_int(domain)))),
+        Ok(fd) => Ok(opened(req, owner, Sock::owning(fd, c_int(domain)))),
         Err(errno) => {
             global_error(req, "Unable to create socket", errno as i32);
-            Ok(dropped(req, object))
+            Ok(dropped(req, owner))
         }
     }
 }
@@ -905,7 +915,7 @@ fn socket_connect(
 /// socket_strerror(): Argument #1 ($error_code) must be between -2147483648 and 2147483647
 /// ```
 #[php_function]
-fn socket_strerror(req: &mut Request, error_code: i64) -> Result<PhpString, Thrown> {
+fn socket_strerror(req: &mut Request, error_code: i64) -> Result<Owner<PhpString>, Thrown> {
     let Ok(code) = i32::try_from(error_code) else {
         return Err(arg_value_error(
             req,
@@ -997,7 +1007,7 @@ fn socket_recv(
     let got = ffi::recv(fd, &mut buf, c_int(flags));
     let value = match got {
         Ok(n) if n > 0 => string(req, &buf[..n])?,
-        _ => Value::null(),
+        _ => Owner::take(req, Value::null()),
     };
     assign(req, &data, value)?;
     match got {
@@ -1256,13 +1266,13 @@ fn socket_create_pair(
         }
     };
     let empty = PhpArray::new(req)?;
-    assign(req, &pair, Value::array(empty))?;
+    assign(req, &pair, empty.into_value())?;
     let mut out = PhpArray::new(req)?;
     for fd in fds {
         let made = new_socket(req, Sock::owning(fd, c_int(domain)))?;
-        out.append(req, made.object().as_value())?;
+        out.append(req, made.into_value().hand_on_unmigrated())?;
     }
-    assign(req, &pair, Value::array(out))?;
+    assign(req, &pair, out.into_value())?;
     Ok(true)
 }
 

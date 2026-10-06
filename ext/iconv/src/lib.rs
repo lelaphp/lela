@@ -36,7 +36,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{
     BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -484,7 +484,7 @@ fn iconv_substr(
     offset: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(charset) = charset(req, encoding) else {
         return Ok(OrFalse::False);
     };
@@ -667,7 +667,7 @@ fn iconv(
     from_encoding: PhpString,
     to_encoding: PhpString,
     string: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (from, to) = (from_encoding.as_bytes(), to_encoding.as_bytes());
     if from.len() >= MAX_NAME || to.len() >= MAX_NAME {
         too_long(req);
@@ -836,10 +836,12 @@ fn iconv_set_encoding(
 /// string(10) "ISO-8859-1"
 /// ```
 #[php_function]
+// The declared `array|string|false`, each fresh value an owner.
+#[allow(clippy::type_complexity)]
 fn iconv_get_encoding(
     req: &mut Request,
     #[php(default = "all")] r#type: PhpString,
-) -> Result<OrFalse<Union<PhpArray, PhpString>>, Thrown> {
+) -> Result<OrFalse<Union<Owner<PhpArray>, Owner<PhpString>>>, Thrown> {
     let kind = r#type.as_bytes();
     if kind.eq_ignore_ascii_case(b"all") {
         let mut out = PhpArray::new(req)?;
@@ -847,7 +849,11 @@ fn iconv_get_encoding(
             let key = PhpString::new(req, kind.name().as_bytes())?;
             let charset = encoding(req, kind);
             let value = PhpString::new(req, &charset)?;
-            out.set(req, Key::Str(key), Value::string(value))?;
+            out.set(
+                req,
+                Key::Str(key.hand_on_unmigrated()),
+                value.into_value().hand_on_unmigrated(),
+            )?;
         }
         return Ok(OrFalse::Value(Union::A(out)));
     }

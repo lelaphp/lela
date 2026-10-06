@@ -6,7 +6,7 @@
 
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::connector::{Cause, Failure, OnError, SqlState};
 use crate::stmt::Stmt;
@@ -179,26 +179,42 @@ fn error_mode(req: &mut Request, dbh: PhpObject) -> OnError {
 
 /// A `PDOException` with `message`, `code` and `errorInfo` written as
 /// `zend_update_property` writes them, thrown.
-fn throw_pdo(req: &mut Request, message: &str, code: Value, info: Option<PhpArray>) -> Thrown {
+fn throw_pdo(
+    req: &mut Request,
+    message: &str,
+    code: Owner<Value>,
+    info: Option<Owner<PhpArray>>,
+) -> Thrown {
     let value = match new_throwable(req, "PDOException", message) {
         Ok(value) => value,
-        Err(thrown) => return thrown,
+        Err(thrown) => {
+            code.give_up(req);
+            if let Some(info) = info {
+                info.give_up(req);
+            }
+            return thrown;
+        }
     };
+    let (code, info) = (
+        code.hand_on_unmigrated(),
+        info.map(Owner::hand_on_unmigrated),
+    );
     if let Some(object) = value.as_object().copied() {
         let written = PhpString::new(req, b"code")
-            .and_then(|name| object.set_prop(req, name, code))
+            .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), code))
             .and_then(|()| match info {
-                Some(info) => PhpString::new(req, b"errorInfo")
-                    .and_then(|name| object.set_prop(req, name, Value::array(info))),
+                Some(info) => PhpString::new(req, b"errorInfo").and_then(|name| {
+                    object.set_prop(req, name.hand_on_unmigrated(), Value::array(info))
+                }),
                 None => Ok(()),
             });
         if let Err(thrown) = written {
-            req.release(value);
+            value.give_up(req);
             return thrown;
         }
     }
     let thrown = throw_value(req, &value);
-    req.release(value);
+    value.give_up(req);
     thrown
 }
 
@@ -225,7 +241,7 @@ pub(super) fn raise_impl(
     let code = crate::string(req, state.as_str().as_bytes())?;
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
-    info.append(req, text)?;
+    info.append(req, text.hand_on_unmigrated())?;
     info.append(req, Value::int(0))?;
     Err(throw_pdo(req, &message, code, Some(info)))
 }
@@ -237,7 +253,7 @@ pub(super) fn fetch_error(
     req: &mut Request,
     dbh: PhpObject,
     on: On,
-    info: &mut PhpArray,
+    info: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     let recorded = match on {
         On::Stmt(stmt) if per_statement(req, dbh) => stmt
@@ -248,7 +264,7 @@ pub(super) fn fetch_error(
     if let Some((code, message)) = recorded {
         info.append(req, Value::int(code))?;
         let text = crate::string(req, &message)?;
-        info.append(req, text)?;
+        info.append(req, text.hand_on_unmigrated())?;
     }
     Ok(())
 }
@@ -280,7 +296,7 @@ pub(super) fn handle(
     let description = description(state).unwrap_or("<<Unknown error>>");
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
-    info.append(req, text)?;
+    info.append(req, text.hand_on_unmigrated())?;
     fetch_error(req, dbh, on, &mut info)?;
     let code = info
         .get(&php_ext::values::Key::Int(1))
@@ -298,11 +314,11 @@ pub(super) fn handle(
     };
     if mode == OnError::Warn {
         docref(req, Level::Warning, &message);
-        req.release(Value::array(info));
+        info.give_up(req);
         return Ok(());
     }
     if pending {
-        req.release(Value::array(info));
+        info.give_up(req);
         return Ok(());
     }
     let code = crate::string(req, s.as_bytes())?;
@@ -381,14 +397,17 @@ pub(super) fn throw_connect(req: &mut Request, failure: Failure) -> Thrown {
     let info = (|| {
         let mut info = PhpArray::new(req)?;
         let text = crate::string(req, error.state.as_str().as_bytes())?;
-        info.append(req, text)?;
+        info.append(req, text.hand_on_unmigrated())?;
         info.append(req, Value::int(error.code))?;
         let text = crate::string(req, &error.message)?;
-        info.append(req, text)?;
-        Ok::<PhpArray, Thrown>(info)
+        info.append(req, text.hand_on_unmigrated())?;
+        Ok::<Owner<PhpArray>, Thrown>(info)
     })();
     match info {
-        Ok(info) => throw_pdo(req, &message, Value::int(error.code), Some(info)),
+        Ok(info) => {
+            let code = Owner::take(req, Value::int(error.code));
+            throw_pdo(req, &message, code, Some(info))
+        }
         Err(thrown) => thrown,
     }
 }

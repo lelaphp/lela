@@ -6,7 +6,7 @@
 
 use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpString, Value, walk};
+use crate::api::values::{Key, PhpArray, Value, walk};
 
 use super::Request;
 
@@ -124,7 +124,7 @@ impl Request {
         entry: Option<(Callable, Vec<Value>)>,
     ) -> Result<(), Thrown> {
         // `zend_hash_str_update_mem` keys by the bytes, never numerically.
-        let string = PhpString::new(self, name)?;
+        let string = self.string(name)?;
         let key = Key::Str(string);
         let standing = self
             .shutdown_functions
@@ -270,7 +270,7 @@ impl Request {
         if let Some(table) = self.shutdown_functions.table {
             return Ok(table);
         }
-        let table = PhpArray::new(self)?;
+        let table = self.array()?;
         self.shutdown_functions.table = Some(table);
         Ok(table)
     }

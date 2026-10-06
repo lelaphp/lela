@@ -45,7 +45,7 @@ impl Request {
                 return Ok(false);
             };
             if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
-                return Err(Thrown::of(self.take_pending()));
+                return Err(Thrown::of(self.take_pending_view()));
             }
             self.serve_top_code(unit)?;
             return Ok(true);
@@ -65,7 +65,7 @@ impl Request {
             None => return Ok(false),
         };
         if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
-            return Err(Thrown::of(self.take_pending()));
+            return Err(Thrown::of(self.take_pending_view()));
         }
         self.serve_top_code(unit)?;
         Ok(true)
@@ -119,7 +119,7 @@ impl Request {
         served?;
         let returned = std::mem::replace(&mut self.returned, Value::null());
         self.release(returned);
-        match self.take_pending() {
+        match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(()),

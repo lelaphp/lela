@@ -399,7 +399,7 @@ fn saved(req: &mut Request, object: PhpObject, code: i32) -> Set {
 fn bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let string = to_string(req, &value.deref())?;
     let bytes = string.as_bytes().to_vec();
-    req.release(Value::string(string));
+    string.give_up(req);
     Ok(bytes)
 }
 
@@ -558,12 +558,12 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
 
 /// `what->mode[0] != 'r' || what->mode[1] == '+'`.
 fn writable(req: &mut Request, stream: Stream) -> Result<bool, Thrown> {
-    let meta: PhpArray = stream.meta_data(req)?;
+    let meta = stream.meta_data(req)?;
     let mode = meta
         .find(b"mode")
         .and_then(|mode| mode.deref().as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
-    req.release(Value::array(meta));
+    meta.give_up(req);
     Ok(mode.first() != Some(&b'r') || mode.get(1) == Some(&b'+'))
 }
 

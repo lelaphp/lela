@@ -9,7 +9,7 @@ use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::handle::{Curl, easy_of, made};
 
@@ -33,7 +33,8 @@ impl Source {
         } else {
             let opened = req
                 .open_stream_with(&self.filename, b"rb", Opening::default())
-                .ok()??;
+                .ok()??
+                .hand_on_unmigrated();
             self.stream = Some(opened);
             opened
         };
@@ -41,7 +42,7 @@ impl Source {
             let bytes = read.as_bytes();
             let len = bytes.len().min(buffer.len());
             buffer[..len].copy_from_slice(&bytes[..len]);
-            req.release(Value::string(read));
+            read.give_up(req);
             return Some(len);
         }
         self.close(req);
@@ -115,17 +116,17 @@ impl CURLFile {
     }
 
     #[php(tentative)]
-    fn getFilename(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         property(req, this.object(), b"name")
     }
 
     #[php(tentative)]
-    fn getMimeType(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getMimeType(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         property(req, this.object(), b"mime")
     }
 
     #[php(tentative)]
-    fn getPostFilename(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPostFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         property(req, this.object(), b"postname")
     }
 
@@ -156,7 +157,7 @@ impl CURLFile {
 }
 
 /// `curlfile_get_property`: the property as a string.
-fn property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<PhpString, Thrown> {
+fn property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     let value = read_prop(req, &object, name)?.deref();
     let string = to_string(req, &value)?;
     Ok(string)
@@ -205,13 +206,13 @@ fn curl_file_create(
     filename: Path,
     #[php(default = null)] mime_type: Option<PhpString>,
     #[php(default = null)] posted_filename: Option<PhpString>,
-) -> Result<Instance<CURLFile>, Thrown> {
+) -> Result<Owner<Instance<CURLFile>>, Thrown> {
     let object = made(req, b"CURLFile")?;
-    if let Err(thrown) = construct(req, object, filename.0, mime_type, posted_filename) {
-        req.release(object.as_value());
+    if let Err(thrown) = construct(req, *object, filename.0, mime_type, posted_filename) {
+        object.give_up(req);
         return Err(thrown);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `class CURLStringFile`: a file part whose bytes are a string.
@@ -294,7 +295,7 @@ fn prop_bytes(
 fn text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let string = to_string(req, &value.deref())?;
     let bytes = string.as_bytes().to_vec();
-    req.release(Value::string(string));
+    string.give_up(req);
     Ok(bytes)
 }
 
@@ -350,7 +351,11 @@ pub(crate) fn build_mime(
                 must_seek: true,
                 ..Opening::default()
             };
-            let stream = req.open_stream_with(&path, b"rb", opening).ok().flatten();
+            let stream = req
+                .open_stream_with(&path, b"rb", opening)
+                .ok()
+                .flatten()
+                .map(Owner::hand_on_unmigrated);
             let size = stream
                 .and_then(|stream| stream.stat(req))
                 .map(|stat| stat[7]);

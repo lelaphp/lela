@@ -11,7 +11,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// `base64_table`: the sixty-four digits, in order.
 const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -75,7 +75,7 @@ const PAD: u8 = b'=';
 /// }
 /// ```
 #[php_function]
-fn base64_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn base64_encode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let input = string.as_bytes();
     PhpString::product(req, input.len().div_ceil(3), 4, 0, |out| {
         encode_into(input, out);
@@ -219,7 +219,7 @@ fn base64_decode(
     req: &mut Request,
     string: PhpString,
     #[php(default = false)] strict: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match decode(string.as_bytes(), strict) {
         Some(decoded) => PhpString::new(req, &decoded).map(OrFalse::Value),
         None => Ok(OrFalse::False),

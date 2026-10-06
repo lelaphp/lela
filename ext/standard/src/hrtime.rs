@@ -12,7 +12,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{Owner, PhpArray, Value};
 
 /// `ZEND_NANO_IN_SEC`.
 const NANO_IN_SEC: u64 = 1_000_000_000;
@@ -37,6 +37,9 @@ fn nanoseconds(req: &mut Request) -> u64 {
     let elapsed = u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX);
     base.saturating_add(elapsed)
 }
+
+/// What `hrtime()` answers: the pair, or the count as a number.
+type Hrtime = Union<Owner<PhpArray>, Union<i64, OrFalse<f64>>>;
 
 /// `hrtime(bool $as_number = false): array|int|float|false`: `[seconds,
 /// nanoseconds]`, or the nanoseconds as one integer.
@@ -68,10 +71,7 @@ fn nanoseconds(req: &mut Request) -> u64 {
 /// }
 /// ```
 #[php_function]
-fn hrtime(
-    req: &mut Request,
-    #[php(default = false)] as_number: bool,
-) -> Result<Union<PhpArray, Union<i64, OrFalse<f64>>>, Thrown> {
+fn hrtime(req: &mut Request, #[php(default = false)] as_number: bool) -> Result<Hrtime, Thrown> {
     let t = nanoseconds(req);
     let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
     if as_number {

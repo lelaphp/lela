@@ -206,7 +206,7 @@ fn fetch(
     let long = |bits: Bits, req: &mut Request| -> Result<Value, Thrown> {
         Ok(match bits {
             Bits::Long(n) => Value::int(n),
-            Bits::Text(s) => Value::string(PhpString::new(req, s.as_bytes())?),
+            Bits::Text(s) => Value::string(PhpString::new(req, s.as_bytes())?.hand_on_unmigrated()),
         })
     };
     let ty = field.field_type();
@@ -247,15 +247,21 @@ fn fetch(
             None => return Ok(None),
         },
         FieldType::Time => match variable(req, p) {
-            Some(b) => Value::string(PhpString::new(req, time(field, &b).as_bytes())?),
+            Some(b) => {
+                Value::string(PhpString::new(req, time(field, &b).as_bytes())?.hand_on_unmigrated())
+            }
             None => return Ok(None),
         },
         FieldType::Date => match variable(req, p) {
-            Some(b) => Value::string(PhpString::new(req, date(&b).as_bytes())?),
+            Some(b) => {
+                Value::string(PhpString::new(req, date(&b).as_bytes())?.hand_on_unmigrated())
+            }
             None => return Ok(None),
         },
         FieldType::DateTime | FieldType::Timestamp => match variable(req, p) {
-            Some(b) => Value::string(PhpString::new(req, datetime(field, &b).as_bytes())?),
+            Some(b) => Value::string(
+                PhpString::new(req, datetime(field, &b).as_bytes())?.hand_on_unmigrated(),
+            ),
             None => return Ok(None),
         },
         // `ps_fetch_bit`: an over-read is warned once, by `variable`.
@@ -268,7 +274,7 @@ fn fetch(
             None => return Ok(None),
         },
         _ => match variable(req, p) {
-            Some(b) => Value::string(PhpString::new(req, &b)?),
+            Some(b) => Value::string(PhpString::new(req, &b)?.hand_on_unmigrated()),
             None => return Ok(None),
         },
     }))

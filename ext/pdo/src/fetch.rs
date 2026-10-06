@@ -15,7 +15,7 @@ use php_ext::raising::{
 };
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{
-    ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
 };
 
 use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
@@ -289,7 +289,7 @@ pub(super) fn value(
         value = convert(req, value, ty)?;
     }
     if nulls == Nulls::ToString && crate::is_null(&value) {
-        value = crate::string(req, b"")?;
+        value = crate::string(req, b"")?.hand_on_unmigrated();
     }
     Ok(value)
 }
@@ -300,13 +300,13 @@ fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Value, Throw
         BindKind::Int => Value::int(to_long(req, &value)?),
         BindKind::Bool => Value::bool(truthy(req, &value)),
         BindKind::Str => match value.as_ref() {
-            ValueRef::Bool(false) => crate::string(req, b"0")?,
+            ValueRef::Bool(false) => crate::string(req, b"0")?.hand_on_unmigrated(),
             ValueRef::Str(_) => return Ok(value),
             ValueRef::Resource(_) => match php_ext::request::Stream::from_value(req, &value) {
-                Some(stream) => Value::string(stream.copy_to_mem(req, None)?),
-                None => crate::string(req, b"")?,
+                Some(stream) => Value::string(stream.copy_to_mem(req, None)?.hand_on_unmigrated()),
+                None => crate::string(req, b"")?.hand_on_unmigrated(),
             },
-            _ => Value::string(to_string(req, &value)?),
+            _ => Value::string(to_string(req, &value)?.hand_on_unmigrated()),
         },
         BindKind::Null => Value::null(),
         BindKind::Lob => match value.as_str_bytes().map(<[u8]>::to_vec) {
@@ -327,7 +327,7 @@ fn memory_stream(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     };
     stream.write(req, bytes);
     stream.seek(req, 0, php_ext::request::Whence::Set);
-    Ok(stream.as_value())
+    Ok(stream.into_resource().into_value().hand_on_unmigrated())
 }
 
 // ---- one row
@@ -389,11 +389,13 @@ fn common(
 /// up, which #1996 moves into `Key::from_string` itself.
 fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
     let made = PhpString::new(req, name)?;
-    let key = Key::from_string(made);
-    if matches!(key, Key::Int(_)) {
-        req.release(Value::string(made));
+    match Key::from_string(*made) {
+        Key::Int(n) => {
+            made.give_up(req);
+            Ok(Key::Int(n))
+        }
+        Key::Str(_) => Ok(Key::Str(made.hand_on_unmigrated())),
     }
-    Ok(key)
 }
 
 /// `do_fetch`: the next row shaped as `how` asks, with the group key
@@ -475,13 +477,13 @@ fn made(
     let mut class = None;
     let out = match kind {
         Kind::Default | Kind::Assoc | Kind::Both | Kind::Num | Kind::Named => {
-            Value::array(PhpArray::new(req)?)
+            PhpArray::new(req)?.into_value().hand_on_unmigrated()
         }
         Kind::Obj => {
             let Some(std) = lookup_class(req, b"stdClass")? else {
                 return Ok(None);
             };
-            new_object(req, std)?.as_value()
+            new_object(req, std)?.hand_on_unmigrated().as_value()
         }
         Kind::Class => {
             let named = with.class.or(match target {
@@ -562,9 +564,13 @@ fn class_object(
             refuse(req, "cannot unserialize class")?;
             return Ok(None);
         }
-        return Ok(Some((new_object(req, ce)?.as_value(), ce, args)));
+        return Ok(Some((
+            new_object(req, ce)?.into_value().hand_on_unmigrated(),
+            ce,
+            args,
+        )));
     }
-    let instance = new_object(req, ce)?;
+    let instance = new_object(req, ce)?.hand_on_unmigrated();
     if flags.has(Flag::PropsLate)
         && let Err(thrown) = construct(req, instance, args)
     {
@@ -650,7 +656,7 @@ fn fill(
         let fetched = value(req, object, next, None)?;
         let text = to_string(req, &fetched);
         req.release(fetched);
-        key = Some(Value::string(text?));
+        key = Some(Value::string(text?.hand_on_unmigrated()));
         next += 1;
     }
     // The group key is given up where the row's columns throw, as the
@@ -691,12 +697,12 @@ fn columns(
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
         req.release(payload);
-        let text = crate::string(req, &bytes)?;
         if let Some(made) = out.as_object().copied() {
-            let answered = php_ext::call::call_method(req, &made, b"unserialize", &[text]);
-            req.release(text);
+            let text = crate::string(req, &bytes)?;
+            let answered = php_ext::call::call_method(req, &made, b"unserialize", &[*text]);
+            text.give_up(req);
             match answered {
-                Ok(answered) => req.release(answered),
+                Ok(answered) => answered.give_up(req),
                 Err(thrown) => {
                     req.release(out);
                     return Err(thrown);
@@ -773,7 +779,7 @@ fn columns(
         for argument in arguments {
             req.release(argument);
         }
-        out = answered?;
+        out = answered?.hand_on_unmigrated();
     }
     Ok(out)
 }
@@ -790,7 +796,7 @@ fn write_column(
     name: &[u8],
     fetched: Value,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?;
+    let name = PhpString::new(req, name)?.hand_on_unmigrated();
     let wrote = match pending {
         Some(standing) => while_pending(req, standing, |req| {
             made.write_prop_in(req, scope, name, fetched)
@@ -853,7 +859,7 @@ fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Res
         let mut list = if let Some(list) = current.as_array().copied() {
             list
         } else {
-            let mut list = PhpArray::new(req)?;
+            let mut list = PhpArray::new(req)?.hand_on_unmigrated();
             req.addref(&current);
             list.append(req, current)?;
             list
@@ -863,7 +869,7 @@ fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Res
     } else {
         fetched
     };
-    let key = Key::Str(PhpString::new(req, name)?);
+    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
     array.set(req, key, stored)?;
     *out = Value::array(array);
     Ok(())
@@ -878,7 +884,7 @@ fn implements_serializable(req: &mut Request, class: ClassId) -> bool {
     match new_object(req, class) {
         Ok(probe) => {
             let is = probe.instance_of(req, serializable);
-            req.release(probe.as_value());
+            probe.give_up(req);
             is
         }
         Err(_) => false,
@@ -897,22 +903,14 @@ fn construct(req: &mut Request, made: PhpObject, args: Option<PhpArray>) -> Resu
 
 /// A constructor served with `args` as its parameters, or with none, its
 /// return given up: what `pdo_call_fetch_object_constructor` and
-/// `pdo_stmt_construct` hand `zend_call_known_function`. The empty array
-/// that stands for no arguments is given up after the call.
+/// `pdo_stmt_construct` hand `zend_call_known_function`.
 pub(super) fn call_constructor(
     req: &mut Request,
     callable: &Callable,
     args: Option<PhpArray>,
 ) -> Result<(), Thrown> {
-    let (args, made_args) = match args {
-        Some(args) => (args, false),
-        None => (PhpArray::new(req)?, true),
-    };
-    let answered = call_array(req, callable, args);
-    if made_args {
-        req.release(Value::array(args));
-    }
-    req.release(answered?);
+    let args = args.unwrap_or_else(PhpArray::empty);
+    call_array(req, callable, args)?.give_up(req);
     Ok(())
 }
 
@@ -956,7 +954,7 @@ fn column_row(
             0
         };
         let raw = value(req, object, key_at, None)?;
-        let key = Value::string(to_string(req, &raw)?);
+        let key = Value::string(to_string(req, &raw)?.hand_on_unmigrated());
         req.release(raw);
         Some(key)
     } else {
@@ -987,7 +985,7 @@ fn key_pair(
     object: PhpObject,
     orientation: Orientation,
     offset: i64,
-    container: &mut PhpArray,
+    container: &mut Owner<PhpArray>,
 ) -> Result<bool, Thrown> {
     if !common(req, object, orientation, offset)? {
         return Ok(false);
@@ -1013,7 +1011,7 @@ fn key_pair(
     } else {
         let text = to_string(req, &key)?;
         req.release(key);
-        Key::from_string(text)
+        Key::from_string(text.hand_on_unmigrated())
     };
     container.set(req, key, fetched)?;
     Ok(true)
@@ -1239,10 +1237,12 @@ pub(super) fn fetch(
     verify(req, default, how, 1, false)?;
     if Kind::of(how) == Some(Kind::KeyPair) {
         let mut out = PhpArray::new(req)?;
-        if key_pair(req, object, orientation, offset, &mut out)? {
-            return Ok(Value::array(out));
+        let paired = key_pair(req, object, orientation, offset, &mut out);
+        if matches!(paired, Ok(true)) {
+            return Ok(out.into_value().hand_on_unmigrated());
         }
-        req.release(Value::array(out));
+        out.give_up(req);
+        paired?;
         stmt::handle_error(req, object, false)?;
         return Ok(Value::bool(false));
     }
@@ -1478,7 +1478,7 @@ pub(super) fn fetch_all(
     this: PhpObject,
     mode: Raw<i64>,
     args: &[Value],
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let given = req.argument_count();
     if given > 3 {
         return Err(arg_count_error(
@@ -1517,16 +1517,16 @@ pub(super) fn fetch_all(
         }
     }
     if let Err(thrown) = gathered {
-        req.release(Value::array(out));
+        out.give_up(req);
         return Err(thrown);
     }
     let state = stmt::read(req, object, |s| s.error_code).flatten();
     if state != Some(SqlState::NONE) {
         // `PDO_HANDLE_STMT_ERR_EX(zval_ptr_dtor(return_value);
         // RETVAL_EMPTY_ARRAY();)` (`Z/ext/pdo/pdo_stmt.c:1305`).
-        req.release(Value::array(out));
+        out.give_up(req);
         stmt::handle_error(req, object, false)?;
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     Ok(out)
 }
@@ -1540,7 +1540,7 @@ fn gather_all(
     how: i64,
     flags: Flags,
     with: &With,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     if kind == Some(Kind::KeyPair) {
         while key_pair(req, object, Orientation::Forward, 0, out)? {}
@@ -1565,7 +1565,7 @@ fn grouped_rows(
     how: i64,
     flags: Flags,
     with: &With,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     // Each group key as it was first seen, what the table keeps under
     // it: the last row for `FETCH_UNIQUE`, every row for `FETCH_GROUP`.
@@ -1619,7 +1619,7 @@ fn grouped_rows(
             for row in rows {
                 group.append(req, row)?;
             }
-            out.set(req, key, Value::array(group))?;
+            out.set(req, key, group.into_value().hand_on_unmigrated())?;
         }
     }
     Ok(())

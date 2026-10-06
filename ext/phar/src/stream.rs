@@ -7,7 +7,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::archive::{self, ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, EntryData, Target};
@@ -247,7 +247,7 @@ fn open_url(
         };
         opened_path(req, &data);
         let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
-        return Ok(Some(stream));
+        return Ok(Some(stream.hand_on_unmigrated()));
     }
     let data = if internal.is_empty() && opening.for_include {
         let Ok(id) = archive::get_archive(req, &host, None) else {
@@ -306,7 +306,7 @@ fn open_url(
         }
     };
     let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
-    Ok(Some(stream))
+    Ok(Some(stream.hand_on_unmigrated()))
 }
 
 /// `*opened_path = "phar://<archive>/<entry>"`, the name an entry's
@@ -442,10 +442,10 @@ const STAT_NAMES: [&[u8]; 13] = [
 ];
 
 /// A stat as the array the engine reads an extension's `url_stat` from.
-fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<PhpArray, Thrown> {
+fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         out.set(req, key, Value::int(field))?;
     }
     Ok(out)
@@ -458,7 +458,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
     let Some(sb) = stat(req, url)? else {
         return Ok(None);
     };
-    Ok(Some(stat_array(req, sb)?))
+    Ok(Some(stat_array(req, sb)?.hand_on_unmigrated()))
 }
 
 /// The stat [`url_stat`] answers, as a stat.
@@ -604,10 +604,20 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
         return Ok(None);
     };
     let mut out = Vec::new();
-    while let Some(name) = dir.read_dir(req)? {
+    loop {
+        let name = match dir.read_dir(req) {
+            Ok(Some(name)) => name,
+            Ok(None) => break,
+            Err(thrown) => {
+                dir.close(req);
+                dir.give_up(req);
+                return Err(thrown);
+            }
+        };
         out.push(name);
     }
-    dir.free(req);
+    dir.close(req);
+    dir.give_up(req);
     Ok(Some(out))
 }
 

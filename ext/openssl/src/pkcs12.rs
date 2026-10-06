@@ -220,7 +220,7 @@ fn openssl_pkcs12_export(
             return Ok(false);
         };
         let der = PhpString::new(req, &out.contents())?;
-        output.set(req, Untyped(Value::string(der)))?;
+        output.set(req, Untyped(der.into_value()))?;
         Ok(true)
     })
 }
@@ -282,13 +282,18 @@ fn openssl_pkcs12_read(
             let mut list = PhpArray::new(req)?;
             for (i, pem) in extra.pems().into_iter().rev().enumerate() {
                 if let Some(pem) = pem {
-                    let pem = Value::string(PhpString::new(req, &pem)?);
+                    let pem = Value::string(PhpString::new(req, &pem)?.hand_on_unmigrated());
                     list.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), pem)?;
                 }
             }
-            put(req, &mut out, b"extracerts", Value::array(list))?;
+            put(
+                req,
+                &mut out,
+                b"extracerts",
+                list.into_value().hand_on_unmigrated(),
+            )?;
         }
-        certificates.set(req, Untyped(Value::array(out)))?;
+        certificates.set(req, Untyped(out.into_value()))?;
         Ok(true)
     })
 }

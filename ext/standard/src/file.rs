@@ -154,7 +154,7 @@ use php_ext::raising::{
 use php_ext::request::{
     OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence, WrapperOp,
 };
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
 /// every stream made while it is on starts detecting its line endings
@@ -494,14 +494,14 @@ fn opendir(
     req: &mut Request,
     directory: Path,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let Path(directory) = directory;
     let context = context_of(req, context, NullContext::Default)?;
     let Some(dir) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))? else {
         return Ok(Untyped(OrFalse::False));
     };
-    set_default_dir(req, Some(dir));
-    Ok(Untyped(OrFalse::Value(dir.resource())))
+    set_default_dir(req, Some(*dir));
+    Ok(Untyped(OrFalse::Value(dir.into_resource())))
 }
 
 /// `closedir($dir_handle = null): void`, `PHP_FUNCTION(closedir)`
@@ -612,7 +612,7 @@ fn rewinddir(
 fn readdir(
     req: &mut Request,
     #[php(default = null)] dir_handle: Option<Stream>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let dir = dir_stream(req, dir_handle)?;
     Ok(match dir.read_dir(req)? {
         Some(name) => OrFalse::Value(PhpString::new(req, &name)?),
@@ -779,11 +779,11 @@ pub fn feof(req: &mut Request, stream: Stream) -> bool {
 /// fgetc(): Argument #1 ($stream) must be of type resource, string given
 /// ```
 #[php_function]
-pub fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown> {
+pub fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     Ok(match stream.read(req, 1)? {
         Some(byte) if !byte.is_empty() => OrFalse::Value(byte),
         Some(empty) => {
-            req.release(Value::string(empty));
+            empty.give_up(req);
             OrFalse::False
         }
         None => OrFalse::False,
@@ -849,7 +849,7 @@ pub fn fgets(
     req: &mut Request,
     stream: Stream,
     #[php(default = null)] length: Option<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let maxlen = match length {
         Some(len) if len <= 0 => return Err(arg_value_error(req, 2, "be greater than 0")),
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
@@ -902,7 +902,11 @@ pub fn fgets(
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 2
 /// ```
 #[php_function]
-pub fn fread(req: &mut Request, stream: Stream, length: i64) -> Result<OrFalse<PhpString>, Thrown> {
+pub fn fread(
+    req: &mut Request,
+    stream: Stream,
+    length: i64,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
@@ -997,14 +1001,14 @@ fn fopen(
     mode: PhpString,
     #[php(default = false)] use_include_path: bool,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let Path(filename) = filename;
     let context = context_of(req, context, NullContext::Default)?;
     let opened = req.with_stream_ctx(context, |req| {
         req.open_stream(filename.as_bytes(), mode.as_bytes(), use_include_path)
     })?;
     Ok(Untyped(opened.map_or(OrFalse::False, |stream| {
-        OrFalse::Value(stream.resource())
+        OrFalse::Value(stream.into_resource())
     })))
 }
 
@@ -1141,12 +1145,14 @@ const STAT_NAMES: [&[u8]; 13] = [
 /// bool(false)
 /// ```
 #[php_function]
-fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpArray>, Thrown> {
+fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let answer = php_fstat(req, stream)?;
-    Ok(answer
+    let array = answer
         .as_array()
         .copied()
-        .map_or(OrFalse::False, OrFalse::Value))
+        .map(|array| Owner::take(req, array));
+    answer.give_up(req);
+    Ok(array.map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `php_fstat(stream, return_value)`, `PHPAPI` in `file.h`
@@ -1164,19 +1170,19 @@ fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpArray>, Thrown>
 /// int(3)
 /// int(32768)
 /// ```
-pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Value, Thrown> {
+pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Owner<Value>, Thrown> {
     let Some(sb) = stream.stat(req) else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     let mut out = PhpArray::new(req)?;
     for field in sb {
         out.append(req, Value::int(field))?;
     }
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         out.set(req, key, Value::int(field))?;
     }
-    Ok(Value::array(out))
+    Ok(out.into_value())
 }
 
 /// `fseek($stream, int $offset, int $whence = SEEK_SET): int`,
@@ -1498,7 +1504,7 @@ fn file_get_contents(
     #[php(default = null)] context: Option<Resource>,
     #[php(default = 0)] offset: i64,
     #[php(default = null)] length: Option<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(filename) = filename;
     let maxlen = match length {
         Some(len) if len < 0 => {
@@ -1529,12 +1535,18 @@ fn file_get_contents(
                 Level::Warning,
                 &format!("Failed to seek to position {offset} in the stream"),
             );
-            stream.free(req);
+            stream.hand_on_unmigrated().free(req);
             return Ok(OrFalse::False);
         }
     }
-    let contents = stream.copy_to_mem(req, maxlen)?;
-    stream.free(req);
+    let contents = match stream.copy_to_mem(req, maxlen) {
+        Ok(contents) => contents,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     Ok(OrFalse::Value(contents))
 }
 
@@ -1645,7 +1657,7 @@ fn file_put_contents(
         return Ok(OrFalse::False);
     };
     if flags & FLOCK_EX != 0 && !stream.flock(req, FLOCK_EX) {
-        stream.free(req);
+        stream.hand_on_unmigrated().free(req);
         docref(
             req,
             Level::Warning,
@@ -1653,11 +1665,14 @@ fn file_put_contents(
         );
         return Ok(OrFalse::False);
     }
-    if mode[0] == b'c' {
-        stream.truncate(req, 0)?;
+    if mode[0] == b'c'
+        && let Err(thrown) = stream.truncate(req, 0)
+    {
+        stream.give_up(req);
+        return Err(thrown);
     }
-    let written = write_data(req, stream, source, &data, name);
-    stream.free(req);
+    let written = write_data(req, *stream, source, &data, name);
+    stream.hand_on_unmigrated().free(req);
     Ok(match written? {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
         None => OrFalse::False,
@@ -1702,7 +1717,7 @@ fn write_data(
             } else {
                 stream.write(req, bytes.as_bytes())
             };
-            req.release(Value::string(bytes));
+            bytes.give_up(req);
             Ok(wrote)
         }
         ValueRef::Null
@@ -1712,7 +1727,7 @@ fn write_data(
         | ValueRef::Str(_) => {
             let text = to_string(req, data)?;
             let wrote = whole(req, text.as_bytes());
-            req.release(Value::string(text));
+            text.give_up(req);
             Ok(wrote)
         }
         ValueRef::Array(array) => {
@@ -1730,11 +1745,11 @@ fn write_data(
                             Level::Warning,
                             &format!("Failed to write {len} bytes to {name}"),
                         );
-                        req.release(Value::string(text));
+                        text.give_up(req);
                         return Ok(None);
                     }
                 }
-                req.release(Value::string(text));
+                text.give_up(req);
             }
             Ok(Some(numbytes))
         }
@@ -1744,7 +1759,7 @@ fn write_data(
             }
             let text = to_string(req, data)?;
             let wrote = whole(req, text.as_bytes());
-            req.release(Value::string(text));
+            text.give_up(req);
             Ok(wrote)
         }
         ValueRef::Undef | ValueRef::Reference(_) => Ok(None),
@@ -1902,7 +1917,7 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 /// }
 /// ```
 #[php_function(aliases(socket_get_status))]
-fn stream_get_meta_data(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
+fn stream_get_meta_data(req: &mut Request, stream: Stream) -> Result<Owner<PhpArray>, Thrown> {
     stream.meta_data(req)
 }
 
@@ -2104,11 +2119,18 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
         return Ok(false);
     };
     let mut done = false;
-    if let Some(to) = req.open_stream(target, b"wb", false)? {
-        done = crate::streamsfuncs::copy_stream(req, from, to, None).is_some();
-        to.free(req);
+    let to = match req.open_stream(target, b"wb", false) {
+        Ok(to) => to,
+        Err(thrown) => {
+            from.give_up(req);
+            return Err(thrown);
+        }
+    };
+    if let Some(to) = to {
+        done = crate::streamsfuncs::copy_stream(req, *from, *to, None).is_some();
+        to.hand_on_unmigrated().free(req);
     }
-    from.free(req);
+    from.hand_on_unmigrated().free(req);
     Ok(done)
 }
 
@@ -2195,7 +2217,11 @@ fn copy(
 /// bool(true)
 /// ```
 #[php_function]
-fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn tempnam(
+    req: &mut Request,
+    directory: Path,
+    prefix: Path,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (Path(dir), Path(prefix)) = (directory, prefix);
     let prefix = crate::string::path::php_basename(prefix.as_bytes(), b"");
     let prefix = &prefix[..prefix.len().min(63)];
@@ -2221,9 +2247,9 @@ fn tempnam(req: &mut Request, directory: Path, prefix: Path) -> Result<OrFalse<P
 /// bool(false)
 /// ```
 #[php_function]
-fn tmpfile(req: &mut Request) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+fn tmpfile(req: &mut Request) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     Ok(Untyped(match req.tmpfile()? {
-        Some(stream) => OrFalse::Value(stream.resource()),
+        Some(stream) => OrFalse::Value(stream.into_resource()),
         None => OrFalse::False,
     }))
 }
@@ -2296,7 +2322,7 @@ fn file(
     filename: Path,
     #[php(default = 0)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Path(filename) = filename;
     let known = FILE_USE_INCLUDE_PATH
         | FILE_IGNORE_NEW_LINES
@@ -2315,11 +2341,17 @@ fn file(
     else {
         return Ok(OrFalse::False);
     };
-    let contents = stream.copy_to_mem(req, None)?;
-    stream.free(req);
+    let contents = match stream.copy_to_mem(req, None) {
+        Ok(contents) => contents,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     let buf = contents.as_bytes().to_vec();
     // `zend_string_free(target_buf)`: the lines are copies.
-    req.release(Value::string(contents));
+    contents.give_up(req);
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
     for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
@@ -2340,7 +2372,7 @@ fn file(
     }
     let mut array = PhpArray::new(req)?;
     for line in lines {
-        let v = Value::string(PhpString::new(req, line)?);
+        let v = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
         array.append(req, v)?;
     }
     Ok(OrFalse::Value(array))
@@ -2583,14 +2615,14 @@ fn get_meta_tags(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] use_include_path: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Path(filename) = filename;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
     let mut array = PhpArray::new(req)?;
     let mut md = MetaData {
-        stream,
+        stream: stream.hand_on_unmigrated(),
         lc: None,
         in_meta: false,
         token: None,
@@ -2608,7 +2640,13 @@ fn get_meta_tags(
             .collect()
     };
     loop {
-        let tok = md.next(req)?;
+        let tok = match md.next(req) {
+            Ok(tok) => tok,
+            Err(thrown) => {
+                array.give_up(req);
+                return Err(thrown);
+            }
+        };
         if tok == MetaToken::Eof {
             break;
         }
@@ -2667,8 +2705,9 @@ fn get_meta_tags(
                     } else {
                         Vec::new()
                     };
-                    let key = Key::from_string(PhpString::new(req, &key)?);
-                    let content = Value::string(PhpString::new(req, &content)?);
+                    let key = Key::from_string(PhpString::new(req, &key)?.hand_on_unmigrated());
+                    let content =
+                        Value::string(PhpString::new(req, &content)?.hand_on_unmigrated());
                     array.set(req, key, content)?;
                 }
                 name = None;
@@ -2700,7 +2739,7 @@ fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
         if written > 0 {
             req.write(chunk.as_bytes());
         }
-        req.release(Value::string(chunk));
+        chunk.give_up(req);
         if written == 0 {
             break;
         }
@@ -2759,8 +2798,14 @@ fn readfile(
     else {
         return Ok(OrFalse::False);
     };
-    let size = passthru(req, stream)?;
-    stream.free(req);
+    let size = match passthru(req, *stream) {
+        Ok(size) => size,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     Ok(OrFalse::Value(size))
 }
 
@@ -2798,6 +2843,10 @@ pub fn fpassthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     passthru(req, stream)
 }
 
+/// What `fscanf()` answers short of `false` and `null`: the values, or
+/// the count assigned.
+type Scanned = Union<Owner<PhpArray>, i64>;
+
 /// `fscanf($stream, string $format, mixed &...$vars): array|int|false|null`,
 /// `PHP_FUNCTION(fscanf)` (`Z/ext/standard/file.c:929`): the next line
 /// of the stream, `php_stream_get_line` with no limit, scanned as
@@ -2833,7 +2882,7 @@ fn fscanf(
     stream: Resource,
     format: PhpString,
     vars: Variadic<Ref<Value>>,
-) -> Result<Option<OrFalse<Union<PhpArray, i64>>>, Thrown> {
+) -> Result<Option<OrFalse<Scanned>>, Thrown> {
     // `php_sscanf_internal` assigns through the call's own arguments from
     // the third on, `vars` as the frame holds them.
     let count = vars.0.len();
@@ -2848,12 +2897,14 @@ fn fscanf(
         return Ok(Some(OrFalse::False));
     };
     let scanned = crate::scanf::php_sscanf_internal(req, &line, format.as_bytes(), 3, count)?;
-    Ok(match scanned.as_ref() {
-        ValueRef::Array(array) => Some(OrFalse::Value(Union::A(*array))),
+    let answer = match scanned.as_ref() {
+        ValueRef::Array(array) => Some(OrFalse::Value(Union::A(Owner::take(req, *array)))),
         ValueRef::Int(n) => Some(OrFalse::Value(Union::B(n))),
         ValueRef::Bool(false) => Some(OrFalse::False),
         _ => None,
-    })
+    };
+    scanned.give_up(req);
+    Ok(answer)
 }
 
 /// `php_stream_sync_supported`, which the plain files kind and the
@@ -3011,8 +3062,8 @@ pub fn php_fputcsv(
     let count = fields.len();
     let mut line = Vec::new();
     for (i, (_, field)) in fields.iter().enumerate() {
-        let field = to_string(req, &field)?;
-        let bytes = field.as_bytes();
+        let field = crate::string::string_bytes(req, &field)?;
+        let bytes = field.as_slice();
         let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
             .iter()
             .chain(escape.iter())
@@ -3118,7 +3169,7 @@ fn fgetcsv(
     #[php(default = ",")] separator: PhpString,
     #[php(default = "\"")] enclosure: PhpString,
     #[php(default = "\\")] escape: Passed<PhpString>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let len = length;
     let delimiter = one_byte(req, separator, 3)?;
     let enclosure = one_byte(req, enclosure, 4)?;
@@ -3154,7 +3205,7 @@ fn fgetcsv(
         None => array.append(req, Value::null())?,
         Some(fields) => {
             for field in fields {
-                let value = Value::string(PhpString::new(req, &field)?);
+                let value = Value::string(PhpString::new(req, &field)?.hand_on_unmigrated());
                 array.append(req, value)?;
             }
         }
@@ -3184,7 +3235,7 @@ fn fgetcsv(
 /// string(0) ""
 /// ```
 #[php_function]
-fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn realpath(req: &mut Request, path: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(path) = path;
     let cwd = req.cwd().as_os_str().as_bytes().to_vec();
     let written = if path.as_bytes().is_empty() {
@@ -3270,7 +3321,7 @@ fn fnmatch(
 /// bool(true)
 /// ```
 #[php_function]
-fn sys_get_temp_dir(req: &mut Request) -> Result<PhpString, Thrown> {
+fn sys_get_temp_dir(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let dir = req.temp_dir();
     PhpString::new(req, dir.as_os_str().as_encoded_bytes())
 }

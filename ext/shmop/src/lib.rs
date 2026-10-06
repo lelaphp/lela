@@ -30,7 +30,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, fatal, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::Segment;
 
@@ -227,7 +227,7 @@ fn shmop_open(
     mode: PhpString,
     permissions: i64,
     size: i64,
-) -> Result<OrFalse<Instance<Shmop>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Shmop>>>, Thrown> {
     if mode.len() != 1 {
         return Err(arg_value_error(req, 2, "be a valid access mode"));
     }
@@ -236,13 +236,13 @@ fn shmop_open(
     let Some(class) = lookup_class(req, b"Shmop")? else {
         return Err(throw_error(req, "Error", "Class \"Shmop\" not found"));
     };
-    let shmop = Instance::of(new_object(req, class)?);
+    let shmop = new_object(req, class)?.into_instance::<Shmop>();
     let opened = open(req, key, mode.as_bytes(), permissions, size);
     if let Ok(Some(segment)) = opened {
         *shmop.payload_mut(req)? = Some(segment);
         return Ok(OrFalse::Value(shmop));
     }
-    req.release(shmop.object().as_value());
+    shmop.give_up(req);
     opened.map(|_| OrFalse::False)
 }
 
@@ -315,7 +315,7 @@ fn shmop_read(
     shmop: Instance<Shmop>,
     offset: i64,
     size: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let len = long(with(req, shmop, Segment::len)?);
     if offset < 0 || offset > len {
         return Err(arg_value_error(req, 2, "be between 0 and the segment size"));

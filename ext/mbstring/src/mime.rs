@@ -15,7 +15,7 @@ use php_ext::abi::{Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `MBSTRING_HEADER_ENC_WCHAR_BUFSIZE`.
 const WCHAR_BUFSIZE: usize = 90;
@@ -317,7 +317,7 @@ fn mb_encode_mimeheader(
     #[php(default = null)] transfer_encoding: Option<PhpString>,
     #[php(default = "\r\n")] newline: PhpString,
     #[php(default = 0)] indent: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut base64 = true;
     let charset = if let Some(name) = charset {
         let enc = self::encoding(req, Some(name), 2)?;
@@ -538,7 +538,7 @@ fn header_decode(input: &[u8], outcode: Encoding) -> Vec<u8> {
 /// string(15) "=?nope?B?QQ==?="
 /// ```
 #[php_function]
-fn mb_decode_mimeheader(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn mb_decode_mimeheader(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let internal = settings(req).current_internal;
     let out = header_decode(string.as_bytes(), internal);
     new_string(req, &out)

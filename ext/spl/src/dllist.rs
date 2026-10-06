@@ -14,7 +14,7 @@ use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{ArrayAccess, Countable, Iterator, Serializable};
 
@@ -334,9 +334,10 @@ impl SplDoublyLinkedList {
     /// Can't peek at an empty datastructure
     /// ```
     #[php(tentative)]
-    fn pop(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn pop(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.pop())? {
-            Some(value) => Ok(value),
+            // The list's owner of the element, the caller's now.
+            Some(value) => Ok(crate::owner_of(req, value)),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -347,9 +348,10 @@ impl SplDoublyLinkedList {
 
     /// `shift(): mixed`; the witness is the class's.
     #[php(tentative)]
-    fn shift(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn shift(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.shift())? {
-            Some(value) => Ok(value),
+            // The list's owner of the element, the caller's now.
+            Some(value) => Ok(crate::owner_of(req, value)),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -411,7 +413,7 @@ impl SplDoublyLinkedList {
     /// }
     /// ```
     #[php(tentative)]
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         list_debug_info(req, this.object())
     }
 
@@ -505,7 +507,7 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let at = node(req, this, index.0)?;
         let value = with(req, this, |l| l.nodes[at].data)?.unwrap_or_default();
-        Ok(crate::copied(req, value))
+        Ok(value.deref())
     }
 
     /// `offsetSet($index, mixed $value): void`, `null` pushing.
@@ -578,7 +580,7 @@ impl SplDoublyLinkedList {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let found = with(req, this.object(), |l| l.at(l.cursor))?;
-        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+        Ok(found.map_or_else(Value::null, |v| v.deref()))
     }
 
     /// `key(): int`, the traverse position.
@@ -685,7 +687,7 @@ impl SplDoublyLinkedList {
     /// int(2)
     /// ```
     #[php(tentative)]
-    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let (flags, head) = with(req, this, |l| (l.flags, l.head))?;
         crate::serialized_parts(req, |req, serializer, out| {
@@ -735,7 +737,7 @@ impl SplDoublyLinkedList {
     /// y2
     /// ```
     #[php(tentative)]
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
         let mut out = PhpArray::new(req)?;
@@ -744,9 +746,9 @@ impl SplDoublyLinkedList {
         for value in values {
             list.append(req, crate::copied(req, value))?;
         }
-        out.append(req, Value::array(list))?;
+        out.append(req, list.into_value().hand_on_unmigrated())?;
         let members = crate::members(req, this)?;
-        out.append(req, Value::array(members))?;
+        out.append(req, members.into_value().hand_on_unmigrated())?;
         Ok(out)
     }
 
@@ -936,8 +938,9 @@ impl ObjectHandlers for Handlers {
     fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
         if crate::overridden(req, object, b"count") {
             let answered = call_method(req, &object, b"count", &[])?;
-            let n = to_long(req, &answered)?;
-            req.release(answered);
+            let n = to_long(req, &answered);
+            answered.give_up(req);
+            let n = n?;
             return Ok(Some(n));
         }
         let n = with(req, object, |l| l.count)?;
@@ -993,12 +996,12 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         copy.push(value);
     }
     copy.cursor.pointer = copy.head;
-    clone_with(req, &object, copy)
+    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
 }
 
 /// `spl_dllist_object_get_debug_info`: the properties, then `flags` and
 /// `dllist` under `SplDoublyLinkedList`'s private names.
-fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let (flags, values) = with(req, object, |l| (l.flags, l.values()))?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
@@ -1006,13 +1009,17 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         out.set(req, key, value)?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
-    out.set(req, Key::Str(name), Value::int(flags))?;
+    out.set(req, Key::Str(name.hand_on_unmigrated()), Value::int(flags))?;
     let mut list = PhpArray::new(req)?;
     for value in values {
         list.append(req, crate::copied(req, value))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0dllist")?;
-    out.set(req, Key::Str(name), Value::array(list))?;
+    out.set(
+        req,
+        Key::Str(name.hand_on_unmigrated()),
+        list.into_value().hand_on_unmigrated(),
+    )?;
     Ok(out)
 }
 
@@ -1023,7 +1030,7 @@ fn peek(req: &mut Request, this: PhpObject, tail: bool) -> Result<Value, Thrown>
         at.and_then(|at| l.nodes[at].data)
     })?;
     match found {
-        Some(value) => Ok(crate::copied(req, value)),
+        Some(value) => Ok(value.deref()),
         None => Err(throw(
             req,
             "RuntimeException",

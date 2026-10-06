@@ -6,7 +6,7 @@ use php_ext::abi::{OrFalse, Path, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Resource, ResourceType, Value};
+use php_ext::values::{Owner, PhpString, Resource, ResourceType, Value};
 
 use crate::State;
 use crate::archive::{Archive, Stat};
@@ -100,17 +100,17 @@ fn fetch(
 /// zip_open(): Argument #1 ($filename) must not be empty
 /// ```
 #[php_function(deprecated(since = "8.0", message = "use ZipArchive::open() instead"))]
-fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Value>, Thrown> {
+fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Owner<Value>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
     if filename.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if basedir_refuses(req, &filename) {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     }
     let Some(resolved) = expand(req, &filename) else {
         docref(req, Level::Warning, "No such file or directory");
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     };
     let host = {
         use std::os::unix::ffi::OsStrExt;
@@ -125,9 +125,9 @@ fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Value>, Thrown>
                 index: 0,
                 num_files,
             };
-            Ok(Untyped(Resource::new(req, kind, dir)?.as_value()))
+            Ok(Untyped(Resource::new(req, kind, dir)?.into_value()))
         }
-        Err(status) => Ok(Untyped(Value::int(i64::from(status.zip)))),
+        Err(status) => Ok(Untyped(Owner::take(req, Value::int(i64::from(status.zip))))),
     }
 }
 
@@ -166,25 +166,25 @@ fn zip_close(req: &mut Request, zip: Resource) -> Result<(), Thrown> {
 /// bool(false)
 /// ```
 #[php_function(deprecated(since = "8.0", message = "use ZipArchive::statIndex() instead"))]
-fn zip_read(req: &mut Request, zip: Resource) -> Result<Untyped<Value>, Thrown> {
+fn zip_read(req: &mut Request, zip: Resource) -> Result<Untyped<Owner<Value>>, Thrown> {
     let kind = dir_type(req);
     let res = fetch(req, zip, kind, "Zip Directory", "zip_read")?;
     let id = res.id();
     let Some(dir) = res.native_mut::<Dir>(req) else {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     };
     if dir.index >= dir.num_files {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     }
     let index = dir.index;
     let Some(za) = dir.za.as_deref_mut() else {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     };
     let Ok(sb) = za.stat_index(index, 0) else {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     };
     let Ok(opened) = za.fopen(index, 0, None) else {
-        return Ok(Untyped(Value::bool(false)));
+        return Ok(Untyped(Owner::take(req, Value::bool(false))));
     };
     dir.index += 1;
     let kind = entry_type(req);
@@ -193,7 +193,7 @@ fn zip_read(req: &mut Request, zip: Resource) -> Result<Untyped<Value>, Thrown> 
         sb,
         dir: id,
     };
-    Ok(Untyped(Resource::new(req, kind, entry)?.as_value()))
+    Ok(Untyped(Resource::new(req, kind, entry)?.into_value()))
 }
 
 /// `zip_entry_open($zip_dp, $zip_entry, string $mode = "rb")`: whether
@@ -266,7 +266,7 @@ fn zip_entry_read(
     req: &mut Request,
     zip_entry: Resource,
     #[php(default = 1024)] len: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let kind = entry_type(req);
     let entry = fetch(req, zip_entry, kind, "Zip Entry", "zip_entry_read")?;
     let len = if len <= 0 {
@@ -327,7 +327,10 @@ fn info(req: &mut Request, zip_entry: Resource, native: &str) -> Result<Option<S
 /// bool(false)
 /// ```
 #[php_function(deprecated(since = "8.0", message = "use ZipArchive::statIndex() instead"))]
-fn zip_entry_name(req: &mut Request, zip_entry: Resource) -> Result<OrFalse<PhpString>, Thrown> {
+fn zip_entry_name(
+    req: &mut Request,
+    zip_entry: Resource,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match info(req, zip_entry, "zip_entry_name")? {
         Some(sb) => Ok(OrFalse::Value(PhpString::new(req, &sb.name)?)),
         None => Ok(OrFalse::False),
@@ -392,7 +395,7 @@ fn zip_entry_filesize(req: &mut Request, zip_entry: Resource) -> Result<OrFalse<
 fn zip_entry_compressionmethod(
     req: &mut Request,
     zip_entry: Resource,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(sb) = info(req, zip_entry, "zip_entry_compressionmethod")? else {
         return Ok(OrFalse::False);
     };

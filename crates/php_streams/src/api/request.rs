@@ -14,7 +14,7 @@ use crate::api::decl::Type;
 
 use crate::api::abi::FromArgument;
 use crate::api::raising::{Thrown, arg_type_error, fatal};
-use crate::api::values::{ClassId, PhpArray, PhpString, Resource, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpString, Resource, ResourceView, Value};
 
 mod context;
 pub(crate) use context::context_dtor;
@@ -279,6 +279,12 @@ pub struct XportFailure {
     pub text: String,
 }
 
+impl ResourceView for Stream {
+    fn resource(&self) -> Resource {
+        self.0
+    }
+}
+
 impl Stream {
     pub(crate) const fn of(r: Resource) -> Stream {
         Stream(r)
@@ -311,7 +317,8 @@ impl Stream {
     /// request's, fewer at the end, `None` for the read that failed
     /// before a byte was had (`fread` answers `false`); the `Err` is
     /// the memory limit, met before a byte is read.
-    pub fn read(self, req: &mut Request, len: usize) -> Result<Option<PhpString>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn read(self, req: &mut Request, len: usize) -> Result<Option<Owner<PhpString>>, Thrown> {
         req.stream_read_to_str(self, len)
     }
 
@@ -370,7 +377,7 @@ impl Stream {
             && len > req.heap_memory_limit()
         {
             let asked = PhpString::filled(req, len, |_| {})?;
-            req.release(Value::string(asked));
+            asked.give_up(req);
         }
         Ok(req
             .stream_op(self, |req, stream| stream.get_line(req, maxlen))
@@ -396,12 +403,13 @@ impl Stream {
     /// string(3) "ccc"
     /// bool(false)
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn get_record(
         self,
         req: &mut Request,
         maxlen: usize,
         delim: &[u8],
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         match req
             .stream_op(self, |req, stream| stream.get_record(req, maxlen, delim))
             .flatten()
@@ -413,11 +421,12 @@ impl Stream {
 
     /// `_php_stream_copy_to_mem`: the rest of the stream, or up to
     /// `maxlen` bytes of it, as one string, empty where nothing was read.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn copy_to_mem(
         self,
         req: &mut Request,
         maxlen: Option<usize>,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         match req.stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen)) {
             Some(Ok(Some(read))) => Ok(read),
             Some(Err(thrown)) => Err(thrown),
@@ -493,7 +502,8 @@ impl Stream {
     /// `eof` where the stream's kind reports them, `wrapper_type`,
     /// `stream_type`, `mode`, `unread_bytes`, `seekable` and `uri`, in
     /// php's order.
-    pub fn meta_data(self, req: &mut Request) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn meta_data(self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         req.stream_meta_data(self)
     }
 
@@ -1145,7 +1155,7 @@ impl FromArgument for Stream {
 pub trait Streams {
     /// `php://stdin`, which is what the CLI's `STDIN` constant holds: the
     /// host's fd 0 where it handed one, else nothing.
-    fn stdin(&mut self) -> Result<Option<Stream>, Thrown>;
+    fn stdin(&mut self) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_stream_open_wrapper_ex(path, mode, REPORT_ERRORS | USE_PATH?)`,
     /// what `fopen()` is: the stream, or `None` after php's warning for
@@ -1190,7 +1200,7 @@ pub trait Streams {
         path: &[u8],
         mode: &[u8],
         use_include_path: bool,
-    ) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_stream_open_wrapper_ex(path, mode, options)` under the
     /// options an opener was handed, or a native chose: what
@@ -1201,7 +1211,7 @@ pub trait Streams {
         path: &[u8],
         mode: &[u8],
         opening: Opening,
-    ) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |
     /// STREAM_USE_URL)`, what `get_headers()` opens: [`Request::open_stream`]
@@ -1224,19 +1234,20 @@ pub trait Streams {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
     /// extension implements, as a resource of the `stream` type with one
     /// owner, the caller's, at position zero with nothing read.
-    fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8]) -> Result<Stream, Thrown>;
+    fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8])
+    -> Result<Owner<Stream>, Thrown>;
 
     /// `opendir()`, `php_stream_opendir` under `REPORT_ERRORS`: the
     /// directory as a stream of the `stream` type, through the plain
     /// files wrapper's `php_plain_files_dirstream_ops` or a registered
     /// wrapper's directory opener, and `None` after php's `Failed to
     /// open directory: ` warning, which an empty path is not given.
-    fn open_dir(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn open_dir(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_stream_stat_path_ex`, and with `cached` the stat `php_stat`
     /// makes: the path's wrapper located and its `url_stat` asked,
@@ -1294,7 +1305,11 @@ pub trait Streams {
     /// `dir`, or after php's notice in the temporary directory, named by
     /// the prefix and nineteen random characters, and closed; its path,
     /// or `None` where none could be made.
-    fn temporary_name(&mut self, dir: &[u8], prefix: &[u8]) -> Result<Option<PhpString>, Thrown>;
+    fn temporary_name(
+        &mut self,
+        dir: &[u8],
+        prefix: &[u8],
+    ) -> Result<Option<Owner<PhpString>>, Thrown>;
 
     /// `f` with `ctx` as the `php_stream_context` every stream operation
     /// it makes is handed, the last argument of php's
@@ -1403,7 +1418,7 @@ pub trait Streams {
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the
     /// temporary directory, opened `r+b` as a plain file and unlinked
     /// when it closes, or `None` where none could be made.
-    fn tmpfile(&mut self) -> Result<Option<Stream>, Thrown>;
+    fn tmpfile(&mut self) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `php_register_url_stream_wrapper`: the wrapper at the end of the
     /// table every request starts with; `false` when the scheme is taken.
@@ -1473,7 +1488,7 @@ pub trait Streams {
     /// ```
     ///
     /// The `Err` is the memory limit, met registering the resource.
-    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown>;
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown>;
 
     /// `stream_wrapper_register()` (`Z/main/streams/userspace.c:437`) past
     /// its parameters: `class` registered under `protocol` for the rest of
@@ -1539,50 +1554,88 @@ pub trait Streams {
         &mut self,
         name: &[u8],
         xport: Xport,
-    ) -> Result<Result<Stream, XportFailure>, Thrown>;
+    ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown>;
 
     /// The connection [`Stream::keep`] took out lent to this request
     /// under `key`: a fresh resource of the `persistent stream` type over
     /// its socket, held under `key` in the request's persistent list as
     /// `php_stream_from_persistent_id` registers one, `r+` and seeking
     /// nowhere, until its owner keeps it again or closes it.
-    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Stream, Thrown>;
+    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown>;
+}
+
+/// The owner a stream of the facet is made with, as the [`Owner`] it
+/// is: the openers below the face keep the [`Stream`] the resource was
+/// made with, so the face takes its own owner and gives that one up,
+/// and the count stands where it stood. Only the face's constructors
+/// call it, each over a stream it has just made.
+#[cfg_attr(debug_assertions, track_caller)]
+pub(crate) fn owned<T: ResourceView>(req: &mut Request, made: T) -> Owner<T> {
+    let owner = Owner::take(req, made);
+    req.release(Value::resource(made.resource()));
+    owner
+}
+
+/// [`owned`] over what may be nothing.
+// A closure would name its own line as the owner's site.
+#[allow(clippy::manual_map)]
+#[cfg_attr(debug_assertions, track_caller)]
+fn owned_some<T: ResourceView>(req: &mut Request, made: Option<T>) -> Option<Owner<T>> {
+    match made {
+        Some(made) => Some(owned(req, made)),
+        None => None,
+    }
 }
 
 impl Streams for Request {
-    fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn stdin(&mut self) -> Result<Option<Owner<Stream>>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     fn open_stream(
         &mut self,
         path: &[u8],
         mode: &[u8],
         use_include_path: bool,
-    ) -> Result<Option<Stream>, Thrown> {
-        self.open_stream_wrapper(path, mode, use_include_path)
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
+        let opened = self.open_stream_wrapper(path, mode, use_include_path)?;
+        Ok(owned_some(self, opened))
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     fn open_stream_with(
         &mut self,
         path: &[u8],
         mode: &[u8],
         opening: Opening,
-    ) -> Result<Option<Stream>, Thrown> {
-        self.open_wrapper_with(path, mode, opening)
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
+        let opened = self.open_wrapper_with(path, mode, opening)?;
+        Ok(owned_some(self, opened))
     }
 
-    fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
-        self.open_url_wrapper(url, mode)
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
+        let opened = self.open_url_wrapper(url, mode)?;
+        Ok(owned_some(self, opened))
     }
 
-    fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8]) -> Result<Stream, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn new_stream(
+        &mut self,
+        ops: Box<dyn StreamOps>,
+        mode: &[u8],
+    ) -> Result<Owner<Stream>, Thrown> {
         let stream = crate::streams::of_extension(ops, mode);
-        self.stream_alloc(stream)
+        let opened = self.stream_alloc(stream)?;
+        Ok(owned(self, opened))
     }
 
-    fn open_dir(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
-        self.open_dir_wrapper(path)
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn open_dir(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
+        let opened = self.open_dir_wrapper(path)?;
+        Ok(owned_some(self, opened))
     }
 
     fn url_stat(&mut self, path: &[u8], link: bool, cached: bool) -> Result<UrlStat, Thrown> {
@@ -1616,7 +1669,12 @@ impl Streams for Request {
         self.path_op(path, op)
     }
 
-    fn temporary_name(&mut self, dir: &[u8], prefix: &[u8]) -> Result<Option<PhpString>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn temporary_name(
+        &mut self,
+        dir: &[u8],
+        prefix: &[u8],
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         match self.open_temporary_fd(Some(dir), prefix, TemporaryGuard::Always) {
             Some((_, path)) => Ok(Some(PhpString::new(
                 self,
@@ -1649,8 +1707,10 @@ impl Streams for Request {
         self.streams().opened_path = Some(path.to_vec());
     }
 
-    fn tmpfile(&mut self) -> Result<Option<Stream>, Thrown> {
-        crate::streams::temporary_file(self, None, b"php")
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn tmpfile(&mut self) -> Result<Option<Owner<Stream>>, Thrown> {
+        let opened = crate::streams::temporary_file(self, None, b"php")?;
+        Ok(owned_some(self, opened))
     }
 
     fn register_wrapper(&mut self, wrapper: StreamWrapper) -> bool {
@@ -1694,8 +1754,10 @@ impl Streams for Request {
         })
     }
 
-    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
-        StreamLayer::stream_from_fd(self, fd, kind)
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown> {
+        let opened = StreamLayer::stream_from_fd(self, fd, kind)?;
+        Ok(owned(self, opened))
     }
 
     fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
@@ -1718,15 +1780,21 @@ impl Streams for Request {
         Transports::transports(self)
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     fn xport_create(
         &mut self,
         name: &[u8],
         xport: Xport,
-    ) -> Result<Result<Stream, XportFailure>, Thrown> {
-        Transports::xport_create(self, name, xport)
+    ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown> {
+        Ok(match Transports::xport_create(self, name, xport)? {
+            Ok(opened) => Ok(owned(self, opened)),
+            Err(failure) => Err(failure),
+        })
     }
 
-    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Stream, Thrown> {
-        crate::streams::persistent::Persistent::lend(self, key, kept.0)
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown> {
+        let opened = crate::streams::persistent::Persistent::lend(self, key, kept.0)?;
+        Ok(owned(self, opened))
     }
 }

@@ -11,7 +11,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
-use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 
 use crate::{State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value};
 
@@ -193,7 +193,7 @@ fn find_in(req: &mut Request, input: Input, name: &[u8]) -> Result<Option<Vec<u8
     let found = array
         .find(name)
         .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));
-    req.release(array.to_value());
+    array.give_up(req);
     Ok(found)
 }
 
@@ -312,8 +312,8 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
         let cancel = cancelled(req, vars, &key);
         with(req, |progress| progress.cancel_upload |= cancel);
         let data = rendered(req)?;
-        let key = Key::Str(PhpString::new(req, &key)?);
-        vars.set(req, key, data)?;
+        let key = Key::Str(PhpString::new(req, &key)?.hand_on_unmigrated());
+        vars.set(req, key, data.hand_on_unmigrated())?;
     }
     session::flush(req, true)?;
     Ok(())
@@ -335,14 +335,14 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
 }
 
 /// The progress as the array php keeps it.
-fn rendered(req: &mut Request) -> Result<Value, Thrown> {
+fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let taken = req
         .state::<State>()
         .progress
         .as_mut()
         .and_then(|progress| progress.data.take());
     let Some(data) = taken else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let mut array = PhpArray::new(req)?;
     set(req, &mut array, b"start_time", Value::int(data.start_time))?;
@@ -362,12 +362,12 @@ fn rendered(req: &mut Request) -> Result<Value, Thrown> {
     let mut files = PhpArray::new(req)?;
     for file in &data.files {
         let mut entry = PhpArray::new(req)?;
-        let field_name = string_value(req, &file.field_name)?;
+        let field_name = string_value(req, &file.field_name)?.hand_on_unmigrated();
         set(req, &mut entry, b"field_name", field_name)?;
-        let name = string_value(req, &file.name)?;
+        let name = string_value(req, &file.name)?.hand_on_unmigrated();
         set(req, &mut entry, b"name", name)?;
         let tmp_name = match &file.tmp_name {
-            Some(tmp) => string_value(req, tmp)?,
+            Some(tmp) => string_value(req, tmp)?.hand_on_unmigrated(),
             None => Value::null(),
         };
         set(req, &mut entry, b"tmp_name", tmp_name)?;
@@ -380,16 +380,26 @@ fn rendered(req: &mut Request) -> Result<Value, Thrown> {
             b"bytes_processed",
             Value::int(file.bytes_processed),
         )?;
-        files.append(req, entry.to_value())?;
+        files.append(req, entry.into_value().hand_on_unmigrated())?;
     }
-    set(req, &mut array, b"files", files.to_value())?;
+    set(
+        req,
+        &mut array,
+        b"files",
+        files.into_value().hand_on_unmigrated(),
+    )?;
     with(req, |progress| progress.data = Some(data));
-    Ok(array.to_value())
+    Ok(array.into_value())
 }
 
 /// `add_assoc_*_ex`.
-fn set(req: &mut Request, array: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
+fn set(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
@@ -435,8 +445,9 @@ fn cleanup(req: &mut Request) -> Result<(), Thrown> {
         .and_then(|progress| progress.key.clone());
     if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
         let name = PhpString::new(req, &key)?;
-        vars.unset(req, &Key::Str(name))?;
-        req.release(Value::string(name));
+        let unset = vars.unset(req, &Key::Str(*name));
+        name.give_up(req);
+        unset?;
     }
     session::flush(req, true)?;
     Ok(())

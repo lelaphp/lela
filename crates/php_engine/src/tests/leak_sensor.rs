@@ -18,11 +18,14 @@ use crate::engine::{Engine, LeakSensor};
 use crate::test::Capture;
 
 /// `dropped_owner(): void`, faulty on purpose: a string made, its one
-/// owner the native's, and the owner dropped, neither handed on nor
-/// given up. Seven bytes, so the block is the 32-byte bin's.
+/// owner the native's, and the owner handed on to a view nothing keeps,
+/// so it is neither given up nor reported dropped. Seven bytes, so the
+/// block is the 32-byte bin's.
 #[php_function]
 fn dropped_owner(req: &mut Request) {
-    let _dropped = PhpString::new(req, b"dropped");
+    if let Ok(made) = PhpString::new(req, b"dropped") {
+        let _leaked = made.hand_on_unmigrated();
+    }
 }
 
 fn faulty() -> Extension {
@@ -35,7 +38,9 @@ fn faulty() -> Extension {
 /// [`dropped_owner`] is: a string made at `RSHUTDOWN` and its owner
 /// dropped.
 fn rshutdown_dropping_an_owner(req: &mut Request) {
-    let _dropped = PhpString::new(req, b"in hook");
+    if let Ok(made) = PhpString::new(req, b"in hook") {
+        let _leaked = made.hand_on_unmigrated();
+    }
 }
 
 fn faulty_at_rshutdown() -> Extension {
@@ -138,7 +143,7 @@ fn the_backtrace_mode_names_the_leaking_line() {
     let source = include_str!("leak_sensor.rs");
     let line = source
         .lines()
-        .position(|line| line.contains("let _dropped = PhpString::new(req, b\"dropped\");"))
+        .position(|line| line.contains("if let Ok(made) = PhpString::new(req, b\"dropped\") {"))
         .map_or(0, |at| at + 1);
     assert!(
         stdout.contains(&format!("leak_sensor.rs:{line}:")),

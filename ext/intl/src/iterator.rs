@@ -11,7 +11,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::Code;
@@ -121,7 +121,6 @@ impl IntlIterator {
         let current = cursor(req, object)
             .and_then(|c| c.current)
             .unwrap_or_else(Value::null);
-        req.addref(&current);
         Ok(current)
     }
 
@@ -239,7 +238,7 @@ pub(crate) fn made(
     req: &mut Request,
     class: &[u8],
     walk: Box<dyn Walk>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         return Err(fatal(req, "InternalError: IntlIterator is not linked"));
     };
@@ -266,7 +265,7 @@ pub(crate) fn data(req: &mut Request, object: PhpObject) -> Result<Option<Value>
 pub(crate) fn from_enumeration(
     req: &mut Request,
     enumeration: Enumeration,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     made(req, b"IntlIterator", Box::new(Strings(enumeration)))
 }
 
@@ -290,7 +289,9 @@ impl Walk for Strings {
             return Ok(None);
         }
         match next {
-            Some(text) => Ok(Some(Value::string(PhpString::new(req, &text)?))),
+            Some(text) => Ok(Some(Value::string(
+                PhpString::new(req, &text)?.hand_on_unmigrated(),
+            ))),
             None => Ok(None),
         }
     }

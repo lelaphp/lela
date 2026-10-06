@@ -9,7 +9,7 @@ use php_ext::abi::{Instance, Passed, Path, Raw, This, True, Union, Untyped, Vari
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{DocString, Kind, Name, Node, Ns, Parser, Utf8, XML_ATTRIBUTE_ID};
 
@@ -72,21 +72,21 @@ fn substring_data(
     this: PhpObject,
     offset: i64,
     count: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let node = fetch(req, this)?;
     let cur = content(node);
     let length = Utf8::len(&cur);
     if overflows(offset) || overflows(count) {
-        return index_error(req, this);
+        return index_error(req, this).map(|v| Owner::take(req, v));
     }
     let Some(offset) = to_unsigned(req, this, offset)? else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     let Some(count) = to_unsigned(req, this, count)? else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     if offset > as_uint(length) {
-        return index_error(req, this);
+        return index_error(req, this).map(|v| Owner::take(req, v));
     }
     let count = count.min(as_uint(length).wrapping_sub(offset));
     let sub = Utf8::sub(&cur, i64::from(offset), i64::from(count)).unwrap_or_default();
@@ -228,7 +228,7 @@ impl DOMImplementation {
         qualifiedName: PhpString,
         #[php(default = "")] publicId: PhpString,
         #[php(default = "")] systemId: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let name = qualifiedName.as_bytes();
         if name.is_empty() {
             return Err(arg_value_error(req, 1, "not be empty"));
@@ -239,7 +239,7 @@ impl DOMImplementation {
                 php_ext::raising::Level::Warning,
                 "URI must not contain percent-encoded NUL bytes",
             );
-            return Ok(Untyped(Value::bool(false)));
+            return Ok(Untyped(Owner::take(req, Value::bool(false))));
         }
         let non_empty = |v: &[u8]| (!v.is_empty()).then(|| v.to_vec());
         let dtd = Node::create_int_subset(
@@ -262,7 +262,7 @@ impl DOMImplementation {
         #[php(default = null)] namespace: Option<PhpString>,
         #[php(default = "")] qualifiedName: PhpString,
         #[php(default = null)] doctype: Option<Instance<DOMDocumentType>>,
-    ) -> Result<Raw<Instance<crate::document::DOMDocument>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::document::DOMDocument>>>, Thrown> {
         let uri = namespace.as_ref().map_or(&[][..], PhpString::as_bytes);
         let name = qualifiedName.as_bytes();
         let doctype = match doctype {
@@ -318,7 +318,7 @@ impl DOMImplementation {
         {
             dtd.share_document(req, shared);
         }
-        returned(req, value)
+        returned(value)
     }
 }
 
@@ -454,7 +454,7 @@ impl DOMCharacterData {
         this: This<Self>,
         offset: i64,
         count: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         substring_data(req, this.object(), offset, count).map(Untyped)
     }
 
@@ -467,9 +467,9 @@ impl DOMCharacterData {
         this: This<Self>,
         offset: i64,
         data: PhpString,
-    ) -> Result<Raw<bool>, Thrown> {
+    ) -> Result<Owner<Raw<bool>>, Thrown> {
         let done = insert_data(req, this.object(), offset, data.as_bytes())?;
-        returned(req, done)
+        returned(Owner::take(req, done))
     }
 
     /// `DOMCharacterData::deleteData(int $offset, int $count): bool`.
@@ -479,9 +479,9 @@ impl DOMCharacterData {
         this: This<Self>,
         offset: i64,
         count: i64,
-    ) -> Result<Raw<bool>, Thrown> {
+    ) -> Result<Owner<Raw<bool>>, Thrown> {
         let done = delete_data(req, this.object(), offset, count)?;
-        returned(req, done)
+        returned(Owner::take(req, done))
     }
 
     /// `DOMCharacterData::replaceData(int $offset, int $count, string $data): bool`.
@@ -492,9 +492,9 @@ impl DOMCharacterData {
         offset: i64,
         count: i64,
         data: PhpString,
-    ) -> Result<Raw<bool>, Thrown> {
+    ) -> Result<Owner<Raw<bool>>, Thrown> {
         let done = replace_data(req, this.object(), (offset, count), data.as_bytes())?;
-        returned(req, done)
+        returned(Owner::take(req, done))
     }
 
     #[php(implementation = DOMElement::replaceWith)]
@@ -645,7 +645,7 @@ impl DOMText {
         req: &mut Request,
         this: This<Self>,
         offset: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let this = this.object();
         let node = fetch(req, this)?;
         if offset < 0 {
@@ -657,7 +657,7 @@ impl DOMText {
             if follows_spec(req, this) {
                 return Err(dom_throw(req, Code::IndexSize));
             }
-            return Ok(Untyped(Value::bool(false)));
+            return Ok(Untyped(Owner::take(req, Value::bool(false))));
         }
         let first = Utf8::ndup(&cur, offset).unwrap_or_default();
         let second = Utf8::sub(&cur, offset, length - offset).unwrap_or_default();
@@ -883,7 +883,7 @@ impl Implementation {
         qualifiedName: Path,
         publicId: Path,
         systemId: Path,
-    ) -> Result<Raw<Instance<DocumentType>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<DocumentType>>>, Thrown> {
         let name = qualifiedName.0.as_bytes();
         if !Name::valid_qname(name) {
             return Err(dom_throw(req, Code::Namespace));
@@ -899,7 +899,7 @@ impl Implementation {
         };
         let class = crate::class(req, "Dom\\DocumentType")?;
         let made = crate::instantiate(req, class, dtd, None)?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `Dom\Implementation::createDocument(?string $namespace, string $qualifiedName, ?Dom\DocumentType $doctype = null): Dom\XMLDocument`.
@@ -934,7 +934,7 @@ impl Implementation {
         namespace: Option<Path>,
         qualifiedName: Path,
         #[php(default = null)] doctype: Option<Instance<DocumentType>>,
-    ) -> Result<Raw<Instance<crate::document::XMLDocument>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::document::XMLDocument>>>, Thrown> {
         let uri = namespace.as_ref().map(|n| n.0.as_bytes());
         let qualified_name = qualifiedName.0.as_bytes();
         let doctype = match doctype {
@@ -971,7 +971,7 @@ impl Implementation {
         }
         let object = crate::modern::document_object(req, "Dom\\XMLDocument", document, private)?;
         if let Some(dtd) = doctype {
-            crate::adopt(req, object, dtd, document);
+            crate::adopt(req, *object, dtd, document);
             document.add_child(dtd);
             dtd.set_tree_doc(Some(document));
             document.set_int_subset(Some(dtd));
@@ -979,7 +979,7 @@ impl Implementation {
         if let Some(e) = element {
             document.add_child(e);
         }
-        returned(req, object.as_value())
+        returned(object.into_value())
     }
 
     /// `Dom\Implementation::createHTMLDocument(?string $title = null): Dom\HTMLDocument`:
@@ -1007,7 +1007,7 @@ impl Implementation {
         req: &mut Request,
         _this: This<Self>,
         #[php(default = null)] title: Option<Path>,
-    ) -> Result<Raw<Instance<crate::html_document::HTMLDocument>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::html_document::HTMLDocument>>>, Thrown> {
         let title = title.map(|t| t.0.as_bytes().to_vec());
         let Some(doc) = Node::new_html_doc() else {
             return Err(dom_throw(req, Code::InvalidState));
@@ -1037,7 +1037,7 @@ impl Implementation {
             return Err(dom_throw(req, Code::InvalidState));
         }
         let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
-        returned(req, object.as_value())
+        returned(object.into_value())
     }
 }
 

@@ -5,7 +5,7 @@ use php_ext::abi::{ExtensionBuilder, Instance, OrFalse, Ref, True, Union, Untype
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Command};
 
 use crate::On;
@@ -243,7 +243,7 @@ fn mysqli_change_user(
 /// string(6) "latin1"
 /// ```
 #[php_function]
-fn mysqli_character_set_name(req: &mut Request, mysql: Link) -> Answer<PhpString> {
+fn mysqli_character_set_name(req: &mut Request, mysql: Link) -> Answer<Owner<PhpString>> {
     let cs = link::status(req, on(mysql))?.charset;
     link::text(req, cs.map(|c| c.name.as_bytes()))
 }
@@ -321,7 +321,7 @@ fn mysqli_connect(
     #[php(default = null)] database: Option<PhpString>,
     #[php(default = null)] port: Option<i64>,
     #[php(default = null)] socket: Option<PhpString>,
-) -> Answer<OrFalse<Link>> {
+) -> Answer<OrFalse<Owner<Link>>> {
     let args = Args {
         host: hostname,
         user: username,
@@ -332,7 +332,7 @@ fn mysqli_connect(
         flags: 0,
     };
     Ok(match link::common_connect(req, None, args, false, false)? {
-        Some(object) => OrFalse::Value(Instance::of(object)),
+        Some(object) => OrFalse::Value(object.into_instance()),
         None => OrFalse::False,
     })
 }
@@ -367,7 +367,7 @@ fn mysqli_connect_errno(req: &mut Request) -> i64 {
 /// NULL
 /// ```
 #[php_function]
-fn mysqli_connect_error(req: &mut Request) -> Answer<Option<PhpString>> {
+fn mysqli_connect_error(req: &mut Request) -> Answer<Option<Owner<PhpString>>> {
     match req.state::<crate::State>().connect_error.clone() {
         Some(error) => PhpString::new(req, &error).map(Some),
         None => Ok(None),
@@ -454,7 +454,7 @@ fn mysqli_errno(req: &mut Request, mysql: Link) -> Answer<i64> {
 /// string(37) "Unknown column 'nope' in 'field list'"
 /// ```
 #[php_function]
-fn mysqli_error(req: &mut Request, mysql: Link) -> Answer<PhpString> {
+fn mysqli_error(req: &mut Request, mysql: Link) -> Answer<Owner<PhpString>> {
     let error = link::status(req, on(mysql))?.error;
     PhpString::new(req, &error)
 }
@@ -482,7 +482,7 @@ fn mysqli_error(req: &mut Request, mysql: Link) -> Answer<PhpString> {
 /// }
 /// ```
 #[php_function]
-fn mysqli_error_list(req: &mut Request, mysql: Link) -> Answer<PhpArray> {
+fn mysqli_error_list(req: &mut Request, mysql: Link) -> Answer<Owner<PhpArray>> {
     let list = link::status(req, on(mysql))?.error_list;
     crate::props::error_list(req, &list)
 }
@@ -560,7 +560,7 @@ fn mysqli_execute_query(
     mysql: Link,
     query: PhpString,
     #[php(default = null)] params: Option<PhpArray>,
-) -> Answer<Union<Res, bool>> {
+) -> Answer<Union<Owner<Res>, bool>> {
     stmt::execute_query(req, on(mysql), query, params)
 }
 
@@ -603,7 +603,7 @@ fn mysqli_execute_query(
 /// bool(false)
 /// ```
 #[php_function]
-fn mysqli_fetch_field(req: &mut Request, result: Res) -> Answer<OrFalse<PhpObject>> {
+fn mysqli_fetch_field(req: &mut Request, result: Res) -> Answer<OrFalse<Owner<PhpObject>>> {
     result::fetch_field(req, on_result(result))
 }
 
@@ -618,7 +618,7 @@ fn mysqli_fetch_field(req: &mut Request, result: Res) -> Answer<OrFalse<PhpObjec
 /// b 253
 /// ```
 #[php_function]
-fn mysqli_fetch_fields(req: &mut Request, result: Res) -> Answer<PhpArray> {
+fn mysqli_fetch_fields(req: &mut Request, result: Res) -> Answer<Owner<PhpArray>> {
     result::fetch_fields(req, on_result(result))
 }
 
@@ -641,7 +641,7 @@ fn mysqli_fetch_field_direct(
     req: &mut Request,
     result: Res,
     index: i64,
-) -> Answer<OrFalse<PhpObject>> {
+) -> Answer<OrFalse<Owner<PhpObject>>> {
     result::fetch_field_direct(req, on_result(result), index)
 }
 
@@ -662,7 +662,7 @@ fn mysqli_fetch_field_direct(
 /// }
 /// ```
 #[php_function]
-fn mysqli_fetch_lengths(req: &mut Request, result: Res) -> Answer<OrFalse<PhpArray>> {
+fn mysqli_fetch_lengths(req: &mut Request, result: Res) -> Answer<OrFalse<Owner<PhpArray>>> {
     result::fetch_lengths(req, on_result(result))
 }
 
@@ -697,7 +697,7 @@ fn mysqli_fetch_all(
     req: &mut Request,
     result: Res,
     #[php(default = MYSQLI_NUM)] mode: i64,
-) -> Answer<PhpArray> {
+) -> Answer<Owner<PhpArray>> {
     result::fetch_all(req, on_result(result), mode)
 }
 
@@ -904,7 +904,7 @@ fn mysqli_free_result(req: &mut Request, result: Res) -> Answer<()> {
 /// string(1) "1"
 /// ```
 #[php_function]
-fn mysqli_get_connection_stats(req: &mut Request, mysql: Link) -> Answer<PhpArray> {
+fn mysqli_get_connection_stats(req: &mut Request, mysql: Link) -> Answer<Owner<PhpArray>> {
     link::connection_stats(req, on(mysql))
 }
 
@@ -920,7 +920,7 @@ fn mysqli_get_connection_stats(req: &mut Request, mysql: Link) -> Answer<PhpArra
 /// string(1) "1"
 /// ```
 #[php_function]
-fn mysqli_get_client_stats(req: &mut Request) -> Answer<PhpArray> {
+fn mysqli_get_client_stats(req: &mut Request) -> Answer<Owner<PhpArray>> {
     extras::client_stats(req)
 }
 
@@ -950,7 +950,7 @@ fn mysqli_get_client_stats(req: &mut Request) -> Answer<PhpArray> {
 /// }
 /// ```
 #[php_function]
-fn mysqli_get_charset(req: &mut Request, mysql: Link) -> Answer<Option<PhpObject>> {
+fn mysqli_get_charset(req: &mut Request, mysql: Link) -> Answer<Option<Owner<PhpObject>>> {
     link::get_charset(req, on(mysql))
 }
 
@@ -971,7 +971,7 @@ fn mysqli_get_charset(req: &mut Request, mysql: Link) -> Answer<Option<PhpObject
 fn mysqli_get_client_info(
     req: &mut Request,
     #[php(default = null)] mysql: Option<Link>,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     let _ = mysql;
     if req.argument_count() > 0 {
         docref(
@@ -1014,7 +1014,7 @@ fn mysqli_get_client_version() -> i64 {
 /// int(1)
 /// ```
 #[php_function]
-fn mysqli_get_links_stats(req: &mut Request) -> Answer<PhpArray> {
+fn mysqli_get_links_stats(req: &mut Request) -> Answer<Owner<PhpArray>> {
     link::links_stats(req)
 }
 
@@ -1027,7 +1027,7 @@ fn mysqli_get_links_stats(req: &mut Request) -> Answer<PhpArray> {
 /// string(20) "127.0.0.1 via TCP/IP"
 /// ```
 #[php_function]
-fn mysqli_get_host_info(req: &mut Request, mysql: Link) -> Answer<PhpString> {
+fn mysqli_get_host_info(req: &mut Request, mysql: Link) -> Answer<Owner<PhpString>> {
     let info = link::status(req, on(mysql))?.host_info;
     link::text(req, info.as_deref())
 }
@@ -1054,7 +1054,7 @@ fn mysqli_get_proto_info(req: &mut Request, mysql: Link) -> Answer<i64> {
 /// bool(true)
 /// ```
 #[php_function]
-fn mysqli_get_server_info(req: &mut Request, mysql: Link) -> Answer<PhpString> {
+fn mysqli_get_server_info(req: &mut Request, mysql: Link) -> Answer<Owner<PhpString>> {
     let info = link::status(req, on(mysql))?.server_info;
     link::text(req, info.as_deref())
 }
@@ -1086,7 +1086,7 @@ fn mysqli_get_server_version(req: &mut Request, mysql: Link) -> Answer<i64> {
 fn mysqli_get_warnings(
     req: &mut Request,
     mysql: Link,
-) -> Answer<OrFalse<Instance<mysqli_warning>>> {
+) -> Answer<OrFalse<Owner<Instance<mysqli_warning>>>> {
     extras::link_warnings(req, on(mysql))
 }
 
@@ -1101,8 +1101,8 @@ fn mysqli_get_warnings(
 /// mysqli object is not fully initialized
 /// ```
 #[php_function]
-fn mysqli_init(req: &mut Request) -> Answer<OrFalse<Link>> {
-    link::init(req, None).map(|o| OrFalse::Value(Instance::of(o)))
+fn mysqli_init(req: &mut Request) -> Answer<OrFalse<Owner<Link>>> {
+    link::init(req, None).map(|o| OrFalse::Value(o.into_instance()))
 }
 
 /// `mysqli_info(mysqli $mysql): ?string`.
@@ -1117,7 +1117,7 @@ fn mysqli_init(req: &mut Request) -> Answer<OrFalse<Link>> {
 /// string(38) "Records: 2  Duplicates: 0  Warnings: 0"
 /// ```
 #[php_function]
-fn mysqli_info(req: &mut Request, mysql: Link) -> Answer<Option<PhpString>> {
+fn mysqli_info(req: &mut Request, mysql: Link) -> Answer<Option<Owner<PhpString>>> {
     match link::status(req, on(mysql))?.info {
         Some(info) => PhpString::new(req, &info).map(Some),
         None => Ok(None),
@@ -1374,7 +1374,11 @@ fn mysqli_poll(
 /// int(1064)
 /// ```
 #[php_function]
-fn mysqli_prepare(req: &mut Request, mysql: Link, query: PhpString) -> Answer<OrFalse<Statement>> {
+fn mysqli_prepare(
+    req: &mut Request,
+    mysql: Link,
+    query: PhpString,
+) -> Answer<OrFalse<Owner<Statement>>> {
     stmt::prepare(req, on(mysql), query)
 }
 
@@ -1423,7 +1427,7 @@ fn mysqli_query(
     mysql: Link,
     query: PhpString,
     #[php(default = MYSQLI_STORE_RESULT)] result_mode: i64,
-) -> Answer<Union<Res, bool>> {
+) -> Answer<Union<Owner<Res>, bool>> {
     link::query(req, on(mysql), query, result_mode)
 }
 
@@ -1464,7 +1468,8 @@ fn mysqli_real_connect(
         socket,
         flags,
     };
-    Ok(link::common_connect(req, Some(mysql.object()), args, true, false)?.is_some())
+    let made = link::common_connect(req, Some(mysql.object()), args, true, false)?;
+    Ok(link::connected_link(req, made))
 }
 
 /// `mysqli_real_escape_string(mysqli $mysql, string $string): string`.
@@ -1481,7 +1486,7 @@ fn mysqli_real_escape_string(
     req: &mut Request,
     mysql: Link,
     string: PhpString,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     link::escape(req, on(mysql), string)
 }
 
@@ -1494,7 +1499,11 @@ fn mysqli_real_escape_string(
 /// string(5) "it\'s"
 /// ```
 #[php_function]
-fn mysqli_escape_string(req: &mut Request, mysql: Link, string: PhpString) -> Answer<PhpString> {
+fn mysqli_escape_string(
+    req: &mut Request,
+    mysql: Link,
+    string: PhpString,
+) -> Answer<Owner<PhpString>> {
     link::escape(req, on(mysql), string)
 }
 
@@ -1534,7 +1543,7 @@ fn mysqli_real_query(req: &mut Request, mysql: Link, query: PhpString) -> Answer
 /// bool(true)
 /// ```
 #[php_function]
-fn mysqli_reap_async_query(req: &mut Request, mysql: Link) -> Answer<Union<Res, bool>> {
+fn mysqli_reap_async_query(req: &mut Request, mysql: Link) -> Answer<Union<Owner<Res>, bool>> {
     link::reap_async_query(req, on(mysql))
 }
 
@@ -1813,7 +1822,7 @@ fn mysqli_stmt_errno(req: &mut Request, statement: Statement) -> Answer<i64> {
 /// string(37) "Unknown column 'nope' in 'field list'"
 /// ```
 #[php_function]
-fn mysqli_stmt_error(req: &mut Request, statement: Statement) -> Answer<PhpString> {
+fn mysqli_stmt_error(req: &mut Request, statement: Statement) -> Answer<Owner<PhpString>> {
     let error = stmt::error_facts(req, on_stmt(statement), Need::Made)?.error;
     PhpString::new(req, &error)
 }
@@ -1839,7 +1848,7 @@ fn mysqli_stmt_error(req: &mut Request, statement: Statement) -> Answer<PhpStrin
 /// }
 /// ```
 #[php_function]
-fn mysqli_stmt_error_list(req: &mut Request, statement: Statement) -> Answer<PhpArray> {
+fn mysqli_stmt_error_list(req: &mut Request, statement: Statement) -> Answer<Owner<PhpArray>> {
     stmt::error_list(req, on_stmt(statement))
 }
 
@@ -1906,7 +1915,7 @@ fn mysqli_stmt_free_result(req: &mut Request, statement: Statement) -> Answer<()
 /// bool(false)
 /// ```
 #[php_function]
-fn mysqli_stmt_get_result(req: &mut Request, statement: Statement) -> Answer<OrFalse<Res>> {
+fn mysqli_stmt_get_result(req: &mut Request, statement: Statement) -> Answer<OrFalse<Owner<Res>>> {
     stmt::get_result(req, on_stmt(statement))
 }
 
@@ -1926,7 +1935,7 @@ fn mysqli_stmt_get_result(req: &mut Request, statement: Statement) -> Answer<OrF
 fn mysqli_stmt_get_warnings(
     req: &mut Request,
     statement: Statement,
-) -> Answer<OrFalse<Instance<mysqli_warning>>> {
+) -> Answer<OrFalse<Owner<Instance<mysqli_warning>>>> {
     extras::stmt_warnings(req, on_stmt(statement))
 }
 
@@ -1942,7 +1951,7 @@ fn mysqli_stmt_get_warnings(
 /// mysqli_stmt object is not fully initialized
 /// ```
 #[php_function]
-fn mysqli_stmt_init(req: &mut Request, mysql: Link) -> Answer<OrFalse<Statement>> {
+fn mysqli_stmt_init(req: &mut Request, mysql: Link) -> Answer<OrFalse<Owner<Statement>>> {
     stmt::stmt_init(req, on(mysql))
 }
 
@@ -2066,7 +2075,10 @@ fn mysqli_stmt_reset(req: &mut Request, statement: Statement) -> Answer<bool> {
 /// bool(false)
 /// ```
 #[php_function]
-fn mysqli_stmt_result_metadata(req: &mut Request, statement: Statement) -> Answer<OrFalse<Res>> {
+fn mysqli_stmt_result_metadata(
+    req: &mut Request,
+    statement: Statement,
+) -> Answer<OrFalse<Owner<Res>>> {
     stmt::result_metadata(req, on_stmt(statement))
 }
 
@@ -2125,7 +2137,7 @@ fn mysqli_stmt_store_result(req: &mut Request, statement: Statement) -> Answer<b
 /// string(5) "HY000"
 /// ```
 #[php_function]
-fn mysqli_stmt_sqlstate(req: &mut Request, statement: Statement) -> Answer<PhpString> {
+fn mysqli_stmt_sqlstate(req: &mut Request, statement: Statement) -> Answer<Owner<PhpString>> {
     let state = stmt::error_facts(req, on_stmt(statement), Need::Open)?.sqlstate;
     PhpString::new(req, &state)
 }
@@ -2142,7 +2154,7 @@ fn mysqli_stmt_sqlstate(req: &mut Request, statement: Statement) -> Answer<PhpSt
 /// string(5) "42S22"
 /// ```
 #[php_function]
-fn mysqli_sqlstate(req: &mut Request, mysql: Link) -> Answer<PhpString> {
+fn mysqli_sqlstate(req: &mut Request, mysql: Link) -> Answer<Owner<PhpString>> {
     let state = link::status(req, on(mysql))?.sqlstate;
     PhpString::new(req, &state)
 }
@@ -2178,7 +2190,7 @@ fn mysqli_ssl_set(
 /// bool(true)
 /// ```
 #[php_function]
-fn mysqli_stat(req: &mut Request, mysql: Link) -> Answer<OrFalse<PhpString>> {
+fn mysqli_stat(req: &mut Request, mysql: Link) -> Answer<OrFalse<Owner<PhpString>>> {
     link::stat(req, on(mysql))
 }
 
@@ -2205,7 +2217,7 @@ fn mysqli_store_result(
     req: &mut Request,
     mysql: Link,
     #[php(default = 0)] mode: i64,
-) -> Answer<OrFalse<Res>> {
+) -> Answer<OrFalse<Owner<Res>>> {
     let _ = mode;
     let given = req.argument_count() == 2;
     link::store_result(req, on(mysql), given)
@@ -2254,7 +2266,7 @@ fn mysqli_thread_safe() -> bool {
 /// bool(false)
 /// ```
 #[php_function]
-fn mysqli_use_result(req: &mut Request, mysql: Link) -> Answer<OrFalse<Res>> {
+fn mysqli_use_result(req: &mut Request, mysql: Link) -> Answer<OrFalse<Owner<Res>>> {
     link::take_rows(req, on(mysql), link::USE)
 }
 

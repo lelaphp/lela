@@ -17,7 +17,7 @@ use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
 pub(crate) use constants::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
@@ -119,7 +119,7 @@ fn ip2long(ip: Path) -> OrFalse<i64> {
 /// string(8) "10.0.0.1"
 /// ```
 #[php_function]
-fn long2ip(req: &mut Request, ip: i64) -> Result<PhpString, Thrown> {
+fn long2ip(req: &mut Request, ip: i64) -> Result<Owner<PhpString>, Thrown> {
     let [a, b, c, d] = u32::try_from(ip & 0xFFFF_FFFF).unwrap_or(0).to_be_bytes();
     PhpString::new(req, format!("{a}.{b}.{c}.{d}").as_bytes())
 }
@@ -174,7 +174,7 @@ fn getenv(
     req: &mut Request,
     #[php(default = null)] name: Option<PhpString>,
     #[php(default = false)] local_only: bool,
-) -> Result<Union<PhpArray, OrFalse<PhpString>>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, OrFalse<Owner<PhpString>>>, Thrown> {
     let _ = local_only;
     let Some(name) = name else {
         let pairs = req.loaded_env();
@@ -183,8 +183,8 @@ fn getenv(
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let key = Key::from_string(PhpString::new(req, &name)?);
-            let value = Value::string(PhpString::new(req, &value)?);
+            let key = Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated());
+            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
             array.set(req, key, value)?;
         }
         return Ok(Union::A(array));
@@ -340,7 +340,7 @@ fn getopt(
     short_options: PhpString,
     #[php(default = [])] long_options: PhpArray,
     #[php(default = null)] rest_index: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     use crate::getopt::{Getopt, Got, Named, long_option};
     let spec = short_options;
     rest_index.set(req, Untyped(Value::int(1)))?;
@@ -354,7 +354,7 @@ fn getopt(
     for (_, value) in long_options.snapshot() {
         let text = to_string(req, &value)?;
         opts.push(long_option(c_string(text.as_bytes())));
-        req.release(Value::string(text));
+        text.give_up(req);
     }
     let mut walk = Getopt::new(&argv, &opts);
     // Each option found, by name in the order first found, with each
@@ -384,12 +384,12 @@ fn getopt(
         {
             Key::Int(n)
         } else {
-            Key::Str(PhpString::new(req, &name)?)
+            Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated())
         };
         let mut items = Vec::new();
         for value in values {
             items.push(match value {
-                Some(bytes) => Value::string(PhpString::new(req, &bytes)?),
+                Some(bytes) => Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated()),
                 None => Value::bool(false),
             });
         }
@@ -400,7 +400,7 @@ fn getopt(
             for item in items {
                 list.append(req, item)?;
             }
-            Value::array(list)
+            Value::array(list.hand_on_unmigrated())
         };
         result.set(req, key, value)?;
     }
@@ -481,7 +481,10 @@ fn time_nanosleep(
 /// -40
 /// ```
 #[php_function]
-fn set_include_path(req: &mut Request, include_path: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn set_include_path(
+    req: &mut Request,
+    include_path: Path,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(path) = include_path;
     let Some(old) = req.ini_get(b"include_path").map(<[u8]>::to_vec) else {
         return Ok(OrFalse::False);
@@ -504,7 +507,7 @@ fn set_include_path(req: &mut Request, include_path: Path) -> Result<OrFalse<Php
 /// get_include_path() expects exactly 0 arguments, 1 given
 /// ```
 #[php_function]
-fn get_include_path(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match req.ini_get(b"include_path").map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),
@@ -586,7 +589,7 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// -56
 /// ```
 #[php_function]
-fn error_get_last(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
     req.last_error()
 }
 
@@ -619,18 +622,18 @@ fn error_clear_last(req: &mut Request) {
 /// scanner was on, the array destroyed.
 fn parse_ini(
     req: &mut Request,
-    into: PhpArray,
+    into: Owner<PhpArray>,
     bytes: &[u8],
     file: &[u8],
     sections: bool,
     mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(scanner) = crate::ini::scanner(mode) else {
         warning(req, "Invalid scanner mode");
-        req.release(Value::array(into));
+        into.give_up(req);
         return Ok(OrFalse::False);
     };
-    let mut callback = crate::ini::Callback::new(into, sections);
+    let mut callback = crate::ini::Callback::new(*into, sections);
     let parsed =
         php_ext::syntax::parse_ini(req, bytes, scanner, |req, event| callback.event(req, event))
             .map(|parsed| match parsed {
@@ -644,7 +647,7 @@ fn parse_ini(
     if matches!(parsed, Ok(true)) {
         return Ok(OrFalse::Value(into));
     }
-    req.release(Value::array(into));
+    into.give_up(req);
     parsed.map(|_| OrFalse::False)
 }
 
@@ -775,7 +778,7 @@ fn parse_ini_string(
     ini_string: PhpString,
     #[php(default = false)] process_sections: bool,
     #[php(default = INI_SCANNER_NORMAL)] scanner_mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (text, sections, mode) = (ini_string, process_sections, scanner_mode);
     // "Setup string": a copy with `ZEND_MMAP_AHEAD` zero bytes past it,
     // held while it is parsed.
@@ -876,7 +879,7 @@ fn parse_ini_file(
     filename: Path,
     #[php(default = false)] process_sections: bool,
     #[php(default = INI_SCANNER_NORMAL)] scanner_mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (Path(filename), sections, mode) = (filename, process_sections, scanner_mode);
     if filename.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
@@ -886,22 +889,22 @@ fn parse_ini_file(
     let mut fh = match ScannerFile::open(req, &name) {
         Ok(Some(fh)) => fh,
         Ok(None) => {
-            req.release(Value::array(into));
+            into.give_up(req);
             return Ok(OrFalse::False);
         }
         Err(thrown) => {
-            req.release(Value::array(into));
+            into.give_up(req);
             return Err(thrown);
         }
     };
     let parsed = match fh.load(req) {
         Ok(Some(bytes)) => parse_ini(req, into, bytes, &name, sections, mode),
         Ok(None) => {
-            req.release(Value::array(into));
+            into.give_up(req);
             Ok(OrFalse::False)
         }
         Err(thrown) => {
-            req.release(Value::array(into));
+            into.give_up(req);
             Err(thrown)
         }
     };
@@ -948,7 +951,7 @@ fn getservbyport(
     req: &mut Request,
     port: i64,
     protocol: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(proto) = protocol;
     let port = u16::from_le_bytes([port.to_le_bytes()[0], port.to_le_bytes()[1]]);
     match crate::ffi::service_name(port, proto.as_bytes()) {
@@ -989,7 +992,7 @@ fn getprotobyname(protocol: Path) -> OrFalse<i64> {
 /// bool(false)
 /// ```
 #[php_function]
-fn getprotobynumber(req: &mut Request, protocol: i64) -> Result<OrFalse<PhpString>, Thrown> {
+fn getprotobynumber(req: &mut Request, protocol: i64) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let number = protocol;
     // `(int)proto`: the low 32 bits.
     #[allow(clippy::cast_possible_truncation)]
@@ -1098,7 +1101,7 @@ fn time_sleep_until(req: &mut Request, timestamp: f64) -> Result<bool, Thrown> {
 /// bool(true)
 /// ```
 #[php_function]
-fn get_current_user(req: &mut Request) -> Result<PhpString, Thrown> {
+fn get_current_user(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let owner = php_get_current_user(req);
     PhpString::new(req, &owner)
 }
@@ -1134,15 +1137,17 @@ pub fn php_get_current_user(req: &mut Request) -> Vec<u8> {
 fn get_cfg_var(
     req: &mut Request,
     option: PhpString,
-) -> Result<Union<PhpString, OrFalse<PhpArray>>, Thrown> {
-    Ok(match req.cfg_entry(option.as_bytes())? {
-        Some(entry) => match entry.as_ref() {
-            ValueRef::Str(value) => Union::A(*value),
-            ValueRef::Array(entries) => Union::B(OrFalse::Value(*entries)),
-            _ => Union::B(OrFalse::False),
-        },
-        None => Union::B(OrFalse::False),
-    })
+) -> Result<Union<Owner<PhpString>, OrFalse<Owner<PhpArray>>>, Thrown> {
+    let Some(entry) = req.cfg_entry(option.as_bytes())? else {
+        return Ok(Union::B(OrFalse::False));
+    };
+    let answer = match entry.as_ref() {
+        ValueRef::Str(value) => Union::A(Owner::take(req, *value)),
+        ValueRef::Array(entries) => Union::B(OrFalse::Value(Owner::take(req, *entries))),
+        _ => Union::B(OrFalse::False),
+    };
+    entry.give_up(req);
+    Ok(answer)
 }
 
 /// Where `error_log` sends a message, its `$message_type` decoded once
@@ -1239,7 +1244,7 @@ fn error_log(
         LogTo::File(path) => match req.open_stream(path, b"a", false)? {
             Some(stream) => {
                 let written = stream.write(req, message);
-                stream.free(req);
+                stream.hand_on_unmigrated().free(req);
                 written == Some(message.len())
             }
             None => false,
@@ -1318,7 +1323,7 @@ fn ini_get_all(
     req: &mut Request,
     #[php(default = null)] extension: Option<PhpString>,
     #[php(default = true)] details: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let mut entries = req.ini_entries();
     entries.sort_by(|a, b| {
         let (a, b) = (a.decl.name.0.as_ref(), b.decl.name.0.as_ref());
@@ -1344,7 +1349,7 @@ fn ini_get_all(
     }
     let mut all = PhpArray::new(req)?;
     for entry in entries {
-        let key = Key::from_string(PhpString::new(req, &entry.decl.name.0)?);
+        let key = Key::from_string(PhpString::new(req, &entry.decl.name.0)?.hand_on_unmigrated());
         let value = if details {
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
@@ -1358,10 +1363,10 @@ fn ini_get_all(
                 (b"local_value", ini_value(req, entry.value.as_deref())?),
                 (b"access", Value::int(access)),
             ] {
-                let name = Key::Str(PhpString::new(req, name)?);
+                let name = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                 option.set(req, name, value)?;
             }
-            Value::array(option)
+            Value::array(option.hand_on_unmigrated())
         } else {
             ini_value(req, entry.value.as_deref())?
         };
@@ -1374,7 +1379,7 @@ fn ini_get_all(
 /// where the entry has none (php's `NULL`).
 fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
     Ok(match value {
-        Some(value) => Value::string(PhpString::new(req, value)?),
+        Some(value) => Value::string(PhpString::new(req, value)?.hand_on_unmigrated()),
         None => Value::null(),
     })
 }
@@ -1636,7 +1641,7 @@ fn move_uploaded_file(req: &mut Request, from: Path, to: Path) -> bool {
 /// }
 /// ```
 #[php_function]
-fn sys_getloadavg(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn sys_getloadavg(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(load) = crate::ffi::loadavg() else {
         return Ok(OrFalse::False);
     };
@@ -1700,7 +1705,7 @@ fn ftok(req: &mut Request, filename: Path, project_id: PhpString) -> Result<i64,
 /// bool(false)
 /// ```
 #[php_function]
-fn inet_ntop(req: &mut Request, ip: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn inet_ntop(req: &mut Request, ip: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let address = ip;
     match crate::ffi::inet_text(address.as_bytes()) {
         Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
@@ -1725,7 +1730,7 @@ fn inet_ntop(req: &mut Request, ip: PhpString) -> Result<OrFalse<PhpString>, Thr
 /// inet_pton(): Argument #1 ($ip) must not contain any null bytes
 /// ```
 #[php_function]
-fn inet_pton(req: &mut Request, ip: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn inet_pton(req: &mut Request, ip: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Path(address) = ip;
     let text = address.as_bytes();
     let six = text.contains(&b':');
@@ -1765,11 +1770,16 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
     let Some(stream) = req.open_stream(filename, b"rb", true)? else {
         return Ok(None);
     };
-    let source = stream.copy_to_mem(req, None);
-    stream.free(req);
-    let source = source?;
+    let source = match stream.copy_to_mem(req, None) {
+        Ok(source) => source,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     let bytes = source.as_bytes().to_vec();
-    req.release(Value::string(source));
+    source.give_up(req);
     Ok(Some(bytes))
 }
 
@@ -1820,7 +1830,7 @@ fn highlight_file(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] r#return: bool,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let (Path(filename), returned) = (filename, r#return);
     if req.check_open_basedir(filename.as_bytes(), true).is_err() {
         return Ok(Union::B(false));
@@ -1873,7 +1883,7 @@ fn highlight_file(
 /// echo "フソ";
 /// ```
 #[php_function]
-fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<PhpString, Thrown> {
+fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<Owner<PhpString>, Thrown> {
     let Path(filename) = filename;
     let Some(source) = scanned_file(req, filename.as_bytes())? else {
         return PhpString::new(req, b"");
@@ -1886,7 +1896,7 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<PhpString, 
 /// `php_output_start_default`, `php_output_get_contents` and
 /// `php_output_discard` ([`Request::captured`]), and php's `Error`
 /// where the handler could not start.
-fn captured(req: &mut Request, printed: &[u8]) -> Result<PhpString, Thrown> {
+fn captured(req: &mut Request, printed: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     match req.captured(|req| req.write(printed))? {
         Some(captured) => Ok(captured),
         None => Err(throw_error(req, "Error", "Unable to start output handler")),
@@ -1926,7 +1936,7 @@ fn highlight_string(
     req: &mut Request,
     string: PhpString,
     #[php(default = false)] r#return: bool,
-) -> Result<Union<PhpString, True>, Thrown> {
+) -> Result<Union<Owner<PhpString>, True>, Thrown> {
     let returned = r#return;
     let html = php_ext::syntax::highlight(req, string.as_bytes(), Scanning::String)?;
     if returned {
@@ -2044,7 +2054,7 @@ fn call_user_func(
     req: &mut Request,
     callback: Callable,
     args: NamedVariadic<Value>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     call_named(req, &callback, &args.positional, args.named())
 }
 
@@ -2228,7 +2238,7 @@ fn call_user_func_array(
     req: &mut Request,
     callback: Callable,
     args: PhpArray,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     call_array(req, &callback, args)
 }
 
@@ -2257,7 +2267,7 @@ fn forward_static_call(
     req: &mut Request,
     callback: Callable,
     args: Variadic<Value>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let arguments = args.0;
     if req.scope().is_none() {
         return Err(php_ext::raising::throw_error(
@@ -2293,7 +2303,7 @@ fn forward_static_call_array(
     req: &mut Request,
     callback: Callable,
     args: PhpArray,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let array = args;
     let callback = forwarded(req, &callback);
     call_array(req, &callback, array)
@@ -2428,7 +2438,7 @@ fn forwarded(req: &Request, callback: &Callable) -> Callable {
 ///   thrown in %s on line 2
 /// ```
 #[php_function]
-fn constant(req: &mut Request, name: PhpString) -> Result<Value, Thrown> {
+fn constant(req: &mut Request, name: PhpString) -> Result<Owner<Value>, Thrown> {
     fetch_constant(req, name.as_bytes())
 }
 

@@ -9,7 +9,7 @@ use php_ext::abi::Union;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::constants::{
     PATHINFO_ALL, PATHINFO_BASENAME, PATHINFO_DIRNAME, PATHINFO_EXTENSION, PATHINFO_FILENAME,
@@ -158,7 +158,7 @@ pub(super) fn basename(
     req: &mut Request,
     path: PhpString,
     #[php(default = "")] suffix: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let suffix: &[u8] = suffix.as_bytes();
     let name = php_basename(path.as_bytes(), suffix).to_vec();
     PhpString::new(req, &name)
@@ -190,7 +190,7 @@ pub(super) fn dirname(
     req: &mut Request,
     path: PhpString,
     #[php(default = 1)] levels: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     if levels < 1 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 1"));
     }
@@ -246,7 +246,7 @@ pub(super) fn pathinfo(
     req: &mut Request,
     path: PhpString,
     #[php(default = PATHINFO_ALL)] flags: i64,
-) -> Result<Union<PhpArray, PhpString>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, Owner<PhpString>>, Thrown> {
     let opt = flags;
     let p = path.as_bytes();
     let mut parts: Vec<(&[u8], Vec<u8>)> = Vec::new();
@@ -275,8 +275,8 @@ pub(super) fn pathinfo(
     }
     let mut array = PhpArray::new(req)?;
     for (name, bytes) in parts {
-        let key = Key::Str(PhpString::new(req, name)?);
-        let value = Value::string(PhpString::new(req, &bytes)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        let value = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
         array.set(req, key, value)?;
     }
     Ok(Union::A(array))

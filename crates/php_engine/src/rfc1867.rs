@@ -14,7 +14,7 @@ use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::request::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
-use crate::api::values::{PhpArray, PhpString, Value};
+use crate::api::values::{PhpArray, Value};
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -469,7 +469,7 @@ impl Handler {
         value: &[u8],
         override_protection: bool,
     ) -> Result<(), Thrown> {
-        let value = Value::string(PhpString::new(req, value)?);
+        let value = Value::string(req.string(value)?);
         self.register(req, self.files, name, value, override_protection)
     }
 }
@@ -501,7 +501,7 @@ pub(crate) fn post_handler(
     let files = if let Some(files) = req.files_track() {
         files
     } else {
-        let files = PhpArray::new(req)?;
+        let files = req.array()?;
         req.set_files_track(files);
         files
     };

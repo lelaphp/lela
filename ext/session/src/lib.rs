@@ -43,7 +43,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Into
 use php_ext::attr::php_const;
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpRef, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpRef, PhpString, Value};
 
 use crate::natives::{
     session_abort, session_cache_expire, session_cache_limiter, session_commit, session_create_id,
@@ -346,8 +346,8 @@ fn shown(bytes: &[u8]) -> String {
 }
 
 /// A new string of the request's as a value.
-fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// An ini entry's text, the engine default where the request set none.
@@ -443,7 +443,7 @@ fn bind_vars(req: &mut Request, vars: Value) -> Result<(), Thrown> {
     if let Some(old) = req.state::<State>().vars.take() {
         req.release(old.as_value());
     }
-    let vars = PhpRef::new(req, vars)?;
+    let vars = PhpRef::new(req, vars)?.hand_on_unmigrated();
     req.addref(&vars.as_value());
     req.state::<State>().vars = Some(vars);
     req.set_global(b"_SESSION", Some(vars.as_value()));

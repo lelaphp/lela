@@ -25,7 +25,7 @@ use php_ext::request::{
     Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
     XportFactory,
 };
-use php_ext::values::{Key, PhpArray, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
 use php_ext_standard::UriParser;
 
 use crate::decode::{Origin, check_path};
@@ -387,7 +387,7 @@ fn option(req: &Request, context: Option<StreamCtx>, name: &[u8]) -> Option<Valu
 pub(crate) fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let text = to_string(req, value)?;
     let bytes = text.as_bytes().to_vec();
-    req.release(Value::string(text));
+    text.give_up(req);
     Ok(bytes)
 }
 
@@ -1238,9 +1238,10 @@ impl Layer {
     ) -> Result<(), Thrown> {
         if self.options.capture_peer_cert {
             let object = object_of(req, peer.clone())?;
-            let value = object.object().as_value();
-            context.set_option(req, b"ssl", b"peer_certificate", &value)?;
-            req.release(value);
+            let value = object.into_value();
+            let set = context.set_option(req, b"ssl", b"peer_certificate", &value);
+            value.give_up(req);
+            set?;
         }
         if self.options.capture_peer_cert_chain {
             let value = match tls.peer_chain() {
@@ -1248,14 +1249,15 @@ impl Layer {
                     let mut array = PhpArray::new(req)?;
                     for cert in chain {
                         let object = object_of(req, cert)?;
-                        array.append(req, object.object().as_value())?;
+                        array.append(req, object.into_value().hand_on_unmigrated())?;
                     }
-                    Value::array(array)
+                    array.into_value()
                 }
-                None => Value::null(),
+                None => Owner::take(req, Value::null()),
             };
-            context.set_option(req, b"ssl", b"peer_certificate_chain", &value)?;
-            req.release(value);
+            let set = context.set_option(req, b"ssl", b"peer_certificate_chain", &value);
+            value.give_up(req);
+            set?;
         }
         Ok(())
     }
@@ -1437,7 +1439,7 @@ impl Layer {
                     "Invalid callback {}, {why}",
                     String::from_utf8_lossy(name.as_bytes())
                 );
-                req.release(Value::string(name));
+                name.give_up(req);
                 return Err(throw_error(req, "Error", &text));
             }
         };
@@ -1448,7 +1450,7 @@ impl Layer {
         {
             bucket.should_close = false;
         }
-        req.release(returned);
+        returned.give_up(req);
         Ok(())
     }
 
@@ -1598,11 +1600,12 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
             v.as_php_string()
                 .map(|s| matches!(s.as_bytes(), b"http" | b"ftp"))
         });
-        req.release(Value::array(meta));
+        meta.give_up(req);
         found.unwrap_or(false)
     });
     if remote {
-        stream.free(req);
+        stream.close(req);
+        stream.give_up(req);
         raise(
             req,
             Level::Warning,
@@ -1641,7 +1644,8 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
             }
         }
     }
-    stream.free(req);
+    stream.close(req);
+    stream.give_up(req);
     if added == 0 {
         raise(
             req,
@@ -1861,7 +1865,7 @@ impl Crypto for Layer {
         if let Some(alpn) = tls.alpn_selected() {
             crate::put_bytes(req, &mut array, b"alpn_protocol", &alpn)?;
         }
-        Ok(Some(array))
+        Ok(Some(array.hand_on_unmigrated()))
     }
 
     /// `STREAM_XPORT_OP_CONNECT`'s tail and the accept's: where the

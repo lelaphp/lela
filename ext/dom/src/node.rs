@@ -12,7 +12,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{C14nOut, C14nSelect, C14nTarget, Kind, Node, Ns, Object, Save, XPath};
 
@@ -118,31 +118,31 @@ pub(crate) fn replace_child(
     node: PhpObject,
     child: PhpObject,
     modern: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let parent = fetch(req, this)?;
     let new_child = fetch(req, node)?;
     let old_child = fetch(req, child)?;
     let strict = strict(req, this);
     if new_child.doc() != parent.doc() && new_child.doc().is_some() {
         dom_error(req, Code::WrongDocument, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if modern {
         replace_validity(req, parent, new_child, old_child)?;
     } else {
         if !children_valid(parent) || parent.children().is_none() {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         if !check_legacy_insertion(req, parent, new_child, strict, false)? {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         if (old_child.kind() == Kind::Attribute) != (new_child.kind() == Kind::Attribute) {
             dom_error(req, Code::HierarchyRequest, strict)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         if old_child.parent() != Some(parent) {
             dom_error(req, Code::NotFound, strict)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
     }
     if new_child.doc().is_none() && parent.doc().is_some() {
@@ -374,7 +374,7 @@ fn cloned_object(
     this: php_ext::values::PhpObject,
     original: Node,
     node: Node,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if node.kind() == Kind::Attribute && original.ns().is_some() && node.ns().is_none() {
         node.set_ns(original.ns());
     }
@@ -499,7 +499,7 @@ pub(crate) fn lookup_prefix(
     this: PhpObject,
     namespace: Option<PhpString>,
     modern: bool,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let uri = namespace.map(|n| n.as_bytes().to_vec()).unwrap_or_default();
     let node = fetch(req, this)?;
     if uri.is_empty() {
@@ -864,15 +864,19 @@ pub(crate) fn contains_node(node: Node, other: Node) -> bool {
 }
 
 /// `dom_node_append_child_legacy`, `DOMNode::appendChild`'s body.
-fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<Value, Thrown> {
+fn append_child(
+    req: &mut Request,
+    this: PhpObject,
+    child: PhpObject,
+) -> Result<Owner<Value>, Thrown> {
     let parent = fetch(req, this)?;
     let child = fetch(req, child)?;
     if !children_valid(parent) {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let strict = strict(req, this);
     if !check_legacy_insertion(req, parent, child, strict, true)? {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
@@ -927,7 +931,7 @@ fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<
                     "A document may only contain one document type",
                     strict,
                 )?;
-                return Ok(Value::bool(false));
+                return Ok(Owner::take(req, Value::bool(false)));
             }
             let added = parent.add_child(child);
             if let (Some(d), Some(a)) = (doc, added) {
@@ -945,7 +949,7 @@ fn append_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<
     };
     let Some(new_child) = new_child else {
         dom_error(req, Code::InvalidState, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     invalidate(req, this);
     object_for(req, new_child, Some(this))
@@ -958,22 +962,22 @@ fn insert_before(
     this: PhpObject,
     child: PhpObject,
     reference: Option<PhpObject>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let parent = fetch(req, this)?;
     let child = fetch(req, child)?;
     if !children_valid(parent) {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let strict = strict(req, this);
     if !check_legacy_insertion(req, parent, child, strict, true)? {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let refp = match reference {
         Some(r) => {
             let refp = fetch(req, r)?;
             if refp.parent() != Some(parent) {
                 dom_error(req, Code::NotFound, strict)?;
-                return Ok(Value::bool(false));
+                return Ok(Owner::take(req, Value::bool(false)));
             }
             Some(refp)
         }
@@ -1110,17 +1114,21 @@ fn insert_before(
 }
 
 /// `DOMNode::removeChild`'s body, which `Dom\Node::removeChild` shares.
-fn remove_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<Value, Thrown> {
+fn remove_child(
+    req: &mut Request,
+    this: PhpObject,
+    child: PhpObject,
+) -> Result<Owner<Value>, Thrown> {
     let parent = fetch(req, this)?;
     let child = fetch(req, child)?;
     let strict = strict(req, this);
     if parent.children().is_none() || child.parent() != Some(parent) {
         dom_error(req, Code::NotFound, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if is_read_only(parent) || child.parent().is_some_and(is_read_only) {
         dom_error(req, Code::NoModificationAllowed, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     child.unlink();
     invalidate(req, this);
@@ -1128,7 +1136,11 @@ fn remove_child(req: &mut Request, this: PhpObject, child: PhpObject) -> Result<
 }
 
 /// `DOMNode::cloneNode`'s body, which `Dom\Node::cloneNode` shares.
-fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<Value, Thrown> {
+fn clone_node_of(
+    req: &mut Request,
+    this: PhpObject,
+    recursive: bool,
+) -> Result<Owner<Value>, Thrown> {
     let n = fetch(req, this)?;
     let is_document = n.kind().is_document();
     if follows_spec(req, this) {
@@ -1136,24 +1148,24 @@ fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<
             let mut private = Private::new(req)?;
             let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
                 private.free(req);
-                return Ok(Value::bool(false));
+                return Ok(Owner::take(req, Value::bool(false)));
             };
             let copy =
                 crate::modern::document_object(req, modern_document_class(n), node, private)?;
-            copy_document_ref(req, this, copy);
-            return Ok(copy.as_value());
+            copy_document_ref(req, this, *copy);
+            return Ok(copy.into_value());
         }
         let cloned = match crate::dom_mut(req, this).and_then(|d| crate::private::of(&mut d.obj)) {
             Some(private) => clone_node_modern(&mut private.mapper, n, n.doc(), recursive),
             None => clone_node(n, n.doc(), recursive),
         };
         let Some(node) = cloned else {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         };
         return cloned_object(req, this, n, node);
     }
     let Some(node) = clone_node(n, n.doc(), recursive) else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     if is_document {
         let value = object_for(req, node, None)?;
@@ -1269,7 +1281,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         append_child(req, this.object(), node.object()).map(Untyped)
     }
 
@@ -1306,7 +1318,7 @@ impl DOMNode {
         #[php(default = false)] withComments: bool,
         #[php(default = null)] xpath: Option<PhpArray>,
         #[php(default = null)] nsPrefixes: Option<PhpArray>,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let out = canonicalization(
             req,
             this.object(),
@@ -1397,7 +1409,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         #[php(default = false)] deep: bool,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         clone_node_of(req, this.object(), deep).map(Untyped)
     }
 
@@ -1427,7 +1439,10 @@ impl DOMNode {
     /// /r/a[2]/b
     /// ```
     #[php(tentative)]
-    fn getNodePath(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getNodePath(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         match fetch(req, this.object())?.path() {
             Some(p) => PhpString::new(req, &p).map(Some),
             None => Ok(None),
@@ -1490,7 +1505,7 @@ impl DOMNode {
         this: This<Self>,
         node: Instance<DOMNode>,
         #[php(default = null)] child: Option<Instance<DOMNode>>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let reference = child.map(|c| c.object());
         insert_before(req, this.object(), node.object(), reference).map(Untyped)
     }
@@ -1618,7 +1633,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         prefix: Option<PhpString>,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let prefix = prefix.map(|p| p.as_bytes().to_vec());
         let this = this.object();
         let mut node = fetch(req, this)?;
@@ -1658,7 +1673,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         namespace: PhpString,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         lookup_prefix(req, this.object(), Some(namespace), false)
     }
 
@@ -1725,7 +1740,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         child: Instance<DOMNode>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         remove_child(req, this.object(), child.object()).map(Untyped)
     }
 
@@ -1747,7 +1762,7 @@ impl DOMNode {
         this: This<Self>,
         node: Instance<DOMNode>,
         child: Instance<DOMNode>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         replace_child(req, this.object(), node.object(), child.object(), false).map(Untyped)
     }
 
@@ -1807,7 +1822,7 @@ impl DOMNode {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] options: Option<PhpArray>,
-    ) -> Result<Raw<Instance<DOMNode>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<DOMNode>>>, Thrown> {
         let _ = options;
         let this = this.object();
         let mut node = fetch(req, this)?;
@@ -1815,7 +1830,7 @@ impl DOMNode {
             node = p;
         }
         let root = object_for(req, node, Some(this))?;
-        returned(req, root)
+        returned(root)
     }
 
     /// `DOMNode::compareDocumentPosition(DOMNode $other): int`.

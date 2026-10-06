@@ -33,7 +33,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{instantiate, lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::{Request, Resolve};
-use php_ext::values::{ClassId, PhpObject, PhpString};
+use php_ext::values::{ClassId, Owner, PhpObject, PhpString};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Emitter, Library, Name, Raised};
 
@@ -451,22 +451,22 @@ fn writer_class(req: &mut Request) -> Result<ClassId, Thrown> {
 pub(crate) fn new_writer(
     req: &mut Request,
     writer: Emitter,
-) -> Result<Instance<XMLWriter>, Thrown> {
+) -> Result<Owner<Instance<XMLWriter>>, Thrown> {
     let class = writer_class(req)?;
     let object = new_object(req, class)?;
-    put(req, object, writer);
-    Ok(Instance::of(object))
+    put(req, *object, writer);
+    Ok(object.into_instance())
 }
 
 /// `xml_writer_create_static`: `object_init_with_constructor` of the
 /// class the call named, the emitter on it.
-pub(crate) fn create_static(req: &mut Request, writer: Emitter) -> Result<Static, Thrown> {
+pub(crate) fn create_static(req: &mut Request, writer: Emitter) -> Result<Owner<Static>, Thrown> {
     let scope = req.called_scope();
     let class = scope.map_or_else(|| writer_class(req), Ok)?;
     match instantiate(req, class, &[]) {
         Ok(object) => {
-            put(req, object, writer);
-            Ok(Static(object))
+            put(req, *object, writer);
+            Ok(object.into_static())
         }
         Err(thrown) => {
             let (raised, _thrown) = writer.close(req);
@@ -503,7 +503,7 @@ pub(crate) fn flush(
     object: PhpObject,
     empty: bool,
     force_string: bool,
-) -> Result<Union<PhpString, i64>, Thrown> {
+) -> Result<Union<Owner<PhpString>, i64>, Thrown> {
     let mut writer = take(req, object)?;
     if force_string && writer.buffered().is_none() {
         put(req, object, writer);
@@ -528,7 +528,7 @@ pub(crate) fn output_memory(
     req: &mut Request,
     object: PhpObject,
     empty: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     match flush(req, object, empty, true)? {
         Union::A(s) => Ok(s),
         Union::B(_) => PhpString::new(req, b""),

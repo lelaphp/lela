@@ -9,7 +9,7 @@
 use php_heap::Fatal;
 
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{PhpObject, PhpString, Value};
+use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::exec;
 
 use super::Request;
@@ -125,7 +125,7 @@ impl Request {
         }
         self.leave_pending(&thrown);
         free(self);
-        Thrown::of(self.take_pending())
+        Thrown::of(self.take_pending_view())
     }
 
     /// The pending throwable at the end of a serving, php's
@@ -194,7 +194,7 @@ impl Request {
     /// `severity | E_DONT_BAIL` as `assert.bail` asks, it is a diagnostic
     /// like any other, and the throwable is given up.
     pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Fatal> {
-        let Some(throwable) = self.take_pending() else {
+        let Some(throwable) = self.take_pending_view() else {
             // `zend_exception_error` on either exit: "We successfully
             // unwound, nothing more to do", and the object is released
             // (`Z/Zend/zend_exceptions.c:1005`); a fatal's bailout is
@@ -218,11 +218,11 @@ impl Request {
             // to take it, so it is rendered uncaught in its turn and the
             // request leaves (`zend_call_function`'s tail,
             // [`Request::thrown_without_frame`]).
-            match crate::api::call::call_method(self, &throwable, b"__tostring", &[]) {
+            match crate::api::call::call_method_made(self, &throwable, b"__tostring", &[]) {
                 Ok(returned) => {
                     let text = returned.deref();
                     if text.as_str_bytes().is_some() {
-                        if let Ok(name) = PhpString::new(self, b"string") {
+                        if let Ok(name) = self.string(b"string") {
                             self.addref(&text);
                             throwable.set_prop(self, name, text).ok();
                         }
@@ -393,8 +393,8 @@ impl Request {
                 .previous_of(exception)
                 .filter(|previous| !seen.iter().any(|done| done.index() == previous.index()));
         }
-        let string = PhpString::new(self, &text)?;
-        let name = PhpString::new(self, b"string")?;
+        let string = self.string(&text)?;
+        let name = self.string(b"string")?;
         self.addref(&Value::string(string));
         this.set_prop(self, name, Value::string(string))?;
         match raised {
@@ -443,11 +443,11 @@ impl Request {
         let trace = self.debug_backtrace()?;
         let line = Value::int(i64::from(self.current_line()));
         for (name, value) in [
-            (&b"file"[..], Value::string(PhpString::new(self, &file)?)),
+            (&b"file"[..], Value::string(self.string(&file)?)),
             (b"line", line),
             (b"trace", Value::array(trace)),
         ] {
-            let name = PhpString::new(self, name)?;
+            let name = self.string(name)?;
             throwable.set_prop(self, name, value)?;
         }
         Ok(())
@@ -619,7 +619,7 @@ impl Request {
                 at = next;
                 continue;
             }
-            let Ok(name) = PhpString::new(self, b"previous") else {
+            let Ok(name) = self.string(b"previous") else {
                 return;
             };
             if at.set_prop(self, name, previous.as_value()).is_ok() {
@@ -668,7 +668,15 @@ impl Request {
     /// the caller's: php's `EG(exception) = NULL` beside the object it
     /// took, which is what a matching `CATCH` does with it. An exit
     /// standing is left where it stands.
-    pub fn take_pending(&mut self) -> Option<PhpObject> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn take_pending(&mut self) -> Option<Owner<PhpObject>> {
+        let object = self.take_pending_view()?;
+        Some(Owner::adopt(self, object))
+    }
+
+    /// What [`take_pending`](Self::take_pending) takes, its one owner not
+    /// yet named.
+    pub(crate) fn take_pending_view(&mut self) -> Option<PhpObject> {
         let object = self.pending()?;
         self.raised = None;
         Some(object)

@@ -11,7 +11,7 @@ use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
@@ -92,7 +92,7 @@ pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Value, Thrown
             "InternalError: PDORow is not declared",
         ));
     };
-    let row = new_object(req, class)?;
+    let row = new_object(req, class)?.hand_on_unmigrated();
     req.addref(&object.as_value());
     if let Some(r) = row.native_mut::<Row>(req) {
         r.stmt = Some(object);
@@ -197,7 +197,9 @@ impl ObjectHandlers for Handlers {
         } else {
             PropertyRead::Warning
         };
-        self.read_property(req, object, name.as_bytes(), how)
+        let read = self.read_property(req, object, name.as_bytes(), how);
+        name.give_up(req);
+        read
     }
 
     fn write_property(
@@ -292,7 +294,9 @@ impl ObjectHandlers for Handlers {
         } else {
             PropertyTest::Isset
         };
-        self.has_property(req, object, name.as_bytes(), test)
+        let has = self.has_property(req, object, name.as_bytes(), test);
+        name.give_up(req);
+        has
     }
 
     fn unset_property(
@@ -331,10 +335,10 @@ impl ObjectHandlers for Handlers {
         let mut out = PhpArray::new(req)?;
         let filled = debug_rows(req, stmt, &mut out);
         if let Err(thrown) = filled {
-            req.release(Value::array(out));
+            out.give_up(req);
             return Err(thrown);
         }
-        Ok(Some(out.into()))
+        Ok(Some(out.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -360,7 +364,7 @@ impl ObjectHandlers for Handlers {
 /// laid into `out`: `zend_array_dup` of the statement's properties, each
 /// row one more owner, then each column but `queryString` fetched,
 /// `zend_hash_update` under its name.
-fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut PhpArray) -> Result<(), Thrown> {
+fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> Result<(), Thrown> {
     for (key, value) in Std.get_properties(req, stmt)? {
         if let Key::Str(name) = key {
             req.addref(&Value::string(name));
@@ -381,7 +385,7 @@ fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut PhpArray) -> Result<
         }
         let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
         let key = match PhpString::new(req, name) {
-            Ok(key) => Key::Str(key),
+            Ok(key) => Key::Str(key.hand_on_unmigrated()),
             Err(thrown) => {
                 req.release(value);
                 return Err(thrown);

@@ -28,7 +28,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
 /// `interface Traversable`, which a user class cannot implement alone.
 #[php_class(interface)]
@@ -209,7 +209,7 @@ impl Funcs {
             Funcs::User | Funcs::Places(_) => {
                 invalidate_current(req, wrapper);
                 let answered = crate::api::call::call_method(req, &data, b"rewind", &[])?;
-                req.release(answered);
+                answered.give_up(req);
                 Ok(())
             }
             Funcs::Generator => crate::generator::iterator_rewind(req, data),
@@ -232,7 +232,7 @@ impl Funcs {
             Funcs::User | Funcs::Places(_) => {
                 let answered = crate::api::call::call_method(req, &data, b"valid", &[])?;
                 let valid = crate::api::coerce::truthy(req, &answered);
-                req.release(answered);
+                answered.give_up(req);
                 Ok(valid)
             }
             Funcs::Generator => crate::generator::iterator_valid(req, data),
@@ -257,7 +257,7 @@ impl Funcs {
             Funcs::User | Funcs::Places(_) => {
                 invalidate_current(req, wrapper);
                 let answered = crate::api::call::call_method(req, &data, b"next", &[])?;
-                req.release(answered);
+                answered.give_up(req);
                 Ok(())
             }
             Funcs::Generator => crate::generator::iterator_move_forward(req, data),
@@ -284,13 +284,13 @@ impl Funcs {
             Funcs::Places(place) if by_ref => {
                 Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.as_value()))
             }
-            Funcs::Places(_) => crate::api::call::call_method(req, &data, b"current", &[]),
+            Funcs::Places(_) => crate::api::call::call_method_made(req, &data, b"current", &[]),
             Funcs::User => {
                 if let Some(kept) = wrapper.native::<Wrapped>(req).and_then(|it| it.value) {
                     req.addref(&kept);
                     return Ok(kept);
                 }
-                let value = crate::api::call::call_method(req, &data, b"current", &[])?;
+                let value = crate::api::call::call_method_made(req, &data, b"current", &[])?;
                 req.addref(&value);
                 if let Some(it) = wrapper.native_mut::<Wrapped>(req) {
                     it.value = Some(value);
@@ -329,7 +329,7 @@ impl Funcs {
                 let answered = crate::api::call::call_method(req, &data, b"key", &[])?;
                 let bare = answered.deref();
                 req.addref(&bare);
-                req.release(answered);
+                answered.give_up(req);
                 Ok(bare)
             }
             Funcs::Generator => crate::generator::iterator_key(req, data),
@@ -718,7 +718,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
     let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
     match answered.deref().as_object().copied() {
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
-            req.release(answered);
+            answered.give_up(req);
             if by_ref {
                 return Err(throw_error(
                     req,
@@ -731,11 +731,11 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         }
         Some(inner) if inner != object && is_traversable(req, inner.class()) => {
             let walked = iterated(req, inner, by_ref);
-            req.release(answered);
+            answered.give_up(req);
             walked
         }
         _ => {
-            req.release(answered);
+            answered.give_up(req);
             let name = req.class_name(object.class());
             Err(throw(
                 req,
@@ -1033,33 +1033,37 @@ impl InternalIterator {
     }
 
     /// `InternalIterator::current(): mixed`.
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
-            return funcs.current(req, walk, false);
+            let made = funcs.current(req, walk, false);
+            return crate::api::values::adopted(req, made);
         }
-        Ok(match internal_element(req, this.object())? {
+        let made = match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(key);
                 value
             }
             None => Value::null(),
-        })
+        };
+        Ok(Owner::adopt(req, made))
     }
 
     /// `InternalIterator::key(): mixed`.
-    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
-            return funcs.key(req, walk);
+            let made = funcs.key(req, walk);
+            return crate::api::values::adopted(req, made);
         }
-        Ok(match internal_element(req, this.object())? {
+        let made = match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(value);
                 key
             }
             None => Value::null(),
-        })
+        };
+        Ok(Owner::adopt(req, made))
     }
 
     /// `InternalIterator::next(): void`.

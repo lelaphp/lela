@@ -10,7 +10,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
 };
 use php_ext::request::{Cast, Request, Resolve, Stream, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::flatfile::{Flatfile, Stored};
 use crate::inifile::Key as IniKey;
@@ -49,7 +49,7 @@ pub(crate) fn dba_popen(
     #[php(default = 0644)] permission: i64,
     #[php(default = 0)] map_size: i64,
     #[php(default = null)] flags: Option<i64>,
-) -> Result<OrFalse<Instance<Connection>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
     let asked = Asked {
         path: path.0.as_bytes().to_vec(),
         mode: mode.as_bytes().to_vec(),
@@ -117,7 +117,7 @@ pub(crate) fn dba_open(
     #[php(default = 0644)] permission: i64,
     #[php(default = 0)] map_size: i64,
     #[php(default = null)] flags: Option<i64>,
-) -> Result<OrFalse<Instance<Connection>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
     let asked = Asked {
         path: path.0.as_bytes().to_vec(),
         mode: mode.as_bytes().to_vec(),
@@ -146,7 +146,7 @@ fn c_text(bytes: &[u8]) -> String {
 }
 
 /// `object_init_ex(return_value, dba_connection_ce)`.
-fn new_connection(req: &mut Request) -> Result<PhpObject, Thrown> {
+fn new_connection(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, b"Dba\\Connection")? else {
         return Err(throw(req, "Error", "Class \"Dba\\Connection\" not found"));
     };
@@ -168,7 +168,7 @@ fn open(
     req: &mut Request,
     asked: &Asked,
     persistent: bool,
-) -> Result<OrFalse<Instance<Connection>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
     if asked.path.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -218,8 +218,11 @@ fn open(
         }
         if let Some(link) = found {
             let object = new_connection(req)?;
-            list(req, object, link, &key)?;
-            return Ok(OrFalse::Value(Instance::of(object)));
+            if let Err(thrown) = list(req, *object, link, &key) {
+                object.give_up(req);
+                return Err(thrown);
+            }
+            return Ok(OrFalse::Value(object.into_instance()));
         }
     }
     let Some(handler) = handler_asked(req, asked.handler.as_deref()) else {
@@ -243,15 +246,18 @@ fn open(
     }
     let object = new_connection(req)?;
     let Some(link) = open_link(req, asked, handler, mode, persistent)? else {
-        req.release(object.as_value());
+        object.give_up(req);
         return Ok(OrFalse::False);
     };
     let id = req.state::<State>().store(link);
     if persistent {
         req.state::<State>().persistent.hold(key.clone(), id);
     }
-    list(req, object, id, &key)?;
-    Ok(OrFalse::Value(Instance::of(object)))
+    if let Err(thrown) = list(req, *object, id, &key) {
+        object.give_up(req);
+        return Err(thrown);
+    }
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// The handler `$handler` names, or the default one; `None` after php's
@@ -317,7 +323,7 @@ fn open_stream(
     name: &[u8],
     mode: &[u8],
     warn: bool,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let opening = php_ext::request::Opening {
         warn,
         must_seek: true,
@@ -357,7 +363,7 @@ fn open_link(
             if mode.access == Access::Read {
                 // A reader tries the lock file that is there first, and
                 // says nothing where it is not.
-                lock_file = open_stream(req, &name, b"rb", false)?;
+                lock_file = open_stream(req, &name, b"rb", false)?.map(Owner::hand_on_unmigrated);
             }
             if lock_file.is_none() {
                 lock_mode = b"a+b";
@@ -365,7 +371,7 @@ fn open_link(
             name
         };
         if lock_file.is_none() {
-            lock_file = open_stream(req, &name, lock_mode, true)?;
+            lock_file = open_stream(req, &name, lock_mode, true)?.map(Owner::hand_on_unmigrated);
             if lock_file.is_some() && on_database {
                 match opened_path(req, &name) {
                     Some(opened) => path = opened,
@@ -387,7 +393,7 @@ fn open_link(
     } else if let (Some(held), true) = (lock_file, on_database) {
         Some(held)
     } else if let Some(file) = open_stream(req, &path, mode.file_mode(), true)? {
-        Some(file)
+        Some(file.hand_on_unmigrated())
     } else {
         free_streams(req, None, lock_file);
         return Ok(None);
@@ -527,7 +533,7 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
     for (_, value) in array.snapshot() {
         let text = php_ext::coerce::to_string(req, &value)?;
         parts.push(text.as_bytes().to_vec());
-        req.release(Value::string(text));
+        text.give_up(req);
     }
     let (group, name) = (&parts[0], &parts[1]);
     if group.is_empty() {
@@ -541,7 +547,7 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
 }
 
 /// The bytes as a string of the request's.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
@@ -645,7 +651,7 @@ pub(crate) fn dba_fetch(
     key: Raw<Union<PhpArray, PhpString>>,
     dba: Raw<Untyped<Value>>,
     #[php(default = 0)] skip: Raw<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let three = req.argument_count() == 3;
     // The legacy `($key, $skip, $dba)`, tried quietly first as php's
     // `ZEND_PARSE_PARAMS_QUIET` tries it.
@@ -786,7 +792,7 @@ fn longish(value: &Value) -> bool {
 pub(crate) fn dba_key_split(
     req: &mut Request,
     key: Raw<Option<Union<PhpString, False>>>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let value = key.value();
     if matches!(
         value.deref().as_ref(),
@@ -812,7 +818,7 @@ pub(crate) fn dba_key_split(
     let mut array = PhpArray::new(req)?;
     for part in [group, name] {
         let part = string(req, part)?;
-        array.append(req, Value::string(part))?;
+        array.append(req, part.into_value().hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -837,7 +843,7 @@ pub(crate) fn dba_key_split(
 pub(crate) fn dba_firstkey(
     req: &mut Request,
     dba: Instance<Connection>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let key = with_link(req, dba, |req, link| {
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
@@ -873,7 +879,7 @@ pub(crate) fn dba_firstkey(
 pub(crate) fn dba_nextkey(
     req: &mut Request,
     dba: Instance<Connection>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let key = with_link(req, dba, |req, link| {
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
@@ -888,7 +894,10 @@ pub(crate) fn dba_nextkey(
 }
 
 /// A key or a value as the native returns it.
-fn or_false(req: &mut Request, bytes: Option<Vec<u8>>) -> Result<OrFalse<PhpString>, Thrown> {
+fn or_false(
+    req: &mut Request,
+    bytes: Option<Vec<u8>>,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match bytes {
         Some(bytes) => Ok(OrFalse::Value(string(req, &bytes)?)),
         None => Ok(OrFalse::False),
@@ -1111,16 +1120,20 @@ pub(crate) fn dba_sync(req: &mut Request, dba: Instance<Connection>) -> Result<b
 pub(crate) fn dba_handlers(
     req: &mut Request,
     #[php(default = false)] full_info: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for &handler in Handler::ALL {
         if full_info {
             let name = string(req, handler.name().as_bytes())?;
             let version = string(req, handler.version().as_bytes())?;
-            array.set(req, Key::Str(name), Value::string(version))?;
+            array.set(
+                req,
+                Key::Str(name.hand_on_unmigrated()),
+                version.into_value().hand_on_unmigrated(),
+            )?;
         } else {
             let name = string(req, handler.name().as_bytes())?;
-            array.append(req, Value::string(name))?;
+            array.append(req, name.into_value().hand_on_unmigrated())?;
         }
     }
     Ok(array)
@@ -1142,7 +1155,7 @@ pub(crate) fn dba_handlers(
 /// }
 /// ```
 #[php_function]
-pub(crate) fn dba_list(req: &mut Request) -> Result<PhpArray, Thrown> {
+pub(crate) fn dba_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let objects: Vec<PhpObject> = req
         .state::<State>()
@@ -1162,7 +1175,7 @@ pub(crate) fn dba_list(req: &mut Request) -> Result<PhpArray, Thrown> {
         array.set(
             req,
             Key::Int(i64::from(object.index())),
-            Value::string(path),
+            path.into_value().hand_on_unmigrated(),
         )?;
     }
     Ok(array)

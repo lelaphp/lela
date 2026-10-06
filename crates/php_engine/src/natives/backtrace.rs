@@ -8,7 +8,7 @@ use php_macros::php_function;
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{PhpArray, Value};
+use crate::api::values::{Owner, PhpArray, Value};
 
 /// `debug_backtrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT, int
 /// $limit = 0): array`, php's `ZEND_FUNCTION(debug_backtrace)`
@@ -115,8 +115,9 @@ fn debug_backtrace(
     req: &mut Request,
     #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
     #[php(default = 0)] limit: i64,
-) -> Result<PhpArray, Thrown> {
-    req.fetch_debug_backtrace(true, options, limit)
+) -> Result<Owner<PhpArray>, Thrown> {
+    let made = req.fetch_debug_backtrace(true, options, limit);
+    crate::api::values::adopted(req, made)
 }
 
 /// `debug_print_backtrace(int $options = 0, int $limit = 0): void`,

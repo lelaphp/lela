@@ -173,7 +173,7 @@ pub fn sniff_charset_from_stream(
         .find(b"wrapper_data")
         .and_then(|data| data.deref().as_array().copied());
     let charset = headers.and_then(|headers| charset_of_headers(req, headers));
-    req.release(Value::array(meta));
+    meta.give_up(req);
     Ok(charset)
 }
 

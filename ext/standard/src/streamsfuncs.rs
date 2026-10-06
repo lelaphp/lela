@@ -95,7 +95,7 @@ use php_ext::request::{
     Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx, StreamOption,
     Streams as _, Whence,
 };
-use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::virtual_cwd::MAXPATHLEN;
 
@@ -194,11 +194,12 @@ fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<S
             return Ok(context);
         }
         let context = StreamCtx::alloc(req)?;
-        stream.set_ctx(req, Some(context));
+        let view = *context;
+        stream.set_ctx(req, Some(view));
         // The stream holds the owner `php_stream_context_alloc` made;
         // `stream->ctx = context->res` takes it without one more.
-        req.release(context.resource().as_value());
-        return Ok(context);
+        context.give_up(req);
+        return Ok(view);
     }
     Err(arg_type_error(req, position, "be a valid stream/context"))
 }
@@ -321,19 +322,19 @@ fn stream_context_create(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
     #[php(default = null)] params: Option<PhpArray>,
-) -> Result<Untyped<Resource>, Thrown> {
+) -> Result<Untyped<Owner<Resource>>, Thrown> {
     let res = StreamCtx::alloc(req)?;
     let mut applied = Ok(());
     if let Some(options) = options {
-        applied = parse_options(req, res, options);
+        applied = parse_options(req, *res, options);
     }
     if let (Ok(()), Some(params)) = (&applied, params) {
-        applied = parse_params(req, res, params);
+        applied = parse_params(req, *res, params);
     }
     match applied {
-        Ok(()) => Ok(Untyped(res.resource())),
+        Ok(()) => Ok(Untyped(res.into_resource())),
         Err(thrown) => {
-            req.release(res.resource().as_value());
+            res.give_up(req);
             Err(thrown)
         }
     }
@@ -399,13 +400,16 @@ fn stream_context_set_params(
 /// }
 /// ```
 #[php_function]
-fn stream_context_get_params(req: &mut Request, context: Resource) -> Result<PhpArray, Thrown> {
+fn stream_context_get_params(
+    req: &mut Request,
+    context: Resource,
+) -> Result<Owner<PhpArray>, Thrown> {
     let res = context_resource(req, context, 1)?;
     let (options, notification) = (res.options(req), res.notifier(req));
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {
         req.addref(&notification);
-        let key = Key::Str(PhpString::new(req, b"notification")?);
+        let key = Key::Str(PhpString::new(req, b"notification")?.hand_on_unmigrated());
         array.set(req, key, notification)?;
     }
     let options = match options {
@@ -414,9 +418,9 @@ fn stream_context_get_params(req: &mut Request, context: Resource) -> Result<Php
             req.addref(&value);
             value
         }
-        None => Value::array(PhpArray::new(req)?),
+        None => Value::array(PhpArray::new(req)?.hand_on_unmigrated()),
     };
-    let key = Key::Str(PhpString::new(req, b"options")?);
+    let key = Key::Str(PhpString::new(req, b"options")?.hand_on_unmigrated());
     array.set(req, key, options)?;
     Ok(array)
 }
@@ -588,14 +592,11 @@ fn stream_context_set_options(
 fn stream_context_get_options(
     req: &mut Request,
     stream_or_context: Resource,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let res = context_resource(req, stream_or_context, 1)?;
     let options = res.options(req);
     match options {
-        Some(options) => {
-            req.addref(&Value::array(options));
-            Ok(options)
-        }
+        Some(options) => Ok(Owner::take(req, options)),
         None => PhpArray::new(req),
     }
 }
@@ -631,7 +632,6 @@ fn stream_context_get_default(
     if let Some(options) = options {
         parse_options(req, res, options)?;
     }
-    req.addref(&res.resource().as_value());
     Ok(Untyped(res.resource()))
 }
 
@@ -655,7 +655,6 @@ fn stream_context_set_default(
 ) -> Result<Untyped<Resource>, Thrown> {
     let res = StreamCtx::default_ctx(req)?;
     parse_options(req, res, options)?;
-    req.addref(&res.resource().as_value());
     Ok(Untyped(res.resource()))
 }
 
@@ -690,7 +689,7 @@ fn stream_get_contents(
     stream: Stream,
     #[php(default = null)] length: Option<i64>,
     #[php(default = -1)] offset: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let maxlen = length.unwrap_or(COPY_ALL);
     let desiredpos = offset;
     if maxlen < 0 && maxlen != COPY_ALL {
@@ -1079,7 +1078,7 @@ fn stream_get_line(
     stream: Stream,
     length: i64,
     #[php(default = "")] ending: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let ending = ending.as_bytes().to_vec();
     if length < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
@@ -1116,7 +1115,7 @@ fn stream_get_line(
 fn stream_resolve_include_path(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let filename = filename.0.as_bytes().to_vec();
     let cwd = req.cwd().as_os_str().as_bytes().to_vec();
     let realpath = |req: &mut Request, path: &[u8]| {
@@ -1191,10 +1190,10 @@ fn stream_resolve_include_path(
 /// bool(true)
 /// ```
 #[php_function]
-fn stream_get_wrappers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn stream_get_wrappers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for scheme in req.stream_wrappers() {
-        let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?);
+        let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?.hand_on_unmigrated());
         array.append(req, scheme)?;
     }
     Ok(array)
@@ -1230,8 +1229,8 @@ fn stream_is_local(req: &mut Request, stream: Untyped<Value>) -> Result<bool, Th
         }
         return Ok(true);
     }
-    let path = php_ext::coerce::to_string(req, &given)?;
-    let path = path.as_bytes();
+    let path = crate::string::string_bytes(req, &given)?;
+    let path = path.as_slice();
     let n = path
         .iter()
         .position(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.')))

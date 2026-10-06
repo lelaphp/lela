@@ -8,7 +8,7 @@
 use php_ext::abi::Raw;
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_null_deprecated, docref, warning};
 use php_ext::request::{Request, StreamOps, Streams as _, Whence};
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Blob};
 use crate::sqlite::Handle;
@@ -149,7 +149,7 @@ pub(super) fn open_blob(
     rowid: Raw<i64>,
     dbname: Raw<Option<PhpString>>,
     flags: Raw<i64>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let given = req.argument_count();
         if !(3..=5).contains(&given) {
@@ -174,19 +174,22 @@ pub(super) fn open_blob(
         let flags = flags.hold(req)?;
         let writable = flags & i64::from(ffi::SQLITE_OPEN_READWRITE) != 0;
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         };
         let blob = match handle.db.blob_open(&dbname, &table, &column, row, writable) {
             Ok(blob) => blob,
             Err(text) => {
                 let text = String::from_utf8_lossy(&text).into_owned();
                 warning(req, &format!("Unable to open blob: {text}"));
-                return Ok(Value::bool(false));
+                return Ok(Owner::take(req, Value::bool(false)));
             }
         };
         let read_only = flags & i64::from(ffi::SQLITE_OPEN_READONLY) != 0;
         let stream = BlobStream::new(blob, read_only, "PDOSQLite");
         let mode: &[u8] = if writable { b"r+b" } else { b"rb" };
-        Ok(req.new_stream(Box::new(stream), mode)?.as_value())
+        Ok(req
+            .new_stream(Box::new(stream), mode)?
+            .into_resource()
+            .into_value())
     })
 }

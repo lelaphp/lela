@@ -13,7 +13,7 @@ use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString};
 
 use super::signature::type_factory;
 use super::{
@@ -76,7 +76,11 @@ fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
 /// for a backed enum and a `ReflectionEnumUnitCase` for a pure one,
 /// with `$name` and `$class` written as
 /// `reflection_class_constant_factory` writes them.
-fn case_factory(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
+fn case_factory(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+) -> Result<Owner<PhpObject>, Thrown> {
     let reflector = if backing_of(req, class).is_some() {
         class_named(req, b"ReflectionEnumBackedCase")?
     } else {
@@ -84,8 +88,8 @@ fn case_factory(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObj
     };
     let object = new_object(req, reflector)?;
     let held = class_name_of(req, class);
-    set_name(req, object, name)?;
-    set_string_prop(req, object, b"class", &held)?;
+    set_name(req, *object, name)?;
+    set_string_prop(req, *object, b"class", &held)?;
     Ok(object)
 }
 
@@ -113,9 +117,11 @@ fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), T
 fn case_object(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
     let case = class_constant(req, class, name)?;
     if let Some(&object) = case.as_object() {
+        // The owner goes with the object the caller is handed.
+        let _case = case.hand_on_unmigrated();
         return Ok(object);
     }
-    req.release(case);
+    case.give_up(req);
     Err(fatal(req, "InternalError: an enum case that is no object"))
 }
 
@@ -195,7 +201,7 @@ impl ReflectionEnum {
         req: &mut Request,
         this: This<Self>,
         name: PhpString,
-    ) -> Result<Instance<ReflectionEnumUnitCase>, Thrown> {
+    ) -> Result<Owner<Instance<ReflectionEnumUnitCase>>, Thrown> {
         let name = name.as_bytes().to_vec();
         let class = this_enum(req, this.object())?;
         if !case_names(req, class).contains(&name) {
@@ -213,7 +219,7 @@ impl ReflectionEnum {
             return Err(throw(req, "ReflectionException", &message));
         }
         let object = case_factory(req, class, &name)?;
-        Ok(Instance::of(object))
+        Ok(object.into_instance())
     }
 
     /// `ReflectionEnum::getCases(): array`: one case reflector per case, in
@@ -248,12 +254,12 @@ impl ReflectionEnum {
     /// string(22) "ReflectionEnumUnitCase"
     /// enum(Pure::A)
     /// ```
-    fn getCases(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getCases(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_enum(req, this.object())?;
         let mut out = PhpArray::new(req)?;
         for name in case_names(req, class) {
             let object = case_factory(req, class, &name)?;
-            out.append(req, object.as_value())?;
+            out.append(req, object.into_value().hand_on_unmigrated())?;
         }
         Ok(out)
     }
@@ -283,10 +289,10 @@ impl ReflectionEnum {
     fn getBackingType(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::signature::ReflectionNamedType>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::signature::ReflectionNamedType>>>, Thrown> {
         let class = this_enum(req, this.object())?;
         match backing_of(req, class) {
-            Some(backing) => Ok(Some(Instance::of(type_factory(req, &backing, false)?))),
+            Some(backing) => Ok(Some(type_factory(req, &backing, false)?.into_instance())),
             None => Ok(None),
         }
     }
@@ -395,13 +401,16 @@ impl ReflectionEnumUnitCase {
     ///   string(16) "PropertyHookType"
     /// }
     /// ```
-    fn getEnum(req: &mut Request, this: This<Self>) -> Result<Instance<ReflectionEnum>, Thrown> {
+    fn getEnum(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<ReflectionEnum>>, Thrown> {
         let (class, _) = this_case(req, this.object())?;
         let reflector = class_named(req, b"ReflectionEnum")?;
         let object = new_object(req, reflector)?;
         let name = class_name_of(req, class);
-        set_name(req, object, &name)?;
-        Ok(Instance::of(object))
+        set_name(req, *object, &name)?;
+        Ok(object.into_instance())
     }
 
     /// `ReflectionEnumUnitCase::getValue(): UnitEnum`: the one instance the
@@ -417,7 +426,11 @@ impl ReflectionEnumUnitCase {
     /// ```
     fn getValue(req: &mut Request, this: This<Self>) -> Result<Instance<crate::UnitEnum>, Thrown> {
         let (class, name) = this_case(req, this.object())?;
-        case_object(req, class, &name).map(Instance::of)
+        let case = case_object(req, class, &name)?;
+        // The class's constant keeps the case; the engine takes its own
+        // owner of the view returned.
+        req.release(case.as_value());
+        Ok(Instance::of(case))
     }
 }
 
@@ -449,10 +462,7 @@ impl ReflectionEnumBackedCase {
         let value = case.prop(req, b"value").unwrap_or_default();
         let backing = match (value.as_int(), value.as_php_string()) {
             (Some(int), _) => Some(Union::A(int)),
-            (None, Some(&string)) => {
-                req.addref(&value);
-                Some(Union::B(string))
-            }
+            (None, Some(&string)) => Some(Union::B(string)),
             (None, None) => None,
         };
         req.release(case.as_value());

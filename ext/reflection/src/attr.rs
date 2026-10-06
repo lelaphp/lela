@@ -24,7 +24,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, FreshString, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, FreshString, Key, Owner, PhpArray, PhpObject, PhpString};
 
 use super::{
     class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
@@ -173,7 +173,7 @@ pub(super) fn reflect_attributes(
     subject: Subject<'_>,
     name: Option<PhpString>,
     flags: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let wanted = name.as_ref().map(|name| name.as_bytes().to_vec());
     if flags & !IS_INSTANCEOF != 0 {
         return Err(arg_value_error(req, 2, "be a valid attribute filter flag"));
@@ -192,7 +192,7 @@ pub(super) fn reflect_attributes(
         _ => None,
     };
     if attributes.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let repeated: Vec<bool> = attributes
         .iter()
@@ -218,7 +218,7 @@ pub(super) fn reflect_attributes(
             file: subject.file.map(<[u8]>::to_vec),
         };
         let object = attribute_factory(req, &kept)?;
-        out.append(req, object.as_value())?;
+        out.append(req, object.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -253,12 +253,12 @@ fn bare_name(name: &[u8]) -> &[u8] {
 /// `reflection_attribute_factory`: one `ReflectionAttribute` with the
 /// reference on its payload and `$name` written, as php writes the
 /// property beside `intern->ptr`.
-fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<PhpObject, Thrown> {
+fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_named(req, b"ReflectionAttribute")?;
     let object = new_object(req, class)?;
     let name = kept.attribute.name.0.to_vec();
-    set_name(req, object, &name)?;
-    keep_attribute(req, object, kept.clone())?;
+    set_name(req, *object, &name)?;
+    keep_attribute(req, *object, kept.clone())?;
     Ok(object)
 }
 
@@ -289,7 +289,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
         // stands where the type alone would read `bool`, and the value
         // given up after it, `zval_ptr_dtor(&flags)`.
         let given = value_name(req, &value);
-        req.release(value);
+        value.give_up(req);
         return Err(throw_error(
             req,
             "Error",
@@ -298,6 +298,7 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
             ),
         ));
     };
+    value.give_up(req);
     // `ZEND_ATTRIBUTE_FLAGS`, every target and `IS_REPEATABLE`.
     if flags & !(TARGET_ALL | IS_REPEATABLE) != 0 {
         return Err(throw_error(
@@ -438,7 +439,7 @@ impl ReflectionAttribute {
     ///   string(4) "attr" interned
     /// }
     /// ```
-    fn getArguments(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getArguments(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let mut out = PhpArray::new(req)?;
         let filled = (|| {
@@ -447,9 +448,13 @@ impl ReflectionAttribute {
                 match &argument.name {
                     Some(name) => {
                         let key = PhpString::new(req, &name.0)?;
-                        out.set(req, Key::Str(key), value)?;
+                        out.set(
+                            req,
+                            Key::Str(key.hand_on_unmigrated()),
+                            value.hand_on_unmigrated(),
+                        )?;
                     }
-                    None => out.append(req, value)?,
+                    None => out.append(req, value.hand_on_unmigrated())?,
                 }
             }
             Ok(())
@@ -458,7 +463,7 @@ impl ReflectionAttribute {
         // evaluate, as the VM frees the return value php's `RETURN_THROWS()`
         // leaves.
         if let Err(thrown) = filled {
-            req.release(Value::array(out));
+            out.give_up(req);
             return Err(thrown);
         }
         Ok(out)
@@ -586,7 +591,7 @@ impl ReflectionAttribute {
     /// ```expect
     /// 2520 32
     /// ```
-    fn newInstance(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
+    fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
         let looked_up = bare_name(&kept.attribute.name.0).to_vec();
@@ -667,7 +672,7 @@ impl ReflectionAttribute {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let mut out = format!(
             "Attribute [ {} ]",

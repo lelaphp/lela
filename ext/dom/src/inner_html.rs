@@ -8,7 +8,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{Owner, PhpObject, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Fragment, Kind, Node, Ns, Parser};
 
@@ -26,7 +26,7 @@ fn fragment_serialize(
     object: PhpObject,
     node: Node,
     outer: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if node.doc().is_some_and(|d| d.kind() == Kind::HtmlDocument) {
         let templates = crate::html5_serializer::templates_of(req, object, node);
         let mut bytes = Vec::new();

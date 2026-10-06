@@ -595,13 +595,15 @@ impl Parser<'_> {
             Token::False => Value::bool(false),
             Token::Int(n) => Value::int(n),
             Token::Double(d) => Value::float(d),
-            Token::Str(bytes) if !self.validating => Value::string(PhpString::new(req, &bytes)?),
+            Token::Str(bytes) if !self.validating => {
+                Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated())
+            }
             Token::ArrayOpen => {
                 self.advance();
                 let array = if self.validating {
                     None
                 } else {
-                    Some(PhpArray::new(req)?)
+                    Some(PhpArray::new(req)?.hand_on_unmigrated())
                 };
                 let frame = Open::Array { at, array };
                 return self.opened(req, frame, open);
@@ -696,7 +698,7 @@ impl Parser<'_> {
                 }
                 match holder {
                     Holder::Array(array) => {
-                        let name = Key::from_string(PhpString::new(req, key)?);
+                        let name = Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
                         array.set(req, name, value)?;
                     }
                     Holder::Object(object) => {
@@ -709,7 +711,7 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                         let name = PhpString::new(req, key)?;
-                        object.set_prop(req, name, value)?;
+                        object.set_prop(req, name.hand_on_unmigrated(), value)?;
                     }
                     Holder::Nothing => req.release(value),
                 }
@@ -782,12 +784,14 @@ impl Parser<'_> {
             return Ok(Holder::Nothing);
         }
         if self.scanner.options & JSON_OBJECT_AS_ARRAY != 0 {
-            return Ok(Holder::Array(PhpArray::new(req)?));
+            return Ok(Holder::Array(PhpArray::new(req)?.hand_on_unmigrated()));
         }
         let Some(class) = call::lookup_class(req, b"stdClass")? else {
             return Ok(Holder::Nothing);
         };
-        Ok(Holder::Object(call::new_object(req, class)?))
+        Ok(Holder::Object(
+            call::new_object(req, class)?.hand_on_unmigrated(),
+        ))
     }
 }
 

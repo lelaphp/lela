@@ -14,7 +14,9 @@ use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
 };
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{ClassId, Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
+};
 
 use crate::connector::{
     BindType, Cause, Connection, Connector, Failure, OnError, Source, SqlState,
@@ -481,7 +483,7 @@ fn construct_driver(
     current: Option<PhpObject>,
     called: ClassId,
     given: Given,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let source = given.dsn.as_bytes().to_vec();
     let bytes = |s: PhpString| s.as_bytes().to_vec();
     let (username, password) = (given.username.map(bytes), given.password.map(bytes));
@@ -492,19 +494,17 @@ fn construct_driver(
     let Some(driver) = crate::drivers(req).find(|d| d.name().as_bytes() == scheme) else {
         return Err(throw(req, "PDOException", "could not find driver"));
     };
-    let object = match specific_object(req, driver, called, current.is_none())? {
-        Some(made) => made,
-        None => match current {
-            Some(current) => current,
-            None => {
-                return Err(php_ext::raising::fatal(
-                    req,
-                    "InternalError: PDO::connect() made no object",
-                ));
-            }
-        },
+    let fresh = specific_object(req, driver, called, current.is_none())?;
+    let object = match (&fresh, current) {
+        (Some(made), _) => **made,
+        (None, Some(current)) => current,
+        (None, None) => {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: PDO::connect() made no object",
+            ));
+        }
     };
-    let made = current.is_none();
     let opened = open(
         req,
         object,
@@ -515,10 +515,10 @@ fn construct_driver(
         options,
     );
     match opened {
-        Ok(()) => Ok(made.then_some(object)),
+        Ok(()) => Ok(fresh),
         Err(thrown) => {
-            if made {
-                req.release(object.as_value());
+            if let Some(fresh) = fresh {
+                fresh.give_up(req);
             }
             Err(thrown)
         }
@@ -786,9 +786,10 @@ fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown
     let Some(stream) = req.open_stream(uri, b"rb", false)? else {
         return Ok(None);
     };
-    let line = stream.get_line(req, Some(512))?;
-    stream.free(req);
-    Ok(line)
+    let line = stream.get_line(req, Some(512));
+    stream.close(req);
+    stream.give_up(req);
+    line
 }
 
 /// `create_driver_specific_pdo_object`: `None` where the current object
@@ -800,7 +801,7 @@ fn specific_object(
     driver: &'static dyn Connector,
     called: ClassId,
     connecting: bool,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let pdo = lookup_class(req, b"PDO")?;
     let is_pdo = Some(called) == pdo;
     let own = match driver.class() {
@@ -1139,7 +1140,7 @@ fn instantiate(
     class: Option<ClassId>,
     with_args: bool,
     sql: &[u8],
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let class = match class {
         Some(class) => class,
         None => match lookup_class(req, b"PDOStatement")? {
@@ -1181,8 +1182,8 @@ fn construct_statement(
     sql: &[u8],
     args: Option<PhpArray>,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, b"queryString")?;
-    let query = PhpString::new(req, sql)?;
+    let name = PhpString::new(req, b"queryString")?.hand_on_unmigrated();
+    let query = PhpString::new(req, sql)?.hand_on_unmigrated();
     Std.write_property(req, stmt, name, Value::string(query))?;
     if constructor_visibility(req, stmt.class()).is_none() {
         return Ok(());
@@ -1191,11 +1192,8 @@ fn construct_statement(
     let Some(callable) = known_method(req, stmt.class(), &constructor, Some(stmt)) else {
         return Ok(());
     };
-    let constructed = crate::fetch::call_constructor(req, &callable, args);
-    if constructed.is_err() {
-        req.release(stmt.as_value());
-    }
-    constructed
+    // The statement's owner is the caller's, given up where this throws.
+    crate::fetch::call_constructor(req, &callable, args)
 }
 
 // ---- transactions
@@ -1437,7 +1435,9 @@ impl PDO {
             password,
             options,
         };
-        construct_driver(req, Some(this), this.class(), given)?;
+        if let Some(made) = construct_driver(req, Some(this), this.class(), given)? {
+            made.give_up(req);
+        }
         Ok(())
     }
 
@@ -1462,7 +1462,7 @@ impl PDO {
         #[php(default = null)] username: Option<PhpString>,
         #[php(sensitive, default = null)] password: Option<PhpString>,
         #[php(default = null)] options: Option<PhpArray>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         let Some(called) = req.called_scope() else {
             return Err(php_ext::raising::fatal(
                 req,
@@ -1476,7 +1476,7 @@ impl PDO {
             options,
         };
         match construct_driver(req, None, called, given)? {
-            Some(object) => Ok(Static(object)),
+            Some(object) => Ok(object.into_static()),
             None => Err(php_ext::raising::fatal(
                 req,
                 "InternalError: PDO::connect() made no object",
@@ -1553,7 +1553,7 @@ impl PDO {
     /// string(5) "HY000"
     /// ```
     #[php(tentative)]
-    fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let this = this.object();
         constructed(req, this)?;
         let (held, code) =
@@ -1597,7 +1597,7 @@ impl PDO {
     /// }
     /// ```
     #[php(tentative)]
-    fn errorInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn errorInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         constructed(req, this)?;
         let (held, code) =
@@ -1608,7 +1608,7 @@ impl PDO {
         };
         let mut out = PhpArray::new(req)?;
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
-        out.append(req, made)?;
+        out.append(req, made.hand_on_unmigrated())?;
         if state != Some(SqlState::NONE) {
             let on = held.map_or(On::Dbh, On::Stmt);
             error::fetch_error(req, this, on, &mut out)?;
@@ -1679,7 +1679,11 @@ impl PDO {
     /// SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
     /// ```
     #[php(tentative)]
-    fn getAttribute(req: &mut Request, this: This<Self>, attribute: i64) -> Result<Value, Thrown> {
+    fn getAttribute(
+        req: &mut Request,
+        this: This<Self>,
+        attribute: i64,
+    ) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         let attr = attribute;
         clear_error(req, this);
@@ -1697,21 +1701,24 @@ impl PDO {
                 d.stringify,
             )
         }) else {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         };
         let (persistent, case, nulls, mode, name, class, args, fetch, stringify) = state;
         match attr {
-            PDO::ATTR_PERSISTENT => return Ok(Value::bool(persistent)),
-            PDO::ATTR_CASE => return Ok(Value::int(case.code())),
-            PDO::ATTR_ORACLE_NULLS => return Ok(Value::int(nulls.code())),
+            PDO::ATTR_PERSISTENT => return Ok(Owner::take(req, Value::bool(persistent))),
+            PDO::ATTR_CASE => return Ok(Owner::take(req, Value::int(case.code()))),
+            PDO::ATTR_ORACLE_NULLS => return Ok(Owner::take(req, Value::int(nulls.code()))),
             PDO::ATTR_ERRMODE => {
-                return Ok(Value::int(match mode {
+                let code = match mode {
                     OnError::Silent => 0,
                     OnError::Warn => 1,
                     OnError::Throw => 2,
-                }));
+                };
+                return Ok(Owner::take(req, Value::int(code)));
             }
-            PDO::ATTR_DRIVER_NAME => return crate::string(req, name.unwrap_or("").as_bytes()),
+            PDO::ATTR_DRIVER_NAME => {
+                return crate::string(req, name.unwrap_or("").as_bytes());
+            }
             PDO::ATTR_STATEMENT_CLASS => {
                 let mut out = PhpArray::new(req)?;
                 let class = class.map_or_else(
@@ -1719,24 +1726,31 @@ impl PDO {
                     |c| crate::class_name(req, c),
                 );
                 let text = crate::string(req, class.as_bytes())?;
-                out.append(req, text)?;
+                out.append(req, text.hand_on_unmigrated())?;
                 if let Some(args) = args {
                     req.addref(&Value::array(args));
                     out.append(req, Value::array(args))?;
                 }
-                return Ok(Value::array(out));
+                return Ok(out.into_value());
             }
-            PDO::ATTR_DEFAULT_FETCH_MODE => return Ok(Value::int(i64::from(fetch))),
-            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Value::bool(stringify)),
+            PDO::ATTR_DEFAULT_FETCH_MODE => {
+                return Ok(Owner::take(req, Value::int(i64::from(fetch))));
+            }
+            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Owner::take(req, Value::bool(stringify))),
             _ => {}
         }
         match on_connection(req, this, |req, conn| conn.attribute(req, attr))? {
-            Ok(Some(Some(value))) => Ok(value),
+            // The driver's value comes with its one owner, the caller's.
+            Ok(Some(Some(value))) => {
+                let owner = Owner::take(req, value);
+                req.release(value);
+                Ok(owner)
+            }
             Ok(Some(None)) => unsupported(req, this, "driver does not support that attribute")
-                .map(|()| Value::bool(false)),
-            Ok(None) => Ok(Value::bool(false)),
+                .map(|()| Owner::take(req, Value::bool(false))),
+            Ok(None) => Ok(Owner::take(req, Value::bool(false))),
             Err(()) => unsupported(req, this, "driver does not support getting attributes")
-                .map(|()| Value::bool(false)),
+                .map(|()| Owner::take(req, Value::bool(false))),
         }
     }
 
@@ -1749,7 +1763,7 @@ impl PDO {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn getAvailableDrivers(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn getAvailableDrivers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         crate::driver_names(req)
     }
 
@@ -1789,7 +1803,7 @@ impl PDO {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let this = this.object();
         let name = name.map(|name| name.as_bytes().to_vec());
         constructed(req, this)?;
@@ -1831,7 +1845,7 @@ impl PDO {
         this: This<Self>,
         query: PhpString,
         #[php(default = [])] options: Passed<PhpArray>,
-    ) -> Result<OrFalse<Instance<PDOStatement>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<PDOStatement>>>, Thrown> {
         let this = this.object();
         let sql = query.as_bytes().to_vec();
         let options = match options {
@@ -1851,17 +1865,27 @@ impl PDO {
             }
             None => dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None)),
         };
-        let stmt = instantiate(req, this, class, args.is_some(), &sql)?;
-        let prepared =
-            with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, options)))?;
+        let owner = instantiate(req, this, class, args.is_some(), &sql)?;
+        let stmt = *owner;
+        let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, options)));
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(thrown) => {
+                owner.give_up(req);
+                return Err(thrown);
+            }
+        };
         match prepared {
             Ok(prepared) => {
                 crate::stmt::attach(req, stmt, prepared);
-                construct_statement(req, stmt, &sql, args)?;
-                Ok(OrFalse::Value(Instance::of(stmt)))
+                if let Err(thrown) = construct_statement(req, stmt, &sql, args) {
+                    owner.give_up(req);
+                    return Err(thrown);
+                }
+                Ok(OrFalse::Value(owner.into_instance()))
             }
             Err(failure) => {
-                req.release(stmt.as_value());
+                owner.give_up(req);
                 error::settle(req, this, On::Dbh, failure)?;
                 Ok(OrFalse::False)
             }
@@ -1899,7 +1923,7 @@ impl PDO {
         query: PhpString,
         #[php(default = null)] fetchMode: Option<i64>,
         fetchModeArgs: Variadic<Value>,
-    ) -> Result<OrFalse<Instance<PDOStatement>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<PDOStatement>>>, Thrown> {
         let this = this.object();
         let sql = query.as_bytes().to_vec();
         let mode = fetchMode;
@@ -1911,17 +1935,22 @@ impl PDO {
         clear_error(req, this);
         let (class, args) =
             dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None));
-        let stmt = instantiate(req, this, class, args.is_some(), &sql)?;
+        let owner = instantiate(req, this, class, args.is_some(), &sql)?;
+        let stmt = *owner;
         if let Some(s) = stmt.native_mut::<Stmt>(req) {
             s.active = crate::stmt::Active::Same;
         }
-        let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, None)))?;
+        let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, None)));
         let prepared = match prepared {
-            Ok(prepared) => prepared,
-            Err(failure) => {
-                req.release(stmt.as_value());
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(failure)) => {
+                owner.give_up(req);
                 error::settle(req, this, On::Dbh, failure)?;
                 return Ok(OrFalse::False);
+            }
+            Err(thrown) => {
+                owner.give_up(req);
+                return Err(thrown);
             }
         };
         crate::stmt::attach(req, stmt, prepared);
@@ -1939,10 +1968,14 @@ impl PDO {
         };
         match ran {
             Ok(()) => {
-                construct_statement(req, stmt, &sql, args)?;
-                Ok(OrFalse::Value(Instance::of(stmt)))
+                if let Err(thrown) = construct_statement(req, stmt, &sql, args) {
+                    owner.give_up(req);
+                    return Err(thrown);
+                }
+                Ok(OrFalse::Value(owner.into_instance()))
             }
             Err(thrown) => {
+                let stmt = owner.hand_on_unmigrated();
                 if let Some(s) = stmt.native_mut::<Stmt>(req) {
                     s.dbh = DbLink::Held(this);
                 }
@@ -1978,7 +2011,7 @@ impl PDO {
         this: This<Self>,
         string: PhpString,
         #[php(default = PDO::PARAM_STR)] r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let this = this.object();
         let text = string.as_bytes().to_vec();
         let ty = BindType::of(r#type);

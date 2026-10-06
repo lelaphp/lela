@@ -34,7 +34,7 @@ use php_ext::coerce::{callable_checked, coerce_param};
 use php_ext::decl::{Name, Type as DeclType};
 use php_ext::raising::{Level, Thrown, arg_type_error, clear, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Position, PushParser};
 
 use compat::Collected;
@@ -387,7 +387,7 @@ fn create(
     req: &mut Request,
     encoding: Option<PhpString>,
     separator: Option<Vec<u8>>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let target = match encoding {
         None => Target::Utf8,
         Some(e) if e.is_empty() => Target::Utf8,
@@ -407,7 +407,7 @@ fn create(
             "InternalError: libxml made no parser",
         ));
     };
-    if let Some(p) = parser_mut(req, object) {
+    if let Some(p) = parser_mut(req, *object) {
         p.engine = Engine::Idle(push);
         p.separator = separator;
         p.options.target = target;

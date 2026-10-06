@@ -105,7 +105,7 @@ use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
 use php_ext::values::{
-    PhpArray, PhpObject, PhpRef, PhpString, Resource, ResourceType, Value, ValueRef,
+    Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, ResourceType, Value, ValueRef,
 };
 
 use crate::State;
@@ -361,15 +361,14 @@ fn call_if_exists(
     req: &mut Request,
     object: PhpObject,
     method: &[u8],
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     let mut callable = PhpArray::new(req)?;
     req.addref(&object.as_value());
     callable.append(req, object.as_value())?;
-    let name = Value::string(PhpString::new(req, method)?);
+    let name = Value::string(PhpString::new(req, method)?.hand_on_unmigrated());
     callable.append(req, name)?;
-    let callable = Value::array(callable);
-    let exists = is_callable(req, &callable);
-    req.release(callable);
+    let exists = is_callable(req, &Value::array(*callable));
+    callable.give_up(req);
     if !exists {
         return Ok(None);
     }
@@ -447,27 +446,38 @@ impl StreamFilter for UserFilter {
         if let Some(cell) = out_res.native_mut::<BrigadeCell>(req) {
             *output = std::mem::take(&mut cell.0);
         }
-        let status = match &called {
-            Ok(value) => match to_long(req, value)? {
-                PSFS_PASS_ON => FilterStatus::PassOn,
-                PSFS_ERR_FATAL => FilterStatus::ErrFatal,
-                _ => FilterStatus::FeedMe,
-            },
-            Err(_) => FilterStatus::ErrFatal,
+        let finished = (|| {
+            let status = match &called {
+                Ok(value) => match to_long(req, value)? {
+                    PSFS_PASS_ON => FilterStatus::PassOn,
+                    PSFS_ERR_FATAL => FilterStatus::ErrFatal,
+                    _ => FilterStatus::FeedMe,
+                },
+                Err(_) => FilterStatus::ErrFatal,
+            };
+            if let Some(n) = consumed {
+                let read = count.get();
+                *n = usize::try_from(to_long(req, &read.deref())?).unwrap_or(0);
+            }
+            unprocessed(req, input);
+            if has_stream {
+                write_prop(req, &object, b"stream", Value::null())?;
+            }
+            Ok(status)
+        })();
+        count.give_up(req);
+        in_res.give_up(req);
+        out_res.give_up(req);
+        let status = match finished {
+            Ok(status) => status,
+            Err(thrown) => {
+                if let Ok(value) = called {
+                    value.give_up(req);
+                }
+                return Err(thrown);
+            }
         };
-        if let Some(n) = consumed {
-            let read = count.get();
-            *n = usize::try_from(to_long(req, &read.deref())?).unwrap_or(0);
-        }
-        unprocessed(req, input);
-        if has_stream {
-            write_prop(req, &object, b"stream", Value::null())?;
-        }
-        req.release(count.as_value());
-        req.release(in_res.as_value());
-        req.release(out_res.as_value());
-        let value = called?;
-        req.release(value);
+        called?.give_up(req);
         Ok(status)
     }
 
@@ -484,7 +494,7 @@ impl StreamFilter for UserFilter {
         };
         req.release(object.as_value());
         if let Some(value) = closed? {
-            req.release(value);
+            value.give_up(req);
         }
         Ok(())
     }
@@ -533,7 +543,7 @@ fn user_filter_factory(
         return Ok(None);
     };
     let object = new_object(req, class)?;
-    let filtername = Value::string(PhpString::new(req, name)?);
+    let filtername = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
     write_prop(req, &object, b"filtername", filtername)?;
     let params = match params {
         Some(value) => {
@@ -544,19 +554,22 @@ fn user_filter_factory(
         None => Value::null(),
     };
     write_prop(req, &object, b"params", params)?;
-    match call_if_exists(req, object, b"oncreate") {
+    match call_if_exists(req, *object, b"oncreate") {
         Ok(Some(value)) if matches!(value.as_ref(), ValueRef::Bool(false)) => {
-            req.release(object.as_value());
+            value.give_up(req);
+            object.give_up(req);
             Ok(None)
         }
         Ok(value) => {
             if let Some(value) = value {
-                req.release(value);
+                value.give_up(req);
             }
-            Ok(Some(Box::new(UserFilter { object })))
+            Ok(Some(Box::new(UserFilter {
+                object: object.hand_on_unmigrated(),
+            })))
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -577,7 +590,10 @@ fn brigade_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
 
 /// A `StreamBucket` over a new `userfilter.bucket` resource of `bytes`,
 /// its `data`, `datalen` and `dataLength` the bytes and their count.
-fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Instance<StreamBucket>, Thrown> {
+fn bucket_object(
+    req: &mut Request,
+    bytes: Vec<u8>,
+) -> Result<Owner<Instance<StreamBucket>>, Thrown> {
     let Some(class) = lookup_class(req, b"StreamBucket")? else {
         return Err(php_ext::raising::fatal(
             req,
@@ -586,14 +602,19 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Instance<StreamBuc
     };
     let kind = bucket_type(req);
     let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let data = Value::string(PhpString::new(req, &bytes)?);
+    let data = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
     let res = Resource::new(req, kind, BucketCell(bytes, None))?;
     let object = new_object(req, class)?;
-    write_prop(req, &object, b"bucket", res.as_value())?;
+    write_prop(
+        req,
+        &object,
+        b"bucket",
+        res.into_value().hand_on_unmigrated(),
+    )?;
     write_prop(req, &object, b"data", data)?;
     write_prop(req, &object, b"datalen", Value::int(len))?;
     write_prop(req, &object, b"dataLength", Value::int(len))?;
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `stream_bucket_make_writeable($brigade): ?StreamBucket`,
@@ -630,7 +651,7 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Instance<StreamBuc
 fn stream_bucket_make_writeable(
     req: &mut Request,
     brigade: Resource,
-) -> Result<Option<Instance<StreamBucket>>, Thrown> {
+) -> Result<Option<Owner<Instance<StreamBucket>>>, Thrown> {
     let res = brigade_of(req, brigade, "stream_bucket_make_writeable")?;
     let head = res.native_mut::<BrigadeCell>(req).and_then(|cell| {
         cell.1.pop_front();
@@ -795,7 +816,7 @@ fn stream_bucket_new(
     req: &mut Request,
     stream: Stream,
     buffer: PhpString,
-) -> Result<Instance<StreamBucket>, Thrown> {
+) -> Result<Owner<Instance<StreamBucket>>, Thrown> {
     let _ = stream;
     bucket_object(req, buffer.as_bytes().to_vec())
 }
@@ -825,10 +846,10 @@ fn stream_bucket_new(
 /// }
 /// ```
 #[php_function]
-fn stream_get_filters(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn stream_get_filters(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.stream_filters() {
-        let value = Value::string(PhpString::new(req, &name)?);
+        let value = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
         out.append(req, value)?;
     }
     Ok(out)
@@ -893,7 +914,7 @@ fn apply_filter(
     req: &mut Request,
     (stream, name, read_write, params): (Stream, PhpString, i64, Passed<Value>),
     append: bool,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let name = name.as_bytes().to_vec();
     let params = match params {
         Passed::Given(params) => Some(params),
@@ -929,7 +950,7 @@ fn stream_filter_prepend(
     filter_name: PhpString,
     #[php(default = 0)] mode: i64,
     params: Passed<Value>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     apply_filter(req, (stream, filter_name, mode, params), false)
 }
 
@@ -970,7 +991,7 @@ fn stream_filter_append(
     filter_name: PhpString,
     #[php(default = 0)] mode: i64,
     params: Passed<Value>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     apply_filter(req, (stream, filter_name, mode, params), true)
 }
 

@@ -25,7 +25,7 @@ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
 use crate::api::net::{Readiness, SockOpt};
-use crate::api::values::Emalloc;
+use crate::api::values::{Emalloc, Owner};
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
@@ -1491,7 +1491,11 @@ fn parse_network_address(text: &[u8]) -> Option<SocketAddr> {
 
 /// What an accept came to: the client and, where it was asked for, its
 /// address, or the error text, `None` for a stream that is no socket.
-type Accepted = Result<(Stream, Option<PhpString>), Option<String>>;
+type Accepted = Result<(Owner<Stream>, Option<Owner<PhpString>>), Option<String>>;
+
+/// What [`Stream::recvfrom`] answers: the bytes read, and the sender's
+/// address where it was asked for, each a string of the request's.
+type Received = (Owner<PhpString>, Option<Owner<PhpString>>);
 
 impl Stream {
     /// `php_stream_xport_accept` (`Z/main/streams/transports.c:283`): the
@@ -1542,14 +1546,19 @@ impl Stream {
             Some(peer) => Some(PhpString::new(req, &peer)?),
             None => None,
         };
-        Ok(Ok((client, peer)))
+        Ok(Ok((crate::api::request::owned(req, client), peer)))
     }
 
     /// `php_stream_xport_get_name` (`Z/main/streams/transports.c:327`):
     /// the socket's own address or, with `peer`, its peer's, as
     /// `php_network_populate_name_from_sockaddr` writes it; `None` where
     /// the stream is no socket, the call failed or the name is empty.
-    pub fn socket_name(self, req: &mut Request, peer: bool) -> Result<Option<PhpString>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn socket_name(
+        self,
+        req: &mut Request,
+        peer: bool,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let answered = req
             .stream_op(self, |req, stream| {
                 stream.ops.xport(req, XportOp::Name { peer })
@@ -1625,7 +1634,7 @@ impl Stream {
         len: usize,
         flags: i64,
         want_addr: bool,
-    ) -> Result<Option<(PhpString, Option<PhpString>)>, Thrown> {
+    ) -> Result<Option<Received>, Thrown> {
         let peek = flags & STREAM_PEEK != 0;
         let mut buf = vec![0u8; len];
         let answered = req

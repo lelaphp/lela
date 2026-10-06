@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, StreamCtx, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
@@ -115,7 +115,7 @@ fn get_headers(
     url: Path,
     #[php(default = false)] associative: bool,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let context = context_of(req, context, NullContext::Default)?;
     let Some(stream) = req.with_stream_ctx(context, |req| req.open_url(url.0.as_bytes(), b"r"))?
     else {
@@ -126,8 +126,8 @@ fn get_headers(
         .find(b"wrapper_data")
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
-        req.release(Value::array(meta));
-        stream.free(req);
+        meta.give_up(req);
+        stream.hand_on_unmigrated().free(req);
         return Ok(OrFalse::False);
     };
     // The lines read first, as bytes: what `add_header` writes is the
@@ -136,8 +136,8 @@ fn get_headers(
     let lines: Vec<Vec<u8>> = walk::rows(req, lines)
         .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
         .collect();
-    req.release(Value::array(meta));
-    stream.free(req);
+    meta.give_up(req);
+    stream.hand_on_unmigrated().free(req);
     Ok(OrFalse::Value(header_array(req, &lines, associative)?))
 }
 
@@ -146,7 +146,7 @@ fn header_array(
     req: &mut Request,
     lines: &[Vec<u8>],
     associative: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut headers = PhpArray::new(req)?;
     for line in lines {
         add_header(req, &mut headers, line, associative)?;
@@ -160,21 +160,21 @@ fn header_array(
 /// value a list, `convert_to_array`, and the rest are appended to it.
 fn add_header(
     req: &mut Request,
-    headers: &mut PhpArray,
+    headers: &mut Owner<PhpArray>,
     line: &[u8],
     associative: bool,
 ) -> Result<(), Thrown> {
     let Some(at) = line.iter().position(|c| *c == b':').filter(|_| associative) else {
-        let value = Value::string(PhpString::new(req, line)?);
+        let value = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
         return headers.append(req, value);
     };
     let mut start = at + 1;
     while line.get(start).is_some_and(u8::is_ascii_whitespace) {
         start += 1;
     }
-    let value = Value::string(PhpString::new(req, &line[start..])?);
+    let value = Value::string(PhpString::new(req, &line[start..])?.hand_on_unmigrated());
     let Some(previous) = headers.find(&line[..at]) else {
-        let name = Key::Str(PhpString::new(req, &line[..at])?);
+        let name = Key::Str(PhpString::new(req, &line[..at])?.hand_on_unmigrated());
         return headers.set(req, name, value);
     };
     if let Some(list) = previous.as_array() {
@@ -185,8 +185,8 @@ fn add_header(
     req.addref(&previous);
     list.append(req, previous)?;
     list.append(req, value)?;
-    let name = Key::Str(PhpString::new(req, &line[..at])?);
-    headers.set(req, name, Value::array(list))
+    let name = Key::Str(PhpString::new(req, &line[..at])?.hand_on_unmigrated());
+    headers.set(req, name, Value::array(list.hand_on_unmigrated()))
 }
 
 /// `php_url`: the components `php_url_parse_ex2` found.
@@ -591,11 +591,11 @@ fn parse_url(
             }
         } else {
             match bytes {
-                Some(bytes) => Value::string(PhpString::new(req, bytes)?),
+                Some(bytes) => Value::string(PhpString::new(req, bytes)?.hand_on_unmigrated()),
                 None => continue,
             }
         };
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         array.set(req, key, value)?;
     }
     Ok(Some(OrFalse::Value(Union::B(Union::A(array)))))
@@ -603,7 +603,7 @@ fn parse_url(
 
 /// What `parse_url` answers short of `false` and `null`: the
 /// `PHP_URL_PORT` number, every part as an array, or one part.
-type Component = Union<i64, Union<PhpArray, PhpString>>;
+type Component = Union<i64, Union<Owner<PhpArray>, Owner<PhpString>>>;
 
 /// `hexchars`.
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -729,7 +729,7 @@ impl UriParser {
 /// string(9) "#00#FF#2B"
 /// ```
 #[php_function]
-fn urlencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn urlencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     encoded(req, string, false)
 }
 
@@ -744,11 +744,11 @@ fn urlencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> 
 /// string(6) "#00#FF"
 /// ```
 #[php_function]
-fn rawurlencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn rawurlencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     encoded(req, string, true)
 }
 
-fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<PhpString, Thrown> {
+fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<Owner<PhpString>, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 3);
     url_encode(string.as_bytes(), raw, &mut out);
     PhpString::new(req, &out)
@@ -765,7 +765,7 @@ fn encoded(req: &mut Request, string: PhpString, raw: bool) -> Result<PhpString,
 /// string(4) "100%"
 /// ```
 #[php_function]
-fn urldecode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn urldecode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let out = decode(string.as_bytes(), true);
     PhpString::new(req, &out)
 }
@@ -781,7 +781,7 @@ fn urldecode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> 
 /// string(1) "%"
 /// ```
 #[php_function]
-fn rawurldecode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn rawurldecode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let out = decode(string.as_bytes(), false);
     PhpString::new(req, &out)
 }

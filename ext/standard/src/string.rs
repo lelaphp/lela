@@ -28,7 +28,7 @@ use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -149,9 +149,16 @@ pub(crate) mod constants {
 
 /// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
 /// more reference to it.
-pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
-    req.addref(&Value::string(string));
-    string
+pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> Owner<PhpString> {
+    Owner::take(req, string)
+}
+
+/// `zval_get_string` of a value read for its bytes, the string given up.
+pub(crate) fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let string = php_ext::coerce::to_string(req, value)?;
+    let bytes = string.as_bytes().to_vec();
+    string.give_up(req);
+    Ok(bytes)
 }
 
 /// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`
@@ -217,7 +224,7 @@ fn ord(req: &mut Request, character: PhpString) -> i64 {
 /// int(0)
 /// ```
 #[php_function]
-fn chr(req: &mut Request, codepoint: i64) -> Result<PhpString, Thrown> {
+fn chr(req: &mut Request, codepoint: i64) -> Result<Owner<PhpString>, Thrown> {
     if !(0..=255).contains(&codepoint) {
         docref(
             req,
@@ -357,7 +364,11 @@ fn chr(req: &mut Request, codepoint: i64) -> Result<PhpString, Thrown> {
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200000032 bytes) in %s on line 2
 /// ```
 #[php_function]
-fn str_repeat(req: &mut Request, string: PhpString, times: i64) -> Result<PhpString, Thrown> {
+fn str_repeat(
+    req: &mut Request,
+    string: PhpString,
+    times: i64,
+) -> Result<Owner<PhpString>, Thrown> {
     if times < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
@@ -424,7 +435,7 @@ fn str_repeat(req: &mut Request, string: PhpString, times: i64) -> Result<PhpStr
 /// handler call with the buffer lost; the `ob_*` layer's call of a
 /// native handler is #288's, and the witness for it stands there.
 #[php_function]
-fn strtoupper(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn strtoupper(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     cased(req, string, u8::to_ascii_uppercase)
 }
 
@@ -454,7 +465,7 @@ fn strtoupper(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown>
 /// string(60) "ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1"
 /// ```
 #[php_function]
-fn strtolower(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn strtolower(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     cased(req, string, u8::to_ascii_lowercase)
 }
 
@@ -540,7 +551,7 @@ fn str_pad(
     length: i64,
     #[php(default = " ")] pad_string: PhpString,
     #[php(default = STR_PAD_RIGHT)] pad_type: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (input, pad) = (string, pad_string.as_bytes());
     let bytes = input.as_bytes();
     if length < 0 || usize::try_from(length).is_ok_and(|length| length <= bytes.len()) {
@@ -585,7 +596,11 @@ fn str_pad(
 /// over `map`: the argument with one more owner when `map` changes no
 /// byte, else a new string of the request's with the bytes before the
 /// first changed one copied and every byte from it mapped.
-fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<PhpString, Thrown> {
+fn cased(
+    req: &mut Request,
+    string: PhpString,
+    map: fn(&u8) -> u8,
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = string.as_bytes();
     let Some(first) = bytes.iter().position(|b| map(b) != *b) else {
         return Ok(str_copy(req, string));
@@ -670,7 +685,7 @@ fn trim(
     req: &mut Request,
     string: PhpString,
     #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = string.as_bytes();
     let (start, end) = match characters {
         Passed::Given(what) if what.len() == 1 => {
@@ -842,7 +857,7 @@ fn substr(
     string: PhpString,
     offset: i64,
     #[php(default = null)] length: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut from = offset;
     let len = i64::try_from(string.len()).unwrap_or(i64::MAX);
     if from < 0 {
@@ -1038,7 +1053,7 @@ fn long(n: usize) -> i64 {
 /// }
 /// ```
 #[php_function]
-fn bin2hex(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn bin2hex(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let input = string.as_bytes();
     PhpString::product(req, input.len(), 2, 0, |out| {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -1067,7 +1082,7 @@ fn bin2hex(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn hex2bin(req: &mut Request, string: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn hex2bin(req: &mut Request, string: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let input = string.as_bytes();
     if !input.len().is_multiple_of(2) {
         docref(
@@ -1194,7 +1209,7 @@ fn trim_side(
     string: PhpString,
     what: Passed<PhpString>,
     left: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = string.as_bytes();
     let strip: Box<dyn Fn(u8) -> bool> = match what {
         Passed::Given(what) if what.len() == 1 => {
@@ -1246,7 +1261,7 @@ fn rtrim(
     req: &mut Request,
     string: PhpString,
     #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     trim_side(req, string, characters, false)
 }
 
@@ -1268,7 +1283,7 @@ fn ltrim(
     req: &mut Request,
     string: PhpString,
     #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     trim_side(req, string, characters, true)
 }
 
@@ -1325,7 +1340,7 @@ fn wordwrap(
     #[php(default = 75)] width: i64,
     #[php(default = "\n")] r#break: PhpString,
     #[php(default = false)] cut_long_words: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (linelength, docut) = (width, cut_long_words);
     let text = string.as_bytes();
     if text.is_empty() {
@@ -1373,7 +1388,7 @@ fn wordwrap(
         _ => (text.len(), brk.len() + 1, 0),
     };
     let charge = PhpString::product(req, chunks, each, over, |_| {})?;
-    req.release(Value::string(charge));
+    charge.give_up(req);
     let mut out: Vec<u8> = Vec::with_capacity(text.len() + brk.len());
     let (mut laststart, mut lastspace) = (0usize, 0usize);
     let mut current = 0usize;
@@ -1470,7 +1485,7 @@ fn explode(
     separator: PhpString,
     string: PhpString,
     #[php(default = PHP_INT_MAX)] limit: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let delim = separator;
     if delim.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
@@ -1479,7 +1494,7 @@ fn explode(
     let (d, s) = (delim.as_bytes(), string.as_bytes());
     if s.is_empty() {
         if limit >= 0 {
-            let empty = Value::string(PhpString::new(req, b"")?);
+            let empty = Value::string(PhpString::new(req, b"")?.hand_on_unmigrated());
             array.append(req, empty)?;
         }
         return Ok(array);
@@ -1513,12 +1528,12 @@ fn explode(
         1
     };
     if limit == 0 || limit == 1 {
-        let whole = Value::string(str_copy(req, string));
+        let whole = Value::string(str_copy(req, string).hand_on_unmigrated());
         array.append(req, whole)?;
         return Ok(array);
     }
     for i in 0..take {
-        let value = Value::string(PhpString::new(req, piece(i))?);
+        let value = Value::string(PhpString::new(req, piece(i))?.hand_on_unmigrated());
         array.append(req, value)?;
     }
     Ok(array)
@@ -1568,7 +1583,7 @@ fn implode(
     req: &mut Request,
     separator: Union<PhpArray, PhpString>,
     #[php(default = null)] array: Option<PhpArray>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     imploded(req, separator, array)
 }
 
@@ -1578,10 +1593,10 @@ fn imploded(
     req: &mut Request,
     separator: Union<PhpArray, PhpString>,
     array: Option<PhpArray>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let name = req.active_function_name();
     let (glue, pieces) = match (separator, array) {
-        (Union::A(array), None) => (PhpString::new(req, b"")?, array),
+        (Union::A(array), None) => (None, array),
         (_, None) => {
             return Err(throw_error(
                 req,
@@ -1591,7 +1606,7 @@ fn imploded(
                 ),
             ));
         }
-        (Union::B(glue), Some(pieces)) => (glue, pieces),
+        (Union::B(glue), Some(pieces)) => (Some(glue), pieces),
         (_, Some(_)) => {
             return Err(php_ext::raising::arg_type_error(
                 req,
@@ -1600,11 +1615,16 @@ fn imploded(
             ));
         }
     };
-    implode_array(req, glue.as_bytes(), pieces)
+    let glue = glue.as_ref().map_or(&b""[..], PhpString::as_bytes);
+    implode_array(req, glue, pieces)
 }
 
 /// `php_implode(glue, pieces)`.
-fn implode_array(req: &mut Request, glue: &[u8], pieces: PhpArray) -> Result<PhpString, Thrown> {
+fn implode_array(
+    req: &mut Request,
+    glue: &[u8],
+    pieces: PhpArray,
+) -> Result<Owner<PhpString>, Thrown> {
     let elements: Vec<Value> = pieces.iter().map(|(_, value)| value).collect();
     if elements.len() == 1
         && let Some(s) = elements[0].deref().as_php_string()
@@ -1659,7 +1679,7 @@ fn strtok(
     req: &mut Request,
     string: PhpString,
     #[php(default = null)] token: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let tok: Vec<u8> = match token {
         None => string.as_bytes().to_vec(),
         Some(token) => {
@@ -1724,7 +1744,7 @@ fn strtok(
 /// str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
 /// ```
 #[php_function]
-fn str_increment(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn str_increment(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut bytes = alphanumeric_argument(req, string)?;
     let mut carry = true;
     for c in bytes.iter_mut().rev() {
@@ -1768,7 +1788,7 @@ fn str_increment(req: &mut Request, string: PhpString) -> Result<PhpString, Thro
 /// str_decrement(): Argument #1 ($string) "0ab" is out of decrement range
 /// ```
 #[php_function]
-fn str_decrement(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn str_decrement(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut bytes = alphanumeric_argument(req, string)?;
     // `zend_argument_value_error(1, "\"%s\" is out of decrement
     // range", ...)`: a sentence without the `must` the face writes.
@@ -1845,7 +1865,7 @@ fn chunk_split(
     string: PhpString,
     #[php(default = 76)] length: i64,
     #[php(default = "\r\n")] separator: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let chunklen = length;
     let sep: &[u8] = separator.as_bytes();
     if chunklen <= 0 {
@@ -1881,7 +1901,7 @@ fn chunk_split(
 /// string(0) ""
 /// ```
 #[php_function]
-fn quotemeta(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn quotemeta(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 2);
     for &c in string.as_bytes() {
         if matches!(
@@ -1909,7 +1929,7 @@ fn quotemeta(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> 
 /// string(2) "1a"
 /// ```
 #[php_function]
-fn ucfirst(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn ucfirst(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     first_cased(req, string, u8::to_ascii_uppercase)
 }
 
@@ -1925,7 +1945,7 @@ fn ucfirst(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
 /// string(2) "1A"
 /// ```
 #[php_function]
-fn lcfirst(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn lcfirst(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     first_cased(req, string, u8::to_ascii_lowercase)
 }
 
@@ -1934,7 +1954,7 @@ fn first_cased(
     req: &mut Request,
     string: PhpString,
     map: fn(&u8) -> u8,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = string.as_bytes();
     let Some(first) = bytes.first() else {
         return PhpString::new(req, b"");
@@ -1966,7 +1986,7 @@ fn ucwords(
     req: &mut Request,
     string: PhpString,
     #[php(default = " \t\r\n\x0C\x0B")] separators: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     if string.is_empty() {
         return PhpString::new(req, b"");
     }
@@ -1993,7 +2013,7 @@ fn ucwords(
 /// bool(true)
 /// ```
 #[php_function]
-fn strrev(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn strrev(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let out: Vec<u8> = string.as_bytes().iter().rev().copied().collect();
     PhpString::new(req, &out)
 }
@@ -2105,7 +2125,7 @@ fn hebrev(
     req: &mut Request,
     string: PhpString,
     #[php(default = 0)] max_chars_per_line: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let max_chars = max_chars_per_line;
     let s = string.as_bytes();
     if s.is_empty() {
@@ -2260,7 +2280,7 @@ fn nl2br(
     req: &mut Request,
     string: PhpString,
     #[php(default = true)] use_xhtml: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let xhtml = use_xhtml;
     let s = string.as_bytes();
     if !s.iter().any(|c| *c == b'\r' || *c == b'\n') {
@@ -2313,7 +2333,7 @@ fn count_chars(
     req: &mut Request,
     string: PhpString,
     #[php(default = 0)] mode: i64,
-) -> Result<Union<PhpArray, PhpString>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, Owner<PhpString>>, Thrown> {
     let input = string;
     if !(0..=4).contains(&mode) {
         return Err(arg_value_error(req, 2, "be between 0 and 4 (inclusive)"));
@@ -2425,7 +2445,7 @@ fn substr_count(
 /// string(0) ""
 /// ```
 #[php_function]
-fn str_rot13(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn str_rot13(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let out: Vec<u8> = string
         .as_bytes()
         .iter()
@@ -2458,7 +2478,7 @@ fn str_rot13(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> 
 /// string(10) "9825107643"
 /// ```
 #[php_function]
-fn str_shuffle(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn str_shuffle(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut bytes = string.as_bytes().to_vec();
     Rng::default_engine().shuffle(req, &mut bytes)?;
     PhpString::new(req, &bytes)
@@ -2524,7 +2544,7 @@ fn str_word_count(
     string: PhpString,
     #[php(default = 0)] format: i64,
     #[php(default = null)] characters: Option<PhpString>,
-) -> Result<Union<PhpArray, i64>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, i64>, Thrown> {
     let list = characters;
     let s = string.as_bytes();
     let mut array = match format {
@@ -2562,11 +2582,13 @@ fn str_word_count(
         if p > start {
             match (&mut array, format) {
                 (Some(array), 1) => {
-                    let word = Value::string(PhpString::new(req, &s[start..p])?);
+                    let word =
+                        Value::string(PhpString::new(req, &s[start..p])?.hand_on_unmigrated());
                     array.append(req, word)?;
                 }
                 (Some(array), _) => {
-                    let word = Value::string(PhpString::new(req, &s[start..p])?);
+                    let word =
+                        Value::string(PhpString::new(req, &s[start..p])?.hand_on_unmigrated());
                     array.set(req, Key::Int(long(start)), word)?;
                 }
                 (None, _) => count += 1,
@@ -2610,17 +2632,17 @@ fn str_split(
     req: &mut Request,
     string: PhpString,
     #[php(default = 1)] length: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
     if string.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut array = PhpArray::new(req)?;
     let chunk = usize::try_from(length).unwrap_or(usize::MAX);
     for piece in string.as_bytes().chunks(chunk) {
-        let value = Value::string(PhpString::new(req, piece)?);
+        let value = Value::string(PhpString::new(req, piece)?.hand_on_unmigrated());
         array.append(req, value)?;
     }
     Ok(array)
@@ -2643,7 +2665,7 @@ fn strpbrk(
     req: &mut Request,
     string: PhpString,
     characters: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (haystack, list) = (string, characters);
     if list.is_empty() {
         return Err(arg_value_error(req, 2, "be a non-empty string"));
@@ -2760,7 +2782,7 @@ fn binary_strncmp(left: &[u8], right: &[u8], length: usize, fold: bool) -> i64 {
     since = "8.2",
     message = "visit the php.net documentation for various alternatives"
 ))]
-fn utf8_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn utf8_encode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 2);
     for &c in string.as_bytes() {
         if c < 0x80 {
@@ -2791,7 +2813,7 @@ fn utf8_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown
     since = "8.2",
     message = "visit the php.net documentation for various alternatives"
 ))]
-fn utf8_decode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn utf8_decode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut pos = 0;

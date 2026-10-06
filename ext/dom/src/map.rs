@@ -11,7 +11,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
 
 use crate::object::{Dom, Extra};
@@ -302,17 +302,14 @@ fn length(req: &mut Request, object: PhpObject) -> i64 {
 }
 
 /// `handler->get_item`: the object at `index`, `null` past the end.
-fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Value, Thrown> {
+fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<Value>, Thrown> {
     let Ok(at) = usize::try_from(index) else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     match view(req, object) {
         View::Set(array) => match array.get(&Key::Int(index)) {
-            Some(v) => {
-                req.addref(&v);
-                Ok(v)
-            }
-            None => Ok(Value::null()),
+            Some(v) => Ok(Owner::take(req, v)),
+            None => Ok(Owner::take(req, Value::null())),
         },
         View::Nodes {
             base,
@@ -325,7 +322,7 @@ fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Value, Throw
             });
             match found {
                 Some(n) => object_for(req, n, Some(base)),
-                None => Ok(Value::null()),
+                None => Ok(Owner::take(req, Value::null())),
             }
         }
         View::Nodes {
@@ -334,9 +331,9 @@ fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Value, Throw
             kind,
         } => match nodes(node, &kind).get(at) {
             Some(n) => object_for(req, *n, Some(base)),
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
         },
-        _ => Ok(Value::null()),
+        _ => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -346,14 +343,14 @@ fn named(
     object: PhpObject,
     name: &[u8],
     ns: Option<&[u8]>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let View::Nodes {
         base,
         node: Some(node),
         kind,
     } = view(req, object)
     else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let found = match kind {
         Walk::Attributes => match ns {
@@ -371,7 +368,7 @@ fn named(
     };
     match found {
         Some(n) => object_for(req, n, Some(base)),
-        None => Ok(Value::null()),
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -411,9 +408,13 @@ pub(crate) fn attribute_node(elem: Node, name: &[u8]) -> Option<Node> {
 
 /// `dom_html_collection_named_item`: the first element of the collection
 /// whose `id` is `key`, or, in the HTML namespace, whose `name` is.
-fn collection_named(req: &mut Request, object: PhpObject, key: &[u8]) -> Result<Value, Thrown> {
+fn collection_named(
+    req: &mut Request,
+    object: PhpObject,
+    key: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     if key.is_empty() {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let View::Nodes {
         base,
@@ -421,7 +422,7 @@ fn collection_named(req: &mut Request, object: PhpObject, key: &[u8]) -> Result<
         kind,
     } = view(req, object)
     else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     for candidate in nodes(node, &kind) {
         let id = candidate.has_ns_prop(b"id", None);
@@ -434,7 +435,7 @@ fn collection_named(req: &mut Request, object: PhpObject, key: &[u8]) -> Result<
             return object_for(req, candidate, Some(base));
         }
     }
-    Ok(Value::null())
+    Ok(Owner::take(req, Value::null()))
 }
 
 /// `dom_modern_nodelist_get_index`: an index, a name, or neither.
@@ -482,7 +483,7 @@ pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
     if !compatible && f.is_finite() && f.abs() < 9.2e18 {
         let text = php_ext::coerce::to_string(req, &Value::float(f))?;
         let shown = String::from_utf8_lossy(text.as_bytes()).into_owned();
-        req.release(Value::string(text));
+        text.give_up(req);
         php_ext::raising::deprecated(
             req,
             &format!("Implicit conversion from float {shown} to int loses precision"),
@@ -540,7 +541,8 @@ fn offset(req: &mut Request, value: &Value) -> Result<Result<i64, PhpString>, Th
 /// `dom_nodelist_length_read` and `dom_namednodemap_length_read`.
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn length_read(req: &mut Request, object: PhpObject) -> crate::Read {
-    Ok(Some(Value::int(length(req, object))))
+    let length = length(req, object);
+    Ok(Some(Owner::take(req, Value::int(length))))
 }
 
 /// The `length` property both classes have.
@@ -643,7 +645,7 @@ impl ObjectHandlers for MapHandlers {
             return Err(throw_error(req, "Error", &message));
         };
         if dims != Dims::Legacy {
-            return match (dims, modern_index(req, offset_value)?) {
+            let read = match (dims, modern_index(req, offset_value)?) {
                 (_, Index::Long(n)) => item(req, object, n),
                 (Dims::ModernMap, Index::Str(name)) => named(req, object, name.as_bytes(), None),
                 (Dims::Collection, Index::Str(name)) => {
@@ -651,12 +653,13 @@ impl ObjectHandlers for MapHandlers {
                 }
                 _ => Err(illegal_offset(req, object, offset_value, isset)),
             };
+            return read.map(Owner::hand_on_unmigrated);
         }
         let is_list = !named_keys(req, object);
-        match offset(req, offset_value)? {
+        let read = match offset(req, offset_value)? {
             Err(name) if is_list => {
                 let _ = name;
-                Ok(Value::null())
+                return Ok(Value::null());
             }
             Err(name) => named(req, object, name.as_bytes(), None),
             Ok(index) if is_list => item(req, object, index),
@@ -670,7 +673,8 @@ impl ObjectHandlers for MapHandlers {
                 }
                 item(req, object, index)
             }
-        }
+        };
+        read.map(Owner::hand_on_unmigrated)
     }
 
     fn has_dimension(
@@ -687,13 +691,13 @@ impl ObjectHandlers for MapHandlers {
                 (Dims::ModernMap, Index::Str(name)) => {
                     let found = named(req, object, name.as_bytes(), None)?;
                     let present = found.as_object().is_some();
-                    req.release(found);
+                    found.give_up(req);
                     Ok(present)
                 }
                 (Dims::Collection, Index::Str(name)) => {
                     let found = collection_named(req, object, name.as_bytes())?;
                     let present = found.as_object().is_some();
-                    req.release(found);
+                    found.give_up(req);
                     Ok(present)
                 }
                 _ => Err(illegal_offset(req, object, offset_value, true)),
@@ -705,7 +709,7 @@ impl ObjectHandlers for MapHandlers {
             Err(name) => {
                 let found = named(req, object, name.as_bytes(), None)?;
                 let present = found.as_object().is_some();
-                req.release(found);
+                found.give_up(req);
                 Ok(present)
             }
             Ok(index) => Ok(index >= 0 && index < length(req, object)),
@@ -726,7 +730,7 @@ impl ObjectHandlers for MapHandlers {
         }
         let current = item(req, object, 0)?;
         Ok(Some(Box::new(NodeIter {
-            current: current.as_object().copied(),
+            current: current.hand_on_unmigrated().as_object().copied(),
             index: 0,
             steps: 0,
         })))
@@ -834,7 +838,7 @@ impl ClassIterator for NodeIter {
         } else {
             node.name()
         };
-        string(req, &name)
+        string(req, &name).map(Owner::hand_on_unmigrated)
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -852,11 +856,11 @@ impl ClassIterator for NodeIter {
         let next = match view(req, object) {
             View::Nodes { base, .. } if cursor => match node_of(req, old).and_then(Node::next) {
                 Some(node) => object_for(req, node, Some(base))?,
-                None => Value::null(),
+                None => Owner::take(req, Value::null()),
             },
             _ => item(req, object, self.index)?,
         };
-        self.current = next.as_object().copied();
+        self.current = next.hand_on_unmigrated().as_object().copied();
         req.release(old.as_value());
         Ok(())
     }
@@ -913,12 +917,16 @@ impl DOMNodeList {
     fn getIterator(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<crate::Iterator>, Thrown> {
-        php_ext::call::internal_iterator(req, &this.object()).map(Instance::of)
+    ) -> Result<Owner<Instance<crate::Iterator>>, Thrown> {
+        php_ext::call::internal_iterator(req, &this.object()).map(Owner::into_instance)
     }
 
     /// `DOMNodeList::item(int $index)`.
-    fn item(req: &mut Request, this: This<Self>, index: i64) -> Result<Untyped<Value>, Thrown> {
+    fn item(
+        req: &mut Request,
+        this: This<Self>,
+        index: i64,
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         item(req, this.object(), index).map(Untyped)
     }
 }
@@ -961,9 +969,9 @@ impl DOMNamedNodeMap {
         req: &mut Request,
         this: This<Self>,
         qualifiedName: PhpString,
-    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<crate::node::DOMNode>>>>, Thrown> {
         let found = named(req, this.object(), qualifiedName.as_bytes(), None)?;
-        crate::returned(req, found)
+        crate::returned(found)
     }
 
     /// `DOMNamedNodeMap::getNamedItemNS(?string $namespace, string $localName): ?DOMNode`.
@@ -973,10 +981,10 @@ impl DOMNamedNodeMap {
         this: This<Self>,
         namespace: Option<PhpString>,
         localName: PhpString,
-    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<crate::node::DOMNode>>>>, Thrown> {
         let ns = namespace.as_ref().map(PhpString::as_bytes);
         let found = named(req, this.object(), localName.as_bytes(), ns)?;
-        crate::returned(req, found)
+        crate::returned(found)
     }
 
     /// `DOMNamedNodeMap::item(int $index): ?DOMNode`.
@@ -985,7 +993,7 @@ impl DOMNamedNodeMap {
         req: &mut Request,
         this: This<Self>,
         index: i64,
-    ) -> Result<Raw<Option<Instance<crate::node::DOMNode>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<crate::node::DOMNode>>>>, Thrown> {
         if !(0..=i64::from(i32::MAX)).contains(&index) {
             return Err(php_ext::raising::arg_value_error(
                 req,
@@ -994,7 +1002,7 @@ impl DOMNamedNodeMap {
             ));
         }
         let found = item(req, this.object(), index)?;
-        crate::returned(req, found)
+        crate::returned(found)
     }
 
     #[php(tentative, implementation = DOMNodeList::count)]
@@ -1136,9 +1144,9 @@ impl HTMLCollection {
         req: &mut Request,
         this: This<Self>,
         key: PhpString,
-    ) -> Result<Raw<Option<Instance<crate::element::Element>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<crate::element::Element>>>>, Thrown> {
         let found = collection_named(req, this.object(), key.as_bytes())?;
-        crate::returned(req, found)
+        crate::returned(found)
     }
 
     #[php(implementation = DOMNodeList::count)]

@@ -12,7 +12,7 @@ use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::archive::{self as za, Archive, Source};
 use crate::c;
@@ -168,7 +168,9 @@ impl Prop {
                     .unwrap_or_default()
             }
         };
-        Ok(Value::string(PhpString::new(req, &bytes)?))
+        Ok(PhpString::new(req, &bytes)?
+            .into_value()
+            .hand_on_unmigrated())
     }
 }
 
@@ -430,11 +432,10 @@ impl ObjectHandlers for Handlers {
 fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     for (name, p) in Prop::ALL {
         let value = p.read(req, object)?;
-        let key = Key::Str(PhpString::new(req, name)?);
-        object.update_row(req, &key, value)?;
-        if let Key::Str(s) = key {
-            req.release(Value::string(s));
-        }
+        let key = PhpString::new(req, name)?;
+        let updated = object.update_row(req, &Key::Str(*key), value);
+        key.give_up(req);
+        updated?;
     }
     Ok(())
 }
@@ -455,7 +456,7 @@ impl Hooks for PhpHooks<'_> {
             return;
         };
         match call(self.req, cb, &[Value::float(current)]) {
-            Ok(v) => self.req.release(v),
+            Ok(v) => v.give_up(self.req),
             Err(t) => self.thrown = Some(t),
         }
     }
@@ -488,14 +489,14 @@ impl Hooks for PhpHooks<'_> {
         };
         let Some(long) = long else {
             let name = value_name(self.req, &v);
-            self.req.release(v);
+            v.give_up(self.req);
             let message = format!(
                 "Return value of callback provided to ZipArchive::registerCancelCallback() must be of type int, {name} returned"
             );
             self.thrown = Some(throw(self.req, "TypeError", &message));
             return true;
         };
-        self.req.release(v);
+        v.give_up(self.req);
         c::i32(long) != 0
     }
 }
@@ -561,16 +562,16 @@ fn index(i: i64) -> usize {
 }
 
 /// The engine's `PhpString` of `bytes`.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
 /// `RETURN_SB`.
-fn stat_array(req: &mut Request, st: &za::Stat) -> Result<PhpArray, Thrown> {
+fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    let name = Value::string(string(req, &st.name)?);
+    let name = string(req, &st.name)?;
     let rows: [(&[u8], Value); 8] = [
-        (b"name", name),
+        (b"name", name.into_value().hand_on_unmigrated()),
         (b"index", Value::int(c::long(st.index))),
         (b"crc", Value::int(i64::from(st.crc))),
         (b"size", Value::int(c::long(st.size))),
@@ -583,7 +584,7 @@ fn stat_array(req: &mut Request, st: &za::Stat) -> Result<PhpArray, Thrown> {
         ),
     ];
     for (k, v) in rows {
-        let key = Key::Str(string(req, k)?);
+        let key = Key::Str(string(req, k)?.hand_on_unmigrated());
         out.set(req, key, v)?;
     }
     Ok(out)
@@ -699,9 +700,9 @@ fn added(
 type Rq = Request;
 type Z = This<ZipArchive>;
 type R<T> = Result<T, Thrown>;
-type Str = R<OrFalse<PhpString>>;
-type Arr = R<OrFalse<PhpArray>>;
-type Res = R<Untyped<OrFalse<Resource>>>;
+type Str = R<OrFalse<Owner<PhpString>>>;
+type Arr = R<OrFalse<Owner<PhpArray>>>;
+type Res = R<Untyped<OrFalse<Owner<Resource>>>>;
 
 /// `ZIP_FROM_OBJECT`, a name `zend_argument_must_not_be_empty_error`
 /// refuses, and `zip_name_locate`: the archive and the index, or `$none`.
@@ -1160,7 +1161,7 @@ impl ZipArchive {
     /// string(19) "File already exists"
     /// ```
     #[php(tentative)]
-    fn getStatusString(req: &mut Rq, this: Z) -> R<PhpString> {
+    fn getStatusString(req: &mut Rq, this: Z) -> R<Owner<PhpString>> {
         let status = this
             .object()
             .native::<Intern>(req)
@@ -2688,9 +2689,9 @@ fn get_stream(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, flags: i64) ->
     };
     let id = this.object().native::<Intern>(req).map_or(0, |i| i.id);
     let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None, None)?;
-    Ok(Untyped(
-        stream.map_or(OrFalse::False, |s| OrFalse::Value(s.resource())),
-    ))
+    Ok(Untyped(stream.map_or(OrFalse::False, |s| {
+        OrFalse::Value(s.into_resource())
+    })))
 }
 
 /// `php_zip_add_file` as `php_zip_add_from_pattern` calls it: the whole

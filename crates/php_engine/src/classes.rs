@@ -32,7 +32,7 @@ use crate::api::abi::{
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
-use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -328,7 +328,7 @@ impl ObjectHandlers for ClosureHandlers {
             return Ok(None);
         };
         let Some(decl) = req.function_decl(closure.function).cloned() else {
-            return PhpArray::new(req).map(|table| Some(table.into()));
+            return PhpArray::new(req).map(|table| Some(table.hand_on_unmigrated().into()));
         };
         let mut out = PhpArray::new(req)?;
         let written = String::from_utf8_lossy(&decl.name.0).into_owned();
@@ -337,12 +337,18 @@ impl ObjectHandlers for ClosureHandlers {
                 Some(scope) => format!("{}::{written}", req.class_name(scope)),
                 None => written,
             };
-            let named = Value::string(PhpString::new(req, named.as_bytes())?);
+            let named = PhpString::new(req, named.as_bytes())?
+                .into_value()
+                .hand_on_unmigrated();
             set_row(req, &mut out, b"function", named)?;
         } else {
-            let named = Value::string(PhpString::new(req, written.as_bytes())?);
+            let named = PhpString::new(req, written.as_bytes())?
+                .into_value()
+                .hand_on_unmigrated();
             set_row(req, &mut out, b"name", named)?;
-            let file = Value::string(PhpString::new(req, &decl.file.0)?);
+            let file = PhpString::new(req, &decl.file.0)?
+                .into_value()
+                .hand_on_unmigrated();
             set_row(req, &mut out, b"file", file)?;
             set_row(req, &mut out, b"line", Value::int(i64::from(decl.line)))?;
         }
@@ -360,9 +366,14 @@ impl ObjectHandlers for ClosureHandlers {
                     value
                 };
                 req.addref(&value);
-                statics.set(req, Key::from_string(name), value)?;
+                statics.set(req, Key::from_string(name.hand_on_unmigrated()), value)?;
             }
-            set_row(req, &mut out, b"static", Value::array(statics))?;
+            set_row(
+                req,
+                &mut out,
+                b"static",
+                statics.into_value().hand_on_unmigrated(),
+            )?;
         }
         if let Some(this) = closure.this {
             let this = this.as_value();
@@ -384,13 +395,21 @@ impl ObjectHandlers for ClosureHandlers {
                 } else {
                     b"<required>"
                 };
-                let stands = Value::string(PhpString::new(req, stands)?);
-                let key = Key::from_string(PhpString::new(req, name.as_bytes())?);
+                let stands = PhpString::new(req, stands)?
+                    .into_value()
+                    .hand_on_unmigrated();
+                let key =
+                    Key::from_string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
                 parameters.set(req, key, stands)?;
             }
-            set_row(req, &mut out, b"parameter", Value::array(parameters))?;
+            set_row(
+                req,
+                &mut out,
+                b"parameter",
+                parameters.into_value().hand_on_unmigrated(),
+            )?;
         }
-        Ok(Some(out.into()))
+        Ok(Some(out.hand_on_unmigrated().into()))
     }
 
     /// `zend_closure_compare` (`Z/Zend/zend_closures.c:446`): two fake
@@ -466,11 +485,11 @@ impl ObjectHandlers for ClosureHandlers {
 /// takes and its value the array's from here.
 fn set_row(
     req: &mut Request,
-    table: &mut PhpArray,
+    table: &mut Owner<PhpArray>,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let key = Key::from_string(PhpString::new(req, name)?);
+    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
     table.set(req, key, value)
 }
 
@@ -487,7 +506,10 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     // `zend_create_closure_ex`: the clone's table is its own and each
     // value in it one more owner, a reference shared with the original
     // as php shares one.
-    closure.bound = closure.bound.map(|table| table.copy(req)).transpose()?;
+    closure.bound = closure
+        .bound
+        .map(|table| table.copy(req).map(Owner::hand_on))
+        .transpose()?;
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
     }
@@ -705,8 +727,9 @@ impl Closure {
         closure: Instance<Closure>,
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
-    ) -> Result<Option<Instance<Closure>>, Thrown> {
-        do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))
+    ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
+        let made = do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))?;
+        Ok(made.map(|bound| Owner::adopt(req, bound)))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -775,8 +798,9 @@ impl Closure {
         this: This<Self>,
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
-    ) -> Result<Option<Instance<Closure>>, Thrown> {
-        do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))
+    ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
+        let made = do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))?;
+        Ok(made.map(|bound| Owner::adopt(req, bound)))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,
@@ -826,14 +850,14 @@ impl Closure {
         this: This<Self>,
         newThis: PhpObject,
         args: NamedVariadic<Value>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let closure = this.object();
         let Some(info) = closure.closure(req).cloned() else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let class = newThis.class();
         if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         }
         // `fci.named_params`, placed by `zend_call_function` over the
         // closure's function.
@@ -847,8 +871,9 @@ impl Closure {
         )?;
         // `zend_unwrap_reference(&closure_result)`: the cell a closure
         // returning by reference handed back given up for the value it
-        // holds.
-        Ok(req.unwrap_reference(returned))
+        // holds, whose owner is the caller's.
+        let value = req.unwrap_reference(returned);
+        Ok(Owner::adopt(req, value))
     }
 
     /// `Closure::fromCallable(callable $callback): Closure`,
@@ -942,13 +967,12 @@ impl Closure {
     fn fromCallable(
         req: &mut Request,
         callback: Raw<Callable>,
-    ) -> Result<Instance<Closure>, Thrown> {
+    ) -> Result<Owner<Instance<Closure>>, Thrown> {
         let given = callback.value();
         if let Some(object) = given.as_object().copied()
             && object.closure(req).is_some()
         {
-            req.addref(&given);
-            return Ok(Instance::of(object));
+            return Ok(Owner::take(req, object).into_instance());
         }
         // A trampoline a `get_closure` handler made has no scope, which
         // `zend_create_closure_from_callable` refuses with no reason.
@@ -962,7 +986,7 @@ impl Closure {
             ));
         }
         let callable = match req.callable_checked(&given) {
-            Ok(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
+            Ok(_) if req.is_pending() => return Err(Thrown::of(req.take_pending_view())),
             Ok(callable) => callable,
             Err(Refusal::Unsaid) => {
                 return Err(throw_over_pending(
@@ -978,7 +1002,8 @@ impl Closure {
                 }));
             }
         };
-        fake_closure(req, &callable).map(Instance::of)
+        let made = fake_closure(req, &callable)?;
+        Ok(Owner::adopt(req, made).into_instance())
     }
 
     /// `Closure::getCurrent(): Closure` (8.5), `ZEND_METHOD(Closure,
@@ -1003,7 +1028,6 @@ impl Closure {
                 "Current function is not a closure",
             ));
         };
-        req.addref(&closure.as_value());
         Ok(Instance::of(closure))
     }
 }
@@ -1580,19 +1604,16 @@ impl Exception {
     /// }
     /// ```
     #[php(final)]
-    fn getTrace(req: &mut Request, this: This<Self>) -> Result<Raw<PhpArray>, Thrown> {
+    fn getTrace(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<PhpArray>>, Thrown> {
         let trace = match this
             .object()
             .prop(req, b"trace")
             .filter(|value| value.as_array().is_some())
         {
-            Some(trace) => {
-                req.addref(&trace);
-                trace
-            }
-            None => Value::array(PhpArray::new(req)?),
+            Some(trace) => Owner::take(req, trace),
+            None => PhpArray::new(req)?.into_value(),
         };
-        Raw::from_value(req, trace)
+        Ok(trace.into_raw())
     }
 
     /// `ZEND_METHOD(Exception, getPrevious)`: the `previous` property. The
@@ -1639,7 +1660,7 @@ impl Exception {
     ///   thrown in %s on line 2
     /// ```
     #[php(final)]
-    fn getTraceAsString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getTraceAsString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let trace = req.trace_string_of(this.object());
         PhpString::new(req, trace.as_bytes())
     }
@@ -1655,8 +1676,9 @@ impl Exception {
     /// Stack trace:
     /// #0 {main}
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        req.exception_string(this.object())
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.exception_string(this.object());
+        crate::api::values::adopted(req, made)
     }
 }
 
@@ -2028,7 +2050,7 @@ fn write_throwable_property(
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?;
+    let name = PhpString::new(req, name)?.hand_on_unmigrated();
     this.set_prop(req, name, value)
 }
 
@@ -2042,7 +2064,6 @@ fn throwable_property<T: FromArgument>(
     name: &[u8],
 ) -> Result<Raw<T>, Thrown> {
     let value = this.prop(req, name).unwrap_or_default();
-    req.addref(&value);
     Raw::from_value(req, value)
 }
 
@@ -2165,7 +2186,10 @@ fn create_closure(
     let Some(class) = req.class_named(b"Closure") else {
         return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
     };
-    let bound = info.bound.map(|table| table.copy(req)).transpose()?;
+    let bound = info
+        .bound
+        .map(|table| table.copy(req).map(Owner::hand_on))
+        .transpose()?;
     if let Some(this) = this {
         req.addref(&this.as_value());
     }

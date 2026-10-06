@@ -9,7 +9,7 @@ use php_ext::abi::Callable;
 use php_ext::call::{call, closure_from_callable};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _, UrlStat};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::ffi::{Context, Uri};
@@ -96,9 +96,10 @@ impl Loader {
             Ok(arguments) => arguments,
             Err(thrown) => return Resolved::Thrown(thrown),
         };
-        let answered = call(req, &callable, &arguments);
+        let views = arguments.each_ref().map(|argument| **argument);
+        let answered = call(req, &callable, &views);
         for argument in arguments {
-            req.release(argument);
+            argument.give_up(req);
         }
         let retval = match answered {
             Ok(retval) => retval,
@@ -110,13 +111,16 @@ impl Loader {
             }
         };
         let resolved = read_answer(req, &retval, &callable, &value);
-        req.release(retval);
+        retval.give_up(req);
         resolved
     }
 
     /// `php_libxml_input_buffer_create_filename`'s open: nothing while the
     /// loader is disabled, else the path opened for reading.
-    pub(crate) fn open_input(req: &mut Request, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+    pub(crate) fn open_input(
+        req: &mut Request,
+        path: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         if req.state::<State>().entity_loader_disabled {
             return Ok(None);
         }
@@ -126,7 +130,10 @@ impl Loader {
     /// `php_libxml_output_buffer_create_filename`'s open: a URI with a scheme
     /// tried unescaped first, and the path as written after, since it may be
     /// a file named with a `%`.
-    pub(crate) fn open_output(req: &mut Request, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+    pub(crate) fn open_output(
+        req: &mut Request,
+        path: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         if contains_nul_escape(path) {
             docref(
                 req,
@@ -155,7 +162,7 @@ impl Loader {
             return Ok(None);
         };
         let bytes = chunk.as_bytes().to_vec();
-        req.release(Value::string(chunk));
+        chunk.give_up(req);
         Ok(Some(bytes))
     }
 }
@@ -167,13 +174,14 @@ fn arguments(
     id: Option<&[u8]>,
     url: Option<&[u8]>,
     members: &Context,
-) -> Result<[Value; 3], Thrown> {
-    let string_or_null = |req: &mut Request, bytes: Option<&[u8]>| -> Result<Value, Thrown> {
-        match bytes {
-            Some(b) => Ok(Value::string(PhpString::new(req, b)?)),
-            None => Ok(Value::null()),
-        }
-    };
+) -> Result<[Owner<Value>; 3], Thrown> {
+    let string_or_null =
+        |req: &mut Request, bytes: Option<&[u8]>| -> Result<Owner<Value>, Thrown> {
+            match bytes {
+                Some(b) => Ok(PhpString::new(req, b)?.into_value()),
+                None => Ok(Owner::take(req, Value::null())),
+            }
+        };
     let public = string_or_null(req, id)?;
     let system = string_or_null(req, url)?;
     let mut context = PhpArray::new(req)?;
@@ -184,11 +192,11 @@ fn arguments(
         (b"extSubSystem", &members.ext_sub_system),
     ];
     for (key, member) in rows {
-        let key = Key::Str(PhpString::new(req, key)?);
+        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
         let value = string_or_null(req, member.as_deref())?;
-        context.set(req, key, value)?;
+        context.set(req, key, value.hand_on_unmigrated())?;
     }
-    Ok([public, system, Value::array(context)])
+    Ok([public, system, context.into_value()])
 }
 
 /// A string is a path, a stream resource the entity's stream, another
@@ -216,7 +224,7 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
         _ => match php_ext::coerce::to_string(req, &retval) {
             Ok(s) => {
                 let path = s.as_bytes().to_vec();
-                req.release(Value::string(s));
+                s.give_up(req);
                 Resolved::Path(path)
             }
             Err(thrown) => Resolved::Thrown(thrown),
@@ -241,7 +249,7 @@ fn function_name(req: &mut Request, callable: &Callable, loader: &Value, member:
     };
     let Some((function, scope)) = closure.closure(req).map(|info| (info.function, info.scope))
     else {
-        req.release(closure.as_value());
+        closure.give_up(req);
         return String::new();
     };
     let mut name = Vec::new();
@@ -255,7 +263,7 @@ fn function_name(req: &mut Request, callable: &Callable, loader: &Value, member:
     if let Some(decl) = req.function_decl(function) {
         name.extend_from_slice(&decl.name.0);
     }
-    req.release(closure.as_value());
+    closure.give_up(req);
     String::from_utf8_lossy(&name).into_owned()
 }
 
@@ -345,7 +353,7 @@ fn open(
     filename: &[u8],
     mode: &[u8],
     read_only: bool,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     if contains_nul_escape(filename) {
         docref(
             req,
@@ -379,7 +387,7 @@ fn open(
     };
     let opened = req.with_stream_ctx(Some(context), |req| req.open_stream(&path, mode, false))?;
     // "Prevent from closing this by fclose()": the stream is libxml's.
-    if let Some(stream) = opened {
+    if let Some(stream) = &opened {
         stream.forbid_fclose(req);
     }
     Ok(opened)

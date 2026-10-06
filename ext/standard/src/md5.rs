@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
 /// not yet full and the last block's words, which ext/hash's
@@ -234,7 +234,7 @@ pub(super) fn digest_value(
     req: &mut Request,
     digest: &[u8],
     binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     if binary {
         PhpString::new(req, digest)
     } else {
@@ -284,7 +284,7 @@ fn md5(
     req: &mut Request,
     string: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut context = Md5::new();
     context.update(string.as_bytes());
     let digest = context.finish();
@@ -312,7 +312,7 @@ pub(super) fn digest_file(
         update(&buf[..n]);
     }
     let complete = stream.eof(req);
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     Ok(complete)
 }
 
@@ -371,7 +371,7 @@ fn md5_file(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] binary: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Md5::new();
     if !digest_file(req, filename.0, |read| context.update(read))? {
         return Ok(OrFalse::False);

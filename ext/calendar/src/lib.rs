@@ -33,7 +33,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Layout, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value};
 
 use constants::{
     CAL_DOW_LONG, CAL_DOW_SHORT, CAL_FRENCH, CAL_GREGORIAN, CAL_JEWISH, CAL_JULIAN,
@@ -228,40 +228,45 @@ fn count(jd: Option<JulianDay>) -> i64 {
 }
 
 /// A string of the request's holding `bytes`.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
 /// `add_assoc_*`: `value` under the string key `name`.
-fn set(req: &mut Request, array: &mut PhpArray, name: &str, value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(string(req, name.as_bytes())?);
+fn set(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &str,
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(string(req, name.as_bytes())?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// `add_assoc_string`.
 fn set_string(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &str,
     text: &str,
 ) -> Result<(), Thrown> {
-    let value = Value::string(string(req, text.as_bytes())?);
-    set(req, array, name, value)
+    let value = string(req, text.as_bytes())?.into_value();
+    set(req, array, name, value.hand_on_unmigrated())
 }
 
 /// `_php_cal_info`: one calendar's month names, its longest month and
 /// its names.
-fn calendar_row(req: &mut Request, calendar: Calendar) -> Result<PhpArray, Thrown> {
+fn calendar_row(req: &mut Request, calendar: Calendar) -> Result<Owner<PhpArray>, Thrown> {
     let (months, max_days, short, long) = calendar.months();
     let mut row = PhpArray::new(req)?;
     for (name, names) in [("months", long), ("abbrevmonths", short)] {
         let size = u32::try_from(months + 1).unwrap_or(u32::MAX);
         let mut list = PhpArray::sized(req, size, Layout::Packed)?;
         for (at, month) in (1..).zip(names.iter().take(months + 1).skip(1)) {
-            let value = Value::string(string(req, month.as_bytes())?);
-            list.set(req, Key::Int(at), value)?;
+            let value = string(req, month.as_bytes())?.into_value();
+            list.set(req, Key::Int(at), value.hand_on_unmigrated())?;
         }
-        set(req, &mut row, name, Value::array(list))?;
+        set(req, &mut row, name, list.into_value().hand_on_unmigrated())?;
     }
     set(req, &mut row, "maxdaysinmonth", Value::int(max_days))?;
     let (name, symbol) = calendar.names();
@@ -333,12 +338,15 @@ fn calendar_row(req: &mut Request, calendar: Calendar) -> Result<PhpArray, Throw
 /// cal_info(): Argument #1 ($calendar) must be a valid calendar ID
 /// ```
 #[php_function]
-fn cal_info(req: &mut Request, #[php(default = -1)] calendar: i64) -> Result<PhpArray, Thrown> {
+fn cal_info(
+    req: &mut Request,
+    #[php(default = -1)] calendar: i64,
+) -> Result<Owner<PhpArray>, Thrown> {
     if calendar == -1 {
         let mut all = PhpArray::sized(req, 4, Layout::Packed)?;
         for (id, calendar) in (0..).zip(Calendar::ALL) {
             let row = calendar_row(req, calendar)?;
-            all.set(req, Key::Int(id), Value::array(row))?;
+            all.set(req, Key::Int(id), row.into_value().hand_on_unmigrated())?;
         }
         return Ok(all);
     }
@@ -541,7 +549,11 @@ fn cal_to_jd(
 /// cal_from_jd(): Argument #2 ($calendar) must be a valid calendar ID
 /// ```
 #[php_function]
-fn cal_from_jd(req: &mut Request, julian_day: i64, calendar: i64) -> Result<PhpArray, Thrown> {
+fn cal_from_jd(
+    req: &mut Request,
+    julian_day: i64,
+    calendar: i64,
+) -> Result<Owner<PhpArray>, Thrown> {
     let cal = Calendar::argument(req, calendar, 2)?;
     let jd = JulianDay(julian_day);
     let date = cal.date(jd);
@@ -600,7 +612,7 @@ fn cal_from_jd(req: &mut Request, julian_day: i64, calendar: i64) -> Result<PhpA
 /// string(5) "0/0/0"
 /// ```
 #[php_function]
-fn jdtogregorian(req: &mut Request, julian_day: i64) -> Result<PhpString, Thrown> {
+fn jdtogregorian(req: &mut Request, julian_day: i64) -> Result<Owner<PhpString>, Thrown> {
     let date = sdn::sdn_to_gregorian(JulianDay(julian_day));
     string(req, sdn::render(date).as_bytes())
 }
@@ -639,7 +651,7 @@ fn gregoriantojd(month: i64, day: i64, year: i64) -> i64 {
 /// string(12) "7/31/2142725"
 /// ```
 #[php_function]
-fn jdtojulian(req: &mut Request, julian_day: i64) -> Result<PhpString, Thrown> {
+fn jdtojulian(req: &mut Request, julian_day: i64) -> Result<Owner<PhpString>, Thrown> {
     let date = sdn::sdn_to_julian(JulianDay(julian_day));
     string(req, sdn::render(date).as_bytes())
 }
@@ -696,7 +708,7 @@ fn jdtojewish(
     julian_day: i64,
     #[php(default = false)] hebrew: bool,
     #[php(default = 0)] flags: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let date = jewish::sdn_to_jewish(JulianDay(julian_day));
     if !hebrew {
         return string(req, sdn::render(date).as_bytes());
@@ -753,7 +765,7 @@ fn jewishtojd(req: &mut Request, month: i64, day: i64, year: i64) -> Result<i64,
 /// string(5) "0/0/0"
 /// ```
 #[php_function]
-fn jdtofrench(req: &mut Request, julian_day: i64) -> Result<PhpString, Thrown> {
+fn jdtofrench(req: &mut Request, julian_day: i64) -> Result<Owner<PhpString>, Thrown> {
     let date = sdn::sdn_to_french(JulianDay(julian_day));
     string(req, sdn::render(date).as_bytes())
 }
@@ -795,7 +807,7 @@ fn jddayofweek(
     req: &mut Request,
     julian_day: i64,
     #[php(default = CAL_DOW_DAYNO)] mode: i64,
-) -> Result<Union<i64, PhpString>, Thrown> {
+) -> Result<Union<i64, Owner<PhpString>>, Thrown> {
     let day = JulianDay(julian_day).day_of_week();
     Ok(match mode {
         CAL_DOW_LONG => Union::B(string(req, sdn::DAY_NAME_LONG[day].as_bytes())?),
@@ -824,7 +836,7 @@ fn jddayofweek(
 /// string(0) ""
 /// ```
 #[php_function]
-fn jdmonthname(req: &mut Request, julian_day: i64, mode: i64) -> Result<PhpString, Thrown> {
+fn jdmonthname(req: &mut Request, julian_day: i64, mode: i64) -> Result<Owner<PhpString>, Thrown> {
     let jd = JulianDay(julian_day);
     let name = match mode {
         CAL_MONTH_GREGORIAN_LONG => {

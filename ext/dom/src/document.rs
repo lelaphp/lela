@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, OrFalse, Passed, Path, Raw, This, True, Union, Unty
 use php_ext::attr::php_class;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi as f;
 use php_ext_libxml::ffi::{
@@ -63,7 +63,7 @@ pub(crate) fn doctype(req: &mut Request, object: PhpObject) -> Read {
 
 fn implementation(req: &mut Request, _object: PhpObject) -> Read {
     let class = crate::class(req, "DOMImplementation")?;
-    Ok(Some(php_ext::call::new_object(req, class)?.as_value()))
+    Ok(Some(php_ext::call::new_object(req, class)?.into_value()))
 }
 
 /// `dom_document_document_element_read`.
@@ -143,7 +143,10 @@ fn set_encoding(req: &mut Request, object: PhpObject, value: &Value) -> Result<(
 /// ```
 pub(crate) fn standalone(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
-    Ok(Some(Value::bool(doc.doc_standalone() > 0)))
+    Ok(Some(Owner::take(
+        req,
+        Value::bool(doc.doc_standalone() > 0),
+    )))
 }
 
 fn set_standalone(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
@@ -203,7 +206,7 @@ pub(crate) fn document_uri(req: &mut Request, object: PhpObject) -> Read {
     match doc.doc_url() {
         Some(url) => Ok(Some(string(req, &url)?)),
         None if crate::modern::follows_spec(req, object) => Ok(Some(string(req, b"about:blank")?)),
-        None => Ok(Some(Value::null())),
+        None => Ok(Some(Owner::take(req, Value::null()))),
     }
 }
 
@@ -219,7 +222,7 @@ fn set_document_uri(req: &mut Request, object: PhpObject, value: &Value) -> Resu
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn config(req: &mut Request, _object: PhpObject) -> Read {
     crate::deprecated_property(req, "Property DOMDocument::$config is deprecated");
-    Ok(Some(Value::null()))
+    Ok(Some(Owner::take(req, Value::null())))
 }
 
 /// One of `libxml_doc_props`' switches, read and written.
@@ -237,15 +240,18 @@ enum Switch {
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn read_switch(req: &mut Request, object: PhpObject, which: Switch) -> Read {
     let p = props_of(req, object);
-    Ok(Some(Value::bool(match which {
-        Switch::Strict => p.strict_error,
-        Switch::Format => p.format,
-        Switch::Validate => p.validate_on_parse,
-        Switch::Resolve => p.resolve_externals,
-        Switch::Preserve => p.preserve_whitespace,
-        Switch::Recover => p.recover,
-        Switch::Substitute => p.substitute_entities,
-    })))
+    Ok(Some(Owner::take(
+        req,
+        Value::bool(match which {
+            Switch::Strict => p.strict_error,
+            Switch::Format => p.format,
+            Switch::Validate => p.validate_on_parse,
+            Switch::Resolve => p.resolve_externals,
+            Switch::Preserve => p.preserve_whitespace,
+            Switch::Recover => p.recover,
+            Switch::Substitute => p.substitute_entities,
+        }),
+    )))
 }
 
 #[allow(clippy::unnecessary_wraps)] // the writer shape every row of a property table has
@@ -492,7 +498,7 @@ fn load_html_as(
 
 /// A new node's object, or php's "Invalid State Error" where libxml made
 /// none.
-fn created(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<Value, Thrown> {
+fn created(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<Owner<Value>, Thrown> {
     match node {
         Some(n) => object_for(req, n, Some(this)),
         None => Err(crate::dom_throw(req, Code::InvalidState)),
@@ -500,10 +506,10 @@ fn created(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<Val
 }
 
 /// `INVALID_CHARACTER_ERR` for a name libxml refuses, `false` answered.
-fn invalid_name(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+fn invalid_name(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let strict = strict(req, this);
     dom_error(req, Code::InvalidCharacter, strict)?;
-    Ok(Value::bool(false))
+    Ok(Owner::take(req, Value::bool(false)))
 }
 
 /// The legacy branch of `DOMDocument::createAttributeNS` past the name's
@@ -578,7 +584,7 @@ pub(crate) fn elements_by_tag_name_ns(
     namespace: Option<Path>,
     local_name: Path,
     class: &str,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let ns = namespace
         .map(|n| n.0.as_bytes().to_vec())
         .unwrap_or_default();
@@ -792,7 +798,7 @@ pub(crate) fn save_xml(
     this: PhpObject,
     node: Option<PhpObject>,
     options: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let format = props_of(req, this).format;
     let no_empty = options & i64::from(php_ext_libxml::NOEMPTYTAG) != 0;
@@ -803,7 +809,7 @@ pub(crate) fn save_xml(
         if node.doc() != Some(doc) {
             let strict = strict(req, this);
             dom_error(req, Code::WrongDocument, strict)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         handlers.dump_node_to_str(req, doc, node, format, no_empty, encoding.as_deref())?
     } else {
@@ -820,7 +826,7 @@ pub(crate) fn save_xml(
         string(req, &bytes)
     } else {
         docref(req, Level::Warning, "Could not save document");
-        Ok(Value::bool(false))
+        Ok(Owner::take(req, Value::bool(false)))
     }
 }
 
@@ -833,7 +839,11 @@ fn handlers_of(req: &Request, object: PhpObject) -> &'static dyn php_ext_libxml:
 }
 
 /// `DOMDocument::saveHTML`'s body.
-fn save_html(req: &mut Request, this: PhpObject, node: Option<PhpObject>) -> Result<Value, Thrown> {
+fn save_html(
+    req: &mut Request,
+    this: PhpObject,
+    node: Option<PhpObject>,
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let format = props_of(req, this).format;
     let (saved, raised) = if let Some(node) = node {
@@ -841,7 +851,7 @@ fn save_html(req: &mut Request, this: PhpObject, node: Option<PhpObject>) -> Res
         if node.doc() != Some(doc) {
             let strict = strict(req, this);
             dom_error(req, Code::WrongDocument, strict)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         let nodes: Vec<Node> = if node.kind() == Kind::Fragment {
             let mut out = Vec::new();
@@ -858,7 +868,7 @@ fn save_html(req: &mut Request, this: PhpObject, node: Option<PhpObject>) -> Res
         if saved.is_none() {
             Errors::route(req, raised);
             docref(req, Level::Warning, "Error dumping HTML node");
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         (saved, raised)
     } else {
@@ -867,7 +877,7 @@ fn save_html(req: &mut Request, this: PhpObject, node: Option<PhpObject>) -> Res
     Errors::route(req, raised);
     match saved {
         Some(bytes) => string(req, &bytes),
-        None => Ok(Value::bool(false)),
+        None => Ok(Owner::take(req, Value::bool(false))),
     }
 }
 
@@ -878,7 +888,7 @@ fn create_element_ns(
     uri: Option<&[u8]>,
     name: &[u8],
     value: Option<&[u8]>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let uri_len = uri.map_or(0, <[u8]>::len);
     let mut made = None;
@@ -907,7 +917,7 @@ fn create_element_ns(
             }
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            Ok(Value::bool(false))
+            Ok(Owner::take(req, Value::bool(false)))
         }
     }
 }
@@ -918,13 +928,13 @@ fn create_attribute_ns(
     this: PhpObject,
     uri: Option<&[u8]>,
     name: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let modern = crate::modern::follows_spec(req, this);
     let root = doc.root();
     if root.is_none() && !modern {
         docref(req, Level::Warning, "Document Missing Root Element");
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let parts = match validate_and_extract(uri, name) {
         Ok(parts) => parts,
@@ -932,7 +942,7 @@ fn create_attribute_ns(
             let code = if modern { code } else { Code::Namespace };
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
     };
     if modern {
@@ -953,7 +963,7 @@ fn create_attribute_ns(
         Err(code) => {
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            Ok(Value::bool(false))
+            Ok(Owner::take(req, Value::bool(false)))
         }
     }
 }
@@ -964,7 +974,7 @@ fn import_node(
     this: PhpObject,
     node_obj: PhpObject,
     deep: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let node = fetch(req, node_obj)?;
     if node.kind().is_document() {
@@ -973,13 +983,13 @@ fn import_node(
             Level::Warning,
             "Cannot import: Node Type Not Supported",
         );
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
     let Some(copy) = crate::clone_node(node, Some(doc), deep) else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     if copy.kind() == Kind::Attribute
         && copy.ns().is_none()
@@ -1016,7 +1026,7 @@ fn modern_import(
     this: PhpObject,
     node_obj: Option<PhpObject>,
     deep: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let Some(node_obj) = node_obj else {
         // `?Dom\Node $node` lets `null` through to `O`, which refuses it.
@@ -1039,7 +1049,11 @@ fn modern_import(
 }
 
 /// `DOMDocument::getElementById`'s body, `Dom\Document`'s too.
-fn get_element_by_id(req: &mut Request, this: PhpObject, id: &[u8]) -> Result<Value, Thrown> {
+fn get_element_by_id(
+    req: &mut Request,
+    this: PhpObject,
+    id: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let modified = crate::modified_since_parsing(req, this);
     if !modified {
@@ -1059,7 +1073,7 @@ fn get_element_by_id(req: &mut Request, this: PhpObject, id: &[u8]) -> Result<Va
         }
         at = crate::next_in_tree_order(n, doc);
     }
-    Ok(Value::null())
+    Ok(Owner::take(req, Value::null()))
 }
 
 /// `dom_document_adopt_node`.
@@ -1068,7 +1082,7 @@ fn adopt_node(
     this: PhpObject,
     node_obj: PhpObject,
     modern: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let node = fetch(req, node_obj)?;
     if matches!(
         node.kind(),
@@ -1081,18 +1095,17 @@ fn adopt_node(
     ) {
         let strict = strict(req, node_obj);
         dom_error(req, Code::NotSupported, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let doc = fetch(req, this)?;
     if !adopt(req, this, node, doc) {
         if modern {
             return Err(crate::dom_throw(req, Code::InvalidState));
         }
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let value = node_obj.as_value();
-    req.addref(&value);
-    Ok(value)
+    Ok(Owner::take(req, value))
 }
 
 /// The first steps of `DOMDocument::xinclude` and `Dom\XMLDocument`'s,
@@ -1274,7 +1287,7 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         localName: Path,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let name = localName.0.as_bytes();
         let this = this.object();
         let doc = fetch(req, this)?;
@@ -1331,7 +1344,7 @@ impl DOMDocument {
         this: This<Self>,
         namespace: Option<PhpString>,
         qualifiedName: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         create_attribute_ns(req, this.object(), uri, qualifiedName.as_bytes()).map(Untyped)
     }
@@ -1355,7 +1368,7 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         data: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let data = data.as_bytes();
         let this = this.object();
         let doc = fetch(req, this)?;
@@ -1384,11 +1397,11 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         data: PhpString,
-    ) -> Result<Raw<Instance<crate::classes::DOMComment>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::classes::DOMComment>>>, Thrown> {
         let this = this.object();
         let doc = fetch(req, this)?;
         let made = created(req, this, Node::new_comment(Some(doc), data.as_bytes()))?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `DOMDocument::createDocumentFragment(): DOMDocumentFragment`.
@@ -1396,11 +1409,11 @@ impl DOMDocument {
     fn createDocumentFragment(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Raw<Instance<crate::classes::DOMDocumentFragment>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::classes::DOMDocumentFragment>>>, Thrown> {
         let this = this.object();
         let doc = fetch(req, this)?;
         let made = created(req, this, Node::new_fragment(Some(doc)))?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `DOMDocument::createElement(string $localName, string $value = "")`.
@@ -1420,7 +1433,7 @@ impl DOMDocument {
         this: This<Self>,
         localName: PhpString,
         #[php(default = "")] value: Passed<PhpString>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let name = localName.as_bytes();
         let value = passed(value);
         let this = this.object();
@@ -1452,7 +1465,7 @@ impl DOMDocument {
         namespace: Option<PhpString>,
         qualifiedName: PhpString,
         #[php(default = "")] value: Passed<PhpString>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         let value = passed(value);
         create_element_ns(
@@ -1470,7 +1483,7 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         name: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let name = name.as_bytes();
         let this = this.object();
         let doc = fetch(req, this)?;
@@ -1486,7 +1499,7 @@ impl DOMDocument {
         this: This<Self>,
         target: PhpString,
         #[php(default = "")] data: Passed<PhpString>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let target = target.as_bytes();
         let data = passed(data);
         let this = this.object();
@@ -1503,11 +1516,11 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         data: PhpString,
-    ) -> Result<Raw<Instance<crate::classes::DOMText>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::classes::DOMText>>>, Thrown> {
         let this = this.object();
         let doc = fetch(req, this)?;
         let made = created(req, this, Node::new_text(Some(doc), data.as_bytes()))?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `DOMDocument::getElementById(string $elementId): ?DOMElement`.
@@ -1529,9 +1542,9 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         elementId: PhpString,
-    ) -> Result<Raw<Option<Instance<DOMElement>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<DOMElement>>>>, Thrown> {
         let found = get_element_by_id(req, this.object(), elementId.as_bytes())?;
-        returned(req, found)
+        returned(found)
     }
 
     #[php(tentative, implementation = DOMElement::getElementsByTagName)]
@@ -1569,7 +1582,7 @@ impl DOMDocument {
         this: This<Self>,
         node: Instance<DOMNode>,
         #[php(default = false)] deep: bool,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         import_node(req, this.object(), node.object(), deep).map(Untyped)
     }
 
@@ -1768,7 +1781,7 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] node: Option<Instance<DOMNode>>,
-    ) -> Result<OrFalse<Raw<PhpString>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Raw<PhpString>>>, Thrown> {
         let saved = save_html(req, this.object(), node.map(|n| n.object()))?;
         or_false(req, saved)
     }
@@ -1843,7 +1856,7 @@ impl DOMDocument {
         this: This<Self>,
         #[php(default = null)] node: Option<Instance<DOMNode>>,
         #[php(default = 0)] options: i64,
-    ) -> Result<OrFalse<Raw<PhpString>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Raw<PhpString>>>, Thrown> {
         let saved = save_xml(req, this.object(), node.map(|n| n.object()), options)?;
         or_false(req, saved)
     }
@@ -1988,7 +2001,7 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-    ) -> Result<OrFalse<Raw<Instance<DOMNode>>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Raw<Instance<DOMNode>>>>, Thrown> {
         let adopted = adopt_node(req, this.object(), node.object(), false)?;
         or_false(req, adopted)
     }
@@ -2091,7 +2104,7 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         localName: PhpString,
-    ) -> Result<Raw<Instance<crate::element::Element>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::element::Element>>>, Thrown> {
         let name = localName.as_bytes();
         let this = this.object();
         let doc = fetch(req, this)?;
@@ -2107,7 +2120,7 @@ impl Document {
             Node::new_element(Some(doc), None, name, None)
         };
         let made = created(req, this, node)?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `Dom\Document::createElementNS(?string $namespace, string $qualifiedName): Dom\Element`.
@@ -2141,7 +2154,7 @@ impl Document {
         this: This<Self>,
         namespace: Option<PhpString>,
         qualifiedName: PhpString,
-    ) -> Result<Raw<Instance<crate::element::Element>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::element::Element>>>, Thrown> {
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         let this = this.object();
         let doc = fetch(req, this)?;
@@ -2156,10 +2169,10 @@ impl Document {
             Err(code) => {
                 let strict = strict(req, this);
                 dom_error(req, code, strict)?;
-                Value::null()
+                Owner::take(req, Value::null())
             }
         };
-        returned(req, made)
+        returned(made)
     }
 
     #[php(implementation = DOMDocument::createDocumentFragment)]
@@ -2195,13 +2208,13 @@ impl Document {
         this: This<Self>,
         target: PhpString,
         data: PhpString,
-    ) -> Result<Raw<Instance<crate::classes::ProcessingInstruction>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::classes::ProcessingInstruction>>>, Thrown> {
         let (target, data) = (target.as_bytes(), data.as_bytes());
         let this = this.object();
         let doc = fetch(req, this)?;
         if !Name::valid(target) {
             let refused = invalid_name(req, this)?;
-            return returned(req, refused);
+            return returned(refused);
         }
         if data.windows(2).any(|w| w == b"?>") {
             return Err(crate::dom_throw_message(
@@ -2211,7 +2224,7 @@ impl Document {
             ));
         }
         let made = created(req, this, Node::new_pi(Some(doc), target, Some(data)))?;
-        returned(req, made)
+        returned(made)
     }
 
     /// `Dom\Document::importNode(?Dom\Node $node, bool $deep = false): Dom\Node`.
@@ -2243,9 +2256,9 @@ impl Document {
         this: This<Self>,
         node: Option<Instance<crate::modern::Node>>,
         #[php(default = false)] deep: bool,
-    ) -> Result<Raw<Instance<crate::modern::Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
         let imported = modern_import(req, this.object(), node.map(|n| n.object()), deep)?;
-        returned(req, imported)
+        returned(imported)
     }
 
     /// `Dom\Document::adoptNode(Dom\Node $node): Dom\Node`: the node's
@@ -2277,9 +2290,9 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         node: Instance<crate::modern::Node>,
-    ) -> Result<Raw<Instance<crate::modern::Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
         let adopted = adopt_node(req, this.object(), node.object(), true)?;
-        returned(req, adopted)
+        returned(adopted)
     }
 
     #[php(implementation = DOMDocument::createAttribute)]
@@ -2379,9 +2392,9 @@ impl Document {
         this: This<Self>,
         node: Instance<DOMNode>,
         #[php(default = false)] deep: bool,
-    ) -> Result<Raw<Instance<crate::modern::Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
         let imported = modern_import(req, this.object(), Some(node.object()), deep)?;
-        returned(req, imported)
+        returned(imported)
     }
 
     #[php(implementation = crate::element::Element::querySelector)]
@@ -2449,7 +2462,7 @@ impl XMLDocument {
         req: &mut Request,
         #[php(default = "1.0")] version: PhpString,
         #[php(default = "UTF-8")] encoding: Path,
-    ) -> Result<Instance<XMLDocument>, Thrown> {
+    ) -> Result<Owner<Instance<XMLDocument>>, Thrown> {
         let encoding = encoding.0.as_bytes();
         if !Library::known_encoding(encoding) {
             return Err(php_ext::raising::argument_error(
@@ -2465,7 +2478,7 @@ impl XMLDocument {
         doc.set_doc_string(DocString::Encoding, Some(encoding));
         let private = crate::private::Private::new(req)?;
         let made = crate::modern::document_object(req, "Dom\\XMLDocument", doc, private)?;
-        Ok(Instance::of(made))
+        Ok(made.into_instance())
     }
 
     /// `Dom\XMLDocument::createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): Dom\XMLDocument`.
@@ -2491,8 +2504,9 @@ impl XMLDocument {
         path: PhpString,
         #[php(default = 0)] options: i64,
         #[php(default = null)] overrideEncoding: Option<PhpString>,
-    ) -> Result<Instance<XMLDocument>, Thrown> {
-        crate::modern::xml_load(req, (path, options, overrideEncoding), true).map(Instance::of)
+    ) -> Result<Owner<Instance<XMLDocument>>, Thrown> {
+        crate::modern::xml_load(req, (path, options, overrideEncoding), true)
+            .map(Owner::into_instance)
     }
 
     /// `Dom\XMLDocument::createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): Dom\XMLDocument`.
@@ -2520,8 +2534,9 @@ impl XMLDocument {
         source: PhpString,
         #[php(default = 0)] options: i64,
         #[php(default = null)] overrideEncoding: Option<PhpString>,
-    ) -> Result<Instance<XMLDocument>, Thrown> {
-        crate::modern::xml_load(req, (source, options, overrideEncoding), false).map(Instance::of)
+    ) -> Result<Owner<Instance<XMLDocument>>, Thrown> {
+        crate::modern::xml_load(req, (source, options, overrideEncoding), false)
+            .map(Owner::into_instance)
     }
 
     #[php(implementation = DOMDocument::createEntityReference)]

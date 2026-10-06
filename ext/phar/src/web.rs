@@ -242,9 +242,8 @@ fn file_type(entry: &[u8]) -> (Vec<u8>, Mime) {
 fn bailout(req: &mut Request) -> Thrown {
     match PhpString::new(req, b"") {
         Ok(empty) => {
-            let status = Value::string(empty);
-            let thrown = php_ext::raising::exit(req, &status);
-            req.release(status);
+            let thrown = php_ext::raising::exit(req, &Value::string(*empty));
+            empty.give_up(req);
             thrown
         }
         Err(thrown) => thrown,
@@ -266,10 +265,10 @@ fn swap_server(
     old: &[u8],
     new: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, new)?);
-    req.update_server(name, value)?;
-    let value = Value::string(PhpString::new(req, old)?);
-    req.update_server(kept, value)
+    let value = PhpString::new(req, new)?.into_value();
+    req.update_server(name, value.hand_on_unmigrated())?;
+    let value = PhpString::new(req, old)?.into_value();
+    req.update_server(kept, value.hand_on_unmigrated())
 }
 
 /// `phar_mung_server_vars` (`Z/ext/phar/phar_object.c:57`): `PATH_INFO`
@@ -362,14 +361,14 @@ fn file_action(
     name.extend_from_slice(entry);
     match kind {
         Mime::Phps => {
-            let function = Value::string(PhpString::new(req, b"highlight_file")?);
+            let function = PhpString::new(req, b"highlight_file")?.into_value();
             let callable = php_ext::coerce::callable_checked(req, &function);
-            req.release(function);
+            function.give_up(req);
             if let Ok(callable) = callable {
-                let name = Value::string(PhpString::new(req, &name)?);
-                let highlighted = php_ext::call::call(req, &callable, &[name]);
-                req.release(name);
-                req.release(highlighted?);
+                let name = PhpString::new(req, &name)?.into_value();
+                let highlighted = php_ext::call::call(req, &callable, &[*name]);
+                name.give_up(req);
+                highlighted?.give_up(req);
             }
             Err(bailout(req))
         }
@@ -565,9 +564,9 @@ const METHODS: [&[u8]; 7] = [
 /// entry, `true` or `false` the 403, anything else php's
 /// `PharException`.
 fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<u8>, Thrown> {
-    let param = Value::string(PhpString::new(req, entry)?);
-    let answered = php_ext::call::call(req, rewrite, &[param]);
-    req.release(param);
+    let param = PhpString::new(req, entry)?.into_value();
+    let answered = php_ext::call::call(req, rewrite, &[*param]);
+    param.give_up(req);
     // A callback that threw left no return value: php's own exception
     // then, the thrown one its previous (`zend_throw_exception_ex` over a
     // pending one).
@@ -580,13 +579,14 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
         )
     })?;
     if let Some(rewritten) = answered.as_str_bytes().map(<[u8]>::to_vec) {
-        req.release(answered);
+        answered.give_up(req);
         return Ok(rewritten);
     }
     if answered.as_bool().is_some() {
+        answered.give_up(req);
         return Err(do_403(req));
     }
-    req.release(answered);
+    answered.give_up(req);
     Err(throw(
         req,
         "PharException",

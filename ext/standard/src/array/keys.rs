@@ -18,7 +18,7 @@ use php_ext::raising::{
     throw_error, warning,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Layout, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
+use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 use super::sort::key_value;
 use super::{copied, key_copy, returned};
@@ -193,7 +193,7 @@ fn array_search(
     needle: Value,
     haystack: PhpArray,
     #[php(default = false)] strict: bool,
-) -> Result<OrFalse<Union<PhpString, i64>>, Thrown> {
+) -> Result<OrFalse<Union<Owner<PhpString>, i64>>, Thrown> {
     match search(req, &needle, haystack, strict)? {
         Some(key) => Ok(OrFalse::Value(key_return(req, &key))),
         None => Ok(OrFalse::False),
@@ -236,14 +236,13 @@ fn array_keys(
     array: PhpArray,
     filter_value: Passed<Value>,
     #[php(default = false)] strict: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let filter = match filter_value {
         Passed::Given(filter) => Some(filter),
         Passed::Omitted => None,
     };
     if array.is_empty() {
-        req.addref(&Value::array(array));
-        return Ok(array);
+        return Ok(Owner::take(req, array));
     }
     let mut out = PhpArray::new(req)?;
     for (key, element) in &array {
@@ -272,7 +271,7 @@ fn array_keys(
 /// NULL
 /// ```
 #[php_function]
-fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
+fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
     let first = array.iter().next();
     key_or_null(req, first.map(|(key, _)| key))
 }
@@ -289,22 +288,19 @@ fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<PhpString
 /// NULL
 /// ```
 #[php_function]
-fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
+fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
     let last = walk::rows(req, array).last();
     key_or_null(req, last.map(|(key, _)| key))
 }
 
-fn key_or_null(req: &mut Request, key: Option<Key>) -> Option<Union<PhpString, i64>> {
+fn key_or_null(req: &mut Request, key: Option<Key>) -> Option<Union<Owner<PhpString>, i64>> {
     key.map(|key| key_return(req, &key))
 }
 
 /// A key as the return, `string|int`, a string one more owner.
-pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<PhpString, i64> {
+pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<Owner<PhpString>, i64> {
     match key {
-        Key::Str(s) => {
-            req.addref(&Value::string(*s));
-            Union::A(*s)
-        }
+        Key::Str(s) => Union::A(Owner::take(req, *s)),
         Key::Int(n) => Union::B(*n),
     }
 }
@@ -321,9 +317,9 @@ pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<PhpString, i64> 
 /// NULL
 /// ```
 #[php_function]
-fn array_first(req: &mut Request, array: PhpArray) -> Value {
+fn array_first(array: PhpArray) -> Value {
     let first = array.iter().next();
-    value_or_null(req, first.map(|(_, value)| value))
+    value_or_null(first.map(|(_, value)| value))
 }
 
 /// `array_last(array $array): mixed`, php's `PHP_FUNCTION(array_last)`
@@ -343,18 +339,11 @@ fn array_first(req: &mut Request, array: PhpArray) -> Value {
 #[php_function]
 fn array_last(req: &mut Request, array: PhpArray) -> Value {
     let last = walk::rows(req, array).last();
-    value_or_null(req, last.map(|(_, value)| value))
+    value_or_null(last.map(|(_, value)| value))
 }
 
-fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
-    match value {
-        Some(value) => {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }
-        None => Value::null(),
-    }
+fn value_or_null(value: Option<Value>) -> Value {
+    value.map_or_else(Value::null, |value| value.deref())
 }
 
 /// `array_values(array $array): array`, php's
@@ -382,13 +371,12 @@ fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
 /// }
 /// ```
 #[php_function]
-fn array_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+fn array_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     if array.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     if array.is_list() && array.next_free() == i64::try_from(array.len()).unwrap_or(i64::MAX) {
-        req.addref(&Value::array(array));
-        return Ok(array);
+        return Ok(Owner::take(req, array));
     }
     let mut out = PhpArray::new(req)?;
     for (_, element) in array.snapshot_refs() {
@@ -421,7 +409,7 @@ fn array_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> 
 /// }
 /// ```
 #[php_function]
-fn array_count_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (_, element) in array.snapshot_refs() {
         let element = element.deref();
@@ -457,7 +445,9 @@ fn symtable_key(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
         req.addref(value);
         return Ok(Key::from_string(*s));
     }
-    Ok(Key::from_string(to_string(req, value)?))
+    Ok(Key::from_string(
+        to_string(req, value)?.hand_on_unmigrated(),
+    ))
 }
 
 /// `array_flip(array $array): array`, php's `PHP_FUNCTION(array_flip)`
@@ -480,7 +470,7 @@ fn symtable_key(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn array_flip(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+fn array_flip(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, element) in array.snapshot_refs() {
         let element = element.deref();
@@ -530,7 +520,7 @@ fn array_change_key_case(
     req: &mut Request,
     array: PhpArray,
     #[php(default = CASE_LOWER)] case: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let upper = case != 0;
     let mut out = PhpArray::new(req)?;
     for (key, element) in array.snapshot_refs() {
@@ -548,7 +538,7 @@ fn array_change_key_case(
                         }
                     })
                     .collect();
-                Key::Str(PhpString::new(req, &folded)?)
+                Key::Str(PhpString::new(req, &folded)?.hand_on_unmigrated())
             }
         };
         let value = copied(req, element);
@@ -605,13 +595,13 @@ fn array_fill(
     start_index: i64,
     count: i64,
     value: Value,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let start = start_index;
     if count < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if count == 0 {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     if count > i64::from(i32::MAX) {
         return Err(argument_error(req, "ValueError", 2, "is too large"));
@@ -661,7 +651,11 @@ fn array_fill(
 /// }
 /// ```
 #[php_function]
-fn array_fill_keys(req: &mut Request, keys: PhpArray, value: Value) -> Result<PhpArray, Thrown> {
+fn array_fill_keys(
+    req: &mut Request,
+    keys: PhpArray,
+    value: Value,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (_, element) in keys.snapshot_refs() {
         let element = element.deref();
@@ -716,7 +710,7 @@ fn array_pad(
     array: PhpArray,
     length: i64,
     value: Value,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (input, size, pad) = (array, length, value);
     let max = super::HT_MAX_SIZE.cast_signed();
     if !(-max..=max).contains(&size) {
@@ -728,12 +722,11 @@ fn array_pad(
     }
     let have = i64::try_from(input.len()).unwrap_or(i64::MAX);
     if have >= size.abs() {
-        req.addref(&Value::array(input));
-        return Ok(input);
+        return Ok(Owner::take(req, input));
     }
     let pads = size.abs() - have;
     let mut out = PhpArray::new(req)?;
-    let fill = |req: &mut Request, out: &mut PhpArray| -> Result<(), Thrown> {
+    let fill = |req: &mut Request, out: &mut Owner<PhpArray>| -> Result<(), Thrown> {
         for _ in 0..pads {
             req.addref(&pad);
             out.append(req, pad)?;
@@ -793,7 +786,7 @@ fn array_reverse(
     req: &mut Request,
     array: PhpArray,
     #[php(default = false)] preserve_keys: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (input, preserve) = (array, preserve_keys);
     let mut out = PhpArray::new(req)?;
     for (key, element) in input.snapshot_refs().into_iter().rev() {
@@ -852,17 +845,17 @@ fn array_chunk(
     array: PhpArray,
     length: i64,
     #[php(default = false)] preserve_keys: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (input, size, preserve) = (array, length, preserve_keys);
     if size < 1 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
     if input.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
     let mut out = PhpArray::new(req)?;
-    let mut chunk: Option<PhpArray> = None;
+    let mut chunk: Option<Owner<PhpArray>> = None;
     let mut current = 0;
     for (key, element) in input.snapshot_refs() {
         let mut open = match chunk {
@@ -878,7 +871,7 @@ fn array_chunk(
         }
         current += 1;
         if current == size {
-            out.append(req, Value::array(open))?;
+            out.append(req, Value::array(open.hand_on_unmigrated()))?;
             chunk = None;
             current = 0;
         } else {
@@ -886,7 +879,7 @@ fn array_chunk(
         }
     }
     if let Some(open) = chunk {
-        out.append(req, Value::array(open))?;
+        out.append(req, Value::array(open.hand_on_unmigrated()))?;
     }
     Ok(out)
 }
@@ -914,7 +907,11 @@ fn array_chunk(
 /// array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements
 /// ```
 #[php_function]
-fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<PhpArray, Thrown> {
+fn array_combine(
+    req: &mut Request,
+    keys: PhpArray,
+    values: PhpArray,
+) -> Result<Owner<PhpArray>, Thrown> {
     if keys.len() != values.len() {
         return Err(argument_error(
             req,
@@ -924,7 +921,7 @@ fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<
         ));
     }
     if keys.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
     for ((_, key), (_, value)) in keys.snapshot_refs().into_iter().zip(values.snapshot_refs()) {
@@ -1009,7 +1006,7 @@ fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool,
                 req,
                 "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead",
             );
-            Key::Str(PhpString::new(req, b"")?)
+            Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated())
         }
         ValueRef::Float(f) => Key::Int(lval_safe(req, f)),
         ValueRef::Bool(b) => Key::Int(i64::from(b)),
@@ -1132,7 +1129,7 @@ fn array_column(
     array: PhpArray,
     column_key: Option<Union<PhpString, i64>>,
     #[php(default = null)] index_key: Option<Union<PhpString, i64>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let input = array;
     let column = column_key.map(column_of);
     let index = index_key.map(column_of);
@@ -1144,13 +1141,23 @@ fn array_column(
                 req.addref(&row);
                 row
             }
-            Some(name) => match fetch(req, &row, name)? {
-                Some(value) => value,
-                None => continue,
+            Some(name) => match fetch(req, &row, name) {
+                Ok(Some(value)) => value,
+                Ok(None) => continue,
+                Err(thrown) => {
+                    out.give_up(req);
+                    return Err(thrown);
+                }
             },
         };
         let key = match &index {
-            Some(name) => fetch(req, &row, name)?,
+            Some(name) => match fetch(req, &row, name) {
+                Ok(key) => key,
+                Err(thrown) => {
+                    out.give_up(req);
+                    return Err(thrown);
+                }
+            },
             None => None,
         };
         match key {
@@ -1159,10 +1166,10 @@ fn array_column(
                 let key_of = php_ext::coerce::key_of(req, &key);
                 req.release(key);
                 match key_of {
-                    Ok(key) => out.set(req, key, value)?,
+                    Ok(key) => out.set(req, key.hand_on_unmigrated(), value)?,
                     Err(thrown) => {
                         req.release(value);
-                        req.release(out.to_value());
+                        out.give_up(req);
                         return Err(thrown);
                     }
                 }
@@ -1252,9 +1259,9 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
 /// int(5)
 /// ```
 #[php_function]
-fn array_sum(req: &mut Request, array: PhpArray) -> Result<Raw<Union<i64, f64>>, Thrown> {
+fn array_sum(req: &mut Request, array: PhpArray) -> Result<Owner<Raw<Union<i64, f64>>>, Thrown> {
     let total = binop(req, array, BinaryOp::Add, "Addition", 0)?;
-    returned(req, total)
+    Ok(returned(total))
 }
 
 /// `array_product(array $array): int|float`, php's `php_array_binop` over
@@ -1271,9 +1278,25 @@ fn array_sum(req: &mut Request, array: PhpArray) -> Result<Raw<Union<i64, f64>>,
 /// int(0)
 /// ```
 #[php_function]
-fn array_product(req: &mut Request, array: PhpArray) -> Result<Raw<Union<i64, f64>>, Thrown> {
+fn array_product(
+    req: &mut Request,
+    array: PhpArray,
+) -> Result<Owner<Raw<Union<i64, f64>>>, Thrown> {
     let total = binop(req, array, BinaryOp::Mul, "Multiplication", 1)?;
-    returned(req, total)
+    Ok(returned(total))
+}
+
+/// `op(total, total, operand)`: the old total given up, as the new
+/// total takes its place, and on a throw.
+fn step(
+    req: &mut Request,
+    op: BinaryOp,
+    total: Owner<Value>,
+    operand: &Value,
+) -> Result<Owner<Value>, Thrown> {
+    let next = binary_op(req, op, &total, operand);
+    total.give_up(req);
+    next
 }
 
 fn binop(
@@ -1282,8 +1305,8 @@ fn binop(
     op: BinaryOp,
     name: &str,
     initial: i64,
-) -> Result<Value, Thrown> {
-    let mut total = Value::int(initial);
+) -> Result<Owner<Value>, Thrown> {
+    let mut total = Owner::take(req, Value::int(initial));
     for (_, element) in input.snapshot_refs() {
         let element = element.deref();
         let operand = match element.as_ref() {
@@ -1292,11 +1315,17 @@ fn binop(
                 // the class's `cast_object` slot asked for `_IS_NUMBER`.
                 if let Some(object) = element.as_object().copied() {
                     let handlers = object.handlers(req);
-                    let number = handlers.cast_object(req, object, TypeTag::Number)?;
+                    let number = match handlers.cast_object(req, object, TypeTag::Number) {
+                        Ok(number) => number,
+                        Err(thrown) => {
+                            total.give_up(req);
+                            return Err(thrown);
+                        }
+                    };
                     if let Some(number) =
                         number.filter(|n| n.as_int().is_some() || n.as_float().is_some())
                     {
-                        total = binary_op(req, op, &total, &number)?;
+                        total = step(req, op, total, &number)?;
                         continue;
                     }
                 }
@@ -1330,7 +1359,7 @@ fn binop(
                         warning(req, "A non-numeric value encountered");
                         number
                     } else {
-                        total = binary_op(req, op, &total, &Value::int(0))?;
+                        total = step(req, op, total, &Value::int(0))?;
                         docref(
                             req,
                             Level::Warning,
@@ -1344,7 +1373,7 @@ fn binop(
             ValueRef::Bool(b) => Value::int(i64::from(b)),
             _ => element,
         };
-        total = binary_op(req, op, &total, &operand)?;
+        total = step(req, op, total, &operand)?;
     }
     Ok(total)
 }

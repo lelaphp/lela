@@ -15,7 +15,9 @@ use crate::api::call::call;
 use crate::api::coerce::{callable_checked, to_long, truthy};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::BindTo;
-use crate::api::values::{Emalloc, Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use crate::api::values::{
+    Emalloc, Key, Owner, PhpArray, PhpString, Resource, ResourceView, Value, ValueRef,
+};
 use crate::state::Layer;
 
 /// `sizeof(php_stream_context)` on the pinned 64-bit build: the
@@ -154,6 +156,12 @@ pub(crate) fn context_dtor(req: &mut Request, res: Resource) {
     }
 }
 
+impl ResourceView for StreamCtx {
+    fn resource(&self) -> Resource {
+        self.0
+    }
+}
+
 impl StreamCtx {
     /// `php_stream_context_alloc` (`Z/main/streams/streams.c:2422`): a
     /// `context` with an empty options array, a resource of its own with
@@ -174,14 +182,18 @@ impl StreamCtx {
     /// 88
     /// -208
     /// ```
-    pub fn alloc(req: &mut Request) -> Result<StreamCtx, Thrown> {
+    pub fn alloc(req: &mut Request) -> Result<Owner<StreamCtx>, Thrown> {
         let kind = req.types().context;
-        let options = PhpArray::new(req)?;
+        let options = PhpArray::new(req)?.hand_on_unmigrated();
         let context = Context {
             options: Some(options),
             notifier: None,
         };
-        Resource::sized(req, kind, context, CONTEXT_SIZE).map(StreamCtx)
+        let made = Resource::sized(req, kind, context, CONTEXT_SIZE)?;
+        let context = StreamCtx(*made);
+        let owner = Owner::take(req, context);
+        made.give_up(req);
+        Ok(owner)
     }
 
     /// `FG(default_context)`, made on first use and kept for the request:
@@ -201,7 +213,7 @@ impl StreamCtx {
         if let Some(context) = req.streams().default_context {
             return Ok(context);
         }
-        let context = StreamCtx::alloc(req)?;
+        let context = StreamCtx::alloc(req)?.hand_on_unmigrated();
         req.streams().default_context = Some(context);
         Ok(context)
     }
@@ -562,7 +574,7 @@ fn call_user_notifier(
     let message = match notice.message {
         Some(text) => {
             let text = text.split(|b| *b == 0).next().unwrap_or_default();
-            Value::string(PhpString::new(req, text)?)
+            PhpString::new(req, text)?.into_value().hand_on_unmigrated()
         }
         None => Value::null(),
     };
@@ -577,7 +589,7 @@ fn call_user_notifier(
     ];
     let answered = call(req, &callable, &arguments);
     req.release(message);
-    answered.map(|value| req.release(value))
+    answered.map(|value| value.give_up(req))
 }
 
 /// The body of [`StreamCtx::set_option`] over the options array
@@ -599,14 +611,14 @@ fn put_option(
             req.addref(&Value::array(array));
             array
         }
-        None => PhpArray::new(req)?,
+        None => PhpArray::new(req)?.hand_on_unmigrated(),
     };
     category.separate(req)?;
     let value = value.deref();
     req.addref(&value);
-    let option_key = Key::Str(PhpString::new(req, &c_string(option))?);
+    let option_key = Key::Str(PhpString::new(req, &c_string(option))?.hand_on_unmigrated());
     category.set(req, option_key, value)?;
-    let wrapper_key = Key::Str(PhpString::new(req, &wrapper)?);
+    let wrapper_key = Key::Str(PhpString::new(req, &wrapper)?.hand_on_unmigrated());
     options.set(req, wrapper_key, Value::array(category))
 }
 
@@ -630,8 +642,12 @@ fn unset_in(
     req.addref(&Value::array(category));
     category.separate(req)?;
     let option = PhpString::new(req, option)?;
-    let unset = category.unset(req, &Key::Str(option));
-    req.release(Value::string(option));
+    let unset = category.unset(req, &Key::Str(*option));
+    option.give_up(req);
     unset?;
-    options.set(req, Key::Str(name), Value::array(category))
+    options.set(
+        req,
+        Key::Str(name.hand_on_unmigrated()),
+        Value::array(category),
+    )
 }

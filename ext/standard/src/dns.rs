@@ -56,7 +56,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::{arg_value_error, ffi};
 
@@ -143,7 +143,9 @@ fn warn(req: &mut Request, warning: &Warning) {
 
 /// A string value of the request's.
 fn text(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+    Ok(Value::string(
+        PhpString::new(req, bytes)?.hand_on_unmigrated(),
+    ))
 }
 
 /// `Z_PARAM_PATH` as a C string: the check has refused a NUL.
@@ -173,7 +175,7 @@ fn value_error(req: &mut Request, error: DnsError) -> Thrown {
 /// bool(true)
 /// ```
 #[php_function]
-fn gethostname(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn gethostname(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match lookup_hostname() {
         Ok(name) => Ok(OrFalse::Value(PhpString::new(req, &name)?)),
         Err(warning) => {
@@ -199,7 +201,7 @@ fn gethostname(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// gethostbyaddr(): Argument #1 ($ip) must not contain any null bytes
 /// ```
 #[php_function]
-fn gethostbyaddr(req: &mut Request, ip: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn gethostbyaddr(req: &mut Request, ip: Path) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match lookup_addr(&c_path(ip)) {
         Ok(name) => Ok(OrFalse::Value(PhpString::new(req, &name)?)),
         Err(warning) => {
@@ -227,7 +229,7 @@ fn gethostbyaddr(req: &mut Request, ip: Path) -> Result<OrFalse<PhpString>, Thro
 /// int(256)
 /// ```
 #[php_function]
-fn gethostbyname(req: &mut Request, hostname: Path) -> Result<PhpString, Thrown> {
+fn gethostbyname(req: &mut Request, hostname: Path) -> Result<Owner<PhpString>, Thrown> {
     let (answer, warning) = lookup_name(&c_path(hostname));
     if let Some(warning) = warning {
         warn(req, &warning);
@@ -252,7 +254,7 @@ fn gethostbyname(req: &mut Request, hostname: Path) -> Result<PhpString, Thrown>
 /// bool(false)
 /// ```
 #[php_function]
-fn gethostbynamel(req: &mut Request, hostname: Path) -> Result<OrFalse<PhpArray>, Thrown> {
+fn gethostbynamel(req: &mut Request, hostname: Path) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (list, warning) = lookup_names(&c_path(hostname));
     if let Some(warning) = warning {
         warn(req, &warning);
@@ -310,17 +312,17 @@ fn record_array(req: &mut Request, record: Record) -> Result<Value, Thrown> {
                     let v = text(req, &entry)?;
                     list.append(req, v)?;
                 }
-                Value::array(list)
+                Value::array(list.hand_on_unmigrated())
             }
         };
-        let k = Key::Str(PhpString::new(req, name.as_bytes())?);
+        let k = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         array.set(req, k, value)?;
     }
-    Ok(Value::array(array))
+    Ok(Value::array(array.hand_on_unmigrated()))
 }
 
 /// A list of records as php's array of them.
-fn records_array(req: &mut Request, records: Vec<Record>) -> Result<PhpArray, Thrown> {
+fn records_array(req: &mut Request, records: Vec<Record>) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for record in records {
         let v = record_array(req, record)?;
@@ -334,7 +336,7 @@ fn empty_refs(req: &mut Request, targets: &[&Out]) -> Result<(), Thrown> {
     for target in targets {
         if target.is_given() {
             let empty = PhpArray::new(req)?;
-            target.set(req, Untyped(Value::array(empty)))?;
+            target.set(req, Untyped(empty.into_value()))?;
         }
     }
     Ok(())
@@ -369,7 +371,7 @@ fn dns_get_record(
     #[php(default = null)] authoritative_name_servers: Out,
     #[php(default = null)] additional_records: Out,
     #[php(default = false)] raw: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let hostname = c_path(hostname);
     empty_refs(req, &[&authoritative_name_servers, &additional_records])?;
     let authns = authoritative_name_servers.is_given();
@@ -383,11 +385,11 @@ fn dns_get_record(
     }
     if authns {
         let v = records_array(req, found.authns)?;
-        authoritative_name_servers.set(req, Untyped(Value::array(v)))?;
+        authoritative_name_servers.set(req, Untyped(v.into_value()))?;
     }
     if addtl {
         let v = records_array(req, found.addtl)?;
-        additional_records.set(req, Untyped(Value::array(v)))?;
+        additional_records.set(req, Untyped(v.into_value()))?;
     }
     match found.records {
         Some(records) => records_array(req, records).map(OrFalse::Value),
@@ -427,13 +429,13 @@ fn dns_get_mx(
         let v = text(req, &host)?;
         list.append(req, v)?;
     }
-    hosts.set(req, Untyped(Value::array(list)))?;
+    hosts.set(req, Untyped(list.into_value()))?;
     if with_weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
             list.append(req, Value::int(weight))?;
         }
-        weights.set(req, Untyped(Value::array(list)))?;
+        weights.set(req, Untyped(list.into_value()))?;
     }
     Ok(found.found)
 }

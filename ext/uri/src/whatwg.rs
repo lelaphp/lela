@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
 
 use crate::{
@@ -66,13 +66,14 @@ fn reported(kind: ErrorKind) -> (UrlValidationErrorType, bool) {
 fn fill_errors(
     req: &mut Request,
     errors: &[ValidationError],
-) -> Result<(PhpArray, Option<&'static str>), Thrown> {
+) -> Result<(Owner<PhpArray>, Option<&'static str>), Thrown> {
     if errors.is_empty() {
-        return Ok((PhpArray::empty(), None));
+        return Ok((Owner::take(req, PhpArray::empty()), None));
     }
     let mut out = PhpArray::new(req)?;
     let mut reason = None;
     let Some(class) = lookup_class(req, b"Uri\\WhatWg\\UrlValidationError")? else {
+        out.give_up(req);
         return Err(fatal(
             req,
             "InternalError: Uri\\WhatWg\\UrlValidationError is not linked",
@@ -84,18 +85,21 @@ fn fill_errors(
         let context = PhpString::new(req, &error.data)?;
         let kind_value = kind.into_return(req)?;
         let fields = [
-            (b"context".as_slice(), Value::string(context)),
+            (
+                b"context".as_slice(),
+                Value::string(context.hand_on_unmigrated()),
+            ),
             (b"type", kind_value),
             (b"failure", Value::bool(failure)),
         ];
         for (name, value) in fields {
-            let name = PhpString::new(req, name)?;
+            let name = PhpString::new(req, name)?.hand_on_unmigrated();
             object.set_prop(req, name, value)?;
         }
         if failure {
             reason = Some(kind.case_name());
         }
-        out.append(req, object.as_value())?;
+        out.append(req, object.into_value().hand_on_unmigrated())?;
     }
     Ok((out, reason))
 }
@@ -120,15 +124,15 @@ fn throw_invalid(
         let written = PhpString::new(req, b"errors").and_then(|name| {
             let errors = Value::array(errors);
             req.addref(&errors);
-            object.set_prop(req, name, errors)
+            object.set_prop(req, name.hand_on_unmigrated(), errors)
         });
         if let Err(thrown) = written {
-            req.release(throwable);
+            throwable.give_up(req);
             return thrown;
         }
     }
     let thrown = throw_value(req, &throwable);
-    req.release(throwable);
+    throwable.give_up(req);
     thrown
 }
 
@@ -140,9 +144,9 @@ fn refused_write(req: &mut Request, component: &str, errors: &[ValidationError])
                 req,
                 &format!("The specified {component} is malformed"),
                 reason,
-                array,
+                *array,
             );
-            req.release(Value::array(array));
+            array.give_up(req);
             thrown
         }
         Err(thrown) => thrown,
@@ -197,8 +201,8 @@ impl UriParser for WhatWg {
         if fails || want_errors {
             let (array, reason) = fill_errors(req, &parsed.errors)?;
             if fails {
-                let thrown = throw_invalid(req, "The specified URI is malformed", reason, array);
-                req.release(Value::array(array));
+                let thrown = throw_invalid(req, "The specified URI is malformed", reason, *array);
+                array.give_up(req);
                 return Err(thrown);
             }
             errors = Some(array);
@@ -411,7 +415,7 @@ impl InvalidUrlException {
 /// `zend_update_property`: one property written by name in the scope of
 /// the class that declares it.
 fn write(req: &mut Request, object: PhpObject, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?;
+    let name = PhpString::new(req, name)?.hand_on_unmigrated();
     object.set_prop(req, name, value)
 }
 
@@ -612,7 +616,7 @@ impl Url {
         uri: PhpString,
         #[php(default = null)] baseUrl: Option<Instance<Url>>,
         #[php(default = null)] errors: Errors,
-    ) -> Result<Option<Static>, Thrown> {
+    ) -> Result<Option<Owner<Static>>, Thrown> {
         crate::parse_static::<W>(req, uri, baseUrl.map(|b| b.object()), Some(&errors))
     }
 
@@ -652,7 +656,7 @@ impl Url {
     /// ```expect
     /// string(5) "https"
     /// ```
-    fn getScheme(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getScheme(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let scheme = crate::component_string::<W>(
             req,
             this.object(),
@@ -682,7 +686,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         scheme: PhpString,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), Some(scheme), W::set_scheme)
     }
 
@@ -696,7 +700,10 @@ impl Url {
     /// string(0) ""
     /// NULL
     /// ```
-    fn getUsername(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getUsername(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(
             req,
             this.object(),
@@ -720,7 +727,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         username: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), username, W::set_username)
     }
 
@@ -733,7 +740,10 @@ impl Url {
     /// string(1) "p"
     /// string(0) ""
     /// ```
-    fn getPassword(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getPassword(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(
             req,
             this.object(),
@@ -757,7 +767,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         #[php(sensitive)] password: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), password, W::set_password)
     }
 
@@ -773,7 +783,10 @@ impl Url {
     /// string(0) ""
     /// NULL
     /// ```
-    fn getAsciiHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getAsciiHost(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
             u.host(ReadAs::NormalizedAscii)
         })
@@ -788,7 +801,10 @@ impl Url {
     /// string(11) "münchen.de"
     /// string(5) "[::1]"
     /// ```
-    fn getUnicodeHost(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getUnicodeHost(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedUnicode, |u| {
             u.host(ReadAs::NormalizedUnicode)
         })
@@ -809,7 +825,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         host: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), host, W::set_host)
     }
 
@@ -840,7 +856,11 @@ impl Url {
     /// string(20) "https://example.com/"
     /// The specified port is malformed (PortOutOfRange)
     /// ```
-    fn withPort(req: &mut Request, this: This<Self>, port: Option<i64>) -> Result<Static, Thrown> {
+    fn withPort(
+        req: &mut Request,
+        this: This<Self>,
+        port: Option<i64>,
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write::<W>(req, this.object(), |req, uri| uri.set_port(req, port))
     }
 
@@ -853,7 +873,7 @@ impl Url {
     /// string(6) "/b%20c"
     /// string(1) "x"
     /// ```
-    fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let path =
             crate::component::<W, _>(req, this.object(), "path", ReadAs::NormalizedAscii, |u| {
                 u.path(ReadAs::NormalizedAscii)
@@ -869,7 +889,11 @@ impl Url {
     /// ```expect
     /// string(27) "https://example.com/b/c%20d"
     /// ```
-    fn withPath(req: &mut Request, this: This<Self>, path: PhpString) -> Result<Static, Thrown> {
+    fn withPath(
+        req: &mut Request,
+        this: This<Self>,
+        path: PhpString,
+    ) -> Result<Owner<Static>, Thrown> {
         let path = path.as_bytes().to_vec();
         crate::write::<W>(req, this.object(), |req, uri| uri.set_path(req, &path))
     }
@@ -884,7 +908,7 @@ impl Url {
     /// string(0) ""
     /// NULL
     /// ```
-    fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
             u.query(ReadAs::NormalizedAscii)
         })
@@ -904,7 +928,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         query: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), query, W::set_query)
     }
 
@@ -917,7 +941,10 @@ impl Url {
     /// string(5) "a%20b"
     /// NULL
     /// ```
-    fn getFragment(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getFragment(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::component_string::<W>(
             req,
             this.object(),
@@ -941,7 +968,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
         fragment: Option<PhpString>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::write_bytes::<W>(req, this.object(), fragment, W::set_fragment)
     }
 
@@ -973,7 +1000,7 @@ impl Url {
     /// ```expect
     /// string(46) "https://xn--mnchen-3ya.de/%C3%A4?%C3%B6#%C3%BC"
     /// ```
-    fn toAsciiString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn toAsciiString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         crate::recompose::<W>(req, this.object(), Recomposition::RawAscii)
     }
 
@@ -985,7 +1012,7 @@ impl Url {
     /// ```expect
     /// string(26) "https://münchen.de/%C3%A4"
     /// ```
-    fn toUnicodeString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn toUnicodeString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         crate::recompose::<W>(req, this.object(), Recomposition::RawUnicode)
     }
 
@@ -1006,7 +1033,7 @@ impl Url {
         this: This<Self>,
         uri: PhpString,
         #[php(default = null)] softErrors: Errors,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         crate::resolve::<W>(req, this.object(), uri, Some(&softErrors))
     }
 
@@ -1020,7 +1047,7 @@ impl Url {
     /// string(84) "O:14:"Uri\WhatWg\Url":2:{i:0;a:1:{s:3:"uri";s:20:"https://example.com/";}i:1;a:0:{}}"
     /// string(20) "https://example.com/"
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         crate::serialize::<W>(req, this.object())
     }
 
@@ -1061,7 +1088,7 @@ impl Url {
     ///   string(0) ""
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         crate::debug_info::<W>(req, this.object())
     }
 }

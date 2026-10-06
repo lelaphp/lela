@@ -19,7 +19,7 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::lazy::{lazy_compatible, object_of};
 use super::signature::type_factory;
@@ -88,9 +88,9 @@ fn hook_reflector(
     req: &mut Request,
     scope: ClassId,
     decl: &MethodDecl,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let object = super::class::method_factory(req, &decl.function.name.0, scope, scope)?;
-    super::keep_hook(req, object);
+    super::keep_hook(req, *object);
     Ok(object)
 }
 
@@ -289,11 +289,11 @@ fn set_raw_value(
         }
     };
     if prop.is_some_and(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some()) {
-        return php_ext::call::write_raw_property(req, &object, key, value);
+        return php_ext::call::write_raw_property(req, &object, key.hand_on_unmigrated(), value);
     }
     let handlers = object.handlers(req);
     req.with_fake_scope(asked, |req| {
-        handlers.write_property(req, object, key, value)
+        handlers.write_property(req, object, key.hand_on_unmigrated(), value)
     })
 }
 
@@ -319,7 +319,7 @@ impl Reflection {
     /// }
     /// ```
     #[php(tentative)]
-    fn getModifierNames(req: &mut Request, modifiers: i64) -> Result<PhpArray, Thrown> {
+    fn getModifierNames(req: &mut Request, modifiers: i64) -> Result<Owner<PhpArray>, Thrown> {
         let mut words: Vec<&str> = Vec::new();
         if modifiers & 64 != 0 {
             words.push("abstract");
@@ -350,7 +350,7 @@ impl Reflection {
         let mut names = PhpArray::new(req)?;
         for word in words {
             let value = string_value(req, word.as_bytes())?;
-            names.append(req, value)?;
+            names.append(req, value.hand_on_unmigrated())?;
         }
         Ok(names)
     }
@@ -522,7 +522,7 @@ impl ReflectionProperty {
     /// Property [ abstract public virtual int $a { get; } ]
     /// Property [ public $b = 1 { final set; } ]
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         let Some((declaring, decl)) = found else {
             // `_property_string` with no property info: php's dynamic row,
@@ -581,7 +581,7 @@ impl ReflectionProperty {
     ///   string(1) "d"
     /// }
     /// ```
-    fn getMangledName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getMangledName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         let mangled = match found {
             Some((scope, decl)) => match decl.visibility {
@@ -721,7 +721,7 @@ impl ReflectionProperty {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] object: Option<PhpObject>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let (class, name, declared) = this_property(req, this.object())?;
         // A `static` property is read through `intern->ce`, the class the
         // reflector was asked about.
@@ -742,9 +742,12 @@ impl ReflectionProperty {
         let holder = if declared.is_some() { class } else { asked };
         held_to(req, object, holder)?;
         let handlers = object.handlers(req);
-        req.with_fake_scope(asked, |req| {
+        let read = req.with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
-        })
+        })?;
+        let owner = Owner::take(req, read);
+        req.release(read);
+        Ok(owner)
     }
 
     /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
@@ -913,7 +916,7 @@ impl ReflectionProperty {
         let (object, handlers) = (*object, object.handlers(req));
         let asked = asked_class(req, this.object(), class);
         req.with_fake_scope(asked, |req| {
-            handlers.write_property(req, object, key, value)
+            handlers.write_property(req, object, key.hand_on_unmigrated(), value)
         })
     }
 
@@ -945,7 +948,7 @@ impl ReflectionProperty {
         req: &mut Request,
         this: This<Self>,
         object: PhpObject,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         held_to(req, object, asked)?;
@@ -964,9 +967,12 @@ impl ReflectionProperty {
         // `read_property` under `EG(fake_scope)`, the class the reflector
         // was asked about.
         let handlers = object.handlers(req);
-        req.with_fake_scope(asked, |req| {
+        let read = req.with_fake_scope(asked, |req| {
             handlers.read_property(req, object, &name, PropertyRead::Warning)
-        })
+        })?;
+        let owner = Owner::take(req, read);
+        req.release(read);
+        Ok(owner)
     }
 
     /// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
@@ -1188,7 +1194,7 @@ impl ReflectionProperty {
                 return Ok(false);
             };
             let held = !matches!(value.as_ref(), ValueRef::Undef);
-            req.release(value);
+            value.give_up(req);
             return Ok(held);
         }
         let Some(object) = object else {
@@ -1426,11 +1432,11 @@ impl ReflectionProperty {
     fn getDeclaringClass(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<crate::class::ReflectionClass>, Thrown> {
+    ) -> Result<Owner<Instance<crate::class::ReflectionClass>>, Thrown> {
         let (class, _, found) = this_declared(req, this.object())?;
         let scope = found.map_or(class, |(scope, _)| scope);
         let object = reflection_class_factory(req, scope)?;
-        Ok(Instance::of(object))
+        Ok(object.into_instance())
     }
 
     /// `ReflectionProperty::getDocComment()`: `prop->doc_comment`, or
@@ -1461,7 +1467,10 @@ impl ReflectionProperty {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getDocComment(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let (_, _, declared) = this_property(req, this.object())?;
         match declared.and_then(|decl| decl.doc_comment) {
             Some(doc) => PhpString::new(req, &doc).map(OrFalse::Value),
@@ -1486,13 +1495,13 @@ impl ReflectionProperty {
     fn getType(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::signature::ReflectionType>>>, Thrown> {
         let (_, _, found) = this_declared(req, this.object())?;
         let Some(ty) = found.and_then(|(_, decl)| decl.ty) else {
             return Ok(None);
         };
         let object = type_factory(req, &ty, true)?;
-        Ok(Some(Instance::of(object)))
+        Ok(Some(object.into_instance()))
     }
 
     /// `ReflectionProperty::getSettableType()`: the type a write must
@@ -1514,7 +1523,7 @@ impl ReflectionProperty {
     fn getSettableType(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::signature::ReflectionType>>>, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         let Some((declaring, decl)) = &found else {
             return Ok(None);
@@ -1533,7 +1542,7 @@ impl ReflectionProperty {
         let Some(ty) = ty else {
             return Ok(None);
         };
-        Ok(Some(Instance::of(type_factory(req, &ty, true)?)))
+        Ok(Some(type_factory(req, &ty, true)?.into_instance()))
     }
 
     /// `ReflectionProperty::hasType()`: `ZEND_TYPE_IS_SET(prop->type)`.
@@ -1606,17 +1615,17 @@ impl ReflectionProperty {
     /// NULL
     /// ```
     #[php(tentative)]
-    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         match default_of(req, &name, found) {
             Default::Written(expr, scope) => eval_declared(req, &expr, Some(scope)),
-            Default::ImplicitNull => Ok(Value::null()),
+            Default::ImplicitNull => Ok(Owner::take(req, Value::null())),
             Default::Absent => {
                 deprecated(
                     req,
                     "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists",
                 );
-                Ok(Value::null())
+                Ok(Owner::take(req, Value::null()))
             }
         }
     }
@@ -1637,12 +1646,12 @@ impl ReflectionProperty {
         this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let (_, _, found) = this_declared(req, this.object())?;
         // `ref->prop == NULL`, a dynamic property: no attributes, before
         // the filter is looked at.
         let Some((scope, decl)) = found else {
-            return Ok(PhpArray::empty());
+            return Ok(Owner::take(req, PhpArray::empty()));
         };
         let file = req
             .class_decl(scope)
@@ -1700,23 +1709,22 @@ impl ReflectionProperty {
     ///   }
     /// }
     /// ```
-    fn getHooks(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getHooks(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let (_, name, found) = this_declared(req, this.object())?;
         let declared: Vec<_> = HookKind::ALL
             .into_iter()
             .filter_map(|kind| Some((kind, hook_of(req, found.as_ref(), &name, kind)?)))
             .collect();
         if declared.is_empty() {
-            return Ok(PhpArray::empty());
+            return Ok(Owner::take(req, PhpArray::empty()));
         }
         let mut hooks = PhpArray::new(req)?;
         for (kind, (scope, decl)) in declared {
             let reflector = hook_reflector(req, scope, &decl)?;
-            let key = php_ext::values::Key::Str(php_ext::values::PhpString::new(
-                req,
-                kind.name().as_bytes(),
-            )?);
-            hooks.set(req, key, reflector.as_value())?;
+            let key = php_ext::values::Key::Str(
+                php_ext::values::PhpString::new(req, kind.name().as_bytes())?.hand_on_unmigrated(),
+            );
+            hooks.set(req, key, reflector.into_value().hand_on_unmigrated())?;
         }
         Ok(hooks)
     }
@@ -1769,11 +1777,11 @@ impl ReflectionProperty {
         req: &mut Request,
         this: This<Self>,
         r#type: PropertyHookType,
-    ) -> Result<Option<Instance<crate::func::ReflectionMethod>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::func::ReflectionMethod>>>, Thrown> {
         let kind = r#type.kind();
         let (_, name, found) = this_declared(req, this.object())?;
         match hook_of(req, found.as_ref(), &name, kind) {
-            Some((scope, decl)) => Ok(Some(Instance::of(hook_reflector(req, scope, &decl)?))),
+            Some((scope, decl)) => Ok(Some(hook_reflector(req, scope, &decl)?.into_instance())),
             None => Ok(None),
         }
     }
@@ -1920,7 +1928,7 @@ impl ReflectionClassConstant {
     /// Constant [ public int IS_DEPRECATED ] { 2048 }
     /// Constant [ public PropertyHookType Get ] { Object }
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, scope, decl) = this_constant(req, this.object())?;
         let held = class_name_of(req, scope);
         let enum_of = req
@@ -1955,7 +1963,7 @@ impl ReflectionClassConstant {
     /// int(2048)
     /// ```
     #[php(tentative)]
-    fn getValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn getValue(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let (_, scope, decl) = this_constant(req, this.object())?;
         super::constant_value(req, &decl, scope)
     }
@@ -2048,10 +2056,10 @@ impl ReflectionClassConstant {
     fn getDeclaringClass(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<crate::class::ReflectionClass>, Thrown> {
+    ) -> Result<Owner<Instance<crate::class::ReflectionClass>>, Thrown> {
         let (_, scope, _) = this_constant(req, this.object())?;
         let object = reflection_class_factory(req, scope)?;
-        Ok(Instance::of(object))
+        Ok(object.into_instance())
     }
 
     /// `ReflectionClassConstant::getDocComment()`: `ref->doc_comment`, or
@@ -2090,7 +2098,10 @@ impl ReflectionClassConstant {
     /// string(8) "/** R */"
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getDocComment(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         match this_class_constant(req, this.object())?.and_then(|decl| decl.doc_comment) {
             Some(doc) => PhpString::new(req, &doc).map(OrFalse::Value),
             None => Ok(OrFalse::False),
@@ -2113,7 +2124,7 @@ impl ReflectionClassConstant {
         this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let (_, scope, decl) = this_constant(req, this.object())?;
         let attributes = decl.attributes.clone();
         let file = req
@@ -2192,13 +2203,13 @@ impl ReflectionClassConstant {
     fn getType(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::signature::ReflectionType>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::signature::ReflectionType>>>, Thrown> {
         let (_, _, decl) = this_constant(req, this.object())?;
         let Some(ty) = decl.ty else {
             return Ok(None);
         };
         let object = type_factory(req, &ty, true)?;
-        Ok(Some(Instance::of(object)))
+        Ok(Some(object.into_instance()))
     }
 }
 
@@ -2288,7 +2299,7 @@ impl ReflectionConstant {
     /// ```expect
     /// string(0) ""
     /// ```
-    fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = this_global_constant(req, this.object())?;
         let space = namespace_end(&name).map_or_else(Vec::new, |end| name[..end].to_vec());
         PhpString::new(req, &space)
@@ -2302,7 +2313,7 @@ impl ReflectionConstant {
     /// ```expect
     /// string(7) "PHP_EOL"
     /// ```
-    fn getShortName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getShortName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = this_global_constant(req, this.object())?;
         let start = namespace_end(&name).map_or(0, |end| end + 1);
         let short = name[start..].to_vec();
@@ -2352,7 +2363,10 @@ impl ReflectionConstant {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn getFileName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getFileName(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let name = this_global_constant(req, this.object())?;
         match req.constant_file(&name).map(<[u8]>::to_vec) {
             Some(file) => PhpString::new(req, &file).map(OrFalse::Value),
@@ -2375,14 +2389,14 @@ impl ReflectionConstant {
     fn getExtension(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::ReflectionExtension>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::ReflectionExtension>>>, Thrown> {
         let Some(name) = constant_extension_name(req, this.object())? else {
             return Ok(None);
         };
         let class = class_named(req, b"ReflectionExtension")?;
         let object = super::new_object(req, class)?;
-        super::set_name(req, object, name.as_bytes())?;
-        Ok(Some(Instance::of(object)))
+        super::set_name(req, *object, name.as_bytes())?;
+        Ok(Some(object.into_instance()))
     }
 
     /// `ReflectionConstant::getExtensionName()`: the extension that
@@ -2394,7 +2408,10 @@ impl ReflectionConstant {
     /// ```expect
     /// string(4) "json"
     /// ```
-    fn getExtensionName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getExtensionName(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let Some(name) = constant_extension_name(req, this.object())? else {
             return Ok(OrFalse::False);
         };
@@ -2421,7 +2438,7 @@ impl ReflectionConstant {
     /// ```expect
     /// Constant [ int DEMO ] { 1 }
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = this_global_constant(req, this.object())?;
         let text = const_string(req, &name, "");
         PhpString::new(req, text.as_bytes())
@@ -2471,7 +2488,7 @@ impl ReflectionConstant {
         this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let constant = this_name(req, this.object(), "ReflectionConstant")?;
         let attributes = req.constant_attributes(&constant_key(&constant)).to_vec();
         let file = this_global_constant(req, this.object())

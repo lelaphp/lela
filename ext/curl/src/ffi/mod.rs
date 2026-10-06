@@ -40,7 +40,7 @@ use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::raising::{Cause, Thrown};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::{Owner, Value};
 
 pub(crate) use easy::{Easy, EasyId, Hook, Info};
 pub(crate) use multi::{Multi, Share};
@@ -230,7 +230,11 @@ impl Cx<'_> {
     /// `zend_call_known_fcc(fcc, &retval, ...)`: the value returned, or
     /// `None` for php's `UNDEF`, when a callback already threw or this
     /// one does, which is kept for the call to hand back.
-    pub(crate) fn call(&mut self, callable: &Callable, arguments: &[Value]) -> Option<Value> {
+    pub(crate) fn call(
+        &mut self,
+        callable: &Callable,
+        arguments: &[Value],
+    ) -> Option<Owner<Value>> {
         if self.session.pending() {
             return None;
         }

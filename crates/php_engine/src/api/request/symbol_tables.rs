@@ -10,7 +10,7 @@
 use php_heap::{FrameRef, Slot, Zval, ZvalRef};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpRef, PhpString, TypeTag, Value};
+use crate::api::values::{Key, PhpArray, PhpRef, TypeTag, Value};
 use crate::exec::{self, TableId};
 
 use super::{Request, Symbol, SymbolTable};
@@ -613,10 +613,10 @@ impl Request {
     /// ```
     pub(crate) fn symbol_table_array(&mut self) -> Result<PhpArray, Thrown> {
         let rows = self.symbol_rows(TableId::GLOBAL);
-        let mut array = PhpArray::new(self)?;
+        let mut array = self.array()?;
         for (name, value) in rows {
             let value = self.dup_value(value, None);
-            let key = Key::from_string(PhpString::new(self, &name)?);
+            let key = Key::from_string(self.string(&name)?);
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -639,13 +639,13 @@ impl Request {
             .and_then(SymbolTable::size);
         let mut array = match size {
             Some(size) if size > 8 => {
-                PhpArray::sized(self, size, crate::api::values::Layout::Hash)?
+                PhpArray::sized(self, size, crate::api::values::Layout::Hash)?.hand_on()
             }
-            _ => PhpArray::new(self)?,
+            _ => self.array()?,
         };
         for (name, value) in rows {
             let value = self.dup_value(value, None);
-            let key = Key::Str(PhpString::new(self, &name)?);
+            let key = Key::Str(self.string(&name)?);
             array.set(self, key, value)?;
         }
         Ok(array)

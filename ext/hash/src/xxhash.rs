@@ -444,7 +444,7 @@ impl Xxh3 {
         }
         let text = to_string(req, &secret)?;
         let mut bytes = text.as_bytes().to_vec();
-        req.release(Value::string(text));
+        text.give_up(req);
         let given = bytes.len();
         if given > 256 {
             bytes.truncate(256);

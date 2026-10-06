@@ -398,7 +398,7 @@ fn serializable(
         object.unprotect_in(req, RecursionGuard::Json);
         wrote
     };
-    req.release(answer);
+    answer.give_up(req);
     wrote
 }
 

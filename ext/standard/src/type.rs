@@ -13,7 +13,7 @@ use php_ext::coerce::{
 };
 use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
@@ -142,7 +142,7 @@ use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 /// }
 /// ```
 #[php_function]
-fn gettype(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn gettype(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     let name: &[u8] = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"NULL",
         ValueRef::Bool(_) => b"boolean",
@@ -182,7 +182,7 @@ fn gettype(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
 /// string(4) "bool"
 /// ```
 #[php_function]
-fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn get_debug_type(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     let name: Vec<u8> = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"null".to_vec(),
         ValueRef::Bool(_) => b"bool".to_vec(),
@@ -294,61 +294,67 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         let converted = match target {
             "null" => {
                 req.release(now);
-                Value::null()
+                Owner::take(req, Value::null())
             }
             "array" => {
                 let mut array = PhpArray::new(req)?;
                 array.append(req, now)?;
-                Value::array(array)
+                array.into_value()
             }
             // `object_init` and `scalar` added to its table, which is
             // the object an array of that one row casts to.
             _ => {
                 let mut row = PhpArray::new(req)?;
-                let key = Key::Str(PhpString::new(req, b"scalar")?);
+                let key = Key::Str(PhpString::new(req, b"scalar")?.hand_on_unmigrated());
                 row.set(req, key, now)?;
-                let row = Value::array(row);
-                let object = to_object(req, &row);
-                req.release(row);
-                Value::object(object?)
+                let object = to_object(req, &Value::array(*row));
+                row.give_up(req);
+                object?.into_value()
             }
         };
         var.set(req, converted)?;
         return Ok(true);
     }
     let converted = match name.as_slice() {
-        b"integer" | b"int" => Value::int(to_long(req, &current)?),
-        b"float" | b"double" => Value::float(to_double(req, &current)?),
+        b"integer" | b"int" => {
+            let n = to_long(req, &current)?;
+            Owner::take(req, Value::int(n))
+        }
+        b"float" | b"double" => {
+            let f = to_double(req, &current)?;
+            Owner::take(req, Value::float(f))
+        }
         b"string" => match to_string(req, &current) {
-            Ok(string) => Value::string(string),
+            Ok(string) => string.into_value(),
             // `convert_to_string` leaves the empty string behind a
             // conversion that threw.
             Err(thrown) => {
                 let empty = PhpString::new(req, b"")?;
-                var.set(req, Value::string(empty))?;
+                var.set(req, empty.into_value())?;
                 return Err(thrown);
             }
         },
         b"array" => {
             if current.as_array().is_some() {
-                req.addref(&current);
-                current
+                Owner::take(req, current)
             } else if matches!(current.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                Value::array(php_ext::values::PhpArray::new(req)?)
+                php_ext::values::PhpArray::new(req)?.into_value()
             } else {
-                Value::array(to_array(req, &current)?)
+                to_array(req, &current)?.into_value()
             }
         }
         b"object" => {
             if current.as_object().is_some() {
-                req.addref(&current);
-                current
+                Owner::take(req, current)
             } else {
-                Value::object(to_object(req, &current)?)
+                to_object(req, &current)?.into_value()
             }
         }
-        b"bool" | b"boolean" => Value::bool(truthy(req, &current)),
-        b"null" => Value::null(),
+        b"bool" | b"boolean" => {
+            let truth = truthy(req, &current);
+            Owner::take(req, Value::bool(truth))
+        }
+        b"null" => Owner::take(req, Value::null()),
         b"resource" => {
             return Err(throw_error(
                 req,
@@ -548,7 +554,7 @@ fn boolval(req: &mut Request, value: Value) -> bool {
 /// Object of class stdClass could not be converted to string
 /// ```
 #[php_function]
-fn strval(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn strval(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     to_string(req, &value)
 }
 
@@ -837,8 +843,8 @@ fn is_callable(
         callable(req, &value)
     };
     if callable_name.is_given() {
-        let name = Value::string(self::callable_name(req, &value)?);
-        callable_name.set(req, Untyped(name))?;
+        let name = self::callable_name(req, &value)?;
+        callable_name.set(req, Untyped(name.into_value()))?;
     }
     Ok(answer)
 }

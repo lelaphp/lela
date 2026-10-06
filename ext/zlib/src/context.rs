@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{FreshString, Key, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{FreshString, Key, Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
 use crate::encode::size_guess;
@@ -194,18 +194,19 @@ impl Options {
                 for (_, element) in array {
                     let string = to_string(req, &element)?;
                     let bytes = string.as_bytes();
-                    if bytes.is_empty() {
-                        return Err(arg_value_error(req, 2, "not contain empty strings"));
+                    let refused = if bytes.is_empty() {
+                        Some("not contain empty strings")
+                    } else if bytes.contains(&0) {
+                        Some("not contain strings with null bytes")
+                    } else {
+                        out.extend_from_slice(bytes);
+                        out.push(0);
+                        None
+                    };
+                    string.give_up(req);
+                    if let Some(refused) = refused {
+                        return Err(arg_value_error(req, 2, refused));
                     }
-                    if bytes.contains(&0) {
-                        return Err(arg_value_error(
-                            req,
-                            2,
-                            "not contain strings with null bytes",
-                        ));
-                    }
-                    out.extend_from_slice(bytes);
-                    out.push(0);
                 }
                 Ok((!out.is_empty()).then_some(out))
             }
@@ -241,7 +242,7 @@ fn made<P: 'static + Send>(
     req: &mut Request,
     class: &[u8],
     fill: impl FnOnce(&mut P),
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
         return Err(throw_error(req, "Error", &text));
@@ -288,7 +289,7 @@ fn deflate_init(
     req: &mut Request,
     encoding: i64,
     #[php(default = [])] options: Raw<Union<PhpObject, php_ext::values::PhpArray>>,
-) -> Result<OrFalse<Instance<DeflateContext>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DeflateContext>>>, Thrown> {
     let options = Options(options.value());
     let level = options.long(req, b"level", -1)?;
     if !(-1..=9).contains(&level) {
@@ -343,7 +344,7 @@ fn deflate_init(
         stream.set_dictionary(req, &dictionary)?;
     }
     let object = made::<Deflating>(req, b"DeflateContext", |payload| payload.0 = Some(stream))?;
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// `deflate_add(DeflateContext $context, string $data, int $flush_mode =
@@ -397,7 +398,7 @@ fn deflate_add(
     context: Instance<DeflateContext>,
     data: PhpString,
     #[php(default = ZLIB_SYNC_FLUSH)] flush_mode: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(flush) = Flush::of(flush_mode) else {
         return Err(arg_value_error(
             req,
@@ -435,7 +436,7 @@ fn deflate_rounds(
     stream: &mut Deflate,
     input: &[u8],
     flush: Flush,
-) -> Result<Result<PhpString, Status>, Thrown> {
+) -> Result<Result<Owner<PhpString>, Status>, Thrown> {
     let mut out = FreshString::new(req, size_guess(input.len()).max(64))?;
     let (mut read, mut used) = (0, 0);
     let status = loop {
@@ -465,7 +466,7 @@ fn deflate_rounds(
                 return Err(thrown);
             }
             out.set_len(used);
-            Ok(Ok(out.finish()))
+            Ok(Ok(out.finish(req)))
         }
         failed => {
             out.free(req);
@@ -498,7 +499,7 @@ fn inflate_init(
     req: &mut Request,
     encoding: i64,
     #[php(default = [])] options: Raw<Union<PhpObject, php_ext::values::PhpArray>>,
-) -> Result<OrFalse<Instance<InflateContext>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<InflateContext>>>, Thrown> {
     let options = Options(options.value());
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
@@ -536,12 +537,12 @@ fn inflate_init(
         payload.stream = Some(stream);
         payload.dictionary = dictionary;
     })?;
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// What one `inflate_add` call came to: the string, or php's warning.
 enum Inflated {
-    Out(PhpString),
+    Out(Owner<PhpString>),
     Refused(String),
 }
 
@@ -612,7 +613,7 @@ fn inflate_add(
     context: Instance<InflateContext>,
     data: PhpString,
     #[php(default = ZLIB_SYNC_FLUSH)] flush_mode: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(flush) = Flush::of(flush_mode) else {
         return Err(arg_value_error(
             req,
@@ -706,7 +707,7 @@ fn inflate_rounds(
         return Ok(Inflated::Refused(refused));
     }
     let out = out.truncate(req, used)?;
-    Ok(Inflated::Out(out.finish()))
+    Ok(Inflated::Out(out.finish(req)))
 }
 
 /// `inflate_get_status(InflateContext $context): int`: the last

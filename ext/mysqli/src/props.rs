@@ -14,7 +14,7 @@ use php_ext::abi::{
 use php_ext::coerce::truthy;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::class_name;
 
@@ -164,11 +164,11 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         let mut table = PhpArray::new(req)?;
         for name in P::NAMES {
             if let Some(value) = P::read(req, object, name, true)? {
-                let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+                let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
                 table.set(req, key, value)?;
             }
         }
-        Ok(Some(DebugInfo::from(table)))
+        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
     }
 }
 
@@ -202,20 +202,23 @@ pub(crate) fn gone(
 pub(crate) fn error_list(
     req: &mut Request,
     list: &[(u32, [u8; 5], Vec<u8>)],
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (errno, sqlstate, error) in list {
         let mut row = PhpArray::new(req)?;
         let state_end = sqlstate.iter().position(|b| *b == 0).unwrap_or(5);
         for (key, value) in [
             ("errno", Value::int(i64::from(*errno))),
-            ("sqlstate", crate::string(req, &sqlstate[..state_end])?),
-            ("error", crate::string(req, error)?),
+            (
+                "sqlstate",
+                crate::string(req, &sqlstate[..state_end])?.hand_on_unmigrated(),
+            ),
+            ("error", crate::string(req, error)?.hand_on_unmigrated()),
         ] {
-            let key = Key::Str(PhpString::new(req, key.as_bytes())?);
+            let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
             row.set(req, key, value)?;
         }
-        out.append(req, Value::array(row))?;
+        out.append(req, row.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }

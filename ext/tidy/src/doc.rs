@@ -14,7 +14,7 @@ use php_ext::raising::{
     throw_error, throwing_warnings,
 };
 use php_ext::request::{Opening, Request, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::ffi::{self, Base, OptType, Status};
 use crate::node::{self, tidyNode};
@@ -101,7 +101,7 @@ impl ObjectHandlers for Handlers {
                     let id = doc_id(req, object)?;
                     with_doc(req, id, |req, doc| doc.save(req))?.unwrap_or_default()
                 };
-                Value::string(PhpString::new(req, fixed(&bytes))?)
+                Value::string(PhpString::new(req, fixed(&bytes))?.hand_on_unmigrated())
             }
             _ => return Ok(None),
         }))
@@ -136,7 +136,7 @@ pub(crate) fn shown(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-fn new_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn new_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
@@ -146,7 +146,7 @@ fn file_to_mem(
     req: &mut Request,
     path: &[u8],
     use_path: bool,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let opening = Opening {
         use_path,
         ..Opening::default()
@@ -154,8 +154,14 @@ fn file_to_mem(
     let Some(stream) = req.open_stream_with(path, b"rb", opening)? else {
         return Ok(None);
     };
-    let data = stream.copy_to_mem(req, None)?;
-    stream.free(req);
+    let data = match stream.copy_to_mem(req, None) {
+        Ok(data) => data,
+        Err(thrown) => {
+            stream.give_up(req);
+            return Err(thrown);
+        }
+    };
+    stream.hand_on_unmigrated().free(req);
     Ok(Some(data))
 }
 
@@ -196,17 +202,22 @@ fn set_opt(
     let number = (opt.kind() == OptType::Integer)
         .then(|| numeric_string(text.as_bytes()))
         .flatten();
-    let set = with_doc(req, id, |req, doc| {
+    let set = match with_doc(req, id, |req, doc| {
         match number.as_ref().map(Value::as_ref) {
             Some(ValueRef::Int(n)) => doc.set_int(req, opt, n),
             Some(ValueRef::Float(d)) => doc.set_int(req, opt, lval_cap(d)),
             _ => doc.set_value(req, opt, text.as_bytes()),
         }
-    })?
-    .unwrap_or(false);
+    }) {
+        Ok(set) => set.unwrap_or(false),
+        Err(thrown) => {
+            text.give_up(req);
+            return Err(thrown);
+        }
+    };
     let refused = !set && number.is_none();
     let value_shown = shown(text.as_bytes());
-    req.release(Value::string(text));
+    text.give_up(req);
     if refused {
         let text = format!("option \"{name_shown}\" does not accept \"{value_shown}\" as a value");
         return Err(argument_error(req, "TypeError", arg, &text));
@@ -265,11 +276,15 @@ fn update_properties(req: &mut Request, object: PhpObject, id: DocId) -> Result<
     for (name, bytes) in [(&b"value"[..], Some(output)), (b"errorBuffer", errors)] {
         if let Some(bytes) = bytes.filter(|b| !b.is_empty()) {
             let bytes = fixed(&bytes);
-            let value = Value::string(PhpString::filled(req, bytes.len(), |out| {
+            let value = PhpString::filled(req, bytes.len(), |out| {
                 out.copy_from_slice(bytes);
-            })?);
+            })?;
             let name = new_string(req, name)?;
-            object.set_prop(req, name, value)?;
+            object.set_prop(
+                req,
+                name.hand_on_unmigrated(),
+                Value::string(value.hand_on_unmigrated()),
+            )?;
         }
     }
     Ok(())
@@ -329,7 +344,7 @@ fn quick_repair(
     data: &[u8],
     config: Config,
     encoding: Option<&[u8]>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(mut doc) = ffi::Doc::new(req)? else {
         return Err(fatal(req, "Could not set Tidy error buffer"));
     };
@@ -349,7 +364,7 @@ fn repair(
     data: &[u8],
     config: Config,
     encoding: Option<&[u8]>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if apply_config(req, id, config, 2)?
         && let Some(encoding) = encoding.filter(|e| !e.is_empty())
     {
@@ -387,7 +402,7 @@ fn repair_file(
     config: Config,
     encoding: Option<PhpString>,
     use_include_path: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     null_encoding(req, encoding.as_ref());
     let Some(data) = file_to_mem(req, filename.0.as_bytes(), use_include_path)? else {
         return Ok(OrFalse::False);
@@ -407,7 +422,7 @@ fn repair_file(
             encoding.as_ref().map(PhpString::as_bytes),
         )
     };
-    req.release(Value::string(data));
+    data.give_up(req);
     answer
 }
 
@@ -417,7 +432,7 @@ fn repair_string(
     string: PhpString,
     config: Config,
     encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     null_encoding(req, encoding.as_ref());
     if too_long(string.as_bytes()) {
         return Err(argument_error(req, "ValueError", 1, "is too long"));
@@ -443,22 +458,24 @@ fn parse_new(
     input: &[u8],
     config: Config,
     encoding: Option<&[u8]>,
-) -> Result<OrFalse<Tidy>, Thrown> {
+) -> Result<OrFalse<Owner<Tidy>>, Thrown> {
     let class = doc_class(req)?;
     let object = new_object(req, class)?;
-    let id = doc_id(req, object)?;
-    let parsed = match apply_config(req, id, config, 2) {
-        Ok(true) => parse_string(req, object, input, encoding),
-        other => other,
+    let parsed = match doc_id(req, *object) {
+        Ok(id) => match apply_config(req, id, config, 2) {
+            Ok(true) => parse_string(req, *object, input, encoding),
+            other => other,
+        },
+        Err(thrown) => Err(thrown),
     };
     match parsed {
-        Ok(true) => Ok(OrFalse::Value(Instance::of(object))),
+        Ok(true) => Ok(OrFalse::Value(object.into_instance())),
         Ok(false) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Ok(OrFalse::False)
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -496,7 +513,7 @@ fn tidy_parse_string(
     string: PhpString,
     #[php(default = null)] config: Config,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<Tidy>, Thrown> {
+) -> Result<OrFalse<Owner<Tidy>>, Thrown> {
     if too_long(string.as_bytes()) {
         return Err(argument_error(req, "ValueError", 1, "is too long"));
     }
@@ -521,7 +538,10 @@ fn tidy_parse_string(
 /// line 1 column 1 - Warning: trimming empty <p>"
 /// ```
 #[php_function]
-fn tidy_get_error_buffer(req: &mut Request, tidy: Tidy) -> Result<OrFalse<PhpString>, Thrown> {
+fn tidy_get_error_buffer(
+    req: &mut Request,
+    tidy: Tidy,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let errors = on_doc(req, tidy.object(), |_, doc| Ok(doc.errors()))?;
     match errors {
         Some(errors) => new_string(req, fixed(&errors)).map(OrFalse::Value),
@@ -539,7 +559,7 @@ fn tidy_get_error_buffer(req: &mut Request, tidy: Tidy) -> Result<OrFalse<PhpStr
 /// string(8) "<i>a</i>"
 /// ```
 #[php_function]
-fn tidy_get_output(req: &mut Request, tidy: Tidy) -> Result<PhpString, Thrown> {
+fn tidy_get_output(req: &mut Request, tidy: Tidy) -> Result<Owner<PhpString>, Thrown> {
     let output = on_doc(req, tidy.object(), |req, doc| doc.save(req))?;
     new_string(req, fixed(&output))
 }
@@ -565,7 +585,7 @@ fn tidy_parse_file(
     #[php(default = null)] config: Config,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = false)] useIncludePath: bool,
-) -> Result<OrFalse<Tidy>, Thrown> {
+) -> Result<OrFalse<Owner<Tidy>>, Thrown> {
     let path = filename.0.as_bytes();
     let Some(contents) = file_to_mem(req, path, useIncludePath)? else {
         let text = cannot_load(path, useIncludePath);
@@ -578,7 +598,7 @@ fn tidy_parse_file(
         let encoding = encoding.as_ref().map(PhpString::as_bytes);
         parse_new(req, contents.as_bytes(), config, encoding)
     };
-    req.release(Value::string(contents));
+    contents.give_up(req);
     answer
 }
 
@@ -627,7 +647,7 @@ fn tidy_repair_string(
     string: PhpString,
     #[php(default = null)] config: Config,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     repair_string(req, string, config, encoding)
 }
 
@@ -651,7 +671,7 @@ fn tidy_repair_file(
     #[php(default = null)] config: Config,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = false)] useIncludePath: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     repair_file(req, filename, config, encoding, useIncludePath)
 }
 
@@ -697,7 +717,7 @@ fn tidy_diagnose(req: &mut Request, tidy: Tidy) -> Result<bool, Thrown> {
 /// string(10) "2021/07/10"
 /// ```
 #[php_function]
-fn tidy_get_release(req: &mut Request) -> Result<PhpString, Thrown> {
+fn tidy_get_release(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     new_string(req, ffi::release_date().as_bytes())
 }
 
@@ -707,7 +727,7 @@ fn opt_doc(
     object: PhpObject,
     option: PhpString,
     arg: u32,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name = option.as_bytes();
     let found = on_doc(req, object, |_, doc| {
         Ok(doc.option(name).map(|opt| doc.option_doc(opt)))
@@ -743,26 +763,25 @@ fn tidy_get_opt_doc(
     req: &mut Request,
     tidy: Tidy,
     option: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     opt_doc(req, tidy.object(), option, 2)
 }
 
 /// One option's value as `php_tidy_get_opt_val` reads it.
-fn opt_value(req: &mut Request, doc: &ffi::Doc, opt: ffi::Opt) -> Result<Value, Thrown> {
+fn opt_value(req: &mut Request, doc: &ffi::Doc, opt: ffi::Opt) -> Result<Owner<Value>, Thrown> {
     Ok(match opt.kind() {
         OptType::String => {
             let text = doc.get_value(opt).unwrap_or_default();
-            Value::string(new_string(req, &text)?)
+            new_string(req, &text)?.into_value()
         }
         #[allow(clippy::cast_possible_wrap)]
-        OptType::Integer => Value::int(doc.get_int(opt) as i64),
-        OptType::Boolean => Value::bool(doc.get_bool(opt)),
+        OptType::Integer => Owner::take(req, Value::int(doc.get_int(opt) as i64)),
+        OptType::Boolean => Owner::take(req, Value::bool(doc.get_bool(opt))),
     })
 }
 
 /// `tidy_get_config`, `tidy::getConfig`: every option by name.
-fn get_config(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
-    let mut out = PhpArray::new(req)?;
+fn get_config(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let id = doc_id(req, object)?;
     let rows = with_doc(req, id, |req, doc| {
         let mut rows = Vec::new();
@@ -771,9 +790,10 @@ fn get_config(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> 
         }
         Ok(rows)
     })?;
+    let mut out = PhpArray::new(req)?;
     for (name, value) in rows.unwrap_or_default() {
-        let key = Key::from_string(new_string(req, &name)?);
-        out.set(req, key, value)?;
+        let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -793,7 +813,7 @@ fn get_config(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> 
 /// bool(true)
 /// ```
 #[php_function]
-fn tidy_get_config(req: &mut Request, tidy: Tidy) -> Result<PhpArray, Thrown> {
+fn tidy_get_config(req: &mut Request, tidy: Tidy) -> Result<Owner<PhpArray>, Thrown> {
     get_config(req, tidy.object())
 }
 
@@ -923,7 +943,7 @@ fn tidy_config_count(req: &mut Request, tidy: Tidy) -> Result<i64, Thrown> {
 }
 
 /// `string|int|bool`.
-type OptAnswer = Union<PhpString, Union<i64, bool>>;
+type OptAnswer = Union<Owner<PhpString>, Union<i64, bool>>;
 
 /// `tidy_getopt`, `tidy::getOpt`.
 fn getopt(
@@ -942,11 +962,13 @@ fn getopt(
     let Some(value) = found else {
         return Err(invalid_option(req, name, arg));
     };
-    Ok(match value.as_ref() {
-        ValueRef::Str(s) => Union::A(*s),
+    let answer = match value.as_ref() {
+        ValueRef::Str(s) => Union::A(Owner::take(req, *s)),
         ValueRef::Int(n) => Union::B(Union::A(n)),
         _ => Union::B(Union::B(value.as_bool().unwrap_or(false))),
-    })
+    };
+    value.give_up(req);
+    Ok(answer)
 }
 
 /// `tidy_getopt(tidy $tidy, string $option): string|int|bool`.
@@ -973,11 +995,11 @@ fn base_node(
     req: &mut Request,
     object: PhpObject,
     which: Base,
-) -> Result<Option<Instance<tidyNode>>, Thrown> {
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     let id = doc_id(req, object)?;
     let found = with_doc(req, id, |_, doc| Ok(doc.base(which)))?.flatten();
     match found {
-        Some(at) => node::create(req, id, at).map(|object| Some(Instance::of(object))),
+        Some(at) => node::create(req, id, at).map(|object| Some(object.into_instance())),
         None => Ok(None),
     }
 }
@@ -994,7 +1016,10 @@ fn base_node(
 /// int(0)
 /// ```
 #[php_function]
-fn tidy_get_root(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNode>>, Thrown> {
+fn tidy_get_root(
+    req: &mut Request,
+    tidy: Tidy,
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     base_node(req, tidy.object(), Base::Root)
 }
 
@@ -1008,7 +1033,10 @@ fn tidy_get_root(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNo
 /// NULL
 /// ```
 #[php_function]
-fn tidy_get_html(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNode>>, Thrown> {
+fn tidy_get_html(
+    req: &mut Request,
+    tidy: Tidy,
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     base_node(req, tidy.object(), Base::Html)
 }
 
@@ -1021,7 +1049,10 @@ fn tidy_get_html(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNo
 /// string(4) "head"
 /// ```
 #[php_function]
-fn tidy_get_head(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNode>>, Thrown> {
+fn tidy_get_head(
+    req: &mut Request,
+    tidy: Tidy,
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     base_node(req, tidy.object(), Base::Head)
 }
 
@@ -1035,7 +1066,10 @@ fn tidy_get_head(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNo
 /// NULL
 /// ```
 #[php_function]
-fn tidy_get_body(req: &mut Request, tidy: Tidy) -> Result<Option<Instance<tidyNode>>, Thrown> {
+fn tidy_get_body(
+    req: &mut Request,
+    tidy: Tidy,
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     base_node(req, tidy.object(), Base::Body)
 }
 
@@ -1076,11 +1110,11 @@ pub(crate) fn functions() -> Vec<Entry> {
 /// functions' parameter.
 pub(crate) mod class {
     use super::{
-        Base, Config, DOC, Instance, Level, Obj, OptAnswer, OrFalse, Path, PhpArray, PhpString,
-        Request, Status, This, Thrown, Value, argument_error, base_node, cannot_load, clean_repair,
-        construct, diagnose, docref, ffi, file_to_mem, get_config, getopt, initialized_status,
-        new_string, opt_doc, parse_with, php_class, repair_file, repair_string, status, throw,
-        tidyNode, too_long,
+        Base, Config, DOC, Instance, Level, Obj, OptAnswer, OrFalse, Owner, Path, PhpArray,
+        PhpString, Request, Status, This, Thrown, argument_error, base_node, cannot_load,
+        clean_repair, construct, diagnose, docref, ffi, file_to_mem, get_config, getopt,
+        initialized_status, new_string, opt_doc, parse_with, php_class, repair_file, repair_string,
+        status, throw, tidyNode, too_long,
     };
 
     /// `class tidy`: one `PHPTidyObj` each, its document made with it,
@@ -1145,8 +1179,8 @@ pub(crate) mod class {
                 let text = cannot_load(filename.as_bytes(), useIncludePath);
                 return Err(throw(req, "Exception", &text));
             };
-            let answer = construct(req, object, contents, config, encoding.as_ref());
-            req.release(Value::string(contents));
+            let answer = construct(req, object, *contents, config, encoding.as_ref());
+            contents.give_up(req);
             answer
         }
 
@@ -1218,7 +1252,7 @@ pub(crate) mod class {
                     encoding.as_ref(),
                 )
             };
-            req.release(Value::string(contents));
+            contents.give_up(req);
             answer
         }
 
@@ -1269,7 +1303,7 @@ pub(crate) mod class {
             string: PhpString,
             #[php(default = null)] config: Config,
             #[php(default = null)] encoding: Option<PhpString>,
-        ) -> Result<OrFalse<PhpString>, Thrown> {
+        ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             repair_string(req, string, config, encoding)
         }
 
@@ -1288,7 +1322,7 @@ pub(crate) mod class {
             #[php(default = null)] config: Config,
             #[php(default = null)] encoding: Option<PhpString>,
             #[php(default = false)] useIncludePath: bool,
-        ) -> Result<OrFalse<PhpString>, Thrown> {
+        ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             repair_file(req, filename, config, encoding, useIncludePath)
         }
 
@@ -1316,7 +1350,7 @@ pub(crate) mod class {
         /// string(10) "2021/07/10"
         /// ```
         #[php(tentative)]
-        fn getRelease(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        fn getRelease(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
             let _ = this;
             new_string(req, ffi::release_date().as_bytes())
         }
@@ -1330,7 +1364,7 @@ pub(crate) mod class {
         /// int(68)
         /// ```
         #[php(tentative)]
-        fn getConfig(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        fn getConfig(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
             get_config(req, this.object())
         }
 
@@ -1374,7 +1408,7 @@ pub(crate) mod class {
             req: &mut Request,
             this: This<Self>,
             option: PhpString,
-        ) -> Result<OrFalse<PhpString>, Thrown> {
+        ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
             opt_doc(req, this.object(), option, 1)
         }
 
@@ -1413,7 +1447,10 @@ pub(crate) mod class {
         /// int(0)
         /// ```
         #[php(tentative)]
-        fn root(req: &mut Request, this: This<Self>) -> Result<Option<Instance<tidyNode>>, Thrown> {
+        fn root(
+            req: &mut Request,
+            this: This<Self>,
+        ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
             base_node(req, this.object(), Base::Root)
         }
 
@@ -1426,7 +1463,10 @@ pub(crate) mod class {
         /// string(4) "head"
         /// ```
         #[php(tentative)]
-        fn head(req: &mut Request, this: This<Self>) -> Result<Option<Instance<tidyNode>>, Thrown> {
+        fn head(
+            req: &mut Request,
+            this: This<Self>,
+        ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
             base_node(req, this.object(), Base::Head)
         }
 
@@ -1439,7 +1479,10 @@ pub(crate) mod class {
         /// string(4) "html"
         /// ```
         #[php(tentative)]
-        fn html(req: &mut Request, this: This<Self>) -> Result<Option<Instance<tidyNode>>, Thrown> {
+        fn html(
+            req: &mut Request,
+            this: This<Self>,
+        ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
             base_node(req, this.object(), Base::Html)
         }
 
@@ -1452,7 +1495,10 @@ pub(crate) mod class {
         /// string(4) "body"
         /// ```
         #[php(tentative)]
-        fn body(req: &mut Request, this: This<Self>) -> Result<Option<Instance<tidyNode>>, Thrown> {
+        fn body(
+            req: &mut Request,
+            this: This<Self>,
+        ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
             base_node(req, this.object(), Base::Body)
         }
     }

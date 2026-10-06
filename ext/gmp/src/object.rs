@@ -12,7 +12,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, numeric_string, to_long, type_name, value_name};
 use php_ext::raising::{Thrown, deprecated, fatal, throw, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_standard::Unserializer;
 
 use crate::ffi::Mpz;
@@ -94,12 +94,12 @@ impl GMP {
     /// }
     /// string(28) "O:3:"GMP":1:{i:0;s:3:"-10";}"
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let text = held(req, object, |n| n.to_text(16));
         let mut array = PhpArray::new(req)?;
         let text = PhpString::new(req, &text)?;
-        array.append(req, Value::string(text))?;
+        array.append(req, text.into_value().hand_on_unmigrated())?;
         let rows = object.entries(req)?;
         if !rows.is_empty() {
             let mut props = PhpArray::new(req)?;
@@ -114,7 +114,7 @@ impl GMP {
                 req.addref(&value);
                 props.set(req, key, value)?;
             }
-            array.append(req, props.to_value())?;
+            array.append(req, props.into_value().hand_on_unmigrated())?;
         }
         Ok(array)
     }
@@ -200,7 +200,7 @@ fn set(req: &mut Request, object: PhpObject, text: Option<&[u8]>, base: i64) -> 
 }
 
 /// `gmp_create`: a fresh `GMP` holding `n`, one owner, the caller's.
-pub(crate) fn made(req: &mut Request, n: Mpz) -> Result<Instance<GMP>, Thrown> {
+pub(crate) fn made(req: &mut Request, n: Mpz) -> Result<Owner<Instance<GMP>>, Thrown> {
     let Some(class) = lookup_class(req, b"GMP")? else {
         return Err(fatal(req, "InternalError: GMP is not linked"));
     };
@@ -208,7 +208,7 @@ pub(crate) fn made(req: &mut Request, n: Mpz) -> Result<Instance<GMP>, Thrown> {
     if let Some(slot) = object.native_mut::<Mpz>(req) {
         *slot = n;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// An operand of an operator or a comparison, read by [`operand`] with
@@ -335,7 +335,7 @@ impl ObjectHandlers for Handlers {
         Ok(Some(match to {
             TypeTag::String => {
                 let text = held(req, object, |n| n.to_text(10));
-                Value::string(PhpString::new(req, &text)?)
+                Value::string(PhpString::new(req, &text)?.hand_on_unmigrated())
             }
             TypeTag::Int => Value::int(held(req, object, Mpz::to_long)),
             TypeTag::Float => Value::float(held(req, object, Mpz::to_double)),
@@ -386,8 +386,12 @@ impl ObjectHandlers for Handlers {
         let text = held(req, object, |n| n.to_text(10));
         let num = PhpString::new(req, &text)?;
         let key = PhpString::new(req, b"num")?;
-        table.set(req, Key::Str(key), Value::string(num))?;
-        Ok(Some(table.into()))
+        table.set(
+            req,
+            Key::Str(key.hand_on_unmigrated()),
+            num.into_value().hand_on_unmigrated(),
+        )?;
+        Ok(Some(table.hand_on_unmigrated().into()))
     }
 
     /// `gmp_do_operation`: the arithmetic, bitwise and shift operators
@@ -449,7 +453,7 @@ impl ObjectHandlers for Handlers {
                 }
             }
         };
-        Ok(Some(made(req, n)?.object().as_value()))
+        Ok(Some(made(req, n)?.into_value().hand_on_unmigrated()))
     }
 
     /// `gmp_compare`: the two as numbers, an operand that is none
@@ -488,7 +492,7 @@ impl ObjectHandlers for Handlers {
 /// `gmp_clone_obj`.
 fn clone_gmp(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let copy = held(req, object, Mpz::clone);
-    clone_with(req, &object, copy)
+    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
 }
 
 /// `gmp_unserialize`, a `C:` record's payload: the number as a

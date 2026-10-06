@@ -214,16 +214,16 @@ fn find_in_include_path(
     }
     let function = archive::string(req, b"stream_resolve_include_path")?;
     let callable = php_ext::coerce::callable_checked(req, &function);
-    req.release(function);
+    function.give_up(req);
     let Ok(callable) = callable else {
         return Ok(None);
     };
     let name = archive::string(req, filename)?;
-    let found = php_ext::call::call(req, &callable, &[name]);
-    req.release(name);
+    let found = php_ext::call::call(req, &callable, &[*name]);
+    name.give_up(req);
     let found = found?;
     let out = found.as_str_bytes().map(<[u8]>::to_vec);
-    req.release(found);
+    found.give_up(req);
     Ok(out)
 }
 
@@ -232,7 +232,7 @@ fn find_in_include_path(
 /// with the arguments the call gave.
 fn serve_named(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
     let name = archive::string(req, name)?;
-    passthrough(req, Some(name))
+    passthrough(req, Some(name.hand_on_unmigrated()))
 }
 
 /// `phar_fopen`.
@@ -543,7 +543,7 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
                 );
                 b"unknown"
             };
-            Value::string(PhpString::new(req, name)?)
+            PhpString::new(req, name)?.into_value().hand_on_unmigrated()
         }
         Fs::IsW => Value::bool(mode & (0o2 << triad) != 0),
         Fs::IsR => Value::bool(mode & (0o4 << triad) != 0),
@@ -556,10 +556,10 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Value, Throw
                 out.append(req, Value::int(field))?;
             }
             for (name, field) in NAMES.iter().zip(sb) {
-                let key = Key::Str(PhpString::new(req, name)?);
+                let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                 out.set(req, key, Value::int(field))?;
             }
-            Value::array(out)
+            out.into_value().hand_on_unmigrated()
         }
     })
 }

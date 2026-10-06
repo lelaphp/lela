@@ -13,7 +13,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 use php_ext_standard::{base64, quot_print};
 
 use super::ffi::{self, Cd, Errno};
@@ -651,7 +651,7 @@ fn iconv_mime_encode(
     field_name: PhpString,
     field_value: PhpString,
     #[php(default = [])] options: PhpArray,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut in_charset = encoding(req, Kind::Internal);
     let mut out_charset = in_charset.clone();
     let (mut max, mut lf, mut scheme) = (76i64, b"\r\n".to_vec(), Scheme::Base64);
@@ -683,14 +683,16 @@ fn iconv_mime_encode(
         max = to_long(req, &given)?;
     }
     if let Some(given) = preference(options, b"line-break-chars") {
-        lf = to_string(req, &given)?.as_bytes().to_vec();
+        let text = to_string(req, &given)?;
+        lf = text.as_bytes().to_vec();
+        text.give_up(req);
     }
     // `(size_t) line_len`.
     let max = usize::try_from(max.cast_unsigned()).unwrap_or(usize::MAX);
     // `safe_emalloc(1, max_line_len, 5)`: the line's buffer meets the
     // memory limit as php's does, before a byte is encoded.
     let charge = PhpString::product(req, 1, max, 5, |_| {})?;
-    req.release(Value::string(charge));
+    charge.give_up(req);
     let (out_charset, in_charset) = (c_str(&out_charset).to_vec(), c_str(&in_charset).to_vec());
     match encode(
         field_name.as_bytes(),
@@ -737,7 +739,7 @@ fn iconv_mime_decode(
     string: PhpString,
     #[php(default = 0)] mode: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mode = Mode::of(mode);
     let Some(charset) = charset(req, encoding) else {
         return Ok(OrFalse::False);
@@ -784,7 +786,7 @@ fn iconv_mime_decode_headers(
     headers: PhpString,
     #[php(default = 0)] mode: i64,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let mode = Mode::of(mode);
     let Some(charset) = charset(req, encoding) else {
         return Ok(OrFalse::False);
@@ -812,19 +814,19 @@ fn iconv_mime_decode_headers(
     }
     let mut out = PhpArray::new(req)?;
     for (name, field) in fields {
-        let key = Key::Str(PhpString::new(req, &name)?);
+        let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
         let value = match field {
-            Field::One(value) => Value::string(PhpString::new(req, &value)?),
+            Field::One(value) => PhpString::new(req, &value)?.into_value(),
             Field::Many(values) => {
                 let mut list = PhpArray::new(req)?;
                 for value in values {
-                    let value = Value::string(PhpString::new(req, &value)?);
-                    list.append(req, value)?;
+                    let value = PhpString::new(req, &value)?.into_value();
+                    list.append(req, value.hand_on_unmigrated())?;
                 }
-                Value::array(list)
+                list.into_value()
             }
         };
-        out.set(req, key, value)?;
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(out))
 }

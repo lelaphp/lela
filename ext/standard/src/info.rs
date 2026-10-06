@@ -14,7 +14,7 @@ use php_ext::abi::{OrFalse, True};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::{InfoRow, PHP_VERSION, Request, Streams as _};
-use php_ext::values::{Key, PhpString};
+use php_ext::values::{Key, Owner, PhpString};
 
 use crate::arg_value_error;
 
@@ -776,7 +776,7 @@ fn int(n: i64) -> i32 {
 fn phpversion(
     req: &mut Request,
     #[php(default = null)] extension: Option<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(name) = extension else {
         return PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value);
     };
@@ -933,7 +933,7 @@ fn phpcredits(req: &mut Request, #[php(default = CREDITS_ALL)] flags: i64) -> Tr
 /// string(3) "cli"
 /// ```
 #[php_function]
-fn php_sapi_name(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn php_sapi_name(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name = req.sapi_name().to_owned();
     PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
 }
@@ -958,7 +958,7 @@ fn php_sapi_name(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 fn php_uname(
     req: &mut Request,
     #[php(default = "a")] mode: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let [mode] = mode.as_bytes() else {
         return Err(arg_value_error(req, 1, "be a single character"));
     };
@@ -1023,7 +1023,7 @@ fn ini_cells(req: &Request) -> [String; 4] {
 /// PHP:  syntax error, unexpected END_OF_LINE in ./d/c.ini on line 2
 /// ```
 #[php_function]
-fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match scanned_list(req) {
         Some(list) => PhpString::new(req, &list).map(OrFalse::Value),
         None => Ok(OrFalse::False),
@@ -1049,7 +1049,7 @@ fn php_ini_scanned_files(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown
 /// bool(true)
 /// ```
 #[php_function]
-fn php_ini_loaded_file(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn php_ini_loaded_file(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match req.ini_files().loaded().map(<[u8]>::to_vec) {
         Some(path) => PhpString::new(req, &path).map(OrFalse::Value),
         None => Ok(OrFalse::False),

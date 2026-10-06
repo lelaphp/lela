@@ -25,7 +25,7 @@ use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
     Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence,
 };
-use crate::api::values::{Resource, Value};
+use crate::api::values::{Owner, Resource, Value};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
 
@@ -678,6 +678,7 @@ impl Stream {
     /// resource for the last filter attached, one owner the caller's and
     /// one the chain's, and `None` where a filter could not be made or
     /// the pre-buffered bytes broke it, after php's warning.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn add_filter(
         self,
         req: &mut Request,
@@ -685,7 +686,7 @@ impl Stream {
         params: Option<&Value>,
         read_write: i64,
         append: bool,
-    ) -> Result<Option<Resource>, Thrown> {
+    ) -> Result<Option<Owner<Resource>>, Thrown> {
         let mut read_write = read_write;
         if read_write & (FILTER_READ | FILTER_WRITE) == 0 {
             let mode = req
@@ -752,7 +753,7 @@ impl Stream {
                 Some(0)
             };
             if let Some(filter) = at.and_then(|at| filters.get_mut(at)) {
-                filter.res = Some(res);
+                filter.res = Some(*res);
             }
         });
         match req.stream_thrown().take() {

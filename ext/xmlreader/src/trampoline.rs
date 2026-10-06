@@ -7,7 +7,7 @@ use php_ext::abi::{Path, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::{Failure, Target, from_string, from_uri};
 
@@ -41,7 +41,7 @@ impl XMLReader {
         uri: Path,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let into = Target::This(this.object());
         from_uri(req, into, Failure::Warn, uri, encoding.as_ref(), flags).map(Untyped)
     }
@@ -52,7 +52,7 @@ impl XMLReader {
         source: PhpString,
         #[php(default = null)] encoding: Option<Path>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let into = Target::This(this.object());
         from_string(req, into, Failure::Warn, source, encoding.as_ref(), flags).map(Untyped)
     }

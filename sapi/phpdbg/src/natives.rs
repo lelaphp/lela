@@ -16,7 +16,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{Level, Thrown, arg_value_error, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 use php_sapi::tier::{self, Code, Opcode};
 
 use crate::bp::At;
@@ -304,7 +304,10 @@ fn phpdbg_prompt(string: PhpString) {
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_exec(req: &mut Request, context: PhpString) -> Result<Union<PhpString, bool>, Thrown> {
+fn phpdbg_exec(
+    req: &mut Request,
+    context: PhpString,
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(context.as_bytes()));
     let shown = String::from_utf8_lossy(context.as_bytes()).into_owned();
     match std::fs::symlink_metadata(path) {
@@ -423,7 +426,7 @@ fn phpdbg_start_oplog() {
 fn phpdbg_end_oplog(
     req: &mut Request,
     #[php(default = [])] options: PhpArray,
-) -> Result<Option<PhpArray>, Thrown> {
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let Some(log) = session::with(|s| s.oplogs.pop()).flatten() else {
         raise(
             req,
@@ -469,7 +472,7 @@ fn phpdbg_end_oplog(
 fn phpdbg_get_executable(
     req: &mut Request,
     #[php(default = [])] options: PhpArray,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (by_function, by_opcode) = shape(req, options);
     let sources = session::with(|s| s.sources.clone()).unwrap_or_default();
     let named = options.find(b"files").map(|value| value.deref());
@@ -482,7 +485,7 @@ fn phpdbg_get_executable(
         for (_, file) in named {
             let text = to_string(req, &file)?;
             files.push(text.as_bytes().to_vec());
-            req.release(Value::string(text));
+            text.give_up(req);
         }
         files
     } else {
@@ -740,7 +743,7 @@ enum Last {
 }
 
 /// The rows as the array php answers.
-fn to_array(req: &mut Request, rows: &Rows) -> Result<PhpArray, Thrown> {
+fn to_array(req: &mut Request, rows: &Rows) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, subs) in &rows.0 {
         let mut inner = PhpArray::new(req)?;
@@ -752,13 +755,13 @@ fn to_array(req: &mut Request, rows: &Rows) -> Result<PhpArray, Thrown> {
                     for (index, n) in counts {
                         named.set(req, Key::Int(*index), Value::int(*n))?;
                     }
-                    let key = Key::Str(PhpString::new(req, name)?);
-                    inner.set(req, key, Value::array(named))?;
+                    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+                    inner.set(req, key, named.into_value().hand_on_unmigrated())?;
                 }
             }
         }
-        let key = Key::Str(PhpString::new(req, key)?);
-        out.set(req, key, Value::array(inner))?;
+        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+        out.set(req, key, inner.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }

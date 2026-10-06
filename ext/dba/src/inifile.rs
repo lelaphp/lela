@@ -7,6 +7,7 @@
 
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::values::Owner;
 
 use crate::flatfile::gets;
 
@@ -166,8 +167,17 @@ fn copy(req: &mut Request, from: Stream, to: Stream, len: Option<i64>) -> bool {
     }
 }
 
+/// The temporary streams closed and their owners given up,
+/// `php_stream_free`.
+fn free(req: &mut Request, held: [Option<Owner<Stream>>; 2]) {
+    for held in held.into_iter().flatten() {
+        held.close(req);
+        held.give_up(req);
+    }
+}
+
 /// `php_stream_temp_create(0, 64 * 1024)`.
-fn temp(req: &mut Request) -> Result<Option<Stream>, Thrown> {
+fn temp(req: &mut Request) -> Result<Option<Owner<Stream>>, Thrown> {
     let made = req.open_stream(b"php://temp/maxmemory:65536", b"w+b", false)?;
     if made.is_none() {
         docref(req, Level::Warning, "Could not create temporary stream");
@@ -375,8 +385,9 @@ impl Inifile {
             match temp(req)? {
                 Some(held) => {
                     file.seek(req, start, Whence::Set);
+                    let copied = copy(req, file, *held, Some(next - start));
                     group = Some(held);
-                    if !copy(req, file, held, Some(next - start)) {
+                    if !copied {
                         docref(
                             req,
                             Level::Warning,
@@ -390,8 +401,14 @@ impl Inifile {
         }
         let mut rest = None;
         if ok {
-            rest = temp(req)?;
-            match rest {
+            rest = match temp(req) {
+                Ok(rest) => rest,
+                Err(thrown) => {
+                    free(req, [group, None]);
+                    return Err(thrown);
+                }
+            };
+            match rest.as_deref().copied() {
                 None => ok = false,
                 Some(rest) => {
                     file.seek(req, 0, Whence::End);
@@ -416,8 +433,14 @@ impl Inifile {
         let mut result = Ok(ok);
         if ok {
             if named {
-                if let Some(group) = group {
-                    ok = Self::filter(req, file, group, key, found)?;
+                if let Some(held) = group.as_deref().copied() {
+                    ok = match Self::filter(req, file, held, key, found) {
+                        Ok(ok) => ok,
+                        Err(thrown) => {
+                            free(req, [group, rest]);
+                            return Err(thrown);
+                        }
+                    };
                 }
                 if let Some(value) = value {
                     if start == next && !key.group().is_empty() {
@@ -434,7 +457,7 @@ impl Inifile {
                 }
             }
             result = Ok(ok);
-            if let Some(rest) = rest
+            if let Some(rest) = rest.as_deref().copied()
                 && rest.tell(req) != 0
             {
                 rest.seek(req, 0, Whence::Set);
@@ -448,9 +471,7 @@ impl Inifile {
                 }
             }
         }
-        for held in [group, rest].into_iter().flatten() {
-            held.free(req);
-        }
+        free(req, [group, rest]);
         file.flush(req);
         file.seek(req, 0, Whence::Set);
         result

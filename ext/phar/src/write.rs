@@ -420,22 +420,36 @@ pub(crate) fn write_out(
             lossy(&fname)
         )));
     };
-    let written = if flags & FILE_COMPRESSED_GZ != 0 {
-        let params = crate::open::window_params(req, 15 + 16)?;
-        let packed = archive::filter_bytes(req, b"zlib.deflate", Some(&params), &newfile);
-        req.release(params);
-        let Some(packed) = packed? else {
-            out.free(req);
+    let compressed = |req: &mut Request| -> Result<Option<Vec<u8>>, Thrown> {
+        Ok(Some(if flags & FILE_COMPRESSED_GZ != 0 {
+            let params = crate::open::window_params(req, 15 + 16)?;
+            let packed = archive::filter_bytes(req, b"zlib.deflate", Some(&params), &newfile);
+            params.give_up(req);
+            let Some(packed) = packed? else {
+                return Ok(None);
+            };
+            packed
+        } else if flags & FILE_COMPRESSED_BZ2 != 0 {
+            archive::filter_bytes(req, b"bzip2.compress", None, &newfile)?.unwrap_or_default()
+        } else {
+            newfile.to_vec()
+        }))
+    };
+    let written = match compressed(req) {
+        Ok(Some(written)) => written,
+        Ok(None) => {
+            out.close(req);
+            out.give_up(req);
             return Ok(Some(format!(
                 "unable to compress all contents of phar \"{}\" using zlib, PHP versions older than 5.2.6 have a buggy zlib",
                 lossy(&fname)
             )));
-        };
-        packed
-    } else if flags & FILE_COMPRESSED_BZ2 != 0 {
-        archive::filter_bytes(req, b"bzip2.compress", None, &newfile)?.unwrap_or_default()
-    } else {
-        newfile.to_vec()
+        }
+        Err(thrown) => {
+            out.close(req);
+            out.give_up(req);
+            return Err(thrown);
+        }
     };
     let mut at = 0;
     while at < written.len() {
@@ -445,7 +459,8 @@ pub(crate) fn write_out(
             _ => break,
         }
     }
-    out.free(req);
+    out.close(req);
+    out.give_up(req);
     Ok(None)
 }
 

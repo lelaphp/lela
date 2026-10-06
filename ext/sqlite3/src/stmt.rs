@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_pdo_sqlite::ffi::{self, SQLITE_OK, Stmt};
 
 use crate::conn::{
@@ -177,12 +177,13 @@ pub(crate) fn prepare_on(
     owner: PhpObject,
     existing: Option<PhpObject>,
     sql: &[u8],
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let (db, exceptions) = open_db(req, owner)?;
-    let object = match existing {
-        Some(object) => object,
+    let made = match existing {
+        Some(object) => Owner::take(req, object),
         None => instantiate(req, b"SQLite3Stmt")?,
     };
+    let object = *made;
     req.addref(&owner.as_value());
     attach(req, object, owner);
     let (prepared, thrown) = db.prepare(req, sql);
@@ -190,9 +191,7 @@ pub(crate) fn prepare_on(
         Ok(stmt) => stmt,
         Err(code) => {
             let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
-            if existing.is_none() {
-                req.release(object.as_value());
-            }
+            made.give_up(req);
             fail(req, exceptions, thrown, i64::from(code), &message)?;
             return Ok(None);
         }
@@ -201,12 +200,10 @@ pub(crate) fn prepare_on(
         set_id(req, object, id);
     }
     if let Some(thrown) = thrown {
-        if existing.is_none() {
-            req.release(object.as_value());
-        }
+        made.give_up(req);
         return Err(thrown);
     }
-    Ok(Some(object))
+    Ok(Some(made))
 }
 
 /// What `php_sqlite3_bind_params` writes into the parameter in place:
@@ -253,12 +250,12 @@ fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result
                         };
                         let text = stream.copy_to_mem(req, None)?;
                         let bytes = text.as_bytes().to_vec();
-                        req.release(Value::string(text));
+                        text.give_up(req);
                         bytes
                     } else {
                         let text = to_string(req, &value)?;
                         let bytes = text.as_bytes().to_vec();
-                        req.release(Value::string(text));
+                        text.give_up(req);
                         bytes
                     };
                     stmt.bind_blob(at, &bytes)
@@ -266,7 +263,7 @@ fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result
                 Kind::Text => {
                     let text = to_string(req, &value)?;
                     let rc = stmt.bind_text(at, text.as_bytes());
-                    req.release(Value::string(text));
+                    text.give_up(req);
                     rc
                 }
                 Kind::Null => stmt.bind_null(at),
@@ -436,7 +433,10 @@ impl SQLite3Stmt {
             return Ok(());
         }
         let sql = query.as_bytes().to_vec();
-        prepare_on(req, sqlite3.object(), Some(this.object()), &sql).map(|_| ())
+        if let Some(made) = prepare_on(req, sqlite3.object(), Some(this.object()), &sql)? {
+            made.give_up(req);
+        }
+        Ok(())
     }
 
     /// `SQLite3Stmt::bindParam()`: the variable bound by reference, read
@@ -598,7 +598,10 @@ impl SQLite3Stmt {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn execute(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Instance<SQLite3Result>>> {
+    fn execute(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<OrFalse<Owner<Instance<SQLite3Result>>>> {
         let object = this.object();
         let taken = held(req, object, false)?;
         let pending = taken.stmt.as_ref().and_then(|stmt| stmt.reset(req).1);
@@ -624,12 +627,12 @@ impl SQLite3Stmt {
             give_back(req, taken);
             let result = instantiate(req, b"SQLite3Result")?;
             req.addref(&object.as_value());
-            result::attach(req, result, object, Origin::Execute);
+            result::attach(req, *result, object, Origin::Execute);
             if let Some(thrown) = thrown {
-                req.release(result.as_value());
+                result.give_up(req);
                 return Err(thrown);
             }
-            return Ok(OrFalse::Value(Instance::of(result)));
+            return Ok(OrFalse::Value(result.into_instance()));
         }
         let failed = if let Some(thrown) = thrown {
             Err(thrown)
@@ -660,7 +663,7 @@ impl SQLite3Stmt {
         req: &mut Request,
         this: This<Self>,
         #[php(default = false)] expand: bool,
-    ) -> Answer<OrFalse<PhpString>> {
+    ) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         let taken = held(req, object, true)?;
         let bound = bind_all(req, object, &taken);

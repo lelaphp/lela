@@ -82,7 +82,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;
 
@@ -167,7 +167,7 @@ fn popen(
     req: &mut Request,
     command: Path,
     mode: PhpString,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let command = command.0.as_bytes().to_vec();
     let mode = mode.as_bytes().to_vec();
     let mut posix_mode = mode.clone();
@@ -218,7 +218,7 @@ fn popen(
         return Ok(Untyped(OrFalse::False));
     };
     let stream = req.stream_from_fd(pipe, FdStream::Process { mode: &mode, child })?;
-    Ok(Untyped(OrFalse::Value(stream.resource())))
+    Ok(Untyped(OrFalse::Value(stream.into_resource())))
 }
 
 /// `strerror(errno)`: the host's text for an `errno`, without the
@@ -585,7 +585,7 @@ fn file_descriptor(
     };
     let fd = stream.cast(req, Cast::Fd, true);
     let childend = fd.and_then(|fd| dup_descriptor(req, fd, nindex));
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     Ok(childend)
 }
 
@@ -844,7 +844,7 @@ fn proc_open(
     #[php(default = null)] cwd: Option<PhpString>,
     #[php(default = null)] env_vars: Option<PhpArray>,
     #[php(default = null)] options: Option<PhpArray>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let _ = options;
     let cwd = cwd.map(|cwd| cwd.as_bytes().to_vec());
     let (command_str, argv) = command_of(req, command)?;
@@ -900,10 +900,10 @@ fn proc_open(
             let value = stream.as_value();
             req.addref(&value);
             opened.set(req, Key::Int(index), value)?;
-            held.push(stream.resource());
+            held.push(stream.hand_on_unmigrated().resource());
         }
     }
-    pipes.set(req, Untyped(Value::array(opened)))?;
+    pipes.set(req, Untyped(opened.into_value()))?;
     let kind = process_type(req);
     let process = Process {
         child: pid,
@@ -1097,7 +1097,7 @@ fn proc_terminate(
 /// int(-1)
 /// ```
 #[php_function]
-fn proc_get_status(req: &mut Request, process: Resource) -> Result<PhpArray, Thrown> {
+fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArray>, Thrown> {
     let res = process_of(req, process, "proc_get_status")?;
     let Some(process) = res.native_mut::<Process>(req) else {
         return Err(php_ext::raising::fatal(
@@ -1131,7 +1131,10 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<PhpArray, Thr
     let pid = process.child;
     let mut out = PhpArray::new(req)?;
     let rows: [(&[u8], Value); 9] = [
-        (b"command", Value::string(PhpString::new(req, &command)?)),
+        (
+            b"command",
+            Value::string(PhpString::new(req, &command)?.hand_on_unmigrated()),
+        ),
         (b"pid", Value::int(i64::from(pid))),
         (b"cached", Value::bool(cached)),
         (b"running", Value::bool(running)),
@@ -1142,7 +1145,7 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<PhpArray, Thr
         (b"stopsig", Value::int(i64::from(stopsig))),
     ];
     for (name, value) in rows {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         out.set(req, key, value)?;
     }
     Ok(out)

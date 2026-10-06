@@ -768,12 +768,14 @@ fn decode_text(
         let (php_type, pack_len) = ty.fetch().unwrap_or((PhpType::String, 0));
         let value = if ty == FieldType::Bit {
             match crate::codec::bit_value(field, text) {
-                crate::codec::Bits::Long(n) if !native => Value::string(PhpString::new(
-                    req,
-                    n.cast_unsigned().to_string().as_bytes(),
-                )?),
+                crate::codec::Bits::Long(n) if !native => Value::string(
+                    PhpString::new(req, n.cast_unsigned().to_string().as_bytes())?
+                        .hand_on_unmigrated(),
+                ),
                 crate::codec::Bits::Long(n) => Value::int(n),
-                crate::codec::Bits::Text(s) => Value::string(PhpString::new(req, s.as_bytes())?),
+                crate::codec::Bits::Text(s) => {
+                    Value::string(PhpString::new(req, s.as_bytes())?.hand_on_unmigrated())
+                }
             }
         } else if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {
             if pack_len < 8 {
@@ -781,7 +783,7 @@ fn decode_text(
             } else {
                 let v = strtoull(text);
                 if field.flags & column::UNSIGNED != 0 && i64::try_from(v).is_err() {
-                    Value::string(PhpString::new(req, text)?)
+                    Value::string(PhpString::new(req, text)?.hand_on_unmigrated())
                 } else {
                     Value::int(v.cast_signed())
                 }
@@ -789,7 +791,7 @@ fn decode_text(
         } else if native && php_type == PhpType::Double {
             Value::float(strtod(text))
         } else {
-            Value::string(PhpString::new(req, text)?)
+            Value::string(PhpString::new(req, text)?.hand_on_unmigrated())
         };
         row.push(value);
     }

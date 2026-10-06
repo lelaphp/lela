@@ -40,7 +40,7 @@ use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw_at, throw_error};
 use php_ext::request::Request;
 use php_ext::syntax::{self, FileId, LexOptions};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use names::constants::{self, TOKEN_PARSE};
 
@@ -226,7 +226,7 @@ impl PhpToken {
         req: &mut Request,
         code: PhpString,
         #[php(default = 0)] flags: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let Some(token_class) = req.called_scope() else {
             return Err(throw_error(
                 req,
@@ -250,11 +250,18 @@ impl PhpToken {
                 Some(id) => id,
                 None => i64::from(text.first().copied().unwrap_or(0)),
             };
-            let object = new_object(req, token_class)?;
+            let object = match new_object(req, token_class) {
+                Ok(object) => object,
+                Err(thrown) => {
+                    rows.give_up(req);
+                    return Err(thrown);
+                }
+            };
             let text = texts.make_str(req, text)?;
             let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
-            fill_token(req, object, id, text, i64::from(token.line), pos)?;
-            rows.append(req, Value::object(object))?;
+            let line = i64::from(token.line);
+            fill_token(req, *object, id, text.hand_on_unmigrated(), line, pos)?;
+            rows.append(req, object.into_value().hand_on_unmigrated())?;
         }
         Ok(rows)
     }
@@ -471,7 +478,10 @@ impl PhpToken {
     /// #0 {main}
     ///   thrown in %s on line 2
     /// ```
-    fn getTokenName(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getTokenName(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let id = token_id(req, this.object())?;
         if id < 256 {
             let byte = u8::try_from(id.rem_euclid(256)).unwrap_or(0);
@@ -509,9 +519,7 @@ impl PhpToken {
     /// string(32) "echoechoechoechoechoechoechoecho"
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let text = token_text(req, this.object())?;
-        req.addref(&Value::string(text));
-        Ok(text)
+        token_text(req, this.object())
     }
 }
 
@@ -987,7 +995,7 @@ fn token_get_all(
     req: &mut Request,
     code: PhpString,
     #[php(default = 0)] flags: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let short_open_tag = req
         .ini_get(b"short_open_tag")
         .is_none_or(Request::ini_parse_bool);
@@ -1005,11 +1013,11 @@ fn token_get_all(
             Some(id) => {
                 let mut row = PhpArray::new(req)?;
                 row.append(req, Value::int(id))?;
-                row.append(req, text)?;
+                row.append(req, text.hand_on_unmigrated())?;
                 row.append(req, Value::int(i64::from(token.line)))?;
-                rows.append(req, Value::array(row))?;
+                rows.append(req, row.into_value().hand_on_unmigrated())?;
             }
-            None => rows.append(req, text)?,
+            None => rows.append(req, text.hand_on_unmigrated())?,
         }
     }
     Ok(rows)
@@ -1046,21 +1054,19 @@ impl<'a> Texts<'a> {
     /// `make_str`: the string a row or a property takes for `text`, one
     /// owner of it handed over, so a repeated text is [`Request::addref`]
     /// over the first call's string.
-    fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Value, Thrown> {
+    fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Owner<Value>, Thrown> {
         let Texts::Shared(table) = self else {
-            return Ok(Value::string(PhpString::new(req, text)?));
+            return Ok(PhpString::new(req, text)?.into_value());
         };
         if text.len() == 1 {
-            return Ok(Value::string(PhpString::new(req, text)?));
+            return Ok(PhpString::new(req, text)?.into_value());
         }
         if let Some(first) = table.get(text) {
-            let copy = Value::string(*first);
-            req.addref(&copy);
-            return Ok(copy);
+            return Ok(Owner::take(req, Value::string(*first)));
         }
         let first = PhpString::new(req, text)?;
-        table.insert(text, first);
-        Ok(Value::string(first))
+        table.insert(text, *first);
+        Ok(first.into_value())
     }
 }
 
@@ -1468,7 +1474,7 @@ fn tokenize_parse(
 /// string(10) "T_VARIABLE"
 /// ```
 #[php_function]
-fn token_name(req: &mut Request, id: i64) -> Result<PhpString, Thrown> {
+fn token_name(req: &mut Request, id: i64) -> Result<Owner<PhpString>, Thrown> {
     let name = names::name_of(id).unwrap_or("UNKNOWN");
     PhpString::new(req, name.as_bytes())
 }

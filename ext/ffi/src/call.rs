@@ -9,7 +9,7 @@ use php_ext::abi::Callable;
 use php_ext::coerce::{callable_checked, to_double, to_long, to_string, truthy, value_name};
 use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 
 use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, write_value};
 use crate::decls::function_symbol;
@@ -193,6 +193,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Valu
         true,
         false,
     )
+    .map(Owner::hand_on_unmigrated)
 }
 
 /// `zend_ffi_return_unsupported`.
@@ -302,7 +303,7 @@ fn pass_arg(
             Scalar::Char => {
                 let text = to_string(req, arg)?;
                 let bytes = text.as_bytes().to_vec();
-                req.release(Value::string(text));
+                text.give_up(req);
                 ffi::write(slot, bytes.first().copied().unwrap_or(0));
                 if bytes.len() != 1 && frame.pending.is_none() {
                     frame.pending = Some(pass_incompatible(req, name, n, arg, ty)?);
@@ -569,9 +570,10 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
             Err(_) => break,
         }
     }
-    let called = php_ext::call::call(req, &callable, &values);
+    let arguments: Vec<Value> = values.iter().map(|value| **value).collect();
+    let called = php_ext::call::call(req, &callable, &arguments);
     for value in values {
-        req.release(value);
+        value.give_up(req);
     }
     let returned = match called {
         Ok(returned) => returned,
@@ -590,7 +592,7 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
     if ret != 0 && !matches!(types(req).get(shape.ret).kind, Kind::Void) {
         write_value(req, ret, shape.ret, &returned).ok();
     }
-    req.release(returned);
+    returned.give_up(req);
 }
 
 /// The calls C made of this request's callbacks while it ran PHP code,

@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::decl::{ClassConstDecl, ConstExpr, Name, Type, Visibility};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::locale::{self as uloc, Part, Shown};
@@ -244,7 +244,7 @@ fn get_value(
     req: &mut Request,
     locale: Path,
     tag: Option<&str>,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let locale = or_default(req, locale.0.as_bytes());
     or_null(check_len(req, locale.len()))?.map_or(Ok(None), |()| {
@@ -268,7 +268,7 @@ fn get_display(
     display: Option<Path>,
     shown: Shown,
     tag: &str,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let locale = locale.0.as_bytes();
     if locale.len() > ffi::FULLNAME_CAPACITY {
@@ -305,20 +305,28 @@ fn get_display(
 }
 
 /// A string value for an array.
-fn text(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    PhpString::new(req, bytes).map(Value::string)
+fn text(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    PhpString::new(req, bytes).map(Owner::into_value)
 }
 
 /// `add_assoc_*`: `key => value` set on the array.
-fn assoc(req: &mut Request, array: &mut PhpArray, key: &[u8], value: &[u8]) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?);
+fn assoc(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
     let value = text(req, value)?;
-    array.set(req, key, value)
+    array.set(req, key, value.hand_on_unmigrated())
 }
 
 /// `locale_get_keywords`: the keywords as `name => value`, `null` where
 /// the ID has none.
-fn get_keywords(req: &mut Request, locale: Path) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+fn get_keywords(
+    req: &mut Request,
+    locale: Path,
+) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
     error::reset(req);
     let locale = locale.0.as_bytes();
     if or_null(check_len(req, locale.len()))?.is_none() {
@@ -333,7 +341,7 @@ fn get_keywords(req: &mut Request, locale: Path) -> Result<Option<OrFalse<PhpArr
     while let Some(key) = keywords.next(&mut status) {
         let (value, code) = uloc::keyword_value(&locale, &c_string(&key));
         if code.is_failure() {
-            req.release(array.to_value());
+            array.give_up(req);
             error::set(
                 req,
                 Code::ILLEGAL_ARGUMENT,
@@ -421,7 +429,7 @@ fn append_multiple(out: &mut Vec<u8>, array: PhpArray, key: &str) -> Appended {
 }
 
 /// `locale_compose`: an ID from its subtags.
-fn compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<PhpString>, Thrown> {
+fn compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::reset(req);
     if subtags.is_empty() {
         return Ok(OrFalse::False);
@@ -504,7 +512,7 @@ fn tokens(value: &[u8]) -> Vec<&[u8]> {
 /// variants and the private subtags.
 fn add_entry(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     locale: &[u8],
     tag: &str,
 ) -> Result<(), Thrown> {
@@ -529,7 +537,7 @@ fn add_entry(
 }
 
 /// `locale_parse`: an ID's subtags by name.
-fn parse(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+fn parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
     error::reset(req);
     let locale = locale.0.as_bytes();
     if or_null(check_len(req, locale.len()))?.is_none() {
@@ -548,7 +556,7 @@ fn parse(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
 }
 
 /// `locale_get_all_variants`: the variant subtags as a list.
-fn all_variants(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+fn all_variants(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
     error::reset(req);
     let locale = or_default(req, locale.0.as_bytes());
     if or_null(check_len(req, locale.len()))?.is_none() {
@@ -560,7 +568,7 @@ fn all_variants(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thr
     {
         for token in tokens(&variant) {
             let value = text(req, token)?;
-            array.append(req, value)?;
+            array.append(req, value.hand_on_unmigrated())?;
         }
     }
     Ok(Some(array))
@@ -676,7 +684,7 @@ fn lookup(
     range: Path,
     canonicalize: bool,
     fallback: Option<Path>,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let range = match (range.0.as_bytes(), fallback) {
         (b"", Some(fallback)) => fallback.0.as_bytes().to_vec(),
@@ -695,7 +703,7 @@ fn lookup(
     match found {
         Some(found) if !found.is_empty() => PhpString::new(req, &found).map(Some),
         _ => match fallback {
-            Some(fallback) => Ok(Some(fallback.0)),
+            Some(fallback) => Ok(Some(Owner::take(req, fallback.0))),
             None => PhpString::new(req, b"").map(Some),
         },
     }
@@ -703,7 +711,10 @@ fn lookup(
 
 /// `locale_accept_from_http`: the available locale an `Accept-Language`
 /// header prefers.
-fn accept_from_http(req: &mut Request, header: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn accept_from_http(
+    req: &mut Request,
+    header: PhpString,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let header = header.as_bytes();
     if header.len() > ffi::FULLNAME_CAPACITY
         && header
@@ -736,7 +747,11 @@ fn accept_from_http(req: &mut Request, header: PhpString) -> Result<OrFalse<PhpS
 }
 
 /// `locale_add_likely_subtags` and `locale_minimize_subtags`.
-fn subtags(req: &mut Request, locale: Path, part: Part) -> Result<OrFalse<PhpString>, Thrown> {
+fn subtags(
+    req: &mut Request,
+    locale: Path,
+    part: Part,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let locale = or_default(req, locale.0.as_bytes());
     let (value, len, status) = uloc::fixed(part, &c_string(&locale));
     if let OrFalse::False = or_false(error::check(req, status, "invalid locale"))? {
@@ -749,7 +764,7 @@ fn subtags(req: &mut Request, locale: Path, part: Part) -> Result<OrFalse<PhpStr
 }
 
 /// `locale_get_default`.
-fn get_default(req: &mut Request) -> Result<PhpString, Thrown> {
+fn get_default(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let locale = crate::default_locale(req);
     PhpString::new(req, &locale)
 }
@@ -783,7 +798,7 @@ type Display = Option<Path>;
 /// string(5) "de_DE"
 /// ```
 #[php_function]
-fn locale_get_default(req: &mut Request) -> Result<PhpString, Thrown> {
+fn locale_get_default(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     get_default(req)
 }
 
@@ -817,7 +832,7 @@ fn locale_set_default(req: &mut Request, locale: Path) -> Result<True, Thrown> {
 fn locale_get_primary_language(
     req: &mut Request,
     locale: Path,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, Some(LANG))
 }
 
@@ -833,7 +848,7 @@ fn locale_get_primary_language(
 /// string(62) "locale_get_script(): unable to get locale script: U_ZERO_ERROR"
 /// ```
 #[php_function]
-fn locale_get_script(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+fn locale_get_script(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, Some(SCRIPT))
 }
 
@@ -847,7 +862,7 @@ fn locale_get_script(req: &mut Request, locale: Path) -> Result<Option<PhpString
 /// string(0) ""
 /// ```
 #[php_function]
-fn locale_get_region(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+fn locale_get_region(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, Some(REGION))
 }
 
@@ -869,7 +884,7 @@ fn locale_get_region(req: &mut Request, locale: Path) -> Result<Option<PhpString
 fn locale_get_keywords(
     req: &mut Request,
     locale: Path,
-) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
     get_keywords(req, locale)
 }
 
@@ -888,7 +903,7 @@ fn locale_get_display_script(
     req: &mut Request,
     locale: Path,
     #[php(default = null)] displayLocale: Display,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_display(req, locale, displayLocale, Shown::Script, SCRIPT)
 }
 
@@ -908,7 +923,7 @@ fn locale_get_display_region(
     req: &mut Request,
     locale: Path,
     #[php(default = null)] displayLocale: Display,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_display(req, locale, displayLocale, Shown::Country, REGION)
 }
 
@@ -927,7 +942,7 @@ fn locale_get_display_name(
     req: &mut Request,
     locale: Path,
     #[php(default = null)] displayLocale: Display,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_display(req, locale, displayLocale, Shown::Name, "name")
 }
 
@@ -946,7 +961,7 @@ fn locale_get_display_language(
     req: &mut Request,
     locale: Path,
     #[php(default = null)] displayLocale: Display,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_display(req, locale, displayLocale, Shown::Language, LANG)
 }
 
@@ -964,7 +979,7 @@ fn locale_get_display_variant(
     req: &mut Request,
     locale: Path,
     #[php(default = null)] displayLocale: Display,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_display(req, locale, displayLocale, Shown::Variant, VARIANT)
 }
 
@@ -983,7 +998,10 @@ fn locale_get_display_variant(
 /// locale_compose(): Argument #1 ($subtags) must contain a "language" key
 /// ```
 #[php_function]
-fn locale_compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<PhpString>, Thrown> {
+fn locale_compose(
+    req: &mut Request,
+    subtags: PhpArray,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     compose(req, subtags)
 }
 
@@ -1015,7 +1033,7 @@ fn locale_compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<PhpStr
 /// }
 /// ```
 #[php_function]
-fn locale_parse(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+fn locale_parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
     parse(req, locale)
 }
 
@@ -1035,7 +1053,10 @@ fn locale_parse(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thr
 /// }
 /// ```
 #[php_function]
-fn locale_get_all_variants(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+fn locale_get_all_variants(
+    req: &mut Request,
+    locale: Path,
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     all_variants(req, locale)
 }
 
@@ -1071,7 +1092,10 @@ fn locale_filter_matches(
 /// string(23) "sr_Latn_RS@currency=EUR"
 /// ```
 #[php_function]
-fn locale_canonicalize(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+fn locale_canonicalize(
+    req: &mut Request,
+    locale: Path,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, None)
 }
 
@@ -1095,7 +1119,7 @@ fn locale_lookup(
     locale: Path,
     #[php(default = false)] canonicalize: bool,
     #[php(default = null)] defaultLocale: Option<Path>,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     lookup(req, languageTag, locale, canonicalize, defaultLocale)
 }
 
@@ -1113,7 +1137,7 @@ fn locale_lookup(
 fn locale_accept_from_http(
     req: &mut Request,
     header: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     accept_from_http(req, header)
 }
 
@@ -1145,7 +1169,7 @@ fn locale_is_right_to_left(req: &mut Request, locale: Path) -> bool {
 fn locale_add_likely_subtags(
     req: &mut Request,
     locale: Path,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     subtags(req, locale, Part::Likely)
 }
 
@@ -1158,7 +1182,10 @@ fn locale_add_likely_subtags(
 /// string(2) "en"
 /// ```
 #[php_function]
-fn locale_minimize_subtags(req: &mut Request, locale: Path) -> Result<OrFalse<PhpString>, Thrown> {
+fn locale_minimize_subtags(
+    req: &mut Request,
+    locale: Path,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     subtags(req, locale, Part::Minimal)
 }
 
@@ -1261,7 +1288,7 @@ pub(crate) struct Locale;
 #[allow(non_snake_case)]
 impl Locale {
     #[php(tentative)]
-    fn getDefault(req: &mut Request) -> Result<PhpString, Thrown> {
+    fn getDefault(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         get_default(req)
     }
 
@@ -1271,22 +1298,28 @@ impl Locale {
     }
 
     #[php(tentative)]
-    fn getPrimaryLanguage(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+    fn getPrimaryLanguage(
+        req: &mut Request,
+        locale: Path,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, Some(LANG))
     }
 
     #[php(tentative)]
-    fn getScript(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+    fn getScript(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, Some(SCRIPT))
     }
 
     #[php(tentative)]
-    fn getRegion(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+    fn getRegion(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, Some(REGION))
     }
 
     #[php(tentative)]
-    fn getKeywords(req: &mut Request, locale: Path) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+    fn getKeywords(
+        req: &mut Request,
+        locale: Path,
+    ) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
         get_keywords(req, locale)
     }
 
@@ -1295,7 +1328,7 @@ impl Locale {
         req: &mut Request,
         locale: Path,
         #[php(default = null)] displayLocale: Display,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_display(req, locale, displayLocale, Shown::Script, SCRIPT)
     }
 
@@ -1304,7 +1337,7 @@ impl Locale {
         req: &mut Request,
         locale: Path,
         #[php(default = null)] displayLocale: Display,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_display(req, locale, displayLocale, Shown::Country, REGION)
     }
 
@@ -1313,7 +1346,7 @@ impl Locale {
         req: &mut Request,
         locale: Path,
         #[php(default = null)] displayLocale: Display,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_display(req, locale, displayLocale, Shown::Name, "name")
     }
 
@@ -1322,7 +1355,7 @@ impl Locale {
         req: &mut Request,
         locale: Path,
         #[php(default = null)] displayLocale: Display,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_display(req, locale, displayLocale, Shown::Language, LANG)
     }
 
@@ -1331,22 +1364,25 @@ impl Locale {
         req: &mut Request,
         locale: Path,
         #[php(default = null)] displayLocale: Display,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_display(req, locale, displayLocale, Shown::Variant, VARIANT)
     }
 
     #[php(tentative)]
-    fn composeLocale(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<PhpString>, Thrown> {
+    fn composeLocale(
+        req: &mut Request,
+        subtags: PhpArray,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         compose(req, subtags)
     }
 
     #[php(tentative)]
-    fn parseLocale(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+    fn parseLocale(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
         parse(req, locale)
     }
 
     #[php(tentative)]
-    fn getAllVariants(req: &mut Request, locale: Path) -> Result<Option<PhpArray>, Thrown> {
+    fn getAllVariants(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
         all_variants(req, locale)
     }
 
@@ -1367,17 +1403,20 @@ impl Locale {
         locale: Path,
         #[php(default = false)] canonicalize: bool,
         #[php(default = null)] defaultLocale: Option<Path>,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         lookup(req, languageTag, locale, canonicalize, defaultLocale)
     }
 
     #[php(tentative)]
-    fn canonicalize(req: &mut Request, locale: Path) -> Result<Option<PhpString>, Thrown> {
+    fn canonicalize(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, None)
     }
 
     #[php(tentative)]
-    fn acceptFromHttp(req: &mut Request, header: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+    fn acceptFromHttp(
+        req: &mut Request,
+        header: PhpString,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         accept_from_http(req, header)
     }
 
@@ -1385,11 +1424,17 @@ impl Locale {
         is_right_to_left(req, locale)
     }
 
-    fn addLikelySubtags(req: &mut Request, locale: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    fn addLikelySubtags(
+        req: &mut Request,
+        locale: Path,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         subtags(req, locale, Part::Likely)
     }
 
-    fn minimizeSubtags(req: &mut Request, locale: Path) -> Result<OrFalse<PhpString>, Thrown> {
+    fn minimizeSubtags(
+        req: &mut Request,
+        locale: Path,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         subtags(req, locale, Part::Minimal)
     }
 }

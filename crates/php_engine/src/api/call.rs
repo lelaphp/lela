@@ -14,7 +14,9 @@ use php_unit::{ConstIdx, Opcode, Unit};
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{Thrown, argument_error, throw_error};
 use crate::api::request::{Request, Strategy};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
+};
 use crate::exec::{self, Body, CallStage};
 
 /// A linked function: user or native, by identity. A native method is
@@ -177,7 +179,7 @@ fn serve(
             function,
             scope,
             this,
-        } => req.serve_method(function, this, scope, arguments, extra_named),
+        } => req.serve_method_made(function, this, scope, arguments, extra_named),
         Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
     };
     without_frame(req, served)
@@ -307,7 +309,22 @@ fn callee(req: &Request, target: Target) -> Option<Function> {
 /// #1 {main}
 ///   thrown in %s on line 3
 /// ```
-pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Result<Value, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn call(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Owner<Value>, Thrown> {
+    let made = call_made(req, callable, arguments);
+    adopted(req, made)
+}
+
+/// What [`call`] makes, its one owner not yet named.
+pub(crate) fn call_made(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
     serve(req, callable.target(), arguments, &[])
 }
 
@@ -324,7 +341,19 @@ pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Resu
 /// whose whole argument list is one array is [`call_array`], and the
 /// witnesses for the placement stand beside `call_user_func_array` in
 /// `ext/standard`.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn call_named(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<Owner<Value>, Thrown> {
+    let made = call_named_made(req, callable, arguments, named);
+    adopted(req, made)
+}
+
+/// What [`call_named`] makes, its one owner not yet named.
+pub(crate) fn call_named_made(
     req: &mut Request,
     callable: &Callable,
     arguments: &[Value],
@@ -382,7 +411,18 @@ pub(crate) fn placed(
 /// ```expect
 /// int(3)
 /// ```
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn call_array(
+    req: &mut Request,
+    callable: &Callable,
+    array: PhpArray,
+) -> Result<Owner<Value>, Thrown> {
+    let made = call_array_made(req, callable, array);
+    adopted(req, made)
+}
+
+/// What [`call_array`] makes, its one owner not yet named.
+pub(crate) fn call_array_made(
     req: &mut Request,
     callable: &Callable,
     array: PhpArray,
@@ -708,7 +748,7 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
         ));
     };
     let scope = req.executed_scope();
-    let value = eval_const_expr(req, &default, scope)?;
+    let value = eval_const_expr_made(req, &default, scope)?;
     if parameter.by_ref {
         return Ok(req.reference(value)?.as_value());
     }
@@ -720,10 +760,11 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
 /// line it records are that opline's.
 fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown {
     if let Some(object) = thrown.exception().copied() {
-        let placed = PhpString::new(req, b"file")
-            .and_then(|name| Ok((name, PhpString::new(req, file)?)))
+        let placed = req
+            .string(b"file")
+            .and_then(|name| Ok((name, req.string(file)?)))
             .and_then(|(name, file)| object.set_prop(req, name, Value::string(file)))
-            .and_then(|()| PhpString::new(req, b"line"))
+            .and_then(|()| req.string(b"line"))
             .and_then(|name| object.set_prop(req, name, Value::int(i64::from(line))));
         if let Err(other) = placed {
             return other;
@@ -814,7 +855,21 @@ pub(crate) fn handle_named_arg(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn call_method(
+    req: &mut Request,
+    object: &PhpObject,
+    method: &[u8],
+    arguments: &[Value],
+) -> Result<Owner<Value>, Thrown> {
+    let made = call_method_made(req, object, method, arguments);
+    adopted(req, made)
+}
+
+/// What [`call_method`] makes, its one owner not yet named.
+// The face's signature, which the engine's callers share.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn call_method_made(
     req: &mut Request,
     object: &PhpObject,
     method: &[u8],
@@ -832,7 +887,7 @@ pub fn call_method(
             ),
         ));
     };
-    let served = req.serve_method(function, Some(*object), class, arguments, &[]);
+    let served = req.serve_method_made(function, Some(*object), class, arguments, &[]);
     without_frame(req, served)
 }
 
@@ -945,12 +1000,14 @@ pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
 /// `zend_get_property_hook_trampoline`: a virtual property has none,
 /// php's `Error`; a typed one nothing wrote is the uninitialised-access
 /// `Error`. One more owner of the value, the caller's.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn read_raw_property(
     req: &mut Request,
     object: &PhpObject,
     name: &[u8],
-) -> Result<Value, Thrown> {
-    req.read_raw(*object, name)
+) -> Result<Owner<Value>, Thrown> {
+    let made = req.read_raw(*object, name);
+    adopted(req, made)
 }
 
 /// A hooked property's backing value written past its hooks, as the
@@ -973,11 +1030,12 @@ pub fn write_raw_property(
 /// (`zend_pass_function`). A constructor that throws leaves the object
 /// marked as one whose constructor failed, so it is given up with no
 /// destructor served (`zend_object_store_ctor_failed`).
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn instantiate(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     instantiate_named(req, class, arguments, &[])
 }
 
@@ -1004,13 +1062,25 @@ pub fn instantiate(
 /// Unknown named parameter $notinterned
 /// c
 /// ```
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn instantiate_named(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
     named: &[(PhpString, Value)],
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = instantiate_named_made(req, class, arguments, named);
+    adopted(req, made)
+}
+
+/// What [`instantiate_named`] makes, its one owner not yet named.
+pub(crate) fn instantiate_named_made(
+    req: &mut Request,
+    class: ClassId,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
 ) -> Result<PhpObject, Thrown> {
-    let object = new_object(req, class)?;
+    let object = new_object_made(req, class)?;
     let constructor = match object.handlers(req).get_constructor(req, object) {
         Ok(constructor) => constructor,
         Err(thrown) => {
@@ -1034,7 +1104,7 @@ pub fn instantiate_named(
         .iter()
         .try_for_each(|(name, value)| placement.named(req, *name, *value))
         .and_then(|()| {
-            req.serve_method(
+            req.serve_method_made(
                 constructor,
                 Some(object),
                 class,
@@ -1092,7 +1162,20 @@ pub fn instantiate_named(
 /// A::__construct(): Argument #1 ($x) must be of type int, string given, called in %s on line 5
 /// Attribute::__construct(): Argument #1 ($flags) must be of type int, string given
 /// ```
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn attribute_object(
+    req: &mut Request,
+    class: ClassId,
+    attribute: &php_unit::decl::Attribute,
+    scope: Option<ClassId>,
+    file: Option<&[u8]>,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = attribute_object_made(req, class, attribute, scope, file);
+    adopted(req, made)
+}
+
+/// What [`attribute_object`] makes, its one owner not yet named.
+pub(crate) fn attribute_object_made(
     req: &mut Request,
     class: ClassId,
     attribute: &php_unit::decl::Attribute,
@@ -1121,7 +1204,7 @@ fn attribute_object_at(
     let mut named: Vec<(PhpString, Value)> = Vec::new();
     let mut evaluated = Ok(());
     for argument in &attribute.arguments {
-        let value = match eval_declared(req, &argument.value, scope) {
+        let value = match eval_declared_made(req, &argument.value, scope) {
             Ok(value) => value,
             Err(thrown) => {
                 evaluated = Err(thrown);
@@ -1129,7 +1212,7 @@ fn attribute_object_at(
             }
         };
         match &argument.name {
-            Some(name) => match PhpString::new(req, &name.0) {
+            Some(name) => match req.string(&name.0) {
                 Ok(name) => named.push((name, value)),
                 Err(thrown) => {
                     req.release(value);
@@ -1140,7 +1223,7 @@ fn attribute_object_at(
             None => positional.push(value),
         }
     }
-    let made = evaluated.and_then(|()| instantiate_named(req, class, &positional, &named));
+    let made = evaluated.and_then(|()| instantiate_named_made(req, class, &positional, &named));
     for value in positional {
         req.release(value);
     }
@@ -1206,8 +1289,8 @@ pub fn class_unserialize(
     if !serializable {
         return Ok(false);
     }
-    let data = Value::string(PhpString::new(req, data)?);
-    let answered = call_method(req, &object, b"unserialize", &[data]);
+    let data = Value::string(req.string(data)?);
+    let answered = call_method_made(req, &object, b"unserialize", &[data]);
     req.release(data);
     req.release(answered?);
     Ok(true)
@@ -1247,7 +1330,14 @@ pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
 /// and no constructor call, a store entry of the request's heap with
 /// one owner, the caller's; an interface, a trait, an enum or an
 /// abstract class is php's `Error` for what cannot be instantiated.
-pub fn new_object(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
+    let made = new_object_made(req, class);
+    adopted(req, made)
+}
+
+/// What [`new_object`] makes, its one owner not yet named.
+pub(crate) fn new_object_made(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
     req.instantiable(class)?;
     req.new_object(class)
 }
@@ -1257,8 +1347,10 @@ pub fn new_object(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown
 /// served on it; a class with a null slot is php's `Error` for an
 /// uncloneable object, and a `__clone` the scope may not reach is
 /// `zend_bad_method_call`'s. The copy is the caller's, one owner.
-pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
-    req.clone_object(*object, None)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn clone(req: &mut Request, object: &PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    let made = req.clone_object(*object, None);
+    adopted(req, made)
 }
 
 /// A class's `clone_obj` over an object with a native payload, php's
@@ -1268,7 +1360,20 @@ pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown>
 /// the class's `__clone` served on it, the copy given up with what
 /// `__clone` threw. What the payload names of the heap is the caller's
 /// to have taken an owner of. The copy is the caller's, one owner.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn clone_with<T: std::any::Any + Send>(
+    req: &mut Request,
+    object: &PhpObject,
+    payload: T,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = clone_with_made(req, object, payload);
+    adopted(req, made)
+}
+
+/// What [`clone_with`] makes, its one owner not yet named.
+// The face's signature, which the engine's callers share.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn clone_with_made<T: std::any::Any + Send>(
     req: &mut Request,
     object: &PhpObject,
     payload: T,
@@ -1311,8 +1416,13 @@ pub fn clone_members(req: &mut Request, new: &PhpObject, old: &PhpObject) -> Res
 /// [`crate::api::abi::ObjectHandlers::iterator_element`] answers, which
 /// is what `getIterator()` hands back for a class php iterates in C.
 /// The iterator is the caller's, one owner, and holds one of `object`.
-pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
-    crate::interfaces::internal_iterator(req, *object)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn internal_iterator(
+    req: &mut Request,
+    object: &PhpObject,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = crate::interfaces::internal_iterator(req, *object);
+    adopted(req, made)
 }
 
 /// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
@@ -1391,7 +1501,7 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
 pub fn bound_variables(
     req: &mut Request,
     callable: &Callable,
-) -> Result<Vec<(PhpString, Value)>, Thrown> {
+) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
     let rows = req.static_variables(callable.target());
     let mut out = Vec::with_capacity(rows.len());
     for (name, value) in rows {
@@ -1476,8 +1586,8 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     let served = req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
-            let class = crate::api::values::PhpString::new(req, bare)?;
-            let returned = call(req, &loader, &[Value::string(class)]);
+            let class = req.string(bare)?;
+            let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
             if let Some(class) = req.class_named(bare) {
@@ -1516,7 +1626,14 @@ pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown>
 ///
 /// `constant()` in `ext/standard` is this and nothing else, and its
 /// witness is the one that pins each arm at the oracle.
-pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Thrown> {
+    let made = fetch_constant_made(req, name);
+    adopted(req, made)
+}
+
+/// What [`fetch_constant`] makes, its one owner not yet named.
+pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
     let name = name.strip_prefix(b"\\").unwrap_or(name);
     if let Some(colon) = name.iter().rposition(|b| *b == b':')
         && colon > 0
@@ -1677,8 +1794,14 @@ pub fn update_class_constants(req: &mut Request, class: ClassId) -> Result<(), T
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
-pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    req.updated_class_constant(class, name)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn class_constant(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
+    let made = req.updated_class_constant(class, name);
+    adopted(req, made)
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
@@ -1762,7 +1885,18 @@ pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<
 /// 6
 /// 4
 /// ```
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn eval_const_expr(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+) -> Result<Owner<Value>, Thrown> {
+    let made = eval_const_expr_made(req, expr, scope);
+    adopted(req, made)
+}
+
+/// What [`eval_const_expr`] makes, its one owner not yet named.
+pub(crate) fn eval_const_expr_made(
     req: &mut Request,
     expr: &ConstExpr,
     scope: Option<ClassId>,
@@ -1784,7 +1918,18 @@ pub fn eval_const_expr(
 /// their strings as its literals do, interned as opcache persists them
 /// (design §5.2, revision 64), where `php -n` copies them per request,
 /// the difference `trace:immutable-literal-arrays` covers.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn eval_declared(
+    req: &mut Request,
+    expr: &ConstExpr,
+    scope: Option<ClassId>,
+) -> Result<Owner<Value>, Thrown> {
+    let made = eval_declared_made(req, expr, scope);
+    adopted(req, made)
+}
+
+/// What [`eval_declared`] makes, its one owner not yet named.
+pub(crate) fn eval_declared_made(
     req: &mut Request,
     expr: &ConstExpr,
     scope: Option<ClassId>,
@@ -1792,7 +1937,7 @@ pub fn eval_declared(
     if let ConstExpr::Str(s) = expr {
         return Ok(Value::string(req.new_interned(s)?));
     }
-    eval_const_expr(req, expr, scope)
+    eval_const_expr_made(req, expr, scope)
 }
 
 /// `zend_ast_evaluate_ex`: one node of a constant expression under its
@@ -1813,7 +1958,7 @@ fn evaluate_node(
         ConstExpr::Bool(b) => Ok(Value::bool(*b)),
         ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
-        ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
+        ConstExpr::Str(s) => Ok(Value::string(req.string(s)?)),
         // The unit's constant array as it stands, which takes no owner,
         // as `ZVAL_COPY` takes none of an `IS_ARRAY_IMMUTABLE`.
         ConstExpr::ImmutableArray(array) => Ok(Value::of_zval(array.value())),
@@ -1858,7 +2003,7 @@ fn evaluate_node(
             let name = scope
                 .map(|scope| req.class_name_bytes(scope))
                 .unwrap_or_default();
-            Ok(Value::string(PhpString::new(req, &name)?))
+            Ok(Value::string(req.string(&name)?))
         }
         ConstExpr::Array { elements, .. } => array_node(req, elements, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_BINARY_OP`, `ZEND_AST_GREATER`
@@ -1941,7 +2086,7 @@ fn array_node(
     if elements.is_empty() {
         return Ok(Value::array(crate::api::values::PhpArray::empty()));
     }
-    let mut array = crate::api::values::PhpArray::new(req)?;
+    let mut array = req.array()?;
     // `zval_ptr_dtor_nogc(result); return FAILURE;`: an element that
     // threw gives up the array built so far, whichever element it was.
     match array_elements(req, &mut array, elements, scope) {
@@ -2361,7 +2506,7 @@ fn construct(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let id = const_class(req, class, scope)?;
-    let object = new_object(req, id)?;
+    let object = new_object_made(req, id)?;
     let mut positional = Vec::new();
     let mut named = Vec::new();
     let evaluated = construct_arguments(req, arguments, scope, &mut positional, &mut named);
@@ -2415,7 +2560,7 @@ fn construct_arguments(
     for (name, argument) in arguments {
         let value = evaluate(req, argument, scope)?;
         match name {
-            Some(name) => match PhpString::new(req, &name.0) {
+            Some(name) => match req.string(&name.0) {
                 Ok(name) => named.push((name, value)),
                 Err(thrown) => {
                     req.release(value);
@@ -2444,13 +2589,13 @@ fn serve_constructor(
             let constructor = req.method_named(id, b"__construct");
             match constructor {
                 Some(constructor) => {
-                    req.serve_method(constructor, Some(object), id, positional, &[])
+                    req.serve_method_made(constructor, Some(object), id, positional, &[])
                 }
                 None => Ok(Value::null()),
             }
         }
         Some(_) => match known_method(req, id, &Name(b"__construct"[..].into()), Some(object)) {
-            Some(callable) => call_named(req, &callable, positional, named),
+            Some(callable) => call_named_made(req, &callable, positional, named),
             None => Ok(Value::null()),
         },
     }
@@ -2872,8 +3017,13 @@ pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Iter, Thrown> {
 /// bool(true)
 /// int(2)
 /// ```
-pub fn closure_from_callable(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    crate::classes::fake_closure(req, callable)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn closure_from_callable(
+    req: &mut Request,
+    callable: &Callable,
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = crate::classes::fake_closure(req, callable);
+    adopted(req, made)
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -2891,7 +3041,7 @@ pub fn write_prop(
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?;
+    let name = PhpString::new(req, name)?.hand_on_unmigrated();
     object.set_prop(req, name, value)
 }
 
@@ -2905,8 +3055,14 @@ pub fn write_prop(
 /// from; a property a class above declared private is still php's
 /// `Error`, since this is `zend_read_static_property_ex`'s
 /// `silent = false`, php's `BP_VAR_R`.
-pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    req.static_property(class, name, Some(class), PropertyRead::Warning)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn read_static_prop(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
+    let made = req.static_property(class, name, Some(class), PropertyRead::Warning);
+    adopted(req, made)
 }
 
 /// Address a `static` property of `class` silently — a property of the
@@ -2925,12 +3081,14 @@ pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Resul
 /// under [`PropertyRead::Silent`] rather than
 /// [`PropertyRead::Warning`], stopping at the pointer where that one
 /// goes on to the value; the fake scope is the same.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn read_class_prop_silent(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
-) -> Result<Option<Value>, Thrown> {
-    req.static_property_silent(class, name, Some(class))
+) -> Result<Option<Owner<Value>>, Thrown> {
+    let made = req.static_property_silent(class, name, Some(class));
+    adopted_some(req, made)
 }
 
 /// Write a `static` property of `class`,
@@ -2957,26 +3115,30 @@ pub fn write_static_prop(
 /// `SKIP_INITIALIZATION_ON_SERIALIZE` is the bit read here. An internal
 /// class other than `stdClass`, and one below such a class, is php's
 /// `Error`.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn new_lazy_ghost(
     req: &mut Request,
     class: ClassId,
     initializer: &Callable,
     options: i64,
-) -> Result<PhpObject, Thrown> {
-    req.make_lazy(None, class, initializer, Strategy::Ghost, options)
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = req.make_lazy(None, class, initializer, Strategy::Ghost, options);
+    adopted(req, made)
 }
 
 /// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
 /// `ReflectionClass::newLazyProxy` serves: a new object of `class`
 /// whose accesses, once one is made, go to the instance `factory`
 /// returns.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn new_lazy_proxy(
     req: &mut Request,
     class: ClassId,
     factory: &Callable,
     options: i64,
-) -> Result<PhpObject, Thrown> {
-    req.make_lazy(None, class, factory, Strategy::Proxy, options)
+) -> Result<Owner<PhpObject>, Thrown> {
+    let made = req.make_lazy(None, class, factory, Strategy::Proxy, options);
+    adopted(req, made)
 }
 
 /// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,

@@ -13,7 +13,7 @@ use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
 use php_ext::request::{Request, Stream, Streams as _};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Other};
 
 use crate::archive::{
@@ -135,7 +135,7 @@ pub(crate) fn construct_as(
         return Ok(());
     };
     let answered = php_ext::call::call(req, &ctor, args)?;
-    req.release(answered);
+    answered.give_up(req);
     Ok(())
 }
 
@@ -203,9 +203,9 @@ fn construct(
         req,
         b"RecursiveDirectoryIterator",
         this,
-        &[url, Value::int(flags)],
+        &[*url, Value::int(flags)],
     );
-    req.release(url);
+    url.give_up(req);
     constructed?;
     if let Some(a) = archives(req).get_mut(id) {
         a.is_data = is_data;
@@ -469,8 +469,9 @@ impl Phar {
             ));
         };
         let name = localName.map_or(file, |n| n.as_bytes().to_vec());
-        let added = crate::build::add_file(req, id, &name, crate::build::Source::Stream(stream));
-        stream.free(req);
+        let added = crate::build::add_file(req, id, &name, crate::build::Source::Stream(*stream));
+        stream.close(req);
+        stream.give_up(req);
         added
     }
 
@@ -495,7 +496,7 @@ impl Phar {
         this: This<Self>,
         directory: PathArg,
         #[php(default = "")] pattern: PhpString,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let id = held(req, this.object())?;
         writes_off(
             req,
@@ -514,7 +515,7 @@ impl Phar {
         this: This<Self>,
         iterator: php_ext::abi::Instance<Traversable>,
         #[php(default = null)] baseDirectory: Option<PhpString>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let id = held(req, this.object())?;
         writes_off(
             req,
@@ -620,7 +621,7 @@ impl Phar {
         this: This<Self>,
         compression: i64,
         #[php(default = null)] extension: Option<PhpString>,
-    ) -> Result<Option<php_ext::abi::Instance<Phar>>, Thrown> {
+    ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
         writes_off(
             req,
@@ -669,7 +670,7 @@ impl Phar {
         let ext = extension.map(|e| e.as_bytes().to_vec());
         Ok(
             crate::convert::to_other(req, id, format, ext.as_deref(), flags)?
-                .map(php_ext::abi::Instance::of),
+                .map(Owner::into_instance),
         )
     }
 
@@ -679,7 +680,7 @@ impl Phar {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] extension: Option<PhpString>,
-    ) -> Result<Option<php_ext::abi::Instance<Phar>>, Thrown> {
+    ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
         writes_off(
             req,
@@ -700,10 +701,7 @@ impl Phar {
             Format::Phar
         };
         let ext = extension.map(|e| e.as_bytes().to_vec());
-        Ok(
-            crate::convert::to_other(req, id, format, ext.as_deref(), 0)?
-                .map(php_ext::abi::Instance::of),
-        )
+        Ok(crate::convert::to_other(req, id, format, ext.as_deref(), 0)?.map(Owner::into_instance))
     }
 
     /// `convertToExecutable(?int $format = null, ?int $compression = null,
@@ -715,7 +713,7 @@ impl Phar {
         #[php(default = null)] format: Option<i64>,
         #[php(default = null)] compression: Option<i64>,
         #[php(default = null)] extension: Option<PhpString>,
-    ) -> Result<Option<php_ext::abi::Instance<Phar>>, Thrown> {
+    ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
         if readonly(req) {
             return Err(throw(
@@ -727,7 +725,7 @@ impl Phar {
         let ext = extension.map(|e| e.as_bytes().to_vec());
         let converted =
             crate::convert::convert(req, id, false, format, compression, ext.as_deref())?;
-        Ok(converted.map(php_ext::abi::Instance::of))
+        Ok(converted.map(Owner::into_instance))
     }
 
     /// `convertToData(?int $format = null, ?int $compression = null,
@@ -739,12 +737,12 @@ impl Phar {
         #[php(default = null)] format: Option<i64>,
         #[php(default = null)] compression: Option<i64>,
         #[php(default = null)] extension: Option<PhpString>,
-    ) -> Result<Option<php_ext::abi::Instance<PharData>>, Thrown> {
+    ) -> Result<Option<Owner<php_ext::abi::Instance<PharData>>>, Thrown> {
         let id = held(req, this.object())?;
         let ext = extension.map(|e| e.as_bytes().to_vec());
         let converted =
             crate::convert::convert(req, id, true, format, compression, ext.as_deref())?;
-        Ok(converted.map(php_ext::abi::Instance::of))
+        Ok(converted.map(Owner::into_instance))
     }
 
     /// `copy(string $from, string $to): true`.
@@ -850,7 +848,7 @@ impl Phar {
 
     /// `getAlias(): ?string`.
     #[php(tentative)]
-    fn getAlias(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getAlias(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let id = held(req, this.object())?;
         let alias = archives(req).get(id).and_then(|a| a.alias.clone());
         alias.map(|a| PhpString::new(req, &a)).transpose()
@@ -858,7 +856,7 @@ impl Phar {
 
     /// `getPath(): string`: the archive's file.
     #[php(tentative)]
-    fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let id = held(req, this.object())?;
         let fname = archives(req)
             .get(id)
@@ -873,10 +871,10 @@ impl Phar {
         req: &mut Request,
         this: This<Self>,
         #[php(default = [])] unserializeOptions: Passed<PhpArray>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let id = held(req, this.object())?;
         let Some(a) = archives(req).get_mut(id) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let value = metadata_value(req, &mut meta, unserializeOptions, "Phar::getMetadata");
@@ -896,7 +894,10 @@ impl Phar {
     /// `getSignature(): array|false`: the hash as upper-case hex and its
     /// type's name.
     #[php(tentative)]
-    fn getSignature(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpArray>, Thrown> {
+    fn getSignature(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         let id = held(req, this.object())?;
         let Some(a) = archives(req).get(id) else {
             return Ok(OrFalse::False);
@@ -916,16 +917,16 @@ impl Phar {
         };
         let mut out = PhpArray::new(req)?;
         for (key, value) in [(&b"hash"[..], hash), (b"hash_type", kind.into_bytes())] {
-            let key = Key::Str(PhpString::new(req, key)?);
+            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
             let value = string(req, &value)?;
-            out.set(req, key, value)?;
+            out.set(req, key, value.hand_on_unmigrated())?;
         }
         Ok(OrFalse::Value(out))
     }
 
     /// `getStub(): string`.
     #[php(tentative)]
-    fn getStub(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getStub(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let id = held(req, this.object())?;
         let stub = crate::build::stub_of(req, id)?;
         PhpString::new(req, &stub)
@@ -933,7 +934,7 @@ impl Phar {
 
     /// `getVersion(): string`.
     #[php(tentative)]
-    fn getVersion(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getVersion(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let id = held(req, this.object())?;
         let version = archives(req)
             .get(id)
@@ -1033,7 +1034,7 @@ impl Phar {
         req: &mut Request,
         this: This<Self>,
         localName: Untyped<PathArg>,
-    ) -> Result<php_ext::abi::Instance<SplFileInfo>, Thrown> {
+    ) -> Result<Owner<php_ext::abi::Instance<SplFileInfo>>, Thrown> {
         let id = held(req, this.object())?;
         let name = localName.0.0.as_bytes().to_vec();
         let fname = named(req, id).0;
@@ -1079,9 +1080,9 @@ impl Phar {
             None => class_named(req, b"SplFileInfo")?,
         };
         let url = string(req, &url)?;
-        let made = instantiate(req, class, &[url]);
-        req.release(url);
-        Ok(php_ext::abi::Instance::of(made?))
+        let made = instantiate(req, class, &[*url]);
+        url.give_up(req);
+        Ok(made?.into_instance())
     }
 
     /// `offsetSet($localName, $value): void`: a string or a stream's
@@ -1291,7 +1292,7 @@ impl Phar {
 
     /// `Phar::apiVersion(): string`.
     #[php(final)]
-    fn apiVersion(req: &mut Request) -> Result<PhpString, Thrown> {
+    fn apiVersion(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         PhpString::new(req, archive::API_VERSION.as_bytes())
     }
 
@@ -1318,7 +1319,7 @@ impl Phar {
         req: &mut Request,
         #[php(default = null)] index: Option<PathArg>,
         #[php(default = null)] webIndex: Option<PathArg>,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let index = index.map(|s| s.0.as_bytes().to_vec());
         let web = webIndex.map(|s| s.0.as_bytes().to_vec());
         match write::default_stub(index.as_deref(), web.as_deref()) {
@@ -1329,22 +1330,22 @@ impl Phar {
 
     /// `Phar::getSupportedCompression(): array`.
     #[php(final)]
-    fn getSupportedCompression(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn getSupportedCompression(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(req)?;
         if has_zlib(req) {
             let v = string(req, b"GZ")?;
-            out.append(req, v)?;
+            out.append(req, v.hand_on_unmigrated())?;
         }
         if has_bz2(req) {
             let v = string(req, b"BZIP2")?;
-            out.append(req, v)?;
+            out.append(req, v.hand_on_unmigrated())?;
         }
         Ok(out)
     }
 
     /// `Phar::getSupportedSignatures(): array`.
     #[php(final)]
-    fn getSupportedSignatures(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn getSupportedSignatures(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(req)?;
         let mut names: Vec<&[u8]> = vec![b"MD5", b"SHA-1", b"SHA-256", b"SHA-512"];
         if req.extension_named(b"openssl").is_some() {
@@ -1352,7 +1353,7 @@ impl Phar {
         }
         for name in names {
             let v = string(req, name)?;
-            out.append(req, v)?;
+            out.append(req, v.hand_on_unmigrated())?;
         }
         Ok(out)
     }
@@ -1418,7 +1419,7 @@ impl Phar {
     fn running(
         req: &mut Request,
         #[php(default = true)] returnPhar: bool,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let found = crate::web::running(req, returnPhar)?;
         PhpString::new(req, &found)
     }
@@ -1746,9 +1747,9 @@ pub(crate) fn metadata_value(
     meta: &mut Metadata,
     options: Passed<PhpArray>,
     function: &str,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if !meta.has_data() {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let options = match options {
         Passed::Given(options) if !options.is_empty() => Some(options),
@@ -1756,11 +1757,13 @@ pub(crate) fn metadata_value(
     };
     if meta.val.is_none() || options.is_some() {
         let data = meta.str.clone().unwrap_or_default();
-        return php_ext_standard::php_unserialize_with_options(req, &data, options, function);
+        // The fresh value's one owner, as an `Owner`.
+        let value = php_ext_standard::php_unserialize_with_options(req, &data, options, function)?;
+        let owner = Owner::take(req, value);
+        req.release(value);
+        return Ok(owner);
     }
-    let value = meta.val.unwrap_or_default();
-    req.addref(&value);
-    Ok(value)
+    Ok(Owner::take(req, meta.val.unwrap_or_default()))
 }
 
 /// `serialize_metadata_or_throw`: the value serialised, then kept with
@@ -1803,7 +1806,10 @@ fn zpp_name_and_value(
     let name_bytes = match name.as_ref() {
         ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            Some(to_string(req, &name)?.as_bytes().to_vec())
+            let text = to_string(req, &name)?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            Some(bytes)
         }
         _ => None,
     };
@@ -1826,7 +1832,10 @@ fn zpp_name_and_value(
     let bytes = match value.as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            to_string(req, &value)?.as_bytes().to_vec()
+            let text = to_string(req, &value)?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            bytes
         }
         _ => {
             let given = value_name(req, &value);

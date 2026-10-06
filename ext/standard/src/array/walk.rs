@@ -8,13 +8,13 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{Callable, FromArgument, Passed, Raw, Ref, True, Variadic};
+use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::pointer::ArrayOrObject;
@@ -250,7 +250,7 @@ fn walk(
         reference
     } else {
         req.addref(&target);
-        PhpRef::new(req, target)?
+        PhpRef::new(req, target)?.hand_on_unmigrated()
     };
     let walked = walk_level(req, holder, &walking);
     if given.reference().is_none() {
@@ -431,7 +431,7 @@ fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result
         arguments.push(userdata);
     }
     let answer = call(req, walk.callback, &arguments)?;
-    req.release(answer);
+    answer.give_up(req);
     Ok(())
 }
 
@@ -457,17 +457,15 @@ fn array_reduce(
     array: PhpArray,
     callback: Callable,
     #[php(default = null)] initial: Value,
-) -> Result<Value, Thrown> {
-    let mut carry = initial;
-    req.addref(&carry);
+) -> Result<Owner<Value>, Thrown> {
+    let mut carry = Owner::take(req, initial);
     for (_, operand) in array.snapshot_refs() {
-        let answer = call(req, &callback, &[carry, operand]);
-        req.release(carry);
+        let answer = call(req, &callback, &[*carry, operand]);
+        carry.give_up(req);
         carry = answer?;
         if let Some(reference) = carry.as_php_ref().copied() {
-            let inner = reference.get();
-            req.addref(&inner);
-            req.release(carry);
+            let inner = Owner::take(req, reference.get());
+            carry.give_up(req);
             carry = inner;
         }
     }
@@ -520,9 +518,9 @@ fn array_filter(
     array: PhpArray,
     #[php(default = null)] callback: Option<Callable>,
     #[php(default = 0)] mode: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if array.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
     for (key, operand) in array.snapshot_refs() {
@@ -536,12 +534,12 @@ fn array_filter(
                 let answer = match call(req, callback, &arguments) {
                     Ok(answer) => answer,
                     Err(thrown) => {
-                        req.release(out.to_value());
+                        out.give_up(req);
                         return Err(thrown);
                     }
                 };
                 let truth = truthy(req, &answer);
-                req.release(answer);
+                answer.give_up(req);
                 truth
             }
             None => truthy(req, &operand.deref()),
@@ -566,7 +564,7 @@ fn find(
     for (key, operand) in array.snapshot_refs() {
         let answer = call(req, callback, &[operand, key_value(&key)])?;
         let truth = truthy(req, &answer);
-        req.release(answer);
+        answer.give_up(req);
         if truth != negate {
             return Ok(Some((key, operand)));
         }
@@ -590,11 +588,7 @@ fn find(
 #[php_function]
 fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((_, value)) => {
-            let value = value.deref();
-            req.addref(&value);
-            Ok(value)
-        }
+        Some((_, value)) => Ok(value.deref()),
         None => Ok(Value::null()),
     }
 }
@@ -614,11 +608,7 @@ fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<
 #[php_function]
 fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((key, _)) => {
-            let value = key_value(&key);
-            req.addref(&value);
-            Ok(value)
-        }
+        Some((key, _)) => Ok(key_value(&key)),
         None => Ok(Value::null()),
     }
 }
@@ -723,9 +713,13 @@ fn array_map(
     callback: Option<Callable>,
     array: PhpArray,
     arrays: Variadic<PhpArray>,
-) -> Result<Raw<PhpArray>, Thrown> {
+) -> Result<Owner<Raw<PhpArray>>, Thrown> {
     let mapped = mapped(req, callback, array, arrays)?;
-    Raw::from_value(req, mapped.map_or(Value::null(), Value::array))
+    let mapped = match mapped {
+        Some(mapped) => mapped.into_value(),
+        None => Owner::take(req, Value::null()),
+    };
+    Ok(mapped.into_raw())
 }
 
 /// `array_map`'s arrays mapped, none where the callback returned nothing
@@ -778,32 +772,31 @@ fn mapped(
     callback: Option<Callable>,
     array: PhpArray,
     arrays: Variadic<PhpArray>,
-) -> Result<Option<PhpArray>, Thrown> {
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let arrays: Vec<PhpArray> = std::iter::once(array).chain(arrays.0).collect();
     if let [input] = arrays[..] {
         let Some(callback) = callback else {
-            req.addref(&Value::array(input));
-            return Ok(Some(input));
+            return Ok(Some(Owner::take(req, input)));
         };
         if input.is_empty() {
-            req.addref(&Value::array(input));
-            return Ok(Some(input));
+            return Ok(Some(Owner::take(req, input)));
         }
         let mut out = PhpArray::new(req)?;
         for (key, operand) in input.snapshot_refs() {
             let answer = match call(req, &callback, &[operand]) {
                 Ok(answer) => answer,
                 Err(thrown) => {
-                    req.release(out.to_value());
+                    out.give_up(req);
                     return Err(thrown);
                 }
             };
             if matches!(answer.as_ref(), ValueRef::Undef) {
-                req.release(out.to_value());
+                answer.give_up(req);
+                out.give_up(req);
                 return Ok(None);
             }
             let key = key_copy(req, &key);
-            out.set(req, key, answer)?;
+            out.set(req, key, answer.hand_on_unmigrated())?;
         }
         return Ok(Some(out));
     }
@@ -825,16 +818,17 @@ fn mapped(
                     req.addref(&value);
                     tuple.append(req, value)?;
                 }
-                Value::array(tuple)
+                Value::array(tuple.hand_on_unmigrated())
             }
             Some(callback) => match call(req, callback, &row) {
                 Ok(answer) if matches!(answer.as_ref(), ValueRef::Undef) => {
-                    req.release(out.to_value());
+                    answer.give_up(req);
+                    out.give_up(req);
                     return Ok(None);
                 }
-                Ok(answer) => answer,
+                Ok(answer) => answer.hand_on_unmigrated(),
                 Err(thrown) => {
-                    req.release(out.to_value());
+                    out.give_up(req);
                     return Err(thrown);
                 }
             },

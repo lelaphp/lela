@@ -8,7 +8,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{Who, rusage};
 use crate::uniqid::now;
@@ -70,7 +70,7 @@ const MICRO_IN_SEC: f64 = 1_000_000.0;
 fn getrusage(
     req: &mut Request,
     #[php(default = 0)] mode: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let who = match mode {
         1 => Who::Children,
         _ => Who::Process,
@@ -80,7 +80,7 @@ fn getrusage(
     };
     let mut usage = PhpArray::new(req)?;
     for (name, value) in fields {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         usage.set(req, key, Value::int(value))?;
     }
     Ok(OrFalse::Value(usage))
@@ -126,7 +126,7 @@ fn as_float(sec: u64, usec: u32) -> f64 {
 fn microtime(
     req: &mut Request,
     #[php(default = false)] as_float: bool,
-) -> Result<Union<PhpString, f64>, Thrown> {
+) -> Result<Union<Owner<PhpString>, f64>, Thrown> {
     let (sec, usec) = now();
     if as_float {
         return Ok(Union::B(self::as_float(sec, usec)));
@@ -179,7 +179,7 @@ fn microtime(
 fn gettimeofday(
     req: &mut Request,
     #[php(default = false)] as_float: bool,
-) -> Result<Union<PhpArray, f64>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, f64>, Thrown> {
     let (sec, usec) = now();
     if as_float {
         return Ok(Union::B(self::as_float(sec, usec)));
@@ -194,7 +194,7 @@ fn gettimeofday(
         (b"dsttime", i64::from(offset.is_dst)),
     ];
     for (name, value) in rows {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         array.set(req, key, Value::int(value))?;
     }
     Ok(Union::A(array))

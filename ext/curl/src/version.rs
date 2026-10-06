@@ -5,7 +5,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{Owner, PhpArray, Value};
 
 use crate::constants as c;
 use crate::ffi::{Version, version};
@@ -55,7 +55,7 @@ fn add_str(
     out.add_str(req, key, text.unwrap_or_default())
 }
 
-fn array(req: &mut Request, d: &Version) -> Result<PhpArray, Thrown> {
+fn array(req: &mut Request, d: &Version) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = Assoc::new(req)?;
     out.add(req, "version_number", Value::int(d.version_num))?;
     out.add(req, "age", Value::int(d.age))?;
@@ -64,14 +64,14 @@ fn array(req: &mut Request, d: &Version) -> Result<PhpArray, Thrown> {
     for (name, bit) in FEATURES {
         features.add(req, name, Value::bool(d.features & bit != 0))?;
     }
-    out.add(req, "feature_list", features.value())?;
+    out.add(req, "feature_list", features.value().hand_on_unmigrated())?;
     out.add(req, "ssl_version_number", Value::int(d.ssl_version_num))?;
     add_str(req, &mut out, "version", Some(&d.version))?;
     add_str(req, &mut out, "host", Some(&d.host))?;
     add_str(req, &mut out, "ssl_version", d.ssl_version.as_deref())?;
     add_str(req, &mut out, "libz_version", d.libz_version.as_deref())?;
     let protocols = list(req, &d.protocols)?;
-    out.add(req, "protocols", protocols)?;
+    out.add(req, "protocols", protocols.hand_on_unmigrated())?;
     if d.age >= 1 {
         add_str(req, &mut out, "ares", d.ares.as_deref())?;
         out.add(req, "ares_num", Value::int(d.ares_num))?;
@@ -138,7 +138,7 @@ fn array(req: &mut Request, d: &Version) -> Result<PhpArray, Thrown> {
 /// bool(true)
 /// ```
 #[php_function]
-fn curl_version(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn curl_version(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     match version() {
         Some(d) => array(req, &d).map(OrFalse::Value),
         None => Ok(OrFalse::False),

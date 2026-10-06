@@ -14,7 +14,9 @@ use php_heap::Fatal;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, ClosureInfo, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use crate::api::values::{
+    ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
+};
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec::{self, CallStage, CallState};
 use crate::observer::OnThrow;
@@ -56,7 +58,21 @@ impl Request {
     /// `extra_named` is what `zend_handle_named_arg` collected for a
     /// variadic callee, carried on the call as
     /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn serve_method(
+        &mut self,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: ClassId,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Owner<Value>, Thrown> {
+        let made = self.serve_method_made(function, this, called_scope, arguments, extra_named);
+        adopted(self, made)
+    }
+
+    /// What [`serve_method`](Self::serve_method) makes, its one owner not yet named.
+    pub(crate) fn serve_method_made(
         &mut self,
         function: Function,
         this: Option<PhpObject>,
@@ -333,7 +349,7 @@ impl Request {
                 // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
                 // owner just taken is the new cell's, and the frame
                 // holds the cell.
-                *argument = PhpRef::new(self, *argument)?.as_value();
+                *argument = self.reference(*argument)?.as_value();
             }
         }
         for (extra, value) in extra_named {
@@ -441,7 +457,7 @@ impl Request {
             Ok(false) => Ok(value),
             Ok(true) => {
                 self.release(value);
-                Err(Thrown::of(self.take_pending()))
+                Err(Thrown::of(self.take_pending_view()))
             }
             Err(fatal) => {
                 self.release(value);
@@ -508,7 +524,7 @@ impl Request {
         for at in &wrapped {
             self.param_must_be_ref(function, u32::try_from(*at + 1).unwrap_or(u32::MAX));
             if self.is_pending() {
-                return Err(Thrown::of(self.take_pending()));
+                return Err(Thrown::of(self.take_pending_view()));
             }
         }
         Ok(wrapped)
@@ -675,7 +691,7 @@ impl Request {
             while self.vm.frames().len() > standing {
                 self.pop_frame();
             }
-            return match self.take_pending() {
+            return match self.take_pending_view() {
                 Some(pending) => Err(Thrown::of(Some(pending))),
                 None => Ok(Value::null()),
             };
@@ -691,7 +707,7 @@ impl Request {
             self.pop_frame();
         }
         served?;
-        match self.take_pending() {
+        match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
             // `EG(exception)` holding the unwind exit or the graceful

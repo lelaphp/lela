@@ -123,7 +123,8 @@ fn clean_output_start(req: &mut Request) -> Result<(), Thrown> {
             handler: StartHandler::Registered(OB_TIDYHANDLER),
             chunk_size: 0,
             flags: STDFLAGS,
-        })?;
+        })?
+        .give_up(req);
     }
     Ok(())
 }

@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants::{OPENSSL_DONT_ZERO_PAD_KEY, OPENSSL_RAW_DATA, OPENSSL_ZERO_PADDING};
 use crate::decode::{Arg, c_string, finish, raised};
@@ -325,7 +325,7 @@ fn openssl_encrypt(
     #[php(default = null)] tag: Ref<Untyped<Value>>,
     #[php(default = "")] aad: PhpString,
     #[php(default = 16)] tag_length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     check_len(req, data.as_bytes().len(), "data")?;
     check_len(req, passphrase.as_bytes().len(), "password")?;
     check_len(req, aad.as_bytes().len(), "aad")?;
@@ -376,7 +376,7 @@ fn openssl_encrypt(
             return Ok(OrFalse::False);
         };
         let bytes = PhpString::new(req, &bytes)?;
-        tag.set(req, Untyped(Value::string(bytes)))?;
+        tag.set(req, Untyped(bytes.into_value()))?;
     } else if tag.is_given() {
         tag.set(req, Untyped(Value::null()))?;
     } else if auth.is_aead() {
@@ -420,7 +420,7 @@ fn openssl_decrypt(
     #[php(default = "")] iv: PhpString,
     #[php(default = null)] tag: Option<PhpString>,
     #[php(default = "")] aad: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if cipher_algo.is_empty() {
         return Err(arg_value_error(req, 2, "not be empty"));
     }
@@ -577,11 +577,11 @@ fn openssl_cipher_key_length(
 }
 
 /// A list of names as a PHP array.
-fn list(req: &mut Request, names: Vec<Vec<u8>>) -> Result<PhpArray, Thrown> {
+fn list(req: &mut Request, names: Vec<Vec<u8>>) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        out.append(req, Value::string(name))?;
+        out.append(req, Value::string(name.hand_on_unmigrated()))?;
     }
     Ok(out)
 }
@@ -603,7 +603,7 @@ fn list(req: &mut Request, names: Vec<Vec<u8>>) -> Result<PhpArray, Thrown> {
 fn openssl_get_md_methods(
     req: &mut Request,
     #[php(default = false)] aliases: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     list(req, md_names(aliases))
 }
 
@@ -624,7 +624,7 @@ fn openssl_get_md_methods(
 fn openssl_get_cipher_methods(
     req: &mut Request,
     #[php(default = false)] aliases: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut names = cipher_names(aliases);
     names.sort();
     list(req, names)
@@ -648,7 +648,7 @@ fn openssl_digest(
     data: PhpString,
     digest_algo: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(md) = Digest::by_name(&c_string(digest_algo.as_bytes())) else {
         docref(req, Level::Warning, "Unknown digest algorithm");
         return Ok(OrFalse::False);
@@ -685,7 +685,7 @@ fn openssl_pbkdf2(
     key_length: i64,
     iterations: i64,
     #[php(default = "sha1")] digest_algo: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     check_int_len(req, password.as_bytes().len(), "password", 1)?;
     check_int_len(req, salt.as_bytes().len(), "salt", 2)?;
     let Ok(length) = c_int::try_from(key_length) else {
@@ -744,7 +744,7 @@ fn openssl_random_pseudo_bytes(
     req: &mut Request,
     length: i64,
     #[php(default = null)] strong_result: Ref<Untyped<Value>>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = if length <= 0 {
         Err(arg_value_error(req, 1, "be greater than 0"))
     } else if c_int::try_from(length).is_err() {
@@ -841,16 +841,16 @@ fn openssl_seal(
         let len = i64::try_from(sealed.data.len()).unwrap_or(0);
         if len > 0 {
             let bytes = PhpString::new(req, &sealed.data)?;
-            sealed_data.set(req, Untyped(Value::string(bytes)))?;
+            sealed_data.set(req, Untyped(bytes.into_value()))?;
             let mut list = PhpArray::new(req)?;
             for key in &sealed.keys {
                 let key = PhpString::new(req, key)?;
-                list.append(req, Value::string(key))?;
+                list.append(req, Value::string(key.hand_on_unmigrated()))?;
             }
-            encrypted_keys.set(req, Untyped(Value::array(list)))?;
+            encrypted_keys.set(req, Untyped(list.into_value()))?;
             if iv.is_given() {
                 let bytes = PhpString::new(req, &sealed.iv)?;
-                iv.set(req, Untyped(Value::string(bytes)))?;
+                iv.set(req, Untyped(bytes.into_value()))?;
             }
         }
         Ok(OrFalse::Value(len))
@@ -934,7 +934,7 @@ fn openssl_open(
             return Ok(false);
         };
         let bytes = PhpString::new(req, &opened)?;
-        output.set(req, Untyped(Value::string(bytes)))?;
+        output.set(req, Untyped(bytes.into_value()))?;
         Ok(true)
     })
 }

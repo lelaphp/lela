@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, TypeTag, Value};
 
 use crate::State;
 use crate::ffi::{Easy, Hook};
@@ -315,7 +315,7 @@ pub(crate) fn cast_object(
 }
 
 /// A new object of a class this extension declares.
-pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<PhpObject, Thrown> {
+pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
         return Err(throw_error(req, "Error", &text));
@@ -344,16 +344,33 @@ pub(crate) fn easy_of(req: &mut Request, object: PhpObject) -> Result<Easy, Thro
 /// callables, streams and private value copied, and a file upload's
 /// MIME tree built again for the copy.
 fn clone_curl(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    copied(req, object).map(Owner::hand_on_unmigrated)
+}
+
+/// [`clone_curl`]'s copy, its owner.
+fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = made(req, b"CurlHandle")?;
-    let failed = |req: &mut Request, copy: PhpObject| {
-        req.release(copy.as_value());
+    let failed = |req: &mut Request, copy: Owner<PhpObject>| {
+        copy.give_up(req);
         throw(req, "Exception", "Failed to clone CurlHandle")
     };
-    let source = easy_of(req, object)?;
-    let Some(easy) = source.duplicate(copy) else {
+    let source = match easy_of(req, object) {
+        Ok(source) => source,
+        Err(thrown) => {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let Some(easy) = source.duplicate(*copy) else {
         return Err(failed(req, copy));
     };
-    let dup = copy_handlers(req, object)?;
+    let dup = match copy_handlers(req, object) {
+        Ok(dup) => dup,
+        Err(thrown) => {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+    };
     let postfields = dup.postfields;
     if let Some(curl) = copy.native_mut::<Curl>(req) {
         *curl = dup;
@@ -361,7 +378,7 @@ fn clone_curl(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
     }
     if let Some(postfields) = postfields
         && let Some(array) = postfields.as_array()
-        && crate::file::build_mime(req, copy, *array).is_err()
+        && crate::file::build_mime(req, *copy, *array).is_err()
     {
         return Err(failed(req, copy));
     }
@@ -507,11 +524,11 @@ pub(crate) fn cleanup_handle(req: &mut Request, object: PhpObject) {
 fn curl_init(
     req: &mut Request,
     #[php(default = null)] url: Option<PhpString>,
-) -> Result<OrFalse<Instance<CurlHandle>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<CurlHandle>>>, Thrown> {
     let object = made(req, b"CurlHandle")?;
     let session = req.state::<State>().session.clone();
-    let Some(easy) = Easy::init(session, object) else {
-        req.release(object.as_value());
+    let Some(easy) = Easy::init(session, *object) else {
+        object.give_up(req);
         docref(
             req,
             Level::Warning,
@@ -525,19 +542,19 @@ fn curl_init(
     }
     if let Some(url) = url {
         let url = url.as_bytes().to_vec();
-        match crate::options::set_url(req, object, &url) {
+        match crate::options::set_url(req, *object, &url) {
             Ok(true) => {}
             Ok(false) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 return Ok(OrFalse::False);
             }
             Err(thrown) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 return Err(thrown);
             }
         }
     }
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// `curl_copy_handle(CurlHandle $handle): CurlHandle|false`.
@@ -557,9 +574,9 @@ fn curl_init(
 fn curl_copy_handle(
     req: &mut Request,
     handle: Instance<CurlHandle>,
-) -> Result<OrFalse<Instance<CurlHandle>>, Thrown> {
-    match clone_curl(req, handle.object()) {
-        Ok(copy) => Ok(OrFalse::Value(Instance::of(copy))),
+) -> Result<OrFalse<Owner<Instance<CurlHandle>>>, Thrown> {
+    match copied(req, handle.object()) {
+        Ok(copy) => Ok(OrFalse::Value(copy.into_instance())),
         Err(thrown) => {
             clear(req, thrown)?;
             docref(req, Level::Warning, "Cannot duplicate cURL handle");
@@ -601,7 +618,7 @@ fn curl_errno(req: &mut Request, handle: Instance<CurlHandle>) -> Result<i64, Th
 /// string(%d) "Could%sopen file %snonexistent-curl-witness%S"
 /// ```
 #[php_function]
-fn curl_error(req: &mut Request, handle: Instance<CurlHandle>) -> Result<PhpString, Thrown> {
+fn curl_error(req: &mut Request, handle: Instance<CurlHandle>) -> Result<Owner<PhpString>, Thrown> {
     let curl = curl(req, handle)?;
     if curl.err == 0 {
         return PhpString::new(req, b"");
@@ -717,7 +734,7 @@ fn curl_reset(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thr
 fn curl_exec(
     req: &mut Request,
     handle: Instance<CurlHandle>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let object = handle.object();
     verify_handlers(req, object, true);
     cleanup_handle(req, object);
@@ -741,7 +758,7 @@ fn curl_exec(
 
 /// What `curl_exec` answers once the transfer succeeded: the body kept
 /// under `PHP_CURL_RETURN`, the file streams flushed otherwise.
-fn finished(req: &mut Request, object: PhpObject) -> Result<Union<PhpString, bool>, Thrown> {
+fn finished(req: &mut Request, object: PhpObject) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let Some(curl) = object.native_mut::<Curl>(req) else {
         return Ok(Union::B(true));
     };
@@ -783,7 +800,7 @@ fn finished(req: &mut Request, object: PhpObject) -> Result<Union<PhpString, boo
 /// string(13) "Unknown error"
 /// ```
 #[php_function]
-fn curl_strerror(req: &mut Request, error_code: i64) -> Result<Option<PhpString>, Thrown> {
+fn curl_strerror(req: &mut Request, error_code: i64) -> Result<Option<Owner<PhpString>>, Thrown> {
     match crate::ffi::strerror(error_code) {
         Some(text) => PhpString::new(req, &text).map(Some),
         None => Ok(None),
@@ -804,7 +821,7 @@ fn curl_escape(
     req: &mut Request,
     handle: Instance<CurlHandle>,
     string: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let easy = easy_of(req, handle.object())?;
     let text = string.as_bytes().to_vec();
     match easy.escape(&text) {
@@ -827,7 +844,7 @@ fn curl_unescape(
     req: &mut Request,
     handle: Instance<CurlHandle>,
     string: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let easy = easy_of(req, handle.object())?;
     let text = string.as_bytes().to_vec();
     match easy.unescape(&text) {

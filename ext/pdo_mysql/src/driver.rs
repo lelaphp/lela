@@ -600,7 +600,9 @@ impl Connection for Db {
     fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
         let h = self.h(req)?;
         let string = |req: &mut Request, bytes: &[u8]| -> Result<Value, Failure> {
-            Ok(Value::string(PhpString::new(req, bytes)?))
+            Ok(Value::string(
+                PhpString::new(req, bytes)?.hand_on_unmigrated(),
+            ))
         };
         Ok(Some(match attr {
             attr::CLIENT_VERSION => string(req, php_ext_mysqlnd::client::CLIENT_INFO.as_bytes())?,

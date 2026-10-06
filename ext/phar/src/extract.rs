@@ -126,17 +126,32 @@ fn extract_file(
         )));
     };
     let target = Target::Slot(slot);
-    if (compressed_fp || entry::efp(req, id, &target)?.is_none())
-        && let Err(error) = entry::open_entry_fp(req, id, slot, true)?
-    {
-        out.free(req);
-        return Ok(Err(format!(
-            "Cannot extract \"{shown}\" to \"{full}\", unable to open internal file pointer: {error}"
-        )));
-    }
-    let bytes = entry::contents(req, id, slot)?;
+    let read = |req: &mut Request| -> Result<Result<Vec<u8>, String>, Thrown> {
+        if (compressed_fp || entry::efp(req, id, &target)?.is_none())
+            && let Err(error) = entry::open_entry_fp(req, id, slot, true)?
+        {
+            return Ok(Err(error));
+        }
+        entry::contents(req, id, slot).map(Ok)
+    };
+    let bytes = match read(req) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            out.close(req);
+            out.give_up(req);
+            return Ok(Err(format!(
+                "Cannot extract \"{shown}\" to \"{full}\", unable to open internal file pointer: {error}"
+            )));
+        }
+        Err(thrown) => {
+            out.close(req);
+            out.give_up(req);
+            return Err(thrown);
+        }
+    };
     let written = out.write(req, &bytes);
-    out.free(req);
+    out.close(req);
+    out.give_up(req);
     if !bytes.is_empty() && written != Some(bytes.len()) {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", copying contents failed"

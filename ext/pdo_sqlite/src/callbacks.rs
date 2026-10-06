@@ -10,7 +10,7 @@ use php_ext::call::call;
 use php_ext::coerce::{to_string, value_name};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
 use crate::ffi::{
     Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
@@ -75,18 +75,24 @@ impl Callbacks for PdoSqlite {
 }
 
 /// An argument as the callback is handed it.
-fn argument(req: &mut Request, argument: Argument) -> Result<Value, Thrown> {
-    Ok(match argument {
+fn argument(req: &mut Request, argument: Argument) -> Result<Owner<Value>, Thrown> {
+    let value = match argument {
         // `sqlite3_value_int`, the library's 32 bits.
         #[allow(clippy::cast_possible_truncation)]
         Argument::Int(n) => Value::int(i64::from(n as i32)),
         Argument::Float(f) => Value::float(f),
         Argument::Null => Value::null(),
-        Argument::Text(bytes) => Value::string(PhpString::new(req, &bytes)?),
-    })
+        Argument::Text(bytes) => return Ok(PhpString::new(req, &bytes)?.into_value()),
+    };
+    Ok(Owner::take(req, value))
 }
 
-fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Value>, Thrown> {
+/// The views of `values`, as a call is handed them.
+fn views(values: &[Owner<Value>]) -> Vec<Value> {
+    values.iter().map(|value| **value).collect()
+}
+
+fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Owner<Value>>, Thrown> {
     let mut out = Vec::with_capacity(given.len());
     for one in given {
         out.push(argument(req, one)?);
@@ -94,15 +100,19 @@ fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Value>, Thro
     Ok(out)
 }
 
-fn release_all(req: &mut Request, values: Vec<Value>) {
+fn release_all(req: &mut Request, values: Vec<Owner<Value>>) {
     for value in values {
-        req.release(value);
+        value.give_up(req);
     }
 }
 
 /// The callback's return as the function's answer: an integer to the
 /// library's 32 bits, `null`, a float, and a string of anything else.
-fn result(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Result<(), Thrown> {
+fn result(
+    req: &mut Request,
+    returned: Owner<Value>,
+    call: &mut Invocation<'_>,
+) -> Result<(), Thrown> {
     let answered = match returned.deref().as_ref() {
         // php hands `sqlite3_result_int` its `zend_long`.
         #[allow(clippy::cast_possible_truncation)]
@@ -120,10 +130,10 @@ fn result(req: &mut Request, returned: Value, call: &mut Invocation<'_>) -> Resu
         }
         _ => to_string(req, &returned.deref()).map(|text| {
             call.return_text(text.as_bytes());
-            req.release(Value::string(text));
+            text.give_up(req);
         }),
     };
-    req.release(returned);
+    returned.give_up(req);
     answered
 }
 
@@ -134,7 +144,7 @@ fn scalar(
     invocation: &mut Invocation<'_>,
 ) -> Result<(), Thrown> {
     let values = arguments(req, invocation.arguments())?;
-    let returned = call(req, &handler.callable, &values);
+    let returned = call(req, &handler.callable, &views(&values));
     release_all(req, values);
     match returned {
         Ok(returned) => result(req, returned, invocation),
@@ -152,7 +162,9 @@ fn state_of(
     state: &mut Option<Box<Aggregate>>,
 ) -> Result<(PhpRef, i64), Thrown> {
     if state.is_none() {
-        let context = PhpRef::new(req, Value::null())?.as_value();
+        let context = PhpRef::new(req, Value::null())?
+            .into_value()
+            .hand_on_unmigrated();
         *state = Some(Box::new(Aggregate {
             value: context,
             row: 0,
@@ -182,11 +194,11 @@ fn step(
     let (context, row) = state_of(req, state)?;
     let mut values = vec![context.as_value(), Value::int(row)];
     let extra = arguments(req, given)?;
-    values.extend(extra.iter().copied());
+    values.extend(views(&extra));
     let returned = call(req, &handler.callable, &values);
     release_all(req, extra);
     let returned = returned?;
-    context.set(req, returned)
+    context.set(req, returned.hand_on_unmigrated())
 }
 
 /// `do_callback` for an aggregate's final: the aggregate's reference and
@@ -224,11 +236,11 @@ fn collate(
     right: &[u8],
 ) -> (i32, Option<Thrown>) {
     let values = match (PhpString::new(req, left), PhpString::new(req, right)) {
-        (Ok(left), Ok(right)) => [Value::string(left), Value::string(right)],
+        (Ok(left), Ok(right)) => vec![left.into_value(), right.into_value()],
         (Err(thrown), _) | (_, Err(thrown)) => return (0, Some(thrown)),
     };
-    let returned = call(req, &handler.callable, &values);
-    release_all(req, values.to_vec());
+    let returned = call(req, &handler.callable, &views(&values));
+    release_all(req, values);
     let returned = match returned {
         Ok(returned) => returned,
         Err(thrown) => return (0, Some(thrown)),
@@ -239,11 +251,12 @@ fn collate(
             0 => 0,
             _ => 1,
         };
+        returned.give_up(req);
         return (order, None);
     }
     let name = req.active_function_name();
     let given = value_name(req, &returned);
-    req.release(returned);
+    returned.give_up(req);
     let thrown = throw_error(
         req,
         "TypeError",
@@ -276,20 +289,21 @@ fn authorize(
     if pending {
         return Ok(SQLITE_DENY);
     }
-    let mut values = vec![Value::int(i64::from(action))];
+    let mut values = vec![Owner::take(req, Value::int(i64::from(action)))];
     for name in names {
         values.push(match name {
-            Some(name) => Value::string(PhpString::new(req, &name)?),
-            None => Value::null(),
+            Some(name) => PhpString::new(req, &name)?.into_value(),
+            None => Owner::take(req, Value::null()),
         });
     }
-    let returned = call(req, &handler.callable, &values);
+    let returned = call(req, &handler.callable, &views(&values));
     release_all(req, values);
     let returned = returned?;
     let name = req.active_function_name();
-    let Some(answer) = returned.deref().as_int() else {
-        let given = value_name(req, &returned);
-        req.release(returned);
+    let answer = returned.deref().as_int();
+    let given = value_name(req, &returned);
+    returned.give_up(req);
+    let Some(answer) = answer else {
         return Err(throw_error(
             req,
             "TypeError",

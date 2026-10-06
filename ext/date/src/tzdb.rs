@@ -8,7 +8,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{self, Tzdb};
 use crate::obj::set_str;
@@ -98,7 +98,7 @@ fn timezone_identifiers_list(
     req: &mut Request,
     #[php(default = DateTimeZone::ALL)] timezoneGroup: i64,
     #[php(default = null)] countryCode: Option<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     identifiers(req, timezoneGroup, countryCode)
 }
 
@@ -107,7 +107,7 @@ pub(super) fn identifiers(
     req: &mut Request,
     what: i64,
     option: Option<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let code = option.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
     if what == DateTimeZone::PER_COUNTRY && code.len() != 2 {
         return Err(arg_value_error(
@@ -127,7 +127,7 @@ pub(super) fn identifiers(
         };
         if keep {
             let id = PhpString::new(req, entry.id)?;
-            array.append(req, Value::string(id))?;
+            array.append(req, Value::string(id.hand_on_unmigrated()))?;
         }
     }
     Ok(array)
@@ -202,12 +202,12 @@ pub(super) fn identifiers(
 /// string(4) "acdt"
 /// ```
 #[php_function]
-fn timezone_abbreviations_list(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn timezone_abbreviations_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     abbreviations(req)
 }
 
 /// The body both entries share.
-pub(super) fn abbreviations(req: &mut Request) -> Result<PhpArray, Thrown> {
+pub(super) fn abbreviations(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     // The rows grouped under their abbreviation in the order each first
     // appears, which is the order php's `zend_hash_str_find` then
     // `add_assoc_zval` leaves the keys in.
@@ -231,14 +231,14 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<PhpArray, Thrown> {
             let offset = row.gmtoffset as i64;
             set_str(req, &mut element, b"offset", Value::int(offset))?;
             let id = match row.full_tz_name {
-                Some(id) => Value::string(PhpString::new(req, id)?),
+                Some(id) => Value::string(PhpString::new(req, id)?.hand_on_unmigrated()),
                 None => Value::null(),
             };
             set_str(req, &mut element, b"timezone_id", id)?;
-            list.append(req, Value::array(element))?;
+            list.append(req, Value::array(element.hand_on_unmigrated()))?;
         }
-        let key = Key::Str(PhpString::new(req, name)?);
-        array.set(req, key, Value::array(list))?;
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
     }
     Ok(array)
 }
@@ -262,7 +262,7 @@ fn timezone_name_from_abbr(
     abbr: PhpString,
     #[php(default = -1)] utcOffset: i64,
     #[php(default = -1)] isDST: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     #[allow(clippy::cast_possible_truncation)]
     let dst = isDST as i32;
     match ffi::timezone_id_from_abbr(abbr.as_bytes(), utcOffset, dst) {
@@ -280,6 +280,6 @@ fn timezone_name_from_abbr(
 /// string(6) "2026.3"
 /// ```
 #[php_function]
-fn timezone_version_get(req: &mut Request) -> Result<PhpString, Thrown> {
+fn timezone_version_get(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, Tzdb::builtin().version())
 }

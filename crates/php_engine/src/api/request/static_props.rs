@@ -174,7 +174,7 @@ impl Request {
         };
         let value = match property.default.as_ref() {
             Some(expr) => {
-                let value = crate::api::call::eval_declared(self, expr, Some(declaring))?;
+                let value = crate::api::call::eval_declared_made(self, expr, Some(declaring))?;
                 self.strictly_held(value, &property, declaring)?
             }
             None if property.ty.is_some() => Value::undef(),

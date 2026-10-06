@@ -9,7 +9,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::checksum::{Bzip2, Castagnoli, Ieee};
 use crate::{checksum, gost, haval, md, murmur, sha, snefru, tiger, whirlpool, xxhash};
@@ -296,13 +296,16 @@ pub(crate) fn fetch(name: &[u8]) -> Option<&'static Algo> {
 /// O:11:"HashContext":5:{i:0;s:6:"sha512";i:1;i:0;i:2;a:21:{i:0;i:-205731576;i:1;i:1779033703;i:2;i:-2067093701;i:3;i:-1150
 /// ```
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn serialize(req: &mut Request, state: &mut dyn State) -> Result<PhpArray, Thrown> {
+pub(crate) fn serialize(
+    req: &mut Request,
+    state: &mut dyn State,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for slot in state.slots() {
         match slot {
             Slot::B(bytes) if bytes.len() > 1 => {
                 let string = PhpString::new(req, bytes)?;
-                out.append(req, Value::string(string))?;
+                out.append(req, string.into_value().hand_on_unmigrated())?;
             }
             Slot::B(bytes) => {
                 for byte in bytes {

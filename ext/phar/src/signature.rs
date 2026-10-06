@@ -110,7 +110,7 @@ fn openssl_call(
     }
     let named = string(req, name)?;
     let function = callable_checked(req, &named);
-    req.release(named);
+    named.give_up(req);
     let Ok(function) = function else {
         return Ok(None);
     };
@@ -122,12 +122,12 @@ fn openssl_call(
     let data = string(req, data)?;
     let signature = string(req, sig)?;
     let signature = if is_sign {
-        Value::reference(PhpRef::new(req, signature)?)
+        PhpRef::new(req, signature.hand_on_unmigrated())?.into_value()
     } else {
         signature
     };
     let key = string(req, key)?;
-    let args = [data, signature, key, Value::int(algo)];
+    let args = [*data, *signature, *key, Value::int(algo)];
     let answered = call(req, &function, &args);
     let out = match &answered {
         Ok(v) if v.as_int() == Some(1) => Some(sig.to_vec()),
@@ -136,10 +136,10 @@ fn openssl_call(
             .and_then(|r| r.get().as_str_bytes().map(<[u8]>::to_vec)),
         _ => None,
     };
-    for arg in args {
-        req.release(arg);
+    for arg in [data, signature, key] {
+        arg.give_up(req);
     }
-    req.release(answered?);
+    answered?.give_up(req);
     Ok(out)
 }
 

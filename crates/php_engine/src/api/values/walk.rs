@@ -503,7 +503,7 @@ fn steps<B>(
         let thrown = match step {
             Ok(ControlFlow::Break(broke)) => return Ok(Some(broke)),
             Ok(ControlFlow::Continue(())) if !req.is_pending() => continue,
-            Ok(ControlFlow::Continue(())) => match req.take_pending() {
+            Ok(ControlFlow::Continue(())) => match req.take_pending_view() {
                 Some(throwable) => Thrown::of(Some(throwable)),
                 None => return Err(Thrown::of(None)),
             },
@@ -752,7 +752,7 @@ pub fn detached<T>(
     if held.is_empty() {
         return Ok(None);
     }
-    let mut copy = held.copy(req)?;
+    let mut copy = held.copy(req)?.hand_on();
     let answered = body(req, &mut copy);
     match holder.reference() {
         Some(cell) => cell.convert(req, copy.to_value()),

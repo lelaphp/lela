@@ -8,7 +8,7 @@
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::locale::{self as c, Class};
 
@@ -252,7 +252,7 @@ fn metaphone(
     req: &mut Request,
     string: PhpString,
     #[php(default = 0)] max_phonemes: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let phones = max_phonemes;
     if phones < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));

@@ -9,7 +9,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::{Opening, Request, Stream, Streams as _};
-use php_ext::values::{Emalloc, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Encode, Format, GdFormat, Image, Rect, Reported};
 use crate::image::{GdImage, gd, im, int, raise, wrap};
@@ -124,7 +124,7 @@ fn image_type(data: &[u8]) -> Option<(Format, &'static str)> {
 fn imagecreatefromstring(
     req: &mut Request,
     data: PhpString,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     if i32::try_from(data.len()).is_err() {
         return Err(arg_value_error(req, 1, "is too long"));
     }
@@ -153,7 +153,7 @@ fn create_from(
     filename: Path,
     format: Format,
     name: &str,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let path = filename.0.as_bytes();
     let Some(stream) = req.open_stream(path, b"rb", false)? else {
         return Ok(OrFalse::False);
@@ -163,15 +163,17 @@ fn create_from(
     let data = match data {
         Ok(data) => data,
         Err(thrown) => {
-            stream.free(req);
+            stream.close(req);
+            stream.give_up(req);
             return Err(thrown);
         }
     };
     if i32::try_from(data.len()).is_err() {
         let text = format!("Cannot read images with more than {} bytes", i32::MAX);
         docref(req, Level::Warning, &text);
-        req.release(Value::string(data));
-        stream.free(req);
+        data.give_up(req);
+        stream.close(req);
+        stream.give_up(req);
         return Ok(OrFalse::False);
     }
     let format = match format {
@@ -184,8 +186,9 @@ fn create_from(
         other => other,
     };
     let image = gd(req, || Image::decode(format, data.as_bytes()));
-    req.release(Value::string(data));
-    stream.free(req);
+    data.give_up(req);
+    stream.close(req);
+    stream.give_up(req);
     let image = image?;
     if image.is_none() {
         let text = format!(
@@ -212,7 +215,7 @@ fn create_from(
 fn imagecreatefromavif(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Avif, "AVIF")
 }
 
@@ -236,7 +239,7 @@ fn imagecreatefromavif(
 fn imagecreatefromgif(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Gif, "GIF")
 }
 
@@ -255,7 +258,7 @@ fn imagecreatefromgif(
 fn imagecreatefromjpeg(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Jpeg(true), "JPEG")
 }
 
@@ -284,7 +287,7 @@ fn imagecreatefromjpeg(
 fn imagecreatefrompng(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Png, "PNG")
 }
 
@@ -303,7 +306,7 @@ fn imagecreatefrompng(
 fn imagecreatefromwebp(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Webp, "WEBP")
 }
 
@@ -327,7 +330,7 @@ fn imagecreatefromwebp(
 fn imagecreatefromxbm(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Xbm, "XBM")
 }
 
@@ -347,7 +350,7 @@ fn imagecreatefromxbm(
 fn imagecreatefromwbmp(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Wbmp, "WBMP")
 }
 
@@ -374,7 +377,7 @@ fn imagecreatefromwbmp(
 fn imagecreatefromgd(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Gd, "GD")
 }
 
@@ -401,7 +404,7 @@ fn imagecreatefromgd(
 fn imagecreatefromgd2(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Gd2, "GD2")
 }
 
@@ -435,7 +438,7 @@ fn imagecreatefromgd2part(
     y: i64,
     width: i64,
     height: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     if width < 1 {
         return Err(arg_value_error(req, 4, "be greater than or equal to 1"));
     }
@@ -466,7 +469,7 @@ fn imagecreatefromgd2part(
 fn imagecreatefrombmp(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Bmp, "BMP")
 }
 
@@ -488,7 +491,7 @@ fn imagecreatefrombmp(
 fn imagecreatefromtga(
     req: &mut Request,
     filename: Path,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     create_from(req, filename, Format::Tga, "TGA")
 }
 
@@ -603,7 +606,9 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
             }
             let path = path.as_bytes().to_vec();
             match req.open_stream(&path, b"wb", false)? {
-                Some(stream) => Sink::new(req, To::Stream(stream, true)).map(Some),
+                Some(stream) => {
+                    Sink::new(req, To::Stream(stream.hand_on_unmigrated(), true)).map(Some)
+                }
                 None => Ok(None),
             }
         }
@@ -679,7 +684,7 @@ fn imagexbm(
     let im = im(req, image)?;
     let to = match &filename {
         Some(path) => match req.open_stream(path.0.as_bytes(), b"wb", false)? {
-            Some(stream) => To::Stream(stream, true),
+            Some(stream) => To::Stream(stream.hand_on_unmigrated(), true),
             None => return Ok(false),
         },
         None => To::Output,
@@ -945,7 +950,8 @@ fn output_gd(
         Ok(bytes) => bytes.unwrap_or_default(),
         Err(thrown) => {
             if let Some(stream) = stream {
-                stream.free(req);
+                stream.close(req);
+                stream.give_up(req);
             }
             return Err(thrown);
         }
@@ -955,7 +961,8 @@ fn output_gd(
             if !bytes.is_empty() {
                 let _ = stream.write(req, &bytes);
             }
-            stream.free(req);
+            stream.close(req);
+            stream.give_up(req);
         }
         None => req.write(&bytes),
     }

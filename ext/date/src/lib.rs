@@ -49,7 +49,7 @@ use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpObject;
+use php_ext::values::{Owner, PhpObject};
 
 use crate::classes::{
     DateError, DateException, DateInvalidOperationException, DateInvalidTimeZoneException,
@@ -146,8 +146,8 @@ pub fn timezone_obj(req: &Request, object: PhpObject) -> Option<TzKind> {
 /// # Errors
 ///
 /// What making the object threw.
-pub fn new_timezone(req: &mut Request, kind: TzKind) -> Result<PhpObject, Thrown> {
-    obj::new_timezone(req, kind).map(|tz| tz.object())
+pub fn new_timezone(req: &mut Request, kind: TzKind) -> Result<Owner<PhpObject>, Thrown> {
+    obj::new_timezone(req, kind)
 }
 
 /// The extension value (design §7.1): declarations paired with entries,

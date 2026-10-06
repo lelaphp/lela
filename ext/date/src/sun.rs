@@ -5,7 +5,7 @@ use php_ext::abi::{OrFalse, Passed, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants::{
     SUNFUNCS_RET_DOUBLE as RET_DOUBLE, SUNFUNCS_RET_STRING as RET_STRING,
@@ -16,7 +16,7 @@ use crate::obj::set_str;
 use crate::zone::default_zone;
 
 /// `string|int|float|false`, what `date_sunrise` and `date_sunset` answer.
-type SunTime = Union<PhpString, Union<i64, OrFalse<f64>>>;
+type SunTime = Union<Owner<PhpString>, Union<i64, OrFalse<f64>>>;
 
 /// `INI_FLT(name)`: `zend_strtod` of the entry, the longest prefix that
 /// reads as a number and zero where none does.
@@ -197,7 +197,7 @@ fn date_sunset(
 /// the altitude, `true` always above, the two times otherwise.
 fn add_pair(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     rs: i32,
     names: (&[u8], &[u8]),
     times: (i64, i64),
@@ -269,7 +269,7 @@ fn date_sun_info(
     timestamp: i64,
     latitude: f64,
     longitude: f64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let time = timestamp;
     if !latitude.is_finite() {
         return Err(arg_value_error(req, 2, "be finite"));

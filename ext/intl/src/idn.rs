@@ -5,7 +5,7 @@ use php_ext::abi::{ExtensionBuilder, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::Code;
@@ -44,7 +44,7 @@ fn idn_to_ascii(
     #[php(default = IDNA_DEFAULT)] flags: i64,
     #[php(default = INTL_IDNA_VARIANT_UTS46)] variant: i64,
     #[php(default = null)] idna_info: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     convert(req, domain, flags, variant, &idna_info, true)
 }
 
@@ -65,7 +65,7 @@ fn idn_to_utf8(
     #[php(default = IDNA_DEFAULT)] flags: i64,
     #[php(default = INTL_IDNA_VARIANT_UTS46)] variant: i64,
     #[php(default = null)] idna_info: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     convert(req, domain, flags, variant, &idna_info, false)
 }
 
@@ -77,7 +77,7 @@ fn convert(
     variant: i64,
     idna_info: &Ref<Untyped<Value>>,
     to_ascii: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let name = domain.as_bytes();
     if name.is_empty() {
@@ -92,7 +92,7 @@ fn convert(
     let wants = idna_info.is_given();
     if wants {
         let empty = PhpArray::new(req)?;
-        idna_info.set(req, Untyped(empty.to_value()))?;
+        idna_info.set(req, Untyped(empty.into_value()))?;
     }
     // `(uint32_t)option`, C's truncation.
     let options = u32::from_le_bytes(flags.to_le_bytes()[..4].try_into().unwrap_or_default());
@@ -111,10 +111,10 @@ fn convert(
     error::set_code(req, converted.status);
     let text = PhpString::new(req, &converted.bytes)?;
     if wants {
-        req.addref(&Value::string(text));
+        req.addref(&Value::string(*text));
         let mut info = PhpArray::new(req)?;
         let pairs = [
-            (&b"result"[..], Value::string(text)),
+            (&b"result"[..], Value::string(*text)),
             (
                 b"isTransitionalDifferent",
                 Value::bool(converted.transitional_different),
@@ -123,12 +123,15 @@ fn convert(
         ];
         for (key, value) in pairs {
             let key = PhpString::new(req, key)?;
-            info.set(req, Key::Str(key), value)?;
+            info.set(req, Key::Str(key.hand_on_unmigrated()), value)?;
         }
-        idna_info.set(req, Untyped(info.to_value()))?;
+        if let Err(thrown) = idna_info.set(req, Untyped(info.into_value())) {
+            text.give_up(req);
+            return Err(thrown);
+        }
     }
     if converted.errors != 0 {
-        req.release(Value::string(text));
+        text.give_up(req);
         return Ok(OrFalse::False);
     }
     Ok(OrFalse::Value(text))
@@ -136,7 +139,11 @@ fn convert(
 
 /// `php_intl_idn_check_status` on a failure: the code and the message
 /// set, and `false`.
-fn failed(req: &mut Request, code: Code, message: &str) -> Result<OrFalse<PhpString>, Thrown> {
+fn failed(
+    req: &mut Request,
+    code: Code,
+    message: &str,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::set(req, code, message)?;
     Ok(OrFalse::False)
 }

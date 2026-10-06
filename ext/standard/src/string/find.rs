@@ -6,7 +6,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use super::{long, lower, memnstr};
 
@@ -256,7 +256,7 @@ pub(super) fn strstr(
     haystack: PhpString,
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     found_part(req, (haystack, needle, before_needle), false)
 }
 
@@ -277,7 +277,7 @@ pub(super) fn stristr(
     haystack: PhpString,
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     found_part(req, (haystack, needle, before_needle), true)
 }
 
@@ -285,7 +285,7 @@ fn found_part(
     req: &mut Request,
     (haystack, needle, part): (PhpString, PhpString, bool),
     fold: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let h = haystack.as_bytes();
     let found = if fold {
         let lh: Vec<u8> = h.iter().map(|c| lower(*c)).collect();
@@ -321,7 +321,7 @@ pub(super) fn strrchr(
     haystack: PhpString,
     needle: PhpString,
     #[php(default = false)] before_needle: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let part = before_needle;
     let h = haystack.as_bytes();
     let c = needle.as_bytes().first().copied().unwrap_or(0);

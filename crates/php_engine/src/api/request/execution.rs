@@ -10,7 +10,7 @@ use super::{Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpArray, PhpObject};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, adopted_some};
 use crate::exec::{self, FrameState, Vm};
 use crate::fiber::Standing;
 use crate::generator;
@@ -168,7 +168,18 @@ impl Request {
     ///   }
     /// }
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn execution_trace(
+        &mut self,
+        object: PhpObject,
+        options: i64,
+    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.execution_trace_made(object, options);
+        adopted_some(self, made)
+    }
+
+    /// What [`execution_trace`](Self::execution_trace) makes, its one owner not yet named.
+    pub(crate) fn execution_trace_made(
         &mut self,
         object: PhpObject,
         options: i64,

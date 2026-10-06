@@ -7,7 +7,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::md5::{digest_file, digest_value};
 
@@ -176,7 +176,7 @@ fn sha1(
     req: &mut Request,
     string: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut context = Sha1::new();
     context.update(string.as_bytes());
     digest_value(req, &context.finish(), binary)
@@ -214,7 +214,7 @@ fn sha1_file(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] binary: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Sha1::new();
     if !digest_file(req, filename.0, |read| context.update(read))? {
         return Ok(OrFalse::False);

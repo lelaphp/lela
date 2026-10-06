@@ -6,7 +6,7 @@
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Emalloc, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
     OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState, Statement,
@@ -374,7 +374,7 @@ impl Connection for Handle {
         match attr {
             ATTR_CLIENT_VERSION | ATTR_SERVER_VERSION => {
                 let version = PhpString::new(req, ffi::version().as_bytes())?;
-                Ok(Some(Value::string(version)))
+                Ok(Some(Value::string(version.hand_on_unmigrated())))
             }
             ATTR_TRANSACTION_MODE => Ok(Some(Value::int(self.transaction_mode))),
             _ => Ok(None),
@@ -578,10 +578,12 @@ impl Statement for Stmt {
             ffi::SQLITE_NULL => Value::null(),
             ffi::SQLITE_INTEGER => Value::int(self.handle.column_int64(column)),
             ffi::SQLITE_FLOAT => Value::float(self.handle.column_double(column)),
-            ffi::SQLITE_BLOB => {
-                Value::string(PhpString::new(req, &self.handle.column_blob(column))?)
-            }
-            _ => Value::string(PhpString::new(req, &self.handle.column_text(column))?),
+            ffi::SQLITE_BLOB => Value::string(
+                PhpString::new(req, &self.handle.column_blob(column))?.hand_on_unmigrated(),
+            ),
+            _ => Value::string(
+                PhpString::new(req, &self.handle.column_text(column))?.hand_on_unmigrated(),
+            ),
         })
     }
 
@@ -630,7 +632,7 @@ impl Statement for Stmt {
                                 "Expected a stream resource",
                             ));
                         };
-                        let text = stream.copy_to_mem(req, None)?;
+                        let text = stream.copy_to_mem(req, None)?.hand_on_unmigrated();
                         replace(req, param.value, Value::string(text));
                         text.as_bytes().to_vec()
                     }
@@ -643,7 +645,7 @@ impl Statement for Stmt {
                         };
                     }
                     _ => {
-                        let text = to_string(req, &value)?;
+                        let text = to_string(req, &value)?.hand_on_unmigrated();
                         replace(req, param.value, Value::string(text));
                         text.as_bytes().to_vec()
                     }
@@ -661,7 +663,7 @@ impl Statement for Stmt {
                     let text = if let Some(text) = value.as_php_string() {
                         *text
                     } else {
-                        let text = to_string(req, &value)?;
+                        let text = to_string(req, &value)?.hand_on_unmigrated();
                         replace(req, param.value, Value::string(text));
                         text
                     };
@@ -738,14 +740,14 @@ impl Statement for Stmt {
             ffi::SQLITE_FLOAT => (b"double", 2),
             ffi::SQLITE_BLOB => {
                 let blob = PhpString::new(req, b"blob")?;
-                flags.append(req, Value::string(blob))?;
+                flags.append(req, Value::string(blob.hand_on_unmigrated()))?;
                 (b"string", 2)
             }
             ffi::SQLITE_INTEGER => (b"integer", 1),
             _ => (b"string", 2),
         };
         set(req, &mut out, b"native_type", Some(native))?;
-        let key = Key::Str(PhpString::new(req, b"pdo_type")?);
+        let key = Key::Str(PhpString::new(req, b"pdo_type")?.hand_on_unmigrated());
         out.set(req, key, Value::int(pdo_type))?;
         set(
             req,
@@ -759,9 +761,9 @@ impl Statement for Stmt {
             b"table",
             self.handle.column_table_name(column).as_deref(),
         )?;
-        let key = Key::Str(PhpString::new(req, b"flags")?);
-        out.set(req, key, Value::array(flags))?;
-        Ok(out)
+        let key = Key::Str(PhpString::new(req, b"flags")?.hand_on_unmigrated());
+        out.set(req, key, flags.into_value().hand_on_unmigrated())?;
+        Ok(out.hand_on_unmigrated())
     }
 
     /// `pdo_sqlite_stmt_cursor_closer`.
@@ -774,15 +776,15 @@ impl Statement for Stmt {
 /// `add_assoc_string` where there is a string.
 fn set(
     req: &mut Request,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
     key: &[u8],
     value: Option<&[u8]>,
 ) -> Result<(), Thrown> {
     let Some(value) = value else {
         return Ok(());
     };
-    let value = Value::string(PhpString::new(req, value)?);
-    let key = Key::Str(PhpString::new(req, key)?);
+    let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
+    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
     out.set(req, key, value)
 }
 

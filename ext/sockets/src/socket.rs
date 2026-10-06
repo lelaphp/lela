@@ -12,7 +12,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpObject, Resource, Value};
+use php_ext::values::{Owner, PhpObject, Resource, Value};
 
 use crate::State;
 
@@ -169,16 +169,16 @@ impl ObjectHandlers for Handlers {
 
 /// `object_init_ex(return_value, socket_ce)` with the payload laid:
 /// a new `Socket` holding `sock`.
-pub(crate) fn new_socket(req: &mut Request, sock: Sock) -> Result<Instance<Socket>, Thrown> {
+pub(crate) fn new_socket(req: &mut Request, sock: Sock) -> Result<Owner<Instance<Socket>>, Thrown> {
     let object = made(req, b"Socket")?;
     if let Some(payload) = object.native_mut::<Sock>(req) {
         *payload = sock;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// A new object of a class this extension declares.
-pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<PhpObject, Thrown> {
+pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
         return Err(throw_error(req, "Error", &text));

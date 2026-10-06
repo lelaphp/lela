@@ -6,7 +6,7 @@ use php_ext::abi::{ExtensionBuilder, OrFalse};
 use php_ext::attr::{php_class, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::error;
 use crate::ffi::normalizer::{Form, Normalizer as Icu};
@@ -58,7 +58,7 @@ impl Normalizer {
         req: &mut Request,
         string: PhpString,
         #[php(default = Normalizer::FORM_C)] form: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         normalize(req, string, form)
     }
 
@@ -76,7 +76,7 @@ impl Normalizer {
         req: &mut Request,
         string: PhpString,
         #[php(default = Normalizer::FORM_C)] form: i64,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         raw_decomposition(req, string, form)
     }
 }
@@ -121,7 +121,7 @@ fn normalizer_normalize(
     req: &mut Request,
     string: PhpString,
     #[php(default = Normalizer::FORM_C)] form: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     normalize(req, string, form)
 }
 
@@ -129,7 +129,7 @@ fn normalize(
     req: &mut Request,
     string: PhpString,
     form: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let form = checked_form(req, form)?;
     let text = match ffi::to_utf16(string.as_bytes()) {
@@ -209,7 +209,7 @@ fn normalizer_get_raw_decomposition(
     req: &mut Request,
     string: PhpString,
     #[php(default = Normalizer::FORM_C)] form: i64,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     raw_decomposition(req, string, form)
 }
 
@@ -217,7 +217,7 @@ fn raw_decomposition(
     req: &mut Request,
     string: PhpString,
     form: i64,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     error::reset(req);
     let bytes = string.as_bytes();
     let mut offset = 0;

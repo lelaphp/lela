@@ -45,7 +45,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 pub use rng::Rng;
 
@@ -380,7 +380,7 @@ fn class_name(req: &Request, object: PhpObject) -> String {
 
 /// `zend_std_get_properties`, duplicated: the object's properties as an
 /// array with one more owner of each value.
-fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in object.props(req)? {
         req.addref(&value);
@@ -391,11 +391,13 @@ fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
 
 /// A serialised state as the array php builds, a word as
 /// `php_random_bin2hex_le` writes it.
-fn fields(req: &mut Request, fields: &[Field]) -> Result<PhpArray, Thrown> {
+fn fields(req: &mut Request, fields: &[Field]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for field in fields {
         let value = match field {
-            Field::Word(bytes) => Value::string(PhpString::new(req, &bin2hex(bytes))?),
+            Field::Word(bytes) => {
+                Value::string(PhpString::new(req, &bin2hex(bytes))?.hand_on_unmigrated())
+            }
             Field::Long(n) => Value::int(*n),
         };
         out.append(req, value)?;
@@ -458,7 +460,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
                 ),
             ));
         }
-        let name = PhpString::new(req, name)?;
+        let name = PhpString::new(req, name)?.hand_on_unmigrated();
         req.addref(&value);
         object.unserialize_prop(req, name, value)?;
     }
@@ -495,7 +497,7 @@ fn invalid_data(req: &mut Request, class: &str, pending: Option<Thrown>) -> Thro
     match made {
         Ok(value) => {
             let thrown = throw_value(req, &value);
-            req.release(value);
+            value.give_up(req);
             thrown
         }
         Err(thrown) => thrown,
@@ -507,14 +509,14 @@ fn exception_with_previous(
     req: &mut Request,
     message: &str,
     previous: Value,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let Some(class) = lookup_class(req, b"Exception")? else {
         return new_throwable(req, "Exception", message);
     };
-    let text = Value::string(PhpString::new(req, message.as_bytes())?);
-    let made = instantiate(req, class, &[text, Value::int(0), previous]);
-    req.release(text);
-    made.map(|object| object.as_value())
+    let text = PhpString::new(req, message.as_bytes())?;
+    let made = instantiate(req, class, &[Value::string(*text), Value::int(0), previous]);
+    text.give_up(req);
+    made.map(Owner::into_value)
 }
 
 /// The handlers of a seedable engine: `php_random_engine_common_clone_object`,
@@ -532,7 +534,7 @@ fn clone_engine<T: Clone + Default + Any + Send>(
     object: PhpObject,
 ) -> Result<PhpObject, Thrown> {
     let state = object.native::<T>(req).cloned().unwrap_or_default();
-    clone_with(req, &object, state)
+    clone_with(req, &object, state).map(Owner::hand_on_unmigrated)
 }
 
 pub(crate) static MT19937: Copying<EngineMt19937> = Copying(PhantomData);
@@ -880,7 +882,7 @@ fn mt_getrandmax() -> i64 {
 /// random_bytes() expects exactly 1 argument, 0 given
 /// ```
 #[php_function]
-fn random_bytes(req: &mut Request, length: i64) -> Result<PhpString, Thrown> {
+fn random_bytes(req: &mut Request, length: i64) -> Result<Owner<PhpString>, Thrown> {
     let size = length;
     if size < 1 {
         return Err(arg_value_error(req, 1, "be greater than 0"));
@@ -889,7 +891,7 @@ fn random_bytes(req: &mut Request, length: i64) -> Result<PhpString, Thrown> {
     let mut filled = Ok(());
     let bytes = PhpString::filled(req, size, |buf| filled = csprng::fill(buf))?;
     if let Err(failure) = filled {
-        req.release(Value::string(bytes));
+        bytes.give_up(req);
         return Err(failure.raise(req));
     }
     Ok(bytes)

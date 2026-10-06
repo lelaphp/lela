@@ -13,7 +13,7 @@ use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpArray;
+use php_ext::values::{Owner, PhpArray};
 
 /// One `PHP_INI_BEGIN` row: its name, its default, `None` for php's
 /// `NULL`, whether it is `PHP_INI_ALL` rather than `PHP_INI_SYSTEM`, and
@@ -235,7 +235,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// array|false
 /// ```
 #[php_function]
-fn fpm_get_status(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     Ok(match req.host_status()? {
         Some(status) => OrFalse::Value(status),
         None => OrFalse::False,
@@ -273,6 +273,6 @@ fn fpm_get_status(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
 /// bool(true)
 /// ```
 #[php_function(aliases(getallheaders))]
-fn apache_request_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.request_headers()
 }
