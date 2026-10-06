@@ -11,6 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{FreshString, Key, Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
@@ -160,10 +161,8 @@ impl Options {
         match self.0.as_ref() {
             ValueRef::Array(array) => Ok(array.find(name).map(|value| value.deref())),
             ValueRef::Object(object) => {
-                let object = *object;
-                Ok(object
-                    .entries(req)?
-                    .into_iter()
+                let table = object.property_table(req)?;
+                Ok(walk::rows(req, table)
                     .find(|(key, _)| matches!(key, Key::Str(k) if k.as_bytes() == name))
                     .map(|(_, value)| value.deref()))
             }

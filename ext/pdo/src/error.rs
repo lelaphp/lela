@@ -6,7 +6,7 @@
 
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, Value};
 
 use crate::connector::{Cause, Failure, OnError, SqlState};
 use crate::stmt::Stmt;
@@ -195,23 +195,30 @@ fn throw_pdo(
             return thrown;
         }
     };
-    let (code, info) = (
-        code.hand_on_unmigrated(),
-        info.map(Owner::hand_on_unmigrated),
-    );
-    if let Some(object) = value.as_object().copied() {
-        let written = PhpString::new(req, b"code")
-            .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), code))
-            .and_then(|()| match info {
-                Some(info) => PhpString::new(req, b"errorInfo").and_then(|name| {
-                    object.set_prop(req, name.hand_on_unmigrated(), Value::array(info))
-                }),
-                None => Ok(()),
-            });
-        if let Err(thrown) = written {
-            value.give_up(req);
-            return thrown;
+    let Some(object) = value.as_object().copied() else {
+        code.give_up(req);
+        if let Some(info) = info {
+            info.give_up(req);
         }
+        let thrown = throw_value(req, &value);
+        value.give_up(req);
+        return thrown;
+    };
+    let written = match php_ext::call::write_prop(req, &object, b"code", code) {
+        Ok(()) => match info {
+            Some(info) => php_ext::call::write_prop(req, &object, b"errorInfo", info.into_value()),
+            None => Ok(()),
+        },
+        Err(thrown) => {
+            if let Some(info) = info {
+                info.give_up(req);
+            }
+            Err(thrown)
+        }
+    };
+    if let Err(thrown) = written {
+        value.give_up(req);
+        return thrown;
     }
     let thrown = throw_value(req, &value);
     value.give_up(req);

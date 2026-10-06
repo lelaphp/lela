@@ -727,22 +727,7 @@ fn columns(
                 let fetched = crate::owned(req, fetched);
                 set(req, &mut out, key, fetched)?;
             }
-            Kind::Default | Kind::Both => {
-                let key = symtable_key(req, &name)?;
-                let held = Owner::take(req, fetched);
-                set(req, &mut out, key, held)?;
-                let fetched = crate::owned(req, fetched);
-                if let Some(mut array) = out.as_array().copied() {
-                    if array.contains(&Key::Int(at)) {
-                        fetched.give_up(req);
-                    } else {
-                        array.set(req, Owner::take(req, Key::Int(at)), fetched)?;
-                        out = Value::array(array);
-                    }
-                } else {
-                    fetched.give_up(req);
-                }
-            }
+            Kind::Default | Kind::Both => both(req, &mut out, &name, at, fetched)?,
             Kind::Named => named(req, &mut out, &name, fetched)?,
             Kind::Num => {
                 let fetched = crate::owned(req, fetched);
@@ -754,8 +739,13 @@ fn columns(
                 }
             }
             Kind::Class | Kind::Obj | Kind::Into => {
-                if let Some(made) = out.as_object().copied() {
-                    write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
+                match out.as_object().copied() {
+                    Some(made) => {
+                        // The fetch engine's value is its one owner.
+                        let fetched = crate::owned(req, fetched);
+                        write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
+                    }
+                    None => req.release(fetched),
                 }
             }
             Kind::Func => arguments.push(fetched),
@@ -795,9 +785,15 @@ fn write_column(
     made: PhpObject,
     scope: PropertyScope,
     name: &[u8],
-    fetched: Value,
+    fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?.hand_on_unmigrated();
+    let name = match PhpString::new(req, name) {
+        Ok(name) => name,
+        Err(thrown) => {
+            fetched.give_up(req);
+            return Err(thrown);
+        }
+    };
     let wrote = match pending {
         Some(standing) => while_pending(req, standing, |req| {
             made.write_prop_in(req, scope, name, fetched)
@@ -839,6 +835,33 @@ fn scope(kind: Kind, class: Option<ClassId>) -> PropertyScope {
         (Kind::Into, _) => PropertyScope::Executing,
         _ => PropertyScope::Declaring,
     }
+}
+
+/// `FETCH_BOTH`'s column: the value under its name and, where the
+/// number names no column already, under its number
+/// (`zend_hash_index_add`), the fetch engine's owner handed to the row.
+fn both(
+    req: &mut Request,
+    out: &mut Value,
+    name: &[u8],
+    at: i64,
+    fetched: Value,
+) -> Result<(), Thrown> {
+    let key = symtable_key(req, name)?;
+    let held = Owner::take(req, fetched);
+    set(req, out, key, held)?;
+    let fetched = crate::owned(req, fetched);
+    let Some(mut array) = out.as_array().copied() else {
+        fetched.give_up(req);
+        return Ok(());
+    };
+    if array.contains(&Key::Int(at)) {
+        fetched.give_up(req);
+    } else {
+        array.set(req, Owner::take(req, Key::Int(at)), fetched)?;
+        *out = Value::array(array);
+    }
+    Ok(())
 }
 
 /// `zend_symtable_update` on the row's array; the key and the value

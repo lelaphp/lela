@@ -136,8 +136,8 @@ impl CURLFile {
         this: This<Self>,
         mime_type: PhpString,
     ) -> Result<(), Thrown> {
-        req.addref(&Value::string(mime_type));
-        write_prop(req, &this.object(), b"mime", Value::string(mime_type))
+        let mime_type = Owner::take(req, Value::string(mime_type));
+        write_prop(req, &this.object(), b"mime", mime_type)
     }
 
     #[php(tentative)]
@@ -146,13 +146,8 @@ impl CURLFile {
         this: This<Self>,
         posted_filename: PhpString,
     ) -> Result<(), Thrown> {
-        req.addref(&Value::string(posted_filename));
-        write_prop(
-            req,
-            &this.object(),
-            b"postname",
-            Value::string(posted_filename),
-        )
+        let posted_filename = Owner::take(req, Value::string(posted_filename));
+        write_prop(req, &this.object(), b"postname", posted_filename)
     }
 }
 
@@ -178,8 +173,8 @@ fn construct(
     ];
     for (name, value) in fields {
         if let Some(value) = value {
-            req.addref(&Value::string(value));
-            write_prop(req, &object, name, Value::string(value))?;
+            let value = Owner::take(req, Value::string(value));
+            write_prop(req, &object, name, value)?;
         }
     }
     Ok(())
@@ -263,8 +258,8 @@ impl CURLStringFile {
             (b"postname", postname),
             (b"mime", mime),
         ] {
-            req.addref(&Value::string(value));
-            write_prop(req, &object, name, Value::string(value))?;
+            let value = Owner::take(req, Value::string(value));
+            write_prop(req, &object, name, value)?;
         }
         Ok(())
     }

@@ -1836,7 +1836,7 @@ fn deserialize_parameters(
                 match val {
                     None => out.push(Value::null()),
                     Some(v) => match master_to_zval(req, cx, p.encode, v) {
-                        Ok(z) => out.push(z),
+                        Ok(z) => out.push(z.hand_on_unmigrated()),
                         Err(e) => {
                             release_all(req, out);
                             return Err(e);
@@ -1882,7 +1882,7 @@ fn deserialize_parameters(
             }
         }
         match master_to_zval(req, cx, enc, node) {
-            Ok(z) => out.push(z),
+            Ok(z) => out.push(z.hand_on_unmigrated()),
             Err(e) => {
                 release_all(req, out);
                 return Err(e);
@@ -2237,7 +2237,7 @@ fn deserialize_function_call_in<'a>(
                 hdr = ih.get_str(&key);
             }
             let parameters = if let Some(h) = hdr {
-                vec![master_to_zval(req, cx, h.encode, hdr_func)?]
+                vec![master_to_zval(req, cx, h.encode, hdr_func)?.hand_on_unmigrated()]
             } else {
                 let mut node = Some(hdr_func);
                 if let Some(fnb) = soap_binding(sdl, hfunction)

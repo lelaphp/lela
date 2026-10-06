@@ -392,6 +392,49 @@ impl Request {
         self.vm.prime(&mut self.map, frame, slot, value);
     }
 
+    /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
+    /// for a method call's pair (`Z/Zend/zend_vm_def.h:3670`, `:3778`):
+    /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds where
+    /// it holds `class` and was written from `frame`'s scope, and none
+    /// otherwise, which is the pass that looks the method up.
+    pub(crate) fn cached_callee(
+        &self,
+        frame: FrameRef,
+        slot: CacheSlot,
+        class: crate::api::values::ClassId,
+    ) -> Option<Function> {
+        match self.cached(frame, slot) {
+            exec::Cached::ClassAndCallee {
+                class: held,
+                scope,
+                function,
+            } if held == class && scope == self.frame_scope(frame) => Some(function),
+            _ => None,
+        }
+    }
+
+    /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
+    /// `:3818`): `class` and the callee it answered into `slot`, with
+    /// `frame`'s scope as the key [`Request::cached_callee`] reads back.
+    pub(crate) fn prime_callee(
+        &mut self,
+        frame: FrameRef,
+        slot: CacheSlot,
+        class: crate::api::values::ClassId,
+        function: Function,
+    ) {
+        let scope = self.frame_scope(frame);
+        self.prime(
+            frame,
+            slot,
+            exec::Cached::ClassAndCallee {
+                class,
+                scope,
+                function,
+            },
+        );
+    }
+
     /// Push a frame for the body of the user function `function`, the
     /// call that reached it served (`zend_vm_stack_push_call_frame` and
     /// `i_init_func_execute_data`, design §5.6): the CVs and the

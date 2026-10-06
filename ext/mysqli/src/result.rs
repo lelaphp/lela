@@ -23,7 +23,7 @@ use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
 use crate::props::{self, Props};
-use crate::{On, class_name, closed, long_or_string, report, report_error, report_mode, string};
+use crate::{On, class_name, closed, long_or_string, report, report_error, report_mode};
 
 /// `MYSQLI_ASSOC`, `MYSQLI_NUM` and `MYSQLI_BOTH`.
 pub(crate) const ASSOC: i64 = 1;
@@ -303,11 +303,10 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
             Key::Str(name) => PhpString::new(req, name.as_bytes())?,
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
         };
+        let value = Owner::take(req, value);
         if plain {
-            table.set(req, name.into_key(), Owner::take(req, value))?;
+            table.set(req, name.into_key(), value)?;
         } else {
-            let name = name.hand_on_unmigrated();
-            req.addref(&value);
             let scope = PropertyScope::Of(ClassRef(made.class()));
             let wrote = match &pending {
                 Some(standing) => while_pending(req, standing, |req| {
@@ -330,7 +329,7 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         }
     }
     if plain {
-        made.replace_table(req, table.hand_on_unmigrated())?;
+        made.replace_table(req, table)?;
     } else {
         table.give_up(req);
     }
@@ -422,36 +421,30 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
 /// `php_add_field_properties`: one column's description as an object.
 fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
-    let rows = [
-        ("name", string(req, &field.name)?.hand_on_unmigrated()),
-        (
-            "orgname",
-            string(req, &field.org_name)?.hand_on_unmigrated(),
-        ),
-        ("table", string(req, &field.table)?.hand_on_unmigrated()),
-        (
-            "orgtable",
-            string(req, &field.org_table)?.hand_on_unmigrated(),
-        ),
+    let facts = [
+        ("name", crate::Fact::Text(&field.name)),
+        ("orgname", crate::Fact::Text(&field.org_name)),
+        ("table", crate::Fact::Text(&field.table)),
+        ("orgtable", crate::Fact::Text(&field.org_table)),
         (
             "def",
-            string(req, field.def.as_deref().unwrap_or_default())?.hand_on_unmigrated(),
+            crate::Fact::Text(field.def.as_deref().unwrap_or_default()),
         ),
-        ("db", string(req, &field.db)?.hand_on_unmigrated()),
-        ("catalog", string(req, b"def")?.hand_on_unmigrated()),
-        ("max_length", Value::int(0)),
+        ("db", crate::Fact::Text(&field.db)),
+        ("catalog", crate::Fact::Text(b"def")),
+        ("max_length", crate::Fact::Int(0)),
         (
             "length",
-            Value::int(i64::try_from(field.length).unwrap_or(i64::MAX)),
+            crate::Fact::Int(i64::try_from(field.length).unwrap_or(i64::MAX)),
         ),
-        ("charsetnr", Value::int(i64::from(field.charsetnr))),
-        ("flags", Value::int(i64::from(field.flags))),
-        ("type", Value::int(i64::from(field.type_byte))),
-        ("decimals", Value::int(i64::from(field.decimals))),
+        ("charsetnr", crate::Fact::Int(i64::from(field.charsetnr))),
+        ("flags", crate::Fact::Int(i64::from(field.flags))),
+        ("type", crate::Fact::Int(i64::from(field.type_byte))),
+        ("decimals", crate::Fact::Int(i64::from(field.decimals))),
     ];
-    for (name, value) in rows {
-        let name = PhpString::new(req, name.as_bytes())?.hand_on_unmigrated();
-        object.set_prop(req, name, value)?;
+    if let Err(thrown) = crate::add_facts(req, *object, &facts) {
+        object.give_up(req);
+        return Err(thrown);
     }
     Ok(object)
 }
@@ -878,8 +871,8 @@ impl ObjectHandlers for ResultHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         self.0.write_property(req, object, name, value)
     }

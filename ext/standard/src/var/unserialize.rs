@@ -1234,47 +1234,46 @@ impl State<'_> {
         (value, at)
     }
 
-    /// The value written into `slot`, which from here holds it, and the
-    /// var hash entry updated.
+    /// The value written into `slot`, a sink: the slot holds the owner
+    /// from here, and the var hash entry a view of it.
     fn write(
         &mut self,
         req: &mut Request,
         slot: &Slot,
         entry: Option<usize>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
+        let view = *value;
         match slot {
             Slot::Root(at) => {
-                if let Some(root) = self.hash.roots.get_mut(*at) {
-                    let previous = std::mem::replace(root, value);
-                    req.release(previous);
-                }
+                let Some(root) = self.hash.roots.get_mut(*at) else {
+                    value.give_up(req);
+                    return Ok(());
+                };
+                let previous = std::mem::replace(root, value.hand_on_unmigrated());
+                req.release(previous);
             }
             // Nothing names a taken root's place any more; the `R:`
             // arm shares its value instead of writing here, and reads a
             // repeated place through the slot it follows.
             Slot::Taken | Slot::Same(_) => {
-                req.release(value);
+                value.give_up(req);
                 return Ok(());
             }
             Slot::Element(array, key) => {
                 let mut array = *array;
-                // The parse's owner of `value` handed on as one the
-                // array takes, and the parse's own given up.
-                let held = Owner::take(req, value);
-                req.release(value);
                 let key = Owner::take(req, key.clone());
-                array.set(req, key, held)?;
+                array.set(req, key, value)?;
             }
             Slot::Property(object, name) => {
-                req.addref(&Value::string(*name));
-                object.unserialize_prop(req, *name, value)?;
+                let name = Owner::take(req, *name);
+                object.unserialize_prop(req, name, value)?;
             }
         }
         if let Some(at) = entry
             && let Some(Some((_, held))) = self.hash.slots.get_mut(at)
         {
-            *held = value;
+            *held = view;
         }
         Ok(())
     }
@@ -1324,8 +1323,7 @@ impl State<'_> {
                     // reference whose other owner goes with the var hash,
                     // so once the reader is done the element holds the
                     // value alone, which it is given here.
-                    let shared = held.deref();
-                    req.addref(&shared);
+                    let shared = Owner::take(req, held.deref());
                     self.write(req, &slot, entry, shared)?;
                     return Ok(true);
                 }
@@ -1337,8 +1335,9 @@ impl State<'_> {
                         *cell
                     } else {
                         req.addref(&held);
-                        let cell = PhpRef::new(req, held)?.hand_on_unmigrated();
-                        self.write(req, &held_slot, Some(at), cell.as_value())?;
+                        let made = PhpRef::new(req, held)?;
+                        let cell = *made;
+                        self.write(req, &held_slot, Some(at), made.into_value())?;
                         // `ref_props`: a typed property whose value was read
                         // becomes a source of the cell it now holds.
                         if let Slot::Property(object, name) = &held_slot
@@ -1348,8 +1347,8 @@ impl State<'_> {
                         }
                         cell
                     };
-                    req.addref(&cell.as_value());
-                    self.write(req, &slot, entry, cell.as_value())?;
+                    let shared = Owner::take(req, cell.as_value());
+                    self.write(req, &slot, entry, shared)?;
                     return Ok(true);
                 }
                 if slots_equal(&held_slot, &slot) {
@@ -1359,13 +1358,14 @@ impl State<'_> {
                 if object.as_object().is_none() {
                     return Ok(false);
                 }
-                req.addref(&object);
+                let object = Owner::take(req, object);
                 self.write(req, &slot, entry, object)?;
                 Ok(true)
             }
             (b'N', b';') => {
                 self.p = start + 2;
-                self.write(req, &slot, entry, Value::null())?;
+                let null = Owner::take(req, Value::null());
+                self.write(req, &slot, entry, null)?;
                 Ok(true)
             }
             (b'b', b':')
@@ -1374,7 +1374,8 @@ impl State<'_> {
                     && start + 3 < self.buf.len() =>
             {
                 self.p = start + 4;
-                self.write(req, &slot, entry, Value::bool(self.at(start + 2) == b'1'))?;
+                let bool = Owner::take(req, Value::bool(self.at(start + 2) == b'1'));
+                self.write(req, &slot, entry, bool)?;
                 Ok(true)
             }
             (b'i', b':') => {
@@ -1386,7 +1387,8 @@ impl State<'_> {
                 }
                 self.p = end + 1;
                 let (n, _) = self.parse_iv2(req, start + 2);
-                self.write(req, &slot, entry, Value::int(n))?;
+                let n = Owner::take(req, Value::int(n));
+                self.write(req, &slot, entry, n)?;
                 Ok(true)
             }
             (b'd', b':') => self.double(req, &slot, entry, start),
@@ -1394,7 +1396,7 @@ impl State<'_> {
                 let Some(text) = self.string(req, start, c0 == b'S') else {
                     return Ok(false);
                 };
-                let value = Value::string(PhpString::new(req, &text)?.hand_on_unmigrated());
+                let value = PhpString::new(req, &text)?.into_value();
                 self.write(req, &slot, entry, value)?;
                 Ok(true)
             }
@@ -1518,7 +1520,8 @@ impl State<'_> {
                 .and_then(|t| t.parse::<f64>().ok())
                 .unwrap_or(0.0),
         };
-        self.write(req, slot, entry, Value::float(value))?;
+        let value = Owner::take(req, Value::float(value));
+        self.write(req, slot, entry, value)?;
         Ok(true)
     }
 
@@ -1685,11 +1688,12 @@ impl State<'_> {
         // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
         // convert from packed to hash during unserialization"; and
         // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
-        let array = match u32::try_from(elements) {
-            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?.hand_on_unmigrated(),
-            _ => PhpArray::empty(),
+        let made = match u32::try_from(elements) {
+            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
+            _ => Owner::take(req, PhpArray::empty()),
         };
-        self.write(req, slot, entry, Value::array(array))?;
+        let array = *made;
+        self.write(req, slot, entry, made.into_value())?;
         if elements == 0 {
             return Ok(self.finish());
         }
@@ -1918,11 +1922,19 @@ impl State<'_> {
             );
             return Ok(false);
         }
-        let object = new_object(req, class)?.hand_on_unmigrated();
-        self.write(req, slot, entry, object.as_value())?;
+        let made = new_object(req, class)?;
+        let object = *made;
+        self.write(req, slot, entry, made.into_value())?;
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?.hand_on_unmigrated();
-            let stored = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
+            let key = PhpString::new(req, MAGIC_MEMBER)?;
+            let stored = PhpString::new(req, &name).map(Owner::into_value);
+            let stored = match stored {
+                Ok(stored) => stored,
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            };
             object.unserialize_prop(req, key, stored)?;
         }
         if has_unserialize {
@@ -2075,8 +2087,9 @@ impl State<'_> {
             self.p += datalen;
             return Ok(false);
         }
-        let object = new_object(req, class)?.hand_on_unmigrated();
-        self.write(req, slot, entry, object.as_value())?;
+        let made = new_object(req, class)?;
+        let object = *made;
+        self.write(req, slot, entry, made.into_value())?;
         let payload = self.buf[self.p..self.p + datalen].to_vec();
         // `zend_user_unserialize` runs outside `BG(serialize_lock)`: what
         // the class's `unserialize()` reads shares this var hash.
@@ -2099,8 +2112,15 @@ impl State<'_> {
         .into_owned();
         warning(req, &format!("Class {shown} has no unserializer"));
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?.hand_on_unmigrated();
-            let stored = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
+            let key = PhpString::new(req, MAGIC_MEMBER)?;
+            let stored = PhpString::new(req, name).map(Owner::into_value);
+            let stored = match stored {
+                Ok(stored) => stored,
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            };
             object.unserialize_prop(req, key, stored)?;
         }
         self.p += datalen + 1;
@@ -2162,10 +2182,11 @@ impl State<'_> {
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Property(object, name));
             }
-            req.addref(&Value::string(name));
+            let held = Owner::take(req, name);
+            let null = Owner::take(req, Value::null());
             // A key naming a virtual property fails the whole object,
             // `is_property_visibility_changed`'s `-1`.
-            if !object.unserialize_prop(req, name, Value::null())? {
+            if !object.unserialize_prop(req, held, null)? {
                 return Ok(false);
             }
             let at = self.hash.slots.len();
@@ -2275,7 +2296,7 @@ impl State<'_> {
             }
             Some(true) => {}
         }
-        let value = class_constant(req, class, case)?.hand_on_unmigrated();
+        let value = class_constant(req, class, case)?;
         self.write(req, slot, entry, value)?;
         Ok(true)
     }

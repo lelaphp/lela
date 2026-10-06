@@ -100,7 +100,11 @@ impl Request {
         read: PropertyRead,
     ) -> Result<Option<(ClassId, PropertyDecl)>, Thrown> {
         let silent = read == PropertyRead::Silent;
-        let found = self.property_info_of(class, name);
+        // The declaration is handed on past what writes the request
+        // (the constants' update, the slot laid down), so it is cloned.
+        let found = self
+            .property_info_of(class, name)
+            .map(|(declaring, property)| (declaring, property.clone()));
         if let Some((declaring, property)) = found.as_ref()
             && property.visibility != Visibility::Public
             && Some(*declaring) != scope

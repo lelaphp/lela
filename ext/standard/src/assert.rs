@@ -400,8 +400,8 @@ fn assert(
         // code written before the throw, which `zend_throw_exception_hook`
         // is told of.
         let coded = |req: &mut Request, object: &PhpObject| -> Result<(), Thrown> {
-            let code = PhpString::new(req, b"code")?.hand_on_unmigrated();
-            object.set_prop(req, code, Value::int(E_ERROR))
+            let code = Owner::take(req, Value::int(E_ERROR));
+            php_ext::call::write_prop(req, object, b"code", code)
         };
         let thrown = if let Some(previous) = pending {
             let thrown = throw_chained(req, previous, "AssertionError", message);

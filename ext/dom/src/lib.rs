@@ -583,8 +583,8 @@ fn dom_error_message(
     if strict {
         let exception = new_throwable(req, "DOMException", message)?;
         if let Some(object) = exception.as_object().copied() {
-            let name = PhpString::new(req, b"code")?;
-            let set = object.set_prop(req, name.hand_on_unmigrated(), Value::int(code as i64));
+            let code = Owner::take(req, Value::int(code as i64));
+            let set = php_ext::call::write_prop(req, &object, b"code", code);
             if let Err(thrown) = set {
                 exception.give_up(req);
                 return Err(thrown);
@@ -864,20 +864,20 @@ fn read_property(
 fn write_property(
     req: &mut Request,
     object: PhpObject,
-    name: PhpString,
-    value: Value,
+    name: Owner<PhpString>,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     let Some(prop) = handler(req, object, name.as_bytes()) else {
         return Std.write_property(req, object, name, value);
     };
     let bytes = name.as_bytes().to_vec();
-    req.release(Value::string(name));
+    name.give_up(req);
     let Some(write) = prop.write else {
-        req.release(value);
+        value.give_up(req);
         return Err(readonly_error(req, object, &bytes));
     };
     let coerced = coerce_property(req, object, &bytes, &value);
-    req.release(value);
+    value.give_up(req);
     let coerced = coerced?;
     let written = write(req, object, &coerced);
     coerced.give_up(req);

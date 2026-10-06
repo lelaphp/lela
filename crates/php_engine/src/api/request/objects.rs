@@ -1707,6 +1707,8 @@ impl Request {
             }
         };
         if place == crate::api::abi::PropertyPlace::Handlers {
+            let name = Owner::adopt(self, name);
+            let value = Owner::adopt(self, value);
             return table.write_property(self, object, name, value);
         }
         let silent = self.serves_accessor(object.class(), b"__set");
@@ -1718,6 +1720,8 @@ impl Request {
                 return Err(thrown);
             }
         };
+        let name = Owner::adopt(self, name);
+        let value = Owner::adopt(self, value);
         table.write_property(self, object, name, value)?;
         if let Some(slot) = slot {
             object

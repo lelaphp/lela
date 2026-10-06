@@ -457,8 +457,8 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
                 ),
             ));
         }
-        let name = PhpString::new(req, name)?.hand_on_unmigrated();
-        req.addref(&value);
+        let name = PhpString::new(req, name)?;
+        let value = Owner::take(req, value);
         object.unserialize_prop(req, name, value)?;
     }
     Ok(())

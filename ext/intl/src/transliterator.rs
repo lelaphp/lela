@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object, write_prop};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::transliterator::{Trans, ids};
@@ -567,7 +567,7 @@ fn made(req: &mut Request, utrans: Trans) -> Answer<Option<Owner<Instance<Transl
     }
     let written = match id {
         Ok(id) => PhpString::new(req, &id)
-            .and_then(|id| write_prop(req, &object, b"id", Value::string(id.hand_on_unmigrated())))
+            .and_then(|id| write_prop(req, &object, b"id", id.into_value()))
             .map(|()| true),
         Err(code) => {
             error::set_code(req, code);

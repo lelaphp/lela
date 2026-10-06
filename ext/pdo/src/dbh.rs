@@ -1182,9 +1182,15 @@ fn construct_statement(
     sql: &[u8],
     args: Option<PhpArray>,
 ) -> Result<(), Thrown> {
-    let name = PhpString::new(req, b"queryString")?.hand_on_unmigrated();
-    let query = PhpString::new(req, sql)?.hand_on_unmigrated();
-    Std.write_property(req, stmt, name, Value::string(query))?;
+    let name = PhpString::new(req, b"queryString")?;
+    let query = match PhpString::new(req, sql) {
+        Ok(query) => query,
+        Err(thrown) => {
+            name.give_up(req);
+            return Err(thrown);
+        }
+    };
+    Std.write_property(req, stmt, name, query.into_value())?;
     if constructor_visibility(req, stmt.class()).is_none() {
         return Ok(());
     }

@@ -279,12 +279,7 @@ fn update_properties(req: &mut Request, object: PhpObject, id: DocId) -> Result<
             let value = PhpString::filled(req, bytes.len(), |out| {
                 out.copy_from_slice(bytes);
             })?;
-            let name = new_string(req, name)?;
-            object.set_prop(
-                req,
-                name.hand_on_unmigrated(),
-                Value::string(value.hand_on_unmigrated()),
-            )?;
+            php_ext::call::write_prop(req, &object, name, value.into_value())?;
         }
     }
     Ok(())

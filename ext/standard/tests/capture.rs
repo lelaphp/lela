@@ -232,12 +232,32 @@ fn print_r_ends_a_nested_array_s_walk_where_a_debug_info_method_destroys_it() {
 #[test]
 fn print_r_ends_an_object_s_nested_array_where_a_debug_info_method_destroys_it() {
     let (stdout, fatal) = armed(
-        "<?php class C { function __debugInfo() { $GLOBALS['o']->p = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\nclass O { public $p; }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$o = new O; $o->p = [new C, $v . $v];\nprint_r($o);",
+        "<?php class C { function __debugInfo() { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\nclass O { public $p; }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v]; $o = new O; $o->p = &$r;\nprint_r($o);",
     );
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
         "O Object\n(\n    [p] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n        )\n\n)\n"
+    );
+}
+
+/// `print_r` over an object whose property alone holds a nested array:
+/// the walk over the object's table owns each row for its step (#1980,
+/// candidate 3), so an element's `__debugInfo` that assigns over the
+/// property leaves the array standing until its row is printed, and
+/// every row of it prints (#2160).
+///
+/// No divergence row records the walk's end: no witness or phpt
+/// compares this input.
+#[test]
+fn print_r_prints_an_object_s_nested_array_its_row_holds() {
+    let (stdout, fatal) = armed(
+        "<?php class C { function __debugInfo() { $GLOBALS['o']->p = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\nclass O { public $p; }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$o = new O; $o->p = [new C, $v . $v];\nprint_r($o);",
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "O Object\n(\n    [p] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n            [1] => vvvvvvvvvv\n        )\n\n)\n"
     );
 }
 

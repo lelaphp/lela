@@ -30,6 +30,7 @@ use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{
     ClassId, DeclaredRows, HashIterator, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place,
     Value, ValueRef,
@@ -1317,7 +1318,10 @@ impl Table {
     fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.snapshot_refs()),
-            Table::Props(object) => object.entries(req),
+            Table::Props(object) => {
+                let table = object.property_table(req)?;
+                Ok(walk::rows(req, table).collect())
+            }
         }
     }
 
@@ -1338,11 +1342,10 @@ impl Table {
 
     /// `zend_hash_update_ind`: `value` is the table's from here, and
     /// `key` a view, the array taking its own owner of a string key.
-    fn set(self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
+    fn set(self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
                 let key = Owner::take(req, key.clone());
-                let value = crate::owner_of(req, value);
                 array.set(req, key, value)?;
                 store(req, owner, array)
             }
@@ -1350,7 +1353,7 @@ impl Table {
                 let name = match key.to_prop_name(req) {
                     Ok(name) => name,
                     Err(thrown) => {
-                        req.release(value);
+                        value.give_up(req);
                         return Err(thrown);
                     }
                 };
@@ -1361,13 +1364,74 @@ impl Table {
         }
     }
 
-    fn append(self, req: &mut Request, value: Value) -> Result<(), Thrown> {
-        if let Table::Array(owner, mut array) = self {
-            let value = crate::owner_of(req, value);
-            array.append(req, value)?;
-            store(req, owner, array)?;
+    /// `zend_hash_next_index_insert`: `value`'s owner is the table's from here,
+    /// laid down at the table's `nNextFreeElement`, an object's property
+    /// table's among them. An integer offset over an object is the
+    /// string that spells it ([`hash_key`] then [`Table::set`]), so it
+    /// moves no next free key, and an unset of one finds no integer row.
+    ///
+    /// ```php
+    /// $o = new stdClass; $ao = @new ArrayObject($o); $ao[] = str_repeat("a", 3); var_dump($o, count($ao));
+    /// $s = new stdClass; $s->x = 1; $as = @new ArrayObject($s);
+    /// $as[] = 'a'; $as[5] = 'five'; $as[] = 'b'; unset($as[1]); $as[] = 'c';
+    /// var_dump($s, count($as));
+    /// #[AllowDynamicProperties] class D { public $p = 1; protected $q = 2; }
+    /// $d = new D; $i = @new ArrayIterator($d); $i[] = 'x';
+    /// $c = clone $d; $over = @new ArrayObject(@new ArrayObject($c)); $over[] = 'y';
+    /// var_dump($d, $c, count($i));
+    /// $full = new ArrayObject([PHP_INT_MAX => 1]); $full[] = 2; $full->append(3);
+    /// var_dump(count($full));
+    /// ```
+    /// ```expect
+    /// object(stdClass)#1 (1) {
+    ///   [0]=>
+    ///   string(3) "aaa"
+    /// }
+    /// int(1)
+    /// object(stdClass)#3 (5) {
+    ///   ["x"]=>
+    ///   int(1)
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   ["5"]=>
+    ///   string(4) "five"
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   [2]=>
+    ///   string(1) "c"
+    /// }
+    /// int(5)
+    /// object(D)#5 (3) {
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["q":protected]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   string(1) "x"
+    /// }
+    /// object(D)#7 (4) {
+    ///   ["p"]=>
+    ///   int(1)
+    ///   ["q":protected]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   string(1) "x"
+    ///   [1]=>
+    ///   string(1) "y"
+    /// }
+    /// int(2)
+    /// int(1)
+    /// ```
+    fn append(self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
+        // php ignores what `zend_hash_next_index_insert` answers, so a
+        // taken next element is no `Error` here, as it is for `$a[]`.
+        match self {
+            Table::Array(owner, mut array) => {
+                array.try_append(req, value)?;
+                store(req, owner, array)
+            }
+            Table::Props(object) => object.append_row(req, value).map(drop),
         }
-        Ok(())
     }
 
     fn unset(self, req: &mut Request, key: &Key) -> Result<(), Thrown> {
@@ -1696,17 +1760,24 @@ fn write(
     value: Value,
 ) -> Result<(), Thrown> {
     sorting_refused(req, object)?;
-    let value = crate::copied(req, value);
     let table = table(req, object)?;
+    let value = Owner::take(req, value);
     // `if (!offset || Z_TYPE_P(offset) == IS_NULL)`: a reference to
     // `null` is no `null` here, and is the key `""` below.
     let offset = offset.filter(|o| !matches!(o.as_ref(), ValueRef::Null | ValueRef::Undef));
     let Some(offset) = offset else {
         return table.append(req, value);
     };
-    let Some(key) = hash_key(req, offset)? else {
-        req.release(value);
-        return Err(illegal(req, object, offset, "write"));
+    let key = match hash_key(req, offset) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            value.give_up(req);
+            return Err(illegal(req, object, offset, "write"));
+        }
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
     };
     table.set(req, &key, value)
 }
@@ -2056,7 +2127,8 @@ impl ObjectHandlers for Handlers {
             if fetch == DimensionRead::ReadWrite {
                 warning(req, &format!("Undefined array key {}", shown(&key)));
             }
-            table.set(req, &key, Value::null())?;
+            let null = Owner::take(req, Value::null());
+            table.set(req, &key, null)?;
         }
         match table {
             Table::Array(owner, mut array) => {
@@ -2149,12 +2221,25 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        if as_props(req, object, name.as_bytes())? {
-            let member = Value::string(name);
-            return self.write_dimension(req, object, Some(&member), value);
+        let props = match as_props(req, object, name.as_bytes()) {
+            Ok(props) => props,
+            Err(thrown) => {
+                name.give_up(req);
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if props {
+            // The name an `ArrayObject` writes a property under is the
+            // offset's, a view; the slot gives the value up.
+            let member = Value::string(*name);
+            let written =
+                self.write_dimension(req, object, Some(&member), value.hand_on_unmigrated());
+            name.give_up(req);
+            return written;
         }
         Std.write_property(req, object, name, value)
     }
@@ -2572,9 +2657,10 @@ fn sort_through(
 /// string(1) "x"
 /// ```
 fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
-    req.addref(&Value::array(sorted));
+    let sorted = Owner::take(req, sorted);
     match table {
         Table::Array(owner, _) => {
+            let sorted = sorted.hand_on_unmigrated();
             let old = with(req, owner, |p| {
                 std::mem::replace(&mut p.storage, Storage::Array(sorted))
             })?;

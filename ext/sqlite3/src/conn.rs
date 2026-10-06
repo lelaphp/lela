@@ -111,8 +111,8 @@ fn with_code(req: &mut Request, thrown: Thrown, code: i64) -> Thrown {
     let Some(object) = thrown.exception().copied() else {
         return thrown;
     };
-    let written = PhpString::new(req, b"code")
-        .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), Value::int(code)));
+    let code = Owner::take(req, Value::int(code));
+    let written = php_ext::call::write_prop(req, &object, b"code", code);
     match written {
         Ok(()) => thrown,
         Err(failed) => failed,

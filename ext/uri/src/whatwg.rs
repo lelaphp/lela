@@ -5,10 +5,10 @@
 
 use php_ext::abi::{Instance, IntoReturn, Passed, Ref, Static, This, Untyped};
 use php_ext::attr::php_class;
-use php_ext::call::{lookup_class, new_object};
+use php_ext::call::{lookup_class, new_object, write_prop};
 use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
 
 use crate::{
@@ -83,19 +83,11 @@ fn fill_errors(
         let (kind, failure) = reported(error.kind);
         let object = new_object(req, class)?;
         let context = PhpString::new(req, &error.data)?;
-        let kind_value = kind.into_return(req)?;
-        let fields = [
-            (
-                b"context".as_slice(),
-                Value::string(context.hand_on_unmigrated()),
-            ),
-            (b"type", kind_value),
-            (b"failure", Value::bool(failure)),
-        ];
-        for (name, value) in fields {
-            let name = PhpString::new(req, name)?.hand_on_unmigrated();
-            object.set_prop(req, name, value)?;
-        }
+        write_prop(req, &object, b"context", context.into_value())?;
+        let kind_value = case_owner(req, kind)?;
+        write_prop(req, &object, b"type", kind_value)?;
+        let failed = Owner::take(req, Value::bool(failure));
+        write_prop(req, &object, b"failure", failed)?;
         if failure {
             reason = Some(kind.case_name());
         }
@@ -121,11 +113,8 @@ fn throw_invalid(
         Err(thrown) => return thrown,
     };
     if let Some(object) = throwable.as_object().copied() {
-        let written = PhpString::new(req, b"errors").and_then(|name| {
-            let errors = Value::array(errors);
-            req.addref(&errors);
-            object.set_prop(req, name.hand_on_unmigrated(), errors)
-        });
+        let errors = Owner::take(req, Value::array(errors));
+        let written = write_prop(req, &object, b"errors", errors);
         if let Err(thrown) = written {
             throwable.give_up(req);
             return thrown;
@@ -373,17 +362,16 @@ impl InvalidUrlException {
     ) -> Result<(), Thrown> {
         let this = this.object();
         if let Passed::Given(message) = message {
-            let message = Value::string(message);
-            req.addref(&message);
-            write(req, this, b"message", message)?;
+            let message = Owner::take(req, Value::string(message));
+            write_prop(req, &this, b"message", message)?;
         }
         if code != 0 {
-            write(req, this, b"code", Value::int(code))?;
+            let code = Owner::take(req, Value::int(code));
+            write_prop(req, &this, b"code", code)?;
         }
         if let Some(previous) = previous {
-            let previous = previous.object().as_value();
-            req.addref(&previous);
-            write(req, this, b"previous", previous)?;
+            let previous = Owner::take(req, previous.object().as_value());
+            write_prop(req, &this, b"previous", previous)?;
         }
         let errors = match errors {
             Passed::Given(errors) => {
@@ -394,29 +382,31 @@ impl InvalidUrlException {
                         "be a list of Uri\\WhatWg\\UrlValidationError",
                     ));
                 }
-                let errors = Value::array(errors);
-                req.addref(&errors);
-                errors
+                Owner::take(req, Value::array(errors))
             }
-            Passed::Omitted => Value::array(PhpArray::empty()),
+            Passed::Omitted => Owner::take(req, Value::array(PhpArray::empty())),
         };
         if this.prop(req, b"errors").is_some() {
-            req.release(errors);
+            errors.give_up(req);
             return Err(readonly_property(
                 req,
                 "Uri\\WhatWg\\InvalidUrlException",
                 "errors",
             ));
         }
-        write(req, this, b"errors", errors)
+        write_prop(req, &this, b"errors", errors)
     }
 }
 
-/// `zend_update_property`: one property written by name in the scope of
-/// the class that declares it.
-fn write(req: &mut Request, object: PhpObject, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?.hand_on_unmigrated();
-    object.set_prop(req, name, value)
+/// The case object of `kind` as an owner. `IntoReturn` answers a case
+/// with one owner taken for the caller (`enum_case`), which the face has
+/// no way to name as the owner it is: a second is taken for the caller
+/// and that one given back.
+fn case_owner(req: &mut Request, kind: UrlValidationErrorType) -> Result<Owner<Value>, Thrown> {
+    let returned = kind.into_return(req)?;
+    let owner = Owner::take(req, returned);
+    req.release(returned);
+    Ok(owner)
 }
 
 /// `zend_readonly_property_modification_error`.
@@ -553,18 +543,18 @@ impl UrlValidationError {
         if this.prop(req, b"context").is_some() {
             return Err(readonly_property(req, class, "context"));
         }
-        let context = Value::string(context);
-        req.addref(&context);
-        write(req, this, b"context", context)?;
+        let context = Owner::take(req, Value::string(context));
+        write_prop(req, &this, b"context", context)?;
         if this.prop(req, b"type").is_some() {
             return Err(readonly_property(req, class, "type"));
         }
-        let kind = r#type.into_return(req)?;
-        write(req, this, b"type", kind)?;
+        let kind = case_owner(req, r#type)?;
+        write_prop(req, &this, b"type", kind)?;
         if this.prop(req, b"failure").is_some() {
             return Err(readonly_property(req, class, "failure"));
         }
-        write(req, this, b"failure", Value::bool(failure))
+        let failure = Owner::take(req, Value::bool(failure));
+        write_prop(req, &this, b"failure", failure)
     }
 }
 

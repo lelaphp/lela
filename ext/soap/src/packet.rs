@@ -46,17 +46,23 @@ fn next_element(mut trav: Option<Node>) -> Option<Node> {
 
 /// `master_to_zval` over a node of the response, with the call's own
 /// ref map.
-fn decode(req: &mut Request, cx: &mut Cx, enc: Option<EncRef>, node: Node) -> Res<Value> {
+fn decode(req: &mut Request, cx: &mut Cx, enc: Option<EncRef>, node: Node) -> Res<Owner<Value>> {
     master_to_zval(req, cx, enc, node)
 }
 
 /// A string decoded and made a string, `convert_to_string`.
 fn decode_string(req: &mut Request, cx: &mut Cx, node: Node) -> Res<Vec<u8>> {
     let v = decode(req, cx, get_conversion(ty::IS_STRING), node)?;
-    let s = to_string(req, &v)?;
+    let s = match to_string(req, &v) {
+        Ok(s) => s,
+        Err(thrown) => {
+            v.give_up(req);
+            return Err(thrown.into());
+        }
+    };
     let bytes = s.as_bytes().to_vec();
     s.give_up(req);
-    req.release(v);
+    v.give_up(req);
     Ok(bytes)
 }
 
@@ -300,7 +306,7 @@ fn read_fault(
     let mut faultstring: Option<Vec<u8>> = None;
     let mut faultactor: Option<Vec<u8>> = None;
     let mut lang: Vec<u8> = Vec::new();
-    let mut details: Option<Value> = None;
+    let mut details: Option<Owner<Value>> = None;
     if version == SOAP_1_1 {
         if let Some(t) = get_node(fault.children(), b"faultcode", None)
             && let Some(c) = t.children()
@@ -350,11 +356,11 @@ fn read_fault(
         faultcode.as_deref().unwrap_or_default(),
         faultstring.as_deref().unwrap_or_default(),
         faultactor.as_deref(),
-        details,
+        details.as_ref().map(|d| **d),
         &lang,
     );
     if let Some(d) = details {
-        req.release(d);
+        d.give_up(req);
     }
     added?;
     Ok(())
@@ -422,7 +428,7 @@ fn read_body(
                         }
                     }
                     let tmp = match val {
-                        None => Value::null(),
+                        None => Owner::take(req, Value::null()),
                         Some(v) => match decode(req, cx, param.encode, v) {
                             Ok(tmp) => tmp,
                             Err(err) => {
@@ -432,7 +438,6 @@ fn read_body(
                         },
                     };
                     let key = PhpString::new(req, param.param_name.as_deref().unwrap_or_default())?;
-                    let tmp = crate::classes::owner_of(req, tmp);
                     let key = PhpKey::from_string(req, key);
                     return_value.set(req, key, tmp)?;
                     param_count += 1;
@@ -456,17 +461,15 @@ fn read_body(
                         if let Some(existing) = return_value.find(&name) {
                             if let Some(arr) = existing.deref().as_array().copied() {
                                 let mut arr = Owner::take(req, arr);
-                                let tmp = crate::classes::owner_of(req, tmp);
                                 arr.append(req, tmp)?;
                                 let key = PhpString::new(req, &name)?;
                                 let key = PhpKey::from_string(req, key);
                                 return_value.set(req, key, arr.into_value())?;
                             } else {
-                                req.release(tmp);
+                                tmp.give_up(req);
                             }
                         } else if v.next().is_some() && get_node(v.next(), &name, None).is_some() {
                             let mut arr = PhpArray::new(req)?;
-                            let tmp = crate::classes::owner_of(req, tmp);
                             arr.append(req, tmp)?;
                             let key = PhpString::new(req, &name)?;
                             let key = PhpKey::from_string(req, key);
@@ -474,11 +477,9 @@ fn read_body(
                         } else {
                             let key = PhpString::new(req, &name)?;
                             let key = PhpKey::from_string(req, key);
-                            let tmp = crate::classes::owner_of(req, tmp);
                             return_value.set(req, key, tmp)?;
                         }
                     } else {
-                        let tmp = crate::classes::owner_of(req, tmp);
                         return_value.append(req, tmp)?;
                     }
                     param_count += 1;
@@ -532,7 +533,6 @@ fn read_body(
                 };
                 let key = PhpString::new(req, &t.name())?;
                 let key = PhpKey::from_string(req, key);
-                let val = crate::classes::owner_of(req, val);
                 headers.set(req, key, val)?;
             }
             trav = t.next();

@@ -64,6 +64,7 @@ mem_forget = "warn"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }  # php_unit: the linked class record's index by name, a `HashTable` of row positions (#2169); already in the lock under indexmap
 regex-lite = "0.1"                  # permit's deny_pattern; one package, no dependencies
 sha1_smol = "1"                     # git blob ids for the stamp's tree hash, in process; one package, no dependencies
 serde = { version = "1", features = ["derive"] }

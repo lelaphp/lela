@@ -650,39 +650,6 @@ fn get_mangled_object_vars(
     crate::api::values::adopted(req, made)
 }
 
-/// `ce->function_table` in its order: the class's own methods as
-/// declared, then each one inherited that it does not declare again,
-/// the parent's table in its own order, and last the interfaces'
-/// methods nothing in the chain declared. Each row is the method's name
-/// as declared, its visibility and the class that declared it.
-fn function_table(req: &Request, class: ClassId) -> Vec<(Box<[u8]>, Visibility, ClassId)> {
-    let mut rows: Vec<(Box<[u8]>, Visibility, ClassId)> = Vec::new();
-    let mut pending = vec![class];
-    let mut seen = Vec::new();
-    let mut interfaces = Vec::new();
-    while let Some(here) = pending.pop() {
-        if seen.contains(&here) || seen.len() > 64 {
-            continue;
-        }
-        seen.push(here);
-        let Some(decl) = req.class_decl(here) else {
-            continue;
-        };
-        for method in &decl.methods {
-            let name = &method.function.name.0;
-            if !rows.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(name)) {
-                rows.push((name.clone(), method.visibility, here));
-            }
-        }
-        interfaces.extend(decl.interfaces.iter().filter_map(|i| req.class_named(&i.0)));
-        match req.class_parent(here) {
-            Some(parent) => pending.push(parent),
-            None => pending.extend(interfaces.drain(..).rev()),
-        }
-    }
-    rows
-}
-
 /// `get_class_methods(object|string $object_or_class): array`, php's
 /// `ZEND_FUNCTION(get_class_methods)` (`Z/Zend/zend_builtin_functions.c:946`):
 /// the names of the methods in `ce->function_table` the executed scope
@@ -720,6 +687,21 @@ fn function_table(req: &Request, class: ClassId) -> Vec<(Box<[u8]>, Visibility, 
 /// #1 {main}
 ///   thrown in %s on line 5
 /// ```
+///
+/// The table's order is php's: the class's own methods, a trait's
+/// among them, then the parent's table, then the traits' abstract
+/// methods it took, then its interfaces' methods nothing above holds:
+///
+/// ```php
+/// interface I { function i(); }
+/// trait T { function t() {} abstract function ta(); }
+/// abstract class P implements I { function p() {} private function pp() {} }
+/// abstract class C extends P implements Countable { use T; function c() {} }
+/// echo implode(",", get_class_methods('C')), "\n";
+/// ```
+/// ```expect
+/// c,t,p,i,ta,count
+/// ```
 #[php_function]
 fn get_class_methods(
     req: &mut Request,
@@ -727,10 +709,11 @@ fn get_class_methods(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let class = object_or_class_name(req, object_or_class.value(), 1)?;
     let scope = req.scope();
-    let names: Vec<Box<[u8]>> = function_table(req, class)
+    let names: Vec<Box<[u8]>> = req
+        .methods_in_order(class)
         .into_iter()
-        .filter(|(_, visibility, declaring)| visible(req, *declaring, *visibility, scope))
-        .map(|(name, _, _)| name)
+        .filter(|(declaring, method)| visible(req, *declaring, method.visibility, scope))
+        .map(|(_, method)| method.function.name.0.clone())
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {

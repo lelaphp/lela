@@ -571,6 +571,9 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::MethodRow
+request::MethodRow::class
+request::MethodRow::scope
 request::Notification
 request::NotifyCode
 request::ObserveAllocations
@@ -744,6 +747,8 @@ request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
 request::Request::method_named
+request::Request::method_row
+request::Request::method_rows
 request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::native_trampoline
@@ -786,6 +791,7 @@ request::Request::response_headers
 request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used
+request::Request::row_method
 request::Request::running_handler_flags
 request::Request::sapi_name
 request::Request::scope
@@ -1173,6 +1179,7 @@ values::PhpArray::try_append
 values::PhpArray::unprotect
 values::PhpArray::unset
 values::PhpObject
+values::PhpObject::append_row
 values::PhpObject::as_value
 values::PhpObject::class
 values::PhpObject::clone_with
@@ -1201,6 +1208,7 @@ values::PhpObject::pointer_move
 values::PhpObject::pointer_row
 values::PhpObject::prop
 values::PhpObject::properties_shared
+values::PhpObject::property_table
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::props_held
@@ -1296,8 +1304,10 @@ values::Value::type_name
 values::Value::unpassed
 values::ValueRef
 values::View
+values::walk::BuiltRows
 values::walk::Guarded
 values::walk::Hold
+values::walk::ObjectTable
 values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
@@ -1305,9 +1315,11 @@ values::walk::Row::refcount
 values::walk::Row::value
 values::walk::Rows
 values::walk::Step
+values::walk::Table
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded
 values::walk::live
+values::walk::properties
 values::walk::rows
 values::zend_sort

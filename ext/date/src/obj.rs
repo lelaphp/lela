@@ -438,9 +438,37 @@ fn update(rows: &mut Vec<(Key, Value)>, name: PhpString, value: Value) {
     }
 }
 
-/// The fields an object's hash shows beside its own rows, each under
-/// its name with one owner of its value.
+/// The fields a `*_object_to_hash` answers, each value one owner, which
+/// the table or the row it is handed to takes.
 pub(super) type Fields = Vec<(&'static [u8], Owner<Value>)>;
+
+/// Fields handed nowhere, given up: the way out of a path that fails
+/// while it holds them.
+pub(super) fn give_up_fields(req: &mut Request, fields: Fields) {
+    for (_, value) in fields {
+        value.give_up(req);
+    }
+}
+
+/// `made` pushed under `name`, or, where it failed, every field made
+/// before it given up and the failure answered.
+fn push_field(
+    req: &mut Request,
+    fields: &mut Fields,
+    name: &'static [u8],
+    made: Result<Owner<Value>, Thrown>,
+) -> Result<(), Thrown> {
+    match made {
+        Ok(value) => {
+            fields.push((name, value));
+            Ok(())
+        }
+        Err(thrown) => {
+            give_up_fields(req, std::mem::take(fields));
+            Err(thrown)
+        }
+    }
+}
 
 /// The rows as an array with its own owners, each key and value one
 /// more owner of what `own` views, the table `__serialize` returns and
@@ -460,60 +488,40 @@ pub(super) fn rows_array(
             return Err(thrown);
         }
     };
-    let filled = fill_rows(req, &mut array, own, fields, first);
-    match filled {
-        Ok(()) => Ok(array),
-        Err(thrown) => {
-            array.give_up(req);
-            Err(thrown)
-        }
-    }
-}
-
-/// [`rows_array`]'s writes into `array`; every field's owner handed to
-/// the array or, past a write that fails, given up.
-fn fill_rows(
-    req: &mut Request,
-    array: &mut Owner<PhpArray>,
-    own: &[(Key, Value)],
-    fields: Fields,
-    first: bool,
-) -> Result<(), Thrown> {
-    let mut written = Ok(());
     if !first {
         for (key, value) in own {
-            written = array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value));
-            if written.is_err() {
-                break;
+            let (key, value) = (Owner::take(req, key.clone()), Owner::take(req, *value));
+            if let Err(thrown) = array.set(req, key, value) {
+                give_up_fields(req, fields);
+                array.give_up(req);
+                return Err(thrown);
             }
         }
     }
     let mut fields = fields.into_iter();
-    if written.is_ok() {
-        for (name, value) in fields.by_ref() {
-            written = set_str(req, array, name, value);
-            if written.is_err() {
-                break;
+    while let Some((name, value)) = fields.next() {
+        let set = match PhpString::new(req, name) {
+            Ok(key) => array.set(req, key.into_key(), value),
+            Err(thrown) => {
+                value.give_up(req);
+                Err(thrown)
             }
+        };
+        if let Err(thrown) = set {
+            give_up_fields(req, fields.collect());
+            array.give_up(req);
+            return Err(thrown);
         }
     }
-    give_up_fields(req, fields.collect());
-    written?;
     if first {
         for (key, value) in own {
             if !array.contains(key) {
-                array.set(req, Owner::take(req, key.clone()), Owner::take(req, *value))?;
+                let (key, value) = (Owner::take(req, key.clone()), Owner::take(req, *value));
+                array.set(req, key, value)?;
             }
         }
     }
-    Ok(())
-}
-
-/// The owners of fields no array took, given up.
-fn give_up_fields(req: &mut Request, fields: Fields) {
-    for (_, value) in fields {
-        value.give_up(req);
-    }
+    Ok(array)
 }
 
 /// The rows a property reader sees: the object's own rows with the
@@ -526,20 +534,29 @@ fn rows_view(
     fields: Fields,
     keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Value>>,
 ) -> Result<Vec<(Key, Value)>, Thrown> {
-    let mut made = Vec::with_capacity(fields.len());
-    for (name, value) in fields {
-        made.push((name, value.hand_on_unmigrated()));
-    }
-    let made = made;
-    let mut rows = std_rows(req, object)?;
-    let mut kept = Vec::with_capacity(made.len() * 2);
-    for (name, value) in made {
-        let name = PhpString::new(req, name)?.hand_on_unmigrated();
-        kept.push(Value::string(name));
-        kept.push(value);
+    let mut rows = match std_rows(req, object) {
+        Ok(rows) => rows,
+        Err(thrown) => {
+            give_up_fields(req, fields);
+            return Err(thrown);
+        }
+    };
+    let mut made = Vec::with_capacity(fields.len() * 2);
+    let mut fields = fields.into_iter();
+    while let Some((name, value)) = fields.next() {
+        let value = value.hand_on_unmigrated();
+        made.push(value);
+        let name = match PhpString::new(req, name) {
+            Ok(name) => name.hand_on_unmigrated(),
+            Err(thrown) => {
+                give_up_fields(req, fields.collect());
+                release_rows(req, Some(made));
+                return Err(thrown);
+            }
+        };
+        made.push(Value::string(name));
         update(&mut rows, name, value);
     }
-    let made = kept;
     let old = keep(req, object).map(|rows| std::mem::replace(rows, made));
     for value in old.into_iter().flatten() {
         req.release(value);
@@ -563,43 +580,29 @@ fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
 /// `timezone_type` and `timezone`.
 pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown> {
     let text = date_format(b"x-m-d H:i:s.u", t, true);
-    let zone: Option<Vec<u8>> = (t.is_localtime != 0).then(|| match t.zone_type {
-        ZONETYPE_ID => t.zone().map(|z| z.name().to_vec()).unwrap_or_default(),
-        ZONETYPE_OFFSET => offset_string(i64::from(t.z)).into_bytes(),
-        ZONETYPE_ABBR => t.tz_abbr().to_vec(),
-        _ => Vec::new(),
-    });
-    let zone = match zone {
-        Some(zone) => Some(PhpString::new(req, &zone)?),
-        None => None,
-    };
-    let text = match PhpString::new(req, &text) {
-        Ok(text) => text,
-        Err(thrown) => {
-            if let Some(zone) = zone {
-                zone.give_up(req);
-            }
-            return Err(thrown);
-        }
-    };
-    let mut fields = vec![(&b"date"[..], text.into_value())];
-    if let Some(zone) = zone {
+    let mut fields = vec![(&b"date"[..], PhpString::new(req, &text)?.into_value())];
+    if t.is_localtime != 0 {
         let zone_type = Owner::take(req, Value::int(i64::from(t.zone_type)));
         fields.push((b"timezone_type", zone_type));
-        fields.push((b"timezone", zone.into_value()));
+        let zone: Vec<u8> = match t.zone_type {
+            ZONETYPE_ID => t.zone().map(|z| z.name().to_vec()).unwrap_or_default(),
+            ZONETYPE_OFFSET => offset_string(i64::from(t.z)).into_bytes(),
+            ZONETYPE_ABBR => t.tz_abbr().to_vec(),
+            _ => Vec::new(),
+        };
+        let zone = PhpString::new(req, &zone).map(Owner::into_value);
+        push_field(req, &mut fields, b"timezone", zone)?;
     }
     Ok(fields)
 }
 
 /// `date_timezone_object_to_hash`.
 pub(super) fn tz_fields(req: &mut Request, kind: &TzKind) -> Result<Fields, Thrown> {
-    let name = PhpString::new(req, &kind.name())?;
+    let name = PhpString::new(req, &kind.name())?.into_value();
+    let zone_type = Owner::take(req, Value::int(kind.zone_type()));
     Ok(vec![
-        (
-            &b"timezone_type"[..],
-            Owner::take(req, Value::int(kind.zone_type())),
-        ),
-        (b"timezone", name.into_value()),
+        (&b"timezone_type"[..], zone_type),
+        (b"timezone", name),
     ])
 }
 
@@ -610,15 +613,16 @@ pub(super) fn interval_fields(
     date_string: Option<&[u8]>,
 ) -> Result<Fields, Thrown> {
     if let Some(text) = date_string {
-        let text = PhpString::new(req, text)?;
+        let text = PhpString::new(req, text)?.into_value();
+        let from_string = Owner::take(req, Value::bool(true));
         return Ok(vec![
-            (&b"from_string"[..], Owner::take(req, Value::bool(true))),
-            (b"date_string", text.into_value()),
+            (&b"from_string"[..], from_string),
+            (b"date_string", text),
         ]);
     }
     #[allow(clippy::cast_precision_loss)]
     let f = diff.us as f64 / 1_000_000.0;
-    let fields: [(&'static [u8], Value); 10] = [
+    let scalars = [
         (&b"y"[..], Value::int(diff.y)),
         (b"m", Value::int(diff.m)),
         (b"d", Value::int(diff.d)),
@@ -637,7 +641,7 @@ pub(super) fn interval_fields(
         ),
         (b"from_string", Value::bool(false)),
     ];
-    Ok(fields
+    Ok(scalars
         .into_iter()
         .map(|(name, value)| (name, Owner::take(req, value)))
         .collect())
@@ -665,33 +669,23 @@ pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fiel
     let (class, interval) = (p.start_ce, p.interval);
     let (recurrences, include_start, include_end) =
         (p.recurrences, p.include_start_date, p.include_end_date);
-    let mut fields: Fields = Vec::with_capacity(7);
-    let made = (|| -> Result<(), Thrown> {
-        fields.push((b"start", period_date(req, start.as_ref(), class)?));
-        fields.push((b"current", period_date(req, current.as_ref(), class)?));
-        fields.push((b"end", period_date(req, end.as_ref(), class)?));
-        let interval = match interval {
-            Some(diff) => new_interval(req, diff, 0, None)?.into_value(),
-            None => Owner::take(req, Value::null()),
-        };
-        fields.push((b"interval", interval));
-        Ok(())
-    })();
-    if let Err(thrown) = made {
-        for (_, value) in fields {
-            value.give_up(req);
-        }
-        return Err(thrown);
+    let mut fields = Vec::with_capacity(7);
+    for (name, t) in [(&b"start"[..], start), (b"current", current), (b"end", end)] {
+        let date = period_date(req, t.as_ref(), class);
+        push_field(req, &mut fields, name, date)?;
     }
-    fields.push((b"recurrences", Owner::take(req, Value::int(recurrences))));
-    fields.push((
-        b"include_start_date",
-        Owner::take(req, Value::bool(include_start)),
-    ));
-    fields.push((
-        b"include_end_date",
-        Owner::take(req, Value::bool(include_end)),
-    ));
+    let interval = match interval {
+        Some(diff) => new_interval(req, diff, 0, None).map(Owner::into_value),
+        None => Ok(Owner::take(req, Value::null())),
+    };
+    push_field(req, &mut fields, b"interval", interval)?;
+    for (name, value) in [
+        (&b"recurrences"[..], Value::int(recurrences)),
+        (b"include_start_date", Value::bool(include_start)),
+        (b"include_end_date", Value::bool(include_end)),
+    ] {
+        fields.push((name, Owner::take(req, value)));
+    }
     Ok(fields)
 }
 
@@ -995,8 +989,8 @@ impl ObjectHandlers for IntervalHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let initialized = object
             .native::<IntervalObj>(req)
@@ -1005,14 +999,14 @@ impl ObjectHandlers for IntervalHandlers {
         if !initialized || !INTERVAL_FIELDS[..8].contains(&field.as_slice()) {
             return Std.write_property(req, object, name, value);
         }
-        req.release(Value::string(name));
+        name.give_up(req);
         let result = if field == b"f" {
             #[allow(clippy::cast_possible_truncation)]
             to_double(req, &value).map(|f| (f * 1_000_000.0) as i64)
         } else {
             to_long(req, &value)
         };
-        req.release(value);
+        value.give_up(req);
         let n = result?;
         if let Some(diff) = object
             .native_mut::<IntervalObj>(req)
@@ -1200,17 +1194,23 @@ impl ObjectHandlers for IntervalHandlers {
 /// new one appended, so the table's internal pointer stays where it
 /// stood.
 fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    for (name, value) in interval_rows(req, object)? {
-        let name = match PhpString::new(req, name) {
-            Ok(name) => name,
+    let mut fields = interval_rows(req, object)?.into_iter();
+    while let Some((name, value)) = fields.next() {
+        let written = match PhpString::new(req, name) {
+            Ok(name) => {
+                let written = object.set_row(req, &Key::Str(*name), value);
+                name.give_up(req);
+                written
+            }
             Err(thrown) => {
                 value.give_up(req);
-                return Err(thrown);
+                Err(thrown)
             }
         };
-        let written = object.set_row(req, &Key::Str(*name), value.hand_on_unmigrated());
-        name.give_up(req);
-        written?;
+        if let Err(thrown) = written {
+            give_up_fields(req, fields.collect());
+            return Err(thrown);
+        }
     }
     Ok(())
 }
@@ -1340,29 +1340,28 @@ impl ObjectHandlers for PeriodHandlers {
         if read == PropertyRead::Write {
             return Err(readonly(req, name));
         }
-        let fields = period_fields(req, object)?;
-        let mut found = Value::null();
-        for (field, value) in fields {
+        let mut found = None;
+        for (field, value) in period_fields(req, object)? {
             if field == name {
-                found = value.hand_on_unmigrated();
+                found = Some(value);
             } else {
                 value.give_up(req);
             }
         }
-        Ok(found)
+        Ok(found.map_or_else(Value::null, Owner::hand_on_unmigrated))
     }
 
     fn write_property(
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if PERIOD_FIELDS.contains(&name.as_bytes()) {
-            req.release(value);
+            value.give_up(req);
             let thrown = readonly(req, name.as_bytes());
-            req.release(Value::string(name));
+            name.give_up(req);
             return Err(thrown);
         }
         Std.write_property(req, object, name, value)

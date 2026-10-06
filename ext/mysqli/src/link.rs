@@ -1042,28 +1042,19 @@ pub(crate) fn get_charset(req: &mut Request, on: On) -> Result<Option<Owner<PhpO
         return Ok(None);
     };
     let object = crate::std_object(req)?;
-    let rows = [
-        (
-            "charset",
-            string(req, cs.name.as_bytes())?.hand_on_unmigrated(),
-        ),
-        (
-            "collation",
-            string(req, cs.collation.as_bytes())?.hand_on_unmigrated(),
-        ),
-        ("dir", string(req, b"")?.hand_on_unmigrated()),
-        ("min_length", Value::int(i64::from(cs.min_length))),
-        ("max_length", Value::int(i64::from(cs.max_length))),
-        ("number", Value::int(i64::from(cs.nr))),
-        ("state", Value::int(1)),
-        (
-            "comment",
-            string(req, cs.comment.as_bytes())?.hand_on_unmigrated(),
-        ),
+    let facts = [
+        ("charset", crate::Fact::Text(cs.name.as_bytes())),
+        ("collation", crate::Fact::Text(cs.collation.as_bytes())),
+        ("dir", crate::Fact::Text(b"")),
+        ("min_length", crate::Fact::Int(i64::from(cs.min_length))),
+        ("max_length", crate::Fact::Int(i64::from(cs.max_length))),
+        ("number", crate::Fact::Int(i64::from(cs.nr))),
+        ("state", crate::Fact::Int(1)),
+        ("comment", crate::Fact::Text(cs.comment.as_bytes())),
     ];
-    for (name, value) in rows {
-        let name = PhpString::new(req, name.as_bytes())?.hand_on_unmigrated();
-        object.set_prop(req, name, value)?;
+    if let Err(thrown) = crate::add_facts(req, *object, &facts) {
+        object.give_up(req);
+        return Err(thrown);
     }
     Ok(Some(object))
 }

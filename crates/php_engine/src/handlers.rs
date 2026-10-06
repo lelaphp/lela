@@ -4908,6 +4908,32 @@ pub(crate) fn new<T: Tier>(
 /// m2
 /// ```
 ///
+/// The pair is read back only in the scope that wrote it: a trait's
+/// method runs in the scope of each class that uses it, and a closure
+/// in the scope it is bound to, over one op array and so one slot,
+/// where php gives each scope a cache of its own. The private method
+/// one scope may call is the access rule's `Error` from the next.
+///
+/// ```php
+/// trait T { function call() { return A::p(); } }
+/// class A { use T; private static function p() { return "A::p"; } }
+/// class B { use T; }
+/// foreach ([new A, new B, new A] as $by) {
+///     try { echo $by->call(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $f = function () { return A::p(); };
+/// foreach ([Closure::bind($f, null, A::class), $f] as $g) {
+///     try { echo $g(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// A::p
+/// Call to private method A::p() from scope B
+/// A::p
+/// A::p
+/// Call to private method A::p() from global scope
+/// ```
+///
 /// A method named on a trait itself, and never one a class took from
 /// it, is php's deprecation on every pass, since php caches no such
 /// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
@@ -4970,14 +4996,12 @@ pub(crate) fn init_static_method_call<T: Tier>(
             class
         }
     };
+    // The pair answers where it holds this pass's class and was written
+    // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (
-            OperandKind::Const,
-            Cached::ClassAndCallee {
-                class: held,
-                function,
-            },
-        ) if held == class => Some(function),
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+            req.cached_callee(frame, slot, class)
+        }
         _ => None,
     };
     if let Some(function) = cached_callee {
@@ -5032,10 +5056,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // rule, and before the rule that the callee is no instance method,
     // which php applies on the cached pass too. php holds the write off
     // a callee reached through a trampoline, one marked
-    // `ZEND_ACC_NEVER_CACHE` and one a trait declared; this engine has
-    // only the last, whose deprecation is raised on every pass.
+    // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
+    // is raised on every pass.
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
-        req.prime(frame, slot, Cached::ClassAndCallee { class, function });
+        req.prime_callee(frame, slot, class, function);
     }
     static_call_frame(req, frame, op, class, function, name)
 }
@@ -5048,8 +5072,8 @@ pub(crate) fn init_static_method_call<T: Tier>(
 /// the calling frame's receiver), and php's `Error` where neither
 /// serves, `Call to undefined method` or the access rule's; then the
 /// end [`Request::static_method_found`] holds a method to. The `bool`
-/// is whether php keeps the callee out of the cache slot: a
-/// trampoline, and a method named on a trait.
+/// is whether php keeps the callee out of the cache slot: one
+/// [`Request::never_cached`] names, and a method named on a trait.
 fn static_method(
     req: &mut Request,
     class: crate::api::values::ClassId,
@@ -5073,9 +5097,9 @@ fn static_method(
             None => return Err(undefined_method(req, class, written)),
         },
     };
-    let trampoline = req.trampoline_of(function).is_some();
+    let never_cached = req.never_cached(function);
     let of_trait = req.static_method_found(function)?;
-    Ok((function, trampoline || of_trait))
+    Ok((function, never_cached || of_trait))
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -5381,6 +5405,91 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
 /// B B
 /// in dtor
 /// ```
+///
+/// A method the program names is looked up on the first pass on each
+/// class, and read back from the opline's cache slot on every pass
+/// after on the same class from the same scope ([`method_of_call`]).
+/// The scope is part of what the slot answers for: a trait's method
+/// runs in the scope of each class that uses it and a closure in the
+/// one it is bound to, over one op array, and the callee one scope
+/// reaches, a private method or the private one standing in for a
+/// child's public one, is the access rule's `Error` or the child's
+/// method from another.
+///
+/// ```php
+/// trait T { function call($o) { return $o->m(); } }
+/// class P { use T; private function m() { return "P::m"; } }
+/// class C extends P { public function m() { return "C::m"; } }
+/// class D { use T; }
+/// class A { private function m() { return "A::m"; } }
+/// foreach ([[new P, new C], [new D, new C], [new P, new C], [new D, new A]] as [$by, $on]) {
+///     try { echo $by->call($on), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $f = function ($o) { return $o->m(); };
+/// foreach ([Closure::bind($f, null, A::class), $f] as $g) {
+///     try { echo $g(new A), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// P::m
+/// C::m
+/// P::m
+/// Call to private method A::m() from scope D
+/// A::m
+/// Call to private method A::m() from global scope
+/// ```
+///
+/// What a lookup answers for the object and not for its class is never
+/// held: `__call`'s trampoline, a closure's `__invoke`, the method an
+/// iterator hands on to the one it wraps, and a method a `PDO`
+/// connection's connector lays on it.
+///
+/// ```php
+/// class M { function __call($n, $a) { return "__call $n"; } }
+/// class N extends M { function m() { return "N::m"; } }
+/// foreach ([new M, new N, new M] as $o) { echo $o->m(), "\n"; }
+/// foreach ([function () { return 1; }, fn() => 2] as $f) { echo $f->__invoke(), "\n"; }
+/// class One extends ArrayIterator { function hello() { return "One"; } }
+/// class Two extends ArrayIterator { function hello() { return "Two"; } }
+/// foreach ([new One([]), new Two([])] as $in) { echo (new IteratorIterator($in))->hello(), "\n"; }
+/// $a = new PDO('sqlite::memory:');
+/// $b = (new ReflectionClass('PDO'))->newInstanceWithoutConstructor();
+/// foreach ([$a, $b] as $p) {
+///     try { var_dump(@$p->sqliteCreateFunction('f', 'strlen')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// __call m
+/// N::m
+/// __call m
+/// 1
+/// 2
+/// One
+/// Two
+/// bool(true)
+/// Call to undefined method PDO::sqliteCreateFunction()
+/// ```
+///
+/// A primed slot answers without the class's `get_method`, so a class
+/// whose handler refuses an object in a state refuses it only until a
+/// pass on another object of the class has primed the slot, in php as
+/// here: an iterator whose constructor never ran is refused on the
+/// first pass and called on the third.
+///
+/// ```php
+/// class Lazy extends RecursiveIteratorIterator {
+///     function __construct($init) { if ($init) parent::__construct(new RecursiveArrayIterator([])); }
+///     function bar() { return "bar"; }
+/// }
+/// foreach ([new Lazy(false), new Lazy(true), new Lazy(false)] as $it) {
+///     try { echo $it->bar(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// The Lazy instance wasn't initialized properly
+/// bar
+/// bar
+/// ```
 pub(crate) fn init_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5398,7 +5507,9 @@ pub(crate) fn init_method_call<T: Tier>(
     };
     let receiver = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let found = match receiver.as_object().copied() {
-        Some(object) => method_on(req, object, &method).map(|found| (object, found)),
+        Some(object) => {
+            method_of_call(req, frame, op, object, &method).map(|found| (object, found))
+        }
         None => Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -5491,6 +5602,40 @@ pub(crate) fn init_method_call<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// The callee of an `INIT_METHOD_CALL` on `object`, and the receiver
+/// its class handed the call to where one did: php's
+/// `CACHED_PTR(opline->result.num) == called_scope` first, where `op2`
+/// is a constant, and [`method_on`] where the slot is unprimed or holds
+/// another class or was written from another scope
+/// ([`Cached::ClassAndCallee`]). The answer is written back, the
+/// receiver's class, the frame's scope and the callee together
+/// (`CACHE_POLYMORPHIC_PTR`, `Z/Zend/zend_vm_def.h:3694`), only where
+/// `op2` is a constant, the callee is no trampoline and no
+/// `ZEND_ACC_NEVER_CACHE` method ([`Request::never_cached`]), and the
+/// object itself answered, `obj == orig_obj`. A primed slot answers
+/// without asking the class's `get_method`, so a handler that refuses
+/// an object in a state, as an iterator whose constructor never ran, is
+/// not asked again for another object of the class, as php's is not.
+fn method_of_call(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    object: PhpObject,
+    method: &exec::MethodName,
+) -> Result<(Function, Option<PhpObject>), Thrown> {
+    let slot = CacheSlot(op.out);
+    let class = object.class();
+    let named = op.op2_type == OperandKind::Const;
+    if named && let Some(function) = req.cached_callee(frame, slot, class) {
+        return Ok((function, None));
+    }
+    let (function, receiver) = method_on(req, object, method)?;
+    if named && receiver.is_none() && !req.never_cached(function) {
+        req.prime_callee(frame, slot, class, function);
+    }
+    Ok((function, receiver))
+}
+
 /// `obj->handlers->get_method(&obj, name, key)` and what
 /// `INIT_METHOD_CALL` holds the answer to: the method by its lowered
 /// name on the object, the trampoline of its class's `__call` where the
@@ -5517,6 +5662,12 @@ fn method_on(
     object: PhpObject,
     method: &exec::MethodName,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
+    // The lookup a primed slot spares, counted where the tests read it
+    // ([`exec::Vm::lookups`]).
+    #[cfg(test)]
+    {
+        req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
+    }
     let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
     let Some((function, receiver)) = method_found(req, object, &method.lowered, &written)? else {
         return Err(undefined_method(req, object.class(), &method.written));
@@ -11903,7 +12054,8 @@ fn assign_property(
                 )));
             };
             write_out(req, frame, code, op, &value);
-            req.addref(name);
+            let key = Owner::take(req, key);
+            let value = Owner::adopt(req, value);
             let table = req.object_handlers(object.heap());
             Ok(table.write_property(req, object, key, value))
         }
@@ -14637,7 +14789,8 @@ fn served_property_step(
     // every arm: the stepped value's own, which php's `zval_ptr_dtor(&res)`
     // gives up after the write, and one more of the name, which the
     // operand keeps its own of.
-    req.addref(&Value::string(name));
+    let name = Owner::take(req, name);
+    let stepped = Owner::adopt(req, stepped);
     let table = req.object_handlers(object.heap());
     table.write_property(req, object, name, stepped)
 }
@@ -15245,7 +15398,8 @@ fn served_incdec(
     }
     // `write_property` takes an owner of the value and of the name,
     // the stepped value's own and one more of the name.
-    req.addref(&Value::string(name));
+    let name = Owner::take(req, name);
+    let stepped = Owner::adopt(req, stepped);
     let table = req.object_handlers(object.heap());
     let wrote = table.write_property(req, object, name, stepped);
     match (refused, wrote) {
@@ -22411,7 +22565,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class, function }
+                    Cached::ClassAndCallee { class, scope: None, function }
                         if Some(class) == closure && Some(function) == callee
                 ),
                 "the class and the callee are in the slot after pass {pass}"
@@ -22450,6 +22604,102 @@ mod tests {
                 matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class)
                     if Some(class) == exception),
                 "the class alone is in the slot after pass {pass}"
+            );
+        }
+    }
+
+    /// A unit whose main op array is one `INIT_METHOD_CALL` over the CV
+    /// `$o` and the pair `GetMessage`, `getmessage`, with the two cache
+    /// slots the compiler reserves in `result` at byte zero: `$o->GetMessage()`.
+    fn method_call(strings: &mut php_heap::Strings) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::InitMethodCall,
+                    op1_type: OperandKind::Cv,
+                    op1: 0,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![
+                    interned(strings, b"GetMessage"),
+                    interned(strings, b"getmessage"),
+                ]
+                .into_boxed_slice(),
+                vars: vec![php_unit::decl::Name::from("o")].into_boxed_slice(),
+                num_cvs: 1,
+                // `zend_alloc_cache_slots(2)`: the class and the callee.
+                cache_size: 16,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// `ZEND_INIT_METHOD_CALL` over a constant name, twice on an
+    /// `Exception` and once on an `Error`, which is what `$o->m()` in a
+    /// loop over two classes is: the first pass finds the slot
+    /// unprimed, looks the method up and writes the receiver's class
+    /// and the callee together, `CACHE_POLYMORPHIC_PTR(opline->result.num,
+    /// called_scope, fbc)`; the second reads the pair back and looks
+    /// nothing up; the third, on another class, looks the method up once
+    /// more and writes that class's pair over it.
+    #[test]
+    fn a_method_call_by_a_constant_name_looks_its_callee_up_once_per_class() {
+        let engine = Engine::cli_builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = method_call(&mut strings);
+        let frame = req.pushed(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let op = code.oplines.first().copied().unwrap_or_default();
+        let exception = req.class_named(b"exception");
+        let error = req.class_named(b"error");
+        assert!(
+            exception.is_some() && error.is_some(),
+            "the engine declares both"
+        );
+        let callee = |req: &Request, class: Option<ClassId>| {
+            class.and_then(|class| req.method_named(class, b"getmessage"))
+        };
+        let (on_exception, on_error) = (callee(&req, exception), callee(&req, error));
+        assert!(
+            on_exception.is_some() && on_exception != on_error,
+            "each declares its own"
+        );
+        assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
+
+        for (pass, class, function, lookups) in [
+            (1, exception, on_exception, 1),
+            (2, exception, on_exception, 1),
+            (3, error, on_error, 2),
+        ] {
+            let made = class.map(|class| req.new_object(class));
+            assert!(
+                matches!(made, Some(Ok(_))),
+                "an object is made on pass {pass}"
+            );
+            let Some(Ok(object)) = made else { continue };
+            let previous = req.set_slot(frame, 0, object.as_value());
+            req.release(previous);
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                init_method_call::<Nop>(&mut req, frame, code, &op),
+                Ok(Stepped::Same(frame)),
+                "the call frame is pushed on pass {pass}"
+            );
+            req.pop_call();
+            assert_eq!(req.vm().lookups, lookups, "lookups over {pass} pass(es)");
+            assert!(
+                matches!(
+                    req.cached(frame, CacheSlot(0)),
+                    Cached::ClassAndCallee { class: held, scope: None, function: callee }
+                        if Some(held) == class && Some(callee) == function
+                ),
+                "the receiver's class and its callee are in the slot after pass {pass}"
             );
         }
     }

@@ -1132,8 +1132,8 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: php_ext::values::PhpString,
-        value: Value,
+        name: Owner<php_ext::values::PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         crate::write_property(req, object, name, value)
     }

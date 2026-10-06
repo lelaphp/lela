@@ -2,9 +2,10 @@
 //! `zend_class_entry`: the modifier bits, the parent, the interfaces
 //! and traits, the function, property and constant tables, and the
 //! three ways php makes an instance. Each reads the linked tables the
-//! reflector's `$name` looks up again, the same walk
-//! `_class_string` renders (`linked_methods`, `linked_interfaces`,
-//! `linked_constants`, `linked_properties`).
+//! reflector's `$name` looks up again, the same `_class_string`
+//! renders: the engine's function table (`Request::method_rows`,
+//! `Request::method_row`), and `linked_interfaces`,
+//! `linked_constants` and `linked_properties`.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
@@ -14,7 +15,7 @@ use php_ext::call::{
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw, throw_error};
-use php_ext::request::Request;
+use php_ext::request::{MethodRow, Request};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
@@ -22,10 +23,9 @@ use super::{
     Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
     class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
     dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties,
-    linked_table, looked_up, lookup_class, method_or_invoke, method_ptr, namespace_end, new_object,
-    property_named, reflection_class_factory, set_name, set_string_prop, string_value, this_class,
-    user_line,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties, looked_up,
+    lookup_class, method_or_invoke, namespace_end, new_object, property_named,
+    reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
 };
 
 /// The name of the first of `traits` whose function table has `method`,
@@ -36,7 +36,7 @@ fn trait_with(req: &mut Request, traits: &[Name], method: &[u8]) -> Result<Vec<u
         let Some(at) = lookup_class(req, &used.0)? else {
             continue;
         };
-        if linked_table(req, at).place(method).is_some() {
+        if req.method_row(at, method).is_some() {
             return Ok(class_name_of(req, at));
         }
     }
@@ -56,10 +56,9 @@ pub(super) fn class_is_abstract(req: &mut Request, class: ClassId) -> bool {
         .class_decl(class)
         .is_some_and(|decl| decl.flags.is_abstract);
     explicit
-        || linked_table(req, class)
-            .rows
-            .iter()
-            .any(|m| m.decl.is_abstract)
+        || req
+            .method_rows(class)
+            .any(|row| req.row_method(row).is_some_and(|m| m.is_abstract))
 }
 
 /// php's `ce_flags & (INTERFACE | TRAIT | ABSTRACT | ENUM)` test, which
@@ -68,19 +67,19 @@ fn cannot_instantiate(req: &mut Request, class: ClassId) -> bool {
     !matches!(kind_of(req, class), ClassKind::Class) || class_is_abstract(req, class)
 }
 
-/// `ce->constructor`: the linked `__construct`, with the scope that
-/// declared it.
-fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, ClassId)> {
-    linked_table(req, class)
-        .named(b"__construct")
-        .map(|m| (m.decl.clone(), m.scope))
+/// `ce->constructor`: the linked `__construct`, with the row of the
+/// function table it is.
+fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, MethodRow)> {
+    let row = req.method_row(class, b"__construct")?;
+    Some((req.row_method(row)?.clone(), row))
 }
 
 /// `reflection_method_factory(ce, mptr, ...)`: a `ReflectionMethod`
-/// with `$name` the method's, `$class` the scope that declared it and
+/// with `$name` the method's, `$class` the scope that declared it,
 /// `intern->ce` the class it was reached through, which
 /// `_function_string` renders against, so a method `B` inherits from
-/// `A` reads `inherits A`.
+/// `A` reads `inherits A`, and `intern->ptr` the row of the function
+/// table it is, none for a method no table holds.
 ///
 /// ```php
 /// class A { function m() {} } class B extends A {}
@@ -96,6 +95,7 @@ pub(super) fn method_factory(
     name: &[u8],
     scope: ClassId,
     ce: ClassId,
+    held: Option<MethodRow>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_named(req, b"ReflectionMethod")?;
     let object = new_object(req, class)?;
@@ -103,8 +103,7 @@ pub(super) fn method_factory(
     set_name(req, *object, name)?;
     set_string_prop(req, *object, b"class", &scope)?;
     keep(req, *object, ce, None);
-    let method = method_ptr(req, ce, name);
-    keep_method(req, *object, method);
+    keep_method(req, *object, held);
     Ok(object)
 }
 
@@ -873,9 +872,10 @@ impl ReflectionClass {
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
-        let clone = linked_table(req, class)
-            .named(b"__clone")
-            .map(|clone| clone.decl.visibility);
+        let clone = req
+            .method_row(class, b"__clone")
+            .and_then(|row| req.row_method(row))
+            .map(|clone| clone.visibility);
         if let Some(visibility) = clone {
             return Ok(visibility == Visibility::Public);
         }
@@ -1005,10 +1005,10 @@ impl ReflectionClass {
         this: This<Self>,
     ) -> Result<Option<Owner<Instance<crate::func::ReflectionMethod>>>, Thrown> {
         let class = this_class(req, this.object())?;
-        let Some((decl, scope)) = constructor_of(req, class) else {
+        let Some((decl, row)) = constructor_of(req, class) else {
             return Ok(None);
         };
-        let object = method_factory(req, &decl.function.name.0, scope, class)?;
+        let object = method_factory(req, &decl.function.name.0, row.scope(), class, Some(row))?;
         Ok(Some(object.into_instance()))
     }
 
@@ -1027,9 +1027,10 @@ impl ReflectionClass {
     fn hasMethod(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
-        let lowered = name.to_ascii_lowercase();
-        let found = linked_table(req, class).place(&lowered).is_some();
-        Ok(found || is_closure_invoke(req, class, &lowered))
+        if req.method_row(class, &name).is_some() {
+            return Ok(true);
+        }
+        Ok(is_closure_invoke(req, class, &name.to_ascii_lowercase()))
     }
 
     /// `ReflectionClass::getMethod(string $name)`:
@@ -1074,7 +1075,13 @@ impl ReflectionClass {
                 ),
             ));
         };
-        let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+        let object = method_factory(
+            req,
+            &found.decl.function.name.0,
+            found.scope,
+            class,
+            found.row,
+        )?;
         // The `__invoke` php makes keeps the closure it was made over.
         if found.via_handler
             && let Some(kept) = kept
@@ -1104,15 +1111,18 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4 | 16 | 32 | 64);
         let class = this_class(req, this.object())?;
         let mut methods = PhpArray::new(req)?;
-        let table = linked_table(req, class);
-        for found in &table.rows {
-            if found.decl.visibility == Visibility::Private && found.scope != class {
-                continue;
-            }
-            if method_bits(&found.decl) & filter == 0 {
-                continue;
-            }
-            let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+        // The rows the filter keeps, read before any object is made.
+        let rows: Vec<(MethodRow, Name)> = req
+            .method_rows(class)
+            .filter_map(|row| {
+                let decl = req.row_method(row)?;
+                let kept = (decl.visibility != Visibility::Private || row.scope() == class)
+                    && method_bits(decl) & filter != 0;
+                kept.then(|| (row, decl.function.name.clone()))
+            })
+            .collect();
+        for (row, name) in rows {
+            let object = method_factory(req, &name.0, row.scope(), class, Some(row))?;
             methods.append(req, object.into_value())?;
         }
         // `zend_get_closure_invoke_method` over the kept closure, or a fresh
@@ -1123,7 +1133,8 @@ impl ReflectionClass {
             && filter & 1 != 0
             && let Some(invoke) = closure_invoke(req, kept)
         {
-            let object = method_factory(req, &invoke.decl.function.name.0, invoke.scope, class)?;
+            let object =
+                method_factory(req, &invoke.decl.function.name.0, invoke.scope, class, None)?;
             if let Some(kept) = kept {
                 keep(req, *object, class, Some(kept));
             }
@@ -2600,7 +2611,7 @@ impl ReflectionClass {
             ));
         };
         held.give_up(req);
-        req.addref(&value);
+        let value = Owner::take(req, value);
         write_static_prop(req, class, &name, value)?;
         Ok(())
     }

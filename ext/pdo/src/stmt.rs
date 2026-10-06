@@ -225,15 +225,16 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if name.as_bytes() == b"queryString"
             && object
                 .slot(0)
                 .is_some_and(|v| !matches!(v.as_ref(), ValueRef::Undef))
         {
-            req.release(value);
+            value.give_up(req);
+            name.give_up(req);
             return Err(throw_error(
                 req,
                 "Error",

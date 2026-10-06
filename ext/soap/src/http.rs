@@ -756,11 +756,14 @@ fn fault(req: &mut Request, this: PhpObject, text: &[u8]) -> R<()> {
 /// (`convert_to_null(Z_CLIENT_HTTPURL_P(this_ptr))`).
 fn drop_connection(req: &mut Request, this: PhpObject, stream: Stream, forget_url: bool) -> R<()> {
     stream.close(req);
-    set_client_slot(req, this, ClientSlot::HttpSocket, Value::null())?;
+    let value = Owner::take(req, Value::null());
+    set_client_slot(req, this, ClientSlot::HttpSocket, value)?;
     if forget_url {
-        set_client_slot(req, this, ClientSlot::HttpUrl, Value::null())?;
+        let value = Owner::take(req, Value::null());
+        set_client_slot(req, this, ClientSlot::HttpUrl, value)?;
     }
-    set_client_slot(req, this, ClientSlot::UseProxy, Value::null())
+    let value = Owner::take(req, Value::null());
+    set_client_slot(req, this, ClientSlot::UseProxy, value)
 }
 
 /// An array slot of the client separated for a write, `SEPARATE_ARRAY`:
@@ -780,7 +783,7 @@ fn slot_array(req: &mut Request, this: PhpObject, which: ClientSlot) -> R<Owner<
 /// A string slot of the client written, `ZVAL_STRINGL`.
 fn set_string_slot(req: &mut Request, this: PhpObject, which: ClientSlot, bytes: &[u8]) -> R<()> {
     let value = PhpString::new(req, bytes)?;
-    set_client_slot(req, this, which, Value::string(value.hand_on_unmigrated()))
+    set_client_slot(req, this, which, value.into_value())
 }
 
 /// `bytes` as a string value with one owner.
@@ -1029,14 +1032,10 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             };
             let view = *s;
             // The client's slot keeps the connection.
-            let kept = s.into_resource().into_value().hand_on_unmigrated();
+            let kept = s.into_resource().into_value();
             set_client_slot(req, this, ClientSlot::HttpSocket, kept)?;
-            set_client_slot(
-                req,
-                this,
-                ClientSlot::UseProxy,
-                Value::int(i64::from(use_proxy)),
-            )?;
+            let use_proxy = Owner::take(req, Value::int(i64::from(use_proxy)));
+            set_client_slot(req, this, ClientSlot::UseProxy, use_proxy)?;
             stream = Some(view);
         }
         let client_trace = matches!(
@@ -1196,19 +1195,15 @@ fn request_headers(
     let context = head.context;
     let set_url = client_slot(this, ClientSlot::HttpUrl);
     if set_url.as_object().is_some() {
-        set_client_slot(req, this, ClientSlot::HttpUrl, Value::null())?;
+        let value = Owner::take(req, Value::null());
+        set_client_slot(req, this, ClientSlot::HttpUrl, value)?;
     }
     let class = class_id(req, "Soap\\Url")?;
     let url = new_object(req, class)?;
     if let Some(payload) = url.native_mut::<UrlPayload>(req) {
         payload.uri = Some(uri.clone());
     }
-    set_client_slot(
-        req,
-        this,
-        ClientSlot::HttpUrl,
-        url.into_value().hand_on_unmigrated(),
-    )?;
+    set_client_slot(req, this, ClientSlot::HttpUrl, url.into_value())?;
     let http_1_1 = match context {
         Some(context) => !matches!(
             context.option(req, b"http", b"protocol_version")
@@ -1390,7 +1385,7 @@ fn digest_authorization(
     let qop = field(b"qop");
     let opaque = field(b"opaque");
     let algorithm = field(b"algorithm");
-    let kept = digest.into_value().hand_on_unmigrated();
+    let kept = digest.into_value();
     set_client_slot(req, this, ClientSlot::Digest, kept)?;
     let password = client_slot(this, ClientSlot::Password);
     let mut ha1 = md5_hex(&[
@@ -1536,7 +1531,7 @@ fn set_cookie(req: &mut Request, this: PhpObject, cookie: &[u8], uri: &UriStruct
         }
         _ => Ok(()),
     };
-    let kept = cookies.into_value().hand_on_unmigrated();
+    let kept = cookies.into_value();
     set_client_slot(req, this, ClientSlot::Cookies, kept)?;
     stored
 }
@@ -1707,7 +1702,7 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
     let Some(digest) = digest else {
         return Ok(false);
     };
-    let kept = digest.into_value().hand_on_unmigrated();
+    let kept = digest.into_value();
     set_client_slot(req, this, ClientSlot::Digest, kept)?;
     Ok(true)
 }

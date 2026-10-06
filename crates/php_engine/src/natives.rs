@@ -1705,7 +1705,7 @@ enum MemberRow {
         ty: Option<Type>,
     },
     Dynamic {
-        name: PhpString,
+        key: Key,
         value: Value,
     },
 }
@@ -1778,24 +1778,25 @@ fn dump_members(
     // unsets one leaves this walk printing what it had, as php's
     // separated table does.
     // The dynamic table alone, which may hold a name a parent declared
-    // private: that one is its own row, `["c"]` beside `["c":"P":private]`.
-    let dynamic: Vec<(PhpString, Value)> = object
+    // private: that one is its own row, `["c"]` beside `["c":"P":private]`;
+    // and an integer key, which `$ao[]` through an `ArrayObject` over the
+    // object appends, is `[0]`.
+    let dynamic: Vec<(Key, Value)> = object
         .heap()
         .properties()
         .map(|table| {
             table
                 .iter()
-                .filter_map(|(key, held)| match key {
-                    php_heap::Key::Str(name) => Some((PhpString::of(name), Value::of_zval(held))),
-                    php_heap::Key::Long(_) => None,
-                })
+                .map(|(key, held)| (Key::of(key), Value::of_zval(held)))
                 .collect()
         })
         .unwrap_or_default();
-    for (name, value) in dynamic {
-        req.addref(&Value::string(name));
+    for (key, value) in dynamic {
+        if let Key::Str(name) = key {
+            req.addref(&Value::string(name));
+        }
         req.addref(&value);
-        rows.push(MemberRow::Dynamic { name, value });
+        rows.push(MemberRow::Dynamic { key, value });
     }
     let count = member_count(req, object, &rows);
     // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
@@ -1814,9 +1815,11 @@ fn dump_members(
             MemberRow::Declared { .. } | MemberRow::Dynamic { .. }
                 if too_deep(out, level, req.stack_limit().overflowed()) =>
             {
-                if let MemberRow::Dynamic { name, value } = row {
+                if let MemberRow::Dynamic { key, value } = row {
                     req.release(value);
-                    req.release(Value::string(name));
+                    if let Key::Str(name) = key {
+                        req.release(Value::string(name));
+                    }
                 }
             }
             MemberRow::Declared { mangled, slot, ty } => match object.slot(slot) {
@@ -1834,11 +1837,13 @@ fn dump_members(
                 }
                 None => {}
             },
-            MemberRow::Dynamic { name, value } => {
-                dump_property_name(req, out, level, name.as_bytes());
+            MemberRow::Dynamic { key, value } => {
+                dump_row_key(req, out, level, &key);
                 dump_held(req, out, &value, level + 2, Held::Owned);
                 req.release(value);
-                req.release(Value::string(name));
+                if let Key::Str(name) = key {
+                    req.release(Value::string(name));
+                }
             }
         }
     }
@@ -1923,6 +1928,18 @@ fn too_deep(out: &mut Vec<u8>, level: usize, past: bool) -> bool {
     out.extend(std::iter::repeat_n(b' ', level + 1));
     out.extend_from_slice(b"nesting level too deep");
     true
+}
+
+/// `php_object_property_dump`'s key: `[0]=>` for an integer one, after
+/// the indent, and a string one as [`dump_property_name`] prints it.
+fn dump_row_key(req: &mut Request, out: &mut Vec<u8>, level: usize, key: &Key) {
+    match key {
+        Key::Int(at) => {
+            out.extend(std::iter::repeat_n(b' ', level + 1));
+            out.extend_from_slice(format!("[{at}]=>\n").as_bytes());
+        }
+        Key::Str(name) => dump_property_name(req, out, level, name.as_bytes()),
+    }
 }
 
 fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: &[u8]) {
@@ -2026,13 +2043,7 @@ fn dump_rows(
         if too_deep(out, level, req.stack_limit().overflowed()) {
             continue;
         }
-        match &key {
-            Key::Int(at) => {
-                out.extend(std::iter::repeat_n(b' ', level + 1));
-                out.extend_from_slice(format!("[{at}]=>\n").as_bytes());
-            }
-            Key::Str(name) => dump_property_name(req, out, level, name.as_bytes()),
-        }
+        dump_row_key(req, out, level, &key);
         dump(req, out, &value, level + 2);
     }
     req.release(Value::array(rows));

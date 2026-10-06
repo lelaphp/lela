@@ -432,9 +432,9 @@ fn in_scope_namespace_info(
         } else {
             string(req, &prefix)?
         };
-        info.set_slot(req, 0, prefix.hand_on_unmigrated())?;
+        info.set_slot(req, 0, prefix)?;
         let uri = crate::nullable_string(req, href.as_deref())?;
-        info.set_slot(req, 1, uri.hand_on_unmigrated())?;
+        info.set_slot(req, 1, uri)?;
         let element = match object_for(req, node, Some(this)) {
             Ok(element) => element,
             Err(thrown) => {
@@ -442,7 +442,7 @@ fn in_scope_namespace_info(
                 return Err(thrown);
             }
         };
-        info.set_slot(req, 2, element.hand_on_unmigrated())?;
+        info.set_slot(req, 2, element.into_value())?;
         out.append(req, info.into_value())?;
     }
     Ok(())

@@ -34,7 +34,7 @@ use php_ext::abi::{
     True, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::lookup_class;
+use php_ext::call::{lookup_class, write_prop};
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::{Request, StreamCtx};
@@ -765,31 +765,30 @@ fn error_object(req: &mut Request, error: &Raised) -> Result<Owner<Instance<LibX
         ));
     };
     let object = php_ext::call::new_object(req, class)?;
-    let rows: [(&[u8], Value); 6] = [
-        (b"level", Value::int(error.level.number())),
-        (b"code", Value::int(i64::from(error.code))),
-        (b"column", Value::int(i64::from(error.column))),
-        (
-            b"message",
-            Value::string(PhpString::new(req, &error.message)?.hand_on_unmigrated()),
-        ),
-        (
-            b"file",
-            Value::string(
-                PhpString::new(req, error.file.as_deref().unwrap_or_default())?
-                    .hand_on_unmigrated(),
-            ),
-        ),
-        (b"line", Value::int(i64::from(error.line))),
-    ];
-    for (name, value) in rows {
-        let name = PhpString::new(req, name)?;
-        if let Err(thrown) = object.set_prop(req, name.hand_on_unmigrated(), value) {
-            object.give_up(req);
-            return Err(thrown);
-        }
+    if let Err(thrown) = error_fields(req, *object, error) {
+        object.give_up(req);
+        return Err(thrown);
     }
     Ok(object.into_instance())
+}
+
+/// The six properties of a `LibXMLError`, in php's order.
+fn error_fields(req: &mut Request, object: PhpObject, error: &Raised) -> Result<(), Thrown> {
+    let numbers: [(&[u8], i64); 3] = [
+        (b"level", error.level.number()),
+        (b"code", i64::from(error.code)),
+        (b"column", i64::from(error.column)),
+    ];
+    for (name, n) in numbers {
+        let n = Owner::take(req, Value::int(n));
+        write_prop(req, &object, name, n)?;
+    }
+    let message = PhpString::new(req, &error.message)?;
+    write_prop(req, &object, b"message", message.into_value())?;
+    let file = PhpString::new(req, error.file.as_deref().unwrap_or_default())?;
+    write_prop(req, &object, b"file", file.into_value())?;
+    let line = Owner::take(req, Value::int(i64::from(error.line)));
+    write_prop(req, &object, b"line", line)
 }
 
 /// `libxml_get_last_error(): LibXMLError|false`: the list's last with

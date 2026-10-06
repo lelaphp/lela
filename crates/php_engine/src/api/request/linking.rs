@@ -29,7 +29,7 @@ use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Value, ValueRef, walk};
+use crate::api::values::{ClassId, Key, Value, ValueRef, walk};
 
 /// The classes whose link is under way, and `CG(delayed_autoloads)`.
 #[derive(Default)]
@@ -178,7 +178,7 @@ impl Request {
     /// [`php_unit::link::link`] of `decl` over the table as a variance
     /// check reads it: the linked classes and those whose link is under
     /// way, a class still fetching marked as read.
-    pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking {
+    pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking<ClassId> {
         let values = self.trait_values(decl);
         let read = RefCell::new(Vec::new());
         let linking = {
@@ -199,15 +199,17 @@ impl Request {
                     decl: unlinked.decl()?,
                     bodies,
                     linked: false,
+                    record: None,
                 })
             };
+            let holder = |holder: ClassId| self.class_decl(holder);
             let evaluated = |expr: &ConstExpr| {
                 values
                     .iter()
                     .find(|(written, _)| written == expr)
                     .map(|(_, value)| value.clone())
             };
-            php_unit::link::link(decl, &lookup, &evaluated)
+            php_unit::link::link(decl, &lookup, &holder, &evaluated)
         };
         for at in read.into_inner() {
             if let Some(Unlinked {
@@ -336,7 +338,7 @@ impl Request {
         &mut self,
         unit: &Arc<Unit>,
         at: u32,
-        linking: Linking,
+        linking: Linking<ClassId>,
     ) -> Result<(), Thrown> {
         let Linking {
             outcome,
@@ -344,6 +346,7 @@ impl Request {
             composed,
             obligations,
             autoloads,
+            record,
         } = linking;
         // What the link raised, held until its end, or until the end
         // of the record that stood when it began: a file's compile.
@@ -370,7 +373,7 @@ impl Request {
             if let Some(standing) = standing {
                 self.links.unlinked.remove(standing);
             }
-            self.bind_declared(unit, at, composed);
+            self.bind_declared(unit, at, composed, record);
             self.emit_recorded(recording);
             return Ok(());
         }
@@ -471,7 +474,7 @@ impl Request {
         if let Some(standing) = self.unlinked_named(name) {
             self.links.unlinked.remove(standing);
         }
-        self.bind_declared(&unit, at, linking.composed);
+        self.bind_declared(&unit, at, linking.composed, linking.record);
         Ok(())
     }
 

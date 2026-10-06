@@ -1088,13 +1088,16 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         return Err(thrown);
     };
     for (key, value) in object.props(req)? {
-        req.addref(&value);
         match key {
             Key::Str(name) => {
-                req.addref(&Value::string(name));
+                let value = Owner::take(req, value);
+                let name = Owner::take(req, name);
                 copy.set_prop(req, name, value)?;
             }
-            Key::Int(_) => copy.set_row(req, &key, value)?,
+            Key::Int(_) => {
+                let value = Owner::take(req, value);
+                copy.set_row(req, &key, value)?;
+            }
         }
     }
     let running = Running::new(req, algo, state)?;
@@ -1789,8 +1792,8 @@ impl HashContext {
         }
         for (key, value) in members.snapshot() {
             let name = key.to_prop_name(req)?;
-            req.addref(&value);
-            this.set_prop(req, name.hand_on_unmigrated(), value)?;
+            let value = Owner::take(req, value);
+            this.set_prop(req, name, value)?;
         }
         Ok(())
     }

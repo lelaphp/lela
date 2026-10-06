@@ -94,7 +94,7 @@ pub(crate) fn set_client_slot(
     req: &mut Request,
     object: PhpObject,
     which: ClientSlot,
-    value: Value,
+    value: Owner<Value>,
 ) -> R<()> {
     object.set_slot(req, which as u32, value)
 }
@@ -158,9 +158,11 @@ pub(crate) fn add_soap_fault_ex(
     } else {
         SERVER_SOAP_FAULT
     };
-    let value = Value::object(*fault);
-    req.addref(&value);
-    obj.set_slot(req, index, value)?;
+    let kept = Owner::take(req, Value::object(*fault));
+    if let Err(thrown) = obj.set_slot(req, index, kept) {
+        fault.give_up(req);
+        return Err(thrown);
+    }
     Ok(fault)
 }
 

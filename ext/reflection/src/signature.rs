@@ -21,9 +21,9 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
-    class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
-    parameter_string, reflection_class_factory, required_parameters, set_name, set_string_prop,
-    this_name, type_to_string,
+    class_chain, class_name_of, class_named, lookup_function, new_object, parameter_string,
+    reflection_class_factory, required_parameters, set_name, set_string_prop, this_name,
+    type_to_string,
 };
 
 /// The function a `ReflectionParameter` reflects, `param->fptr` as a
@@ -238,11 +238,8 @@ fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<Functio
                 return php_ext::call::property_hook(req, *class, property, kind)
                     .map(|(_, decl)| decl.function);
             }
-            let lowered = name.to_ascii_lowercase();
-            linked_methods(req, *class)
-                .into_iter()
-                .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-                .map(|m| m.decl.function)
+            let row = req.method_row(*class, name)?;
+            req.row_method(row).map(|m| m.function.clone())
         }
     }
 }

@@ -197,7 +197,8 @@ impl ObjectHandlers for Handlers {
             (b"maxTemplateVars", vars),
         ] {
             let name = PhpString::new(req, name)?;
-            Std.write_property(req, object, name.hand_on_unmigrated(), Value::int(n))?;
+            let n = Owner::take(req, Value::int(n));
+            Std.write_property(req, object, name, n)?;
         }
         Ok(())
     }
@@ -238,15 +239,23 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if !validated(name.as_bytes()) {
             return Std.write_property(req, object, name, value);
         }
         let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-        let old = read_int(req, object, name.as_bytes())?;
-        let again = PhpString::new(req, name.as_bytes())?;
+        let read = read_int(req, object, name.as_bytes())
+            .and_then(|old| Ok((old, PhpString::new(req, name.as_bytes())?)));
+        let (old, again) = match read {
+            Ok(read) => read,
+            Err(thrown) => {
+                name.give_up(req);
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
         let now = match Std.write_property(req, object, name, value) {
             Ok(()) => read_int(req, object, again.as_bytes()),
             Err(thrown) => Err(thrown),
@@ -259,7 +268,8 @@ impl ObjectHandlers for Handlers {
             }
         };
         if now < 0 {
-            Std.write_property(req, object, again.hand_on_unmigrated(), Value::int(old))?;
+            let old = Owner::take(req, Value::int(old));
+            Std.write_property(req, object, again, old)?;
             let class = class_name(req, object.class());
             let message = format!("{class}::${shown} must be greater than or equal to 0");
             return Err(throw_error(req, "ValueError", &message));

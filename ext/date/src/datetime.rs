@@ -817,13 +817,8 @@ pub(super) fn restore_properties(
             None => (object.class(), bytes),
         };
         let plain = PhpString::new(req, plain)?;
-        req.addref(&value);
-        object.write_prop_in(
-            req,
-            PropertyScope::Of(ClassRef(scope)),
-            plain.hand_on_unmigrated(),
-            value,
-        )?;
+        let value = Owner::take(req, value);
+        object.write_prop_in(req, PropertyScope::Of(ClassRef(scope)), plain, value)?;
     }
     Ok(())
 }

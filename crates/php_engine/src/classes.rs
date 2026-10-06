@@ -29,7 +29,7 @@ use crate::api::abi::{
     Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, Instance, NamedVariadic,
     ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
 };
-use crate::api::call::{Function, Target};
+use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -1868,18 +1868,20 @@ impl ErrorException {
     ) -> Result<(), Thrown> {
         let this = this.object();
         update_exception_properties(req, this, message, code, previous)?;
-        write_throwable_property(req, this, b"severity", Value::int(severity))?;
+        let severity = Owner::take(req, Value::int(severity));
+        write_prop(req, &this, b"severity", severity)?;
         let named = filename.is_some();
         if let Some(filename) = filename {
-            let filename = Value::string(filename);
-            req.addref(&filename);
-            write_throwable_property(req, this, b"file", filename)?;
+            let filename = Owner::take(req, Value::string(filename));
+            write_prop(req, &this, b"file", filename)?;
         }
-        match line {
-            Some(line) => write_throwable_property(req, this, b"line", Value::int(line)),
-            None if named => write_throwable_property(req, this, b"line", Value::int(0)),
-            None => Ok(()),
-        }
+        let line = match line {
+            Some(line) => line,
+            None if named => 0,
+            None => return Ok(()),
+        };
+        let line = Owner::take(req, Value::int(line));
+        write_prop(req, &this, b"line", line)
     }
 
     /// `ZEND_METHOD(ErrorException, getSeverity)`: the `severity`
@@ -2019,31 +2021,19 @@ fn update_exception_properties(
     previous: Passed<Option<Instance<Throwable>>>,
 ) -> Result<(), Thrown> {
     if let Passed::Given(message) = message {
-        let message = Value::string(message);
-        req.addref(&message);
-        write_throwable_property(req, this, b"message", message)?;
+        let message = Owner::take(req, Value::string(message));
+        write_prop(req, &this, b"message", message)?;
     }
     if let Passed::Given(code) = code {
-        write_throwable_property(req, this, b"code", Value::int(code))?;
+        let code = Owner::take(req, Value::int(code));
+        write_prop(req, &this, b"code", code)?;
     }
     if let Passed::Given(previous) = previous {
         let previous = previous.map_or_else(Value::null, |previous| previous.object().as_value());
-        req.addref(&previous);
-        write_throwable_property(req, this, b"previous", previous)?;
+        let previous = Owner::take(req, previous);
+        write_prop(req, &this, b"previous", previous)?;
     }
     Ok(())
-}
-
-/// `zend_update_property_ex` on the throwable's base class: the value
-/// written by name, one owner of it the object's.
-fn write_throwable_property(
-    req: &mut Request,
-    this: PhpObject,
-    name: &[u8],
-    value: Value,
-) -> Result<(), Thrown> {
-    let name = PhpString::new(req, name)?.hand_on_unmigrated();
-    this.set_prop(req, name, value)
 }
 
 /// `GET_PROPERTY(ZEND_THIS, name)`: the getter's property read off the

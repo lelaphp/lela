@@ -985,12 +985,12 @@ impl ObjectHandlers for Handlers {
         &self,
         req: &mut Request,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let written = write_property(req, object, name.as_bytes(), &value);
-        req.release(value);
-        req.release(Value::string(name));
+        value.give_up(req);
+        name.give_up(req);
         written
     }
 
