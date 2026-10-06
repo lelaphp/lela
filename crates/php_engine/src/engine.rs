@@ -735,6 +735,12 @@ pub(crate) struct Shared {
     /// functions ([`crate::multibyte`]).
     pub(crate) script_encodings: Vec<php_compile::multibyte::Encoding>,
     pub(crate) units: UnitCache,
+    /// The engine's published arena (design §5.14, *Identities*): the
+    /// rows of the classes and functions published past the engine's
+    /// own, which every request reads with nothing taken and which no row is
+    /// written in after it is published. The preload is its first
+    /// publisher. Each request holds the arena it started with.
+    pub(crate) arena: Arc<crate::arena::Arena>,
     /// The persistent pool (design §4.10, #1172), php's
     /// `EG(persistent_list)`: what the stream layer keeps between
     /// requests, the sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT`
@@ -2941,6 +2947,10 @@ impl EngineBuilder {
             &functions,
             &classes,
         );
+        let arena = Arc::new(crate::arena::Arena::past(
+            classes.len(),
+            functions.len().saturating_add(methods.len()),
+        ));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -2990,6 +3000,7 @@ impl EngineBuilder {
                 locked,
                 script_encodings: Vec::new(),
                 units,
+                arena,
                 persistent: Arc::new(crate::api::abi::Pool::new(PERSISTENT_ENTRIES)),
                 strings: Mutex::new(strings),
                 names,

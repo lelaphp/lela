@@ -19,8 +19,15 @@ use crate::api::values::{
 };
 use crate::exec::{self, Body, CallStage};
 
-/// A linked function: user or native, by identity. A native method is
-/// one too, numbered past the functions.
+/// A linked function: user or native, by identity, one word (design
+/// §5.14, *Identities*). With its top bit clear it is one every request
+/// shares: a native, then a native method, numbered from zero, then a
+/// user function or method of the engine's published arena past them;
+/// or, from [`Function::ENUM`] on, a published enum's own `cases`,
+/// `from` or `tryFrom`. With it set it is the request's own: a user
+/// function, method or closure among its rows, an enum's method from
+/// `ENUM` on, and from [`Function::TRAMPOLINE`] on a call's trampoline.
+/// Either stays the function's for as long as the request runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Function(pub(crate) u32);
 
@@ -29,6 +36,68 @@ impl Function {
     /// no constructor and arguments to take, which takes them and
     /// returns `null`.
     pub(crate) const PASS: Function = Function(u32::MAX);
+
+    /// The bit that marks a function of the request's own.
+    pub(crate) const LOCAL: u32 = 1 << 31;
+
+    /// The bit, under the top one, that marks the request's trampolines.
+    pub(crate) const TRAMPOLINE: u32 = 1 << 30;
+
+    /// The bit, under those, that marks an enum's own method; the
+    /// numbers below it are a space's user functions.
+    pub(crate) const ENUM: u32 = 1 << 29;
+
+    /// Whether every request shares the function: a native, or a row of
+    /// the engine's published arena; not one of this request's own.
+    #[must_use]
+    pub fn is_published(self) -> bool {
+        self.0 & Function::LOCAL == 0
+    }
+
+    /// The request's own user function at `at` among its rows.
+    pub(crate) fn local(at: usize) -> Option<Function> {
+        let at = u32::try_from(at).ok().filter(|at| *at < Function::ENUM)?;
+        Some(Function(at | Function::LOCAL))
+    }
+
+    /// Where the function stands among the request's own user functions,
+    /// if it is one.
+    pub(crate) fn local_at(self) -> Option<usize> {
+        if self.0 & (Function::LOCAL | Function::TRAMPOLINE | Function::ENUM) != Function::LOCAL {
+            return None;
+        }
+        usize::try_from(self.0 & !Function::LOCAL).ok()
+    }
+
+    /// The number of a native or a published user function, which the
+    /// arena's rows are numbered past the natives in.
+    pub(crate) fn published_number(self) -> Option<u32> {
+        (self.0 < Function::ENUM).then_some(self.0)
+    }
+
+    /// The published enum method at `at` of the arena's.
+    pub(crate) fn published_enum(at: u32) -> Option<Function> {
+        (at < Function::ENUM).then_some(Function(Function::ENUM | at))
+    }
+
+    /// Where a published enum method stands among the arena's.
+    pub(crate) fn published_enum_at(self) -> Option<u32> {
+        (self.0 & !(Function::ENUM - 1) == Function::ENUM).then_some(self.0 & (Function::ENUM - 1))
+    }
+
+    /// The request's own enum method at `at` among its rows.
+    pub(crate) fn local_enum(at: usize) -> Option<Function> {
+        let at = u32::try_from(at).ok().filter(|at| *at < Function::ENUM)?;
+        Some(Function(Function::LOCAL | Function::ENUM | at))
+    }
+
+    /// Where an enum method of the request's own stands among its rows.
+    pub(crate) fn local_enum_at(self) -> Option<usize> {
+        if self.0 & !(Function::ENUM - 1) != Function::LOCAL | Function::ENUM {
+            return None;
+        }
+        usize::try_from(self.0 & (Function::ENUM - 1)).ok()
+    }
 }
 
 /// What a [`Callable`] resolved to, `zend_fcall_info_cache`'s three
