@@ -1,6 +1,7 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
+use php_ext::abi::Extension;
 use php_ext::test::{Capture, Engine};
 
 #[test]
@@ -192,6 +193,27 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
     );
 }
 
+/// An engine of `extensions` with `ini` set and the request leak sensor
+/// armed (#1992), for a test against the server of
+/// `ci/mysql/compose.yaml`; `None` where none listens, said on stderr,
+/// and the test passes.
+#[cfg(debug_assertions)]
+fn armed(extensions: &[Extension], ini: &[(&str, &str)]) -> Option<Engine> {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return None;
+    }
+    let mut builder = Engine::builder().extensions(extensions);
+    for (name, value) in ini {
+        builder = builder.ini(name, value);
+    }
+    Some(
+        builder
+            .sense_leaks(php_ext::test::LeakSensor::Armed)
+            .build(),
+    )
+}
+
 /// What mysqlnd reads off the wire is read into the buffer it parses, as
 /// php's `mysqlnd_vio::network_read` reads into its caller's, and the
 /// file a `LOAD DATA LOCAL INFILE` sends is read the same way
@@ -204,18 +226,14 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[("mysqli.allow_local_infile", "1")],
+    ) else {
         return;
-    }
+    };
     let file = std::env::temp_dir().join(format!("t2092-{}.csv", std::process::id()));
     std::fs::write(&file, "1,a\n2,b\n").expect("the file the server asks for");
-    let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
-        .ini("mysqli.allow_local_infile", "1")
-        .sense_leaks(LeakSensor::Armed)
-        .build();
     let source = format!(
         "<?php $l = mysqli_init();
         mysqli_options($l, MYSQLI_OPT_LOCAL_INFILE, true);
@@ -255,15 +273,12 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_reading_its_warnings_leaves_none_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
         return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    };
     let source = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
         mysqli_query($l, 'SELECT 1/0');
         $w = mysqli_get_warnings($l);
@@ -286,19 +301,16 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_refused_by_the_server_leaves_none_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
-        return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[
+    let Some(engine) = armed(
+        &[
             php_ext_openssl::extension(),
             php_ext_mysqlnd::extension(),
             php_ext_mysqli::extension(),
-        ])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+        ],
+        &[],
+    ) else {
+        return;
+    };
     let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
         var_dump(@mysqli_connect('127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());";
     let served = engine.serve_capture(source, Capture::default());
@@ -316,15 +328,12 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
         return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    };
     let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
         $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
         $s = mysqli_stmt_init($l);
@@ -343,15 +352,12 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
         return;
-    }
-    let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
+    };
     let source = "<?php var_dump(mysqli_options(mysqli_init(), MYSQLI_INIT_COMMAND, 5));
         $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
         $class = 'std'; $class .= 'Class';
@@ -373,17 +379,14 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
 #[cfg(debug_assertions)]
 #[test]
 fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
-    use php_ext::test::LeakSensor;
-    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
-        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
         return;
-    }
+    };
     let file = std::env::temp_dir().join(format!("t2092-{}.pem", std::process::id()));
     std::fs::write(&file, "not a key\n").expect("the key file");
-    let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
-        .sense_leaks(LeakSensor::Armed)
-        .build();
     let source = format!(
         "<?php mysqli_report(MYSQLI_REPORT_OFF);
         $l = mysqli_init();
