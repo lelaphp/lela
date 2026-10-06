@@ -1790,14 +1790,15 @@ impl PhpObject {
     /// written into the dynamic table under the key; the value and the
     /// key are the object's from here. `false` is a key naming a virtual
     /// property, which php's `is_property_visibility_changed` refuses
-    /// with its warning, and which fails the unserialization.
+    /// with its warning, and which fails the unserialization. A sink of
+    /// both owners.
     pub fn unserialize_prop(
         &self,
         req: &mut Request,
-        key: PhpString,
-        value: Value,
+        key: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<bool, Thrown> {
-        req.unserialize_property(*self, key, value)
+        req.unserialize_property(*self, key.hand_on(), value.hand_on())
     }
 
     /// What `unserialize()` holds a declared typed property to once the

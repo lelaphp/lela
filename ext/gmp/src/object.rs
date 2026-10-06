@@ -151,10 +151,10 @@ impl GMP {
             return Err(throw(req, "Exception", "Could not unserialize properties"));
         };
         for (key, value) in props.snapshot() {
-            req.addref(&value);
+            let value = Owner::take(req, value);
             match key {
                 Key::Str(name) => {
-                    req.addref(&Value::string(name));
+                    let name = Owner::take(req, name);
                     object.unserialize_prop(req, name, value)?;
                 }
                 // `zend_hash_index_update` into the table, under the
@@ -164,7 +164,6 @@ impl GMP {
                         req,
                         &format!("Creation of dynamic property GMP::${n} is deprecated"),
                     );
-                    let value = Owner::take(req, value);
                     object.set_row(req, &Key::Int(n), value)?;
                 }
             }

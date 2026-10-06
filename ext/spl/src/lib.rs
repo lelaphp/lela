@@ -726,8 +726,8 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
                 continue;
             }
             let name = key.to_prop_name(req)?;
-            req.addref(&value);
-            object.unserialize_prop(req, name.hand_on_unmigrated(), value)?;
+            let value = Owner::take(req, value);
+            object.unserialize_prop(req, name, value)?;
         }
     }
     Ok(())
