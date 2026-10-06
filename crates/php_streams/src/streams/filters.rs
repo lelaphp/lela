@@ -505,15 +505,15 @@ impl PhpStream {
 
 /// `php_stream_filter_remove(filter, 1)` past the unlinking: the
 /// filter's resource closed, where it has one, and the chain's owner of
-/// it given up, then `php_stream_filter_free`'s `dtor`.
+/// it given up, then `php_stream_filter_free`'s `dtor`, served whatever
+/// a call before it threw, as php's is: what a filter holds is given up
+/// with it, and a filter whose `dtor` serves PHP code serves none while
+/// a throwable is pending ([`crate::api::request::StreamFilter::close`]).
 fn release_filter(req: &mut Request, filter: Attached) {
     let Attached { mut ops, res } = filter;
     if let Some(res) = res {
         res.close(req);
         req.release(res.as_value());
-    }
-    if req.stream_thrown().is_some() {
-        return;
     }
     if let Err(thrown) = ops.close(req) {
         defer(req, thrown);

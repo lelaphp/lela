@@ -163,3 +163,20 @@ var_dump(get_headers('web://x'));
     );
     assert_eq!(stdout, "bool(false)\n");
 }
+
+/// A user filter whose `filter()` throws as its stream closes is given
+/// up with the stream all the same, its `onClose()` not called while
+/// the throwable is pending (#2091).
+#[test]
+fn a_user_filter_that_threw_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+class F { public $filtername, $params; public int $stream = 1; function filter($in, $out, &$consumed, $closing): int { return PSFS_PASS_ON; } function onClose() { echo "closed\n"; } }
+stream_filter_register('f', 'F');
+$m = fopen('php://memory', 'w');
+stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+try { fclose($m); } catch (TypeError $e) { echo get_class($e), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "TypeError\n");
+}

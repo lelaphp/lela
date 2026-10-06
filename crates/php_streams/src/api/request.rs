@@ -1090,7 +1090,10 @@ pub trait StreamFilter: Send {
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown>;
 
-    /// `fops->dtor`, served once when the filter leaves its chain.
+    /// `fops->dtor`, served once when the filter leaves its chain, a
+    /// throwable pending or not: it gives up what the filter holds, and
+    /// serves no PHP code while [`Request::stream_thrown`] holds one, as
+    /// `zend_call_function` serves none under `EG(exception)`.
     fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
         Ok(())
     }
