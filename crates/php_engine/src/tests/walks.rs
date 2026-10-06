@@ -196,6 +196,30 @@ fn object_rows(
     PhpString::new(req, read.as_bytes())
 }
 
+/// `object_guarded(object &$o): string`: a guarded walk over the
+/// object's property table that asks, at its first row, whether a second
+/// guarded walk over the same table is inside it already.
+#[php_function]
+fn object_guarded(req: &mut Request, o: Ref<PhpObject>) -> Result<Owner<PhpString>, Thrown> {
+    let Some(object) = o.get().copied() else {
+        return Err(throw_error(req, "Exception", "no object"));
+    };
+    let table = object.property_table(req)?;
+    let inner = table.clone();
+    let walked = walk::foreach_guarded(req, table, Hold::Owner, |req, _| -> walk::Step<bool> {
+        let again = walk::foreach_guarded(req, inner.clone(), Hold::Owner, |_, _| -> walk::Step {
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(ControlFlow::Break(again == Guarded::Recursive))
+    })?;
+    let said = match walked {
+        Guarded::Walked(Some(true)) => "inside",
+        Guarded::Walked(_) => "not inside",
+        Guarded::Recursive => "recursive at the start",
+    };
+    PhpString::new(req, said.as_bytes())
+}
+
 fn walks() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -206,6 +230,7 @@ fn walks() -> Extension {
             foreach_calls::declared(),
             live_reads::declared(),
             object_rows::declared(),
+            object_guarded::declared(),
         ])
         .build("walks")
 }
@@ -399,5 +424,21 @@ fn a_foreach_walk_over_an_object_holding_nothing_ends_where_it_is_destroyed() {
         String::from_utf8_lossy(&served.stdout),
         "gone a=a9223372036854775807 d=d9223372036854775807 e=e9223372036854775807 \n"
     );
+    assert_eq!(served.fatal, None);
+}
+
+/// A guarded walk over an object's property table marks its dynamic
+/// table, `zobj->properties`, as `json_encode`'s walk over the table
+/// `zend_get_properties_for` hands it marks the table: a second guarded
+/// walk inside it finds it marked, and the mark is cleared as it ends.
+#[test]
+fn a_guarded_walk_over_an_object_marks_its_table() {
+    let served = armed().serve_capture(
+        "<?php #[AllowDynamicProperties] class P { public $a = 1; }\n\
+         $o = new P; $o->d = 2;\n\
+         echo object_guarded($o), ' ', object_guarded($o), \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "inside inside\n");
     assert_eq!(served.fatal, None);
 }

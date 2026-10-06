@@ -690,6 +690,32 @@ const INDENT: usize = 4;
 ///     [e] => e
 /// )
 /// ```
+///
+/// The object's guard is cleared before the table is released, so a
+/// destructor the release serves prints the object whole:
+///
+/// ```php
+/// class D { function __destruct() { global $o, $n; if ($n++ < 1) { echo "dtor:"; print_r($o); } } }
+/// class O { public $x = 1; function __debugInfo() { return ['d' => new D]; } }
+/// $n = 0; $o = new O;
+/// print_r($o);
+/// ```
+/// ```expect
+/// dtor:O Object
+/// (
+///     [d] => D Object
+///         (
+///         )
+///
+/// )
+/// O Object
+/// (
+///     [d] => D Object
+///         (
+///         )
+///
+/// )
+/// ```
 #[php_function]
 fn print_r(
     req: &mut Request,
@@ -812,17 +838,23 @@ pub(super) fn render(
         let held = object.props_held(req, PropertyPurpose::Debug)?;
         object.protect_in(req, RecursionGuard::Debug);
         let mut printed = Printed::open(out, indent, true);
-        let walked = walk::properties(req, held, |req, row| {
+        let walked = walk::properties(req, &held, |req, row| {
             printed.row(req, out, row.key(), row.value())?;
             Ok(ControlFlow::<()>::Continue(()))
         });
+        // The guard cleared before the release, as php's
+        // `zend_release_properties` follows its unprotect, so a
+        // destructor the release serves prints the object whole.
         object.unprotect_in(req, RecursionGuard::Debug);
+        let released = held.release(req);
         // What the table left pending was raised before any row's, so a
-        // row's is chained onto it.
-        return match (walked, printed.close(out)) {
+        // row's is chained onto it; a fatal a row raised ends the print
+        // where it stands.
+        let rendered = walked.and_then(|_| printed.close(out));
+        return match (released, rendered) {
             (Err(earlier), Err(later)) => Err(earlier.chain(req, later)),
-            (Err(thrown), Ok(())) | (Ok(_), Err(thrown)) => Err(thrown),
-            (Ok(_), Ok(())) => Ok(()),
+            (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
+            (Ok(()), Ok(())) => Ok(()),
         };
     }
     // `zval_get_string_func`, whose string is the caller's to release:
