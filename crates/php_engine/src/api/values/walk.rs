@@ -23,10 +23,12 @@
 //!   table changing nor changes the one being worked on. The `usort`
 //!   family.
 //!
-//! A walk takes the table and lends the body each row's key and value
-//! for that step. The body answers a [`Step`]: std's `ControlFlow` to go
-//! on or stop early with a value, and `Err` for a throwable, which `?`
-//! hands on. The walk owns the loop and calls the body, so what it took
+//! A row walk takes the table and lends the body each row's key and
+//! value for that step. The body answers a [`Step`]: std's
+//! `ControlFlow` to go on or stop early with a value, and `Err` for a
+//! throwable, which `?` hands on. [`detached`] lends the body the whole
+//! copy instead, since what walks its rows is the sort the body runs,
+//! whose comparisons are lent the rows; it answers what the body did. The walk owns the loop and calls the body, so what it took
 //! is given back on every way out, `?` included, by the walk itself and
 //! never by a `Drop` (design §5.1: nothing runs implicitly on drop). A
 //! body keeps a row past its step only by taking an owner of its own
@@ -620,12 +622,14 @@ fn bucket_steps<B>(
 
 /// php's walk over a private copy swapped back, `php_usort`
 /// (`Z/ext/standard/array.c:878`): the array the by-reference argument
-/// `holder` holds copied (`zend_array_dup`, "so the in-place
+/// `holder` held on entry copied (`zend_array_dup`, "so the in-place
 /// modifications will not be visible to the callback function"), the
 /// copy lent to `body`, which sorts or walks it, and the copy written
-/// into the caller's variable after, whatever the body answered, the
-/// array the variable held given up (`ZVAL_ARR(array, arr)` and the
-/// `zval_ptr_dtor` of the old one). Code the body runs that writes the
+/// into the caller's variable after, whatever the body answered: written
+/// first, as `ZVAL_ARR(array, arr)` writes it, with no type consulted,
+/// and the array the variable held given up after (`zval_ptr_dtor` of
+/// the garbage), so a destructor that serves reads the sorted copy. A
+/// temporary passed where a reference was asked for keeps nothing. Code the body runs that writes the
 /// variable writes the original, which the swap gives up: an append a
 /// comparator makes is not in the sorted array. An array with no row is
 /// not copied, and the body not called, as `php_usort` returns before;
@@ -638,6 +642,18 @@ fn bucket_steps<B>(
 /// ```expect
 /// [1,2,3]
 /// {"a":1,"c":3}
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { global $a; echo "dtor: ", json_encode($a), "\n"; } }
+/// $a = [3, 1, 2]; $i = 0;
+/// usort($a, function ($x, $y) use (&$i) { global $a; if ($i++ == 0) { $a[] = new D; } return $x <=> $y; });
+/// $a = [3, 1, 2]; $i = 0;
+/// usort($a, function ($x, $y) use (&$i) { global $a; if ($i++ == 0) { $a = new D; } return $x <=> $y; });
+/// ```
+/// ```expect
+/// dtor: [1,2,3]
+/// dtor: [1,2,3]
 /// ```
 pub fn detached<T>(
     req: &mut Request,
@@ -652,8 +668,9 @@ pub fn detached<T>(
     }
     let mut copy = held.copy(req)?;
     let answered = body(req, &mut copy);
-    let written = holder.set(req, copy);
-    let answered = answered?;
-    written?;
-    Ok(Some(answered))
+    match holder.reference() {
+        Some(cell) => cell.convert(req, copy.to_value()),
+        None => req.release(copy.to_value()),
+    }
+    answered.map(Some)
 }
