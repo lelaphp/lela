@@ -871,10 +871,10 @@ impl Phar {
         req: &mut Request,
         this: This<Self>,
         #[php(default = [])] unserializeOptions: Passed<PhpArray>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let id = held(req, this.object())?;
         let Some(a) = archives(req).get_mut(id) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let value = metadata_value(req, &mut meta, unserializeOptions, "Phar::getMetadata");
@@ -1747,9 +1747,9 @@ pub(crate) fn metadata_value(
     meta: &mut Metadata,
     options: Passed<PhpArray>,
     function: &str,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if !meta.has_data() {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     let options = match options {
         Passed::Given(options) if !options.is_empty() => Some(options),
@@ -1757,11 +1757,13 @@ pub(crate) fn metadata_value(
     };
     if meta.val.is_none() || options.is_some() {
         let data = meta.str.clone().unwrap_or_default();
-        return php_ext_standard::php_unserialize_with_options(req, &data, options, function);
+        // The fresh value's one owner, as an `Owner`.
+        let value = php_ext_standard::php_unserialize_with_options(req, &data, options, function)?;
+        let owner = Owner::take(req, value);
+        req.release(value);
+        return Ok(owner);
     }
-    let value = meta.val.unwrap_or_default();
-    req.addref(&value);
-    Ok(value)
+    Ok(Owner::take(req, meta.val.unwrap_or_default()))
 }
 
 /// `serialize_metadata_or_throw`: the value serialised, then kept with

@@ -1441,8 +1441,9 @@ impl PDOStatement {
         #[php(default = PDO::FETCH_DEFAULT)] mode: i64,
         #[php(default = PDO::FETCH_ORI_NEXT)] cursorOrientation: i64,
         #[php(default = 0)] cursorOffset: i64,
-    ) -> Result<Value, Thrown> {
-        fetch::fetch(req, this.object(), mode, (cursorOrientation, cursorOffset))
+    ) -> Result<Owner<Value>, Thrown> {
+        let value = fetch::fetch(req, this.object(), mode, (cursorOrientation, cursorOffset))?;
+        Ok(crate::owned(req, value))
     }
 
     /// `PDOStatement::fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array`:
@@ -1541,8 +1542,9 @@ impl PDOStatement {
         req: &mut Request,
         this: This<Self>,
         #[php(default = 0)] column: i64,
-    ) -> Result<Value, Thrown> {
-        fetch::fetch_column(req, this.object(), column)
+    ) -> Result<Owner<Value>, Thrown> {
+        let value = fetch::fetch_column(req, this.object(), column)?;
+        Ok(crate::owned(req, value))
     }
 
     /// `PDOStatement::fetchObject(?string $class = "stdClass", array $constructorArgs = []): object|false`.
@@ -1574,12 +1576,22 @@ impl PDOStatement {
         this: This<Self>,
         #[php(default = "stdClass")] class: Option<PhpString>,
         #[php(default = [])] constructorArgs: Passed<PhpArray>,
-    ) -> Result<OrFalse<PhpObject>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
         let args = match constructorArgs {
             Passed::Given(args) => Some(args),
             Passed::Omitted => None,
         };
-        fetch::fetch_object(req, this.object(), class, args)
+        Ok(
+            match fetch::fetch_object(req, this.object(), class, args)? {
+                // The fetch engine's object comes with its one owner, the caller's.
+                OrFalse::Value(object) => {
+                    let owner = Owner::take(req, object);
+                    req.release(object.as_value());
+                    OrFalse::Value(owner)
+                }
+                OrFalse::False => OrFalse::False,
+            },
+        )
     }
 
     /// `PDOStatement::getAttribute(int $name): mixed`: the connector's, then
@@ -1596,44 +1608,13 @@ impl PDOStatement {
     /// SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
     /// ```
     #[php(tentative)]
-    fn getAttribute(req: &mut Request, this: This<Self>, name: i64) -> Result<Value, Thrown> {
-        let attr = name;
-        let (stmt, dbh) = this_stmt(req, this.object())?;
-        let generic = |req: &Request| {
-            (attr == PDO::ATTR_EMULATE_PREPARES).then(|| {
-                Value::bool(
-                    read(req, stmt, |s| {
-                        s.placeholders == Some(Placeholders::Emulated)
-                    })
-                    .unwrap_or(false),
-                )
-            })
-        };
-        clear_error(req, stmt);
-        match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
-            Ok(Some(Some(value))) => Ok(value),
-            Ok(Some(None)) => match generic(req) {
-                Some(value) => Ok(value),
-                None => unsupported(
-                    req,
-                    stmt,
-                    dbh,
-                    "driver doesn't support getting that attribute",
-                )
-                .map(|()| Value::bool(false)),
-            },
-            Ok(None) => Ok(Value::bool(false)),
-            Err(()) => match generic(req) {
-                Some(value) => Ok(value),
-                None => unsupported(
-                    req,
-                    stmt,
-                    dbh,
-                    "This driver doesn't support getting attributes",
-                )
-                .map(|()| Value::bool(false)),
-            },
-        }
+    fn getAttribute(
+        req: &mut Request,
+        this: This<Self>,
+        name: i64,
+    ) -> Result<Owner<Value>, Thrown> {
+        let value = stmt_attribute(req, this, name)?;
+        Ok(crate::owned(req, value))
     }
 
     /// `PDOStatement::getColumnMeta(int $column): array|false`: the
@@ -1676,7 +1657,7 @@ impl PDOStatement {
         req: &mut Request,
         this: This<Self>,
         column: i64,
-    ) -> Result<OrFalse<PhpArray>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         let (stmt, dbh) = this_stmt(req, this.object())?;
         let Ok(at) = usize::try_from(column) else {
             return Err(argument_error(
@@ -1702,7 +1683,12 @@ impl PDOStatement {
             s.columns.as_ref().and_then(|c| c.get(at).cloned())
         })
         .flatten();
-        let mut meta = meta;
+        // The driver's table comes with its one owner, the caller's.
+        let mut meta = {
+            let owner = Owner::take(req, meta);
+            req.release(Value::array(meta));
+            owner
+        };
         if let Some(info) = info {
             let key = PhpString::new(req, b"name")?.hand_on_unmigrated();
             let made = crate::string(req, &info.name)?;
@@ -1877,5 +1863,47 @@ impl PDOStatement {
         let stmt = this.object();
         handle(req, stmt)?;
         Ok(internal_iterator(req, &stmt)?.into_instance())
+    }
+}
+
+/// What `PDOStatement::getAttribute` answers, its one owner the
+/// caller's.
+fn stmt_attribute(req: &mut Request, this: This<PDOStatement>, name: i64) -> Result<Value, Thrown> {
+    let attr = name;
+    let (stmt, dbh) = this_stmt(req, this.object())?;
+    let generic = |req: &Request| {
+        (attr == PDO::ATTR_EMULATE_PREPARES).then(|| {
+            Value::bool(
+                read(req, stmt, |s| {
+                    s.placeholders == Some(Placeholders::Emulated)
+                })
+                .unwrap_or(false),
+            )
+        })
+    };
+    clear_error(req, stmt);
+    match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
+        Ok(Some(Some(value))) => Ok(value),
+        Ok(Some(None)) => match generic(req) {
+            Some(value) => Ok(value),
+            None => unsupported(
+                req,
+                stmt,
+                dbh,
+                "driver doesn't support getting that attribute",
+            )
+            .map(|()| Value::bool(false)),
+        },
+        Ok(None) => Ok(Value::bool(false)),
+        Err(()) => match generic(req) {
+            Some(value) => Ok(value),
+            None => unsupported(
+                req,
+                stmt,
+                dbh,
+                "This driver doesn't support getting attributes",
+            )
+            .map(|()| Value::bool(false)),
+        },
     }
 }

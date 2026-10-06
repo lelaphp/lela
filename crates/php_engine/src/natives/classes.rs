@@ -628,14 +628,18 @@ fn answered_vars(
 /// }
 /// ```
 #[php_function]
-fn get_mangled_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn get_mangled_object_vars(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Owner<PhpArray>, Thrown> {
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
     if let Some(array) = crate::ops::object_symtable(req, object)? {
-        return Ok(array);
+        return Ok(Owner::adopt(req, array));
     }
     let rows = req.properties_no_lazy_init(object)?;
-    crate::ops::mangled_array(req, object, rows)
+    let made = crate::ops::mangled_array(req, object, rows);
+    crate::api::values::adopted(req, made)
 }
 
 /// `ce->function_table` in its order: the class's own methods as

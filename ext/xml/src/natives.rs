@@ -526,10 +526,10 @@ fn xml_parse_into_struct(
     }
     if index.is_given() {
         let empty = PhpArray::new(req)?;
-        index.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
+        index.set(req, Untyped(empty.into_value()))?;
     }
     let empty = PhpArray::new(req)?;
-    values.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
+    values.set(req, Untyped(empty.into_value()))?;
     let (Some(data_ref), info_ref) = (values.reference(), index.reference()) else {
         return Ok(OrFalse::False);
     };

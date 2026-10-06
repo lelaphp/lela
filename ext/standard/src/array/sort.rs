@@ -1018,7 +1018,7 @@ fn multisort(
             }
         }
         rebuilt.set_next_free(req, count)?;
-        cell.set(req, Untyped(rebuilt.into_value().hand_on_unmigrated()))?;
+        cell.set(req, Untyped(rebuilt.into_value()))?;
     }
     Ok(())
 }

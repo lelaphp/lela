@@ -334,9 +334,10 @@ impl SplDoublyLinkedList {
     /// Can't peek at an empty datastructure
     /// ```
     #[php(tentative)]
-    fn pop(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn pop(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.pop())? {
-            Some(value) => Ok(value),
+            // The list's owner of the element, the caller's now.
+            Some(value) => Ok(crate::owner_of(req, value)),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -347,9 +348,10 @@ impl SplDoublyLinkedList {
 
     /// `shift(): mixed`; the witness is the class's.
     #[php(tentative)]
-    fn shift(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn shift(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.shift())? {
-            Some(value) => Ok(value),
+            // The list's owner of the element, the caller's now.
+            Some(value) => Ok(crate::owner_of(req, value)),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -505,7 +507,7 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let at = node(req, this, index.0)?;
         let value = with(req, this, |l| l.nodes[at].data)?.unwrap_or_default();
-        Ok(crate::copied(req, value))
+        Ok(value.deref())
     }
 
     /// `offsetSet($index, mixed $value): void`, `null` pushing.
@@ -578,7 +580,7 @@ impl SplDoublyLinkedList {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let found = with(req, this.object(), |l| l.at(l.cursor))?;
-        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+        Ok(found.map_or_else(Value::null, |v| v.deref()))
     }
 
     /// `key(): int`, the traverse position.
@@ -1028,7 +1030,7 @@ fn peek(req: &mut Request, this: PhpObject, tail: bool) -> Result<Value, Thrown>
         at.and_then(|at| l.nodes[at].data)
     })?;
     match found {
-        Some(value) => Ok(crate::copied(req, value)),
+        Some(value) => Ok(value.deref()),
         None => Err(throw(
             req,
             "RuntimeException",

@@ -85,5 +85,5 @@ pub(super) fn parse_str(
     result: Ref<Untyped<Value>>,
 ) -> Result<(), Thrown> {
     let array = req.parse_query(string.as_bytes())?;
-    result.set(req, Untyped(Value::array(array.hand_on_unmigrated())))
+    result.set(req, Untyped(array.into_value()))
 }

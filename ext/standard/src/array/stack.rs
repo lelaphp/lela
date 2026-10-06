@@ -53,12 +53,17 @@ impl Stack {
     }
 
     /// A rebuilt table written where the array stood.
-    pub(super) fn replace(&mut self, req: &mut Request, rebuilt: PhpArray) -> Result<(), Thrown> {
+    pub(super) fn replace(
+        &mut self,
+        req: &mut Request,
+        rebuilt: Owner<PhpArray>,
+    ) -> Result<(), Thrown> {
+        let view = *rebuilt;
         match self.owned {
-            Some(cell) => cell.set(req, rebuilt.to_value())?,
+            Some(cell) => cell.set(req, rebuilt.into_value().hand_on_unmigrated())?,
             None => self.given.set(req, rebuilt)?,
         }
-        self.array = rebuilt;
+        self.array = view;
         Ok(())
     }
 
@@ -209,7 +214,7 @@ fn array_push(
 /// int(1)
 /// ```
 #[php_function]
-fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
+fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
     let mut stack = Stack::of(req, array)?;
     // The last element as `ZEND_HASH_REVERSE_FOREACH` finds it, from
     // `nNumUsed` back: the internal pointer set to it, and reset below as
@@ -217,7 +222,7 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     stack.array.cursor_end();
     let (Some(key), Some(value)) = (stack.array.cursor_key(), stack.array.cursor_current()) else {
         stack.finish(req);
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     req.addref(&value);
     let popped = stack.array.unset(req, &key);
@@ -229,7 +234,10 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
     stack.array.cursor_reset();
     stack.finish(req);
     let value = unwrapped(req, value);
-    popped?;
+    if let Err(thrown) = popped {
+        value.give_up(req);
+        return Err(thrown);
+    }
     Ok(value)
 }
 
@@ -237,14 +245,14 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
 /// made once the table is changed: a reference's value as it stands
 /// after, with one more owner, in place of the reference, so an element
 /// that referred to the array itself hands back the array as it is left.
-fn unwrapped(req: &mut Request, taken: Value) -> Value {
-    let Some(reference) = taken.as_php_ref().copied() else {
-        return taken;
-    };
-    let value = reference.get().deref();
-    req.addref(&value);
+/// `taken` is the owner the native took of the element.
+fn unwrapped(req: &mut Request, taken: Value) -> Owner<Value> {
+    let value = taken
+        .as_php_ref()
+        .map_or(taken, |reference| reference.get().deref());
+    let owner = Owner::take(req, value);
     req.release(taken);
-    value
+    owner
 }
 
 /// `array_shift(array &$array): mixed`, php's `PHP_FUNCTION(array_shift)`
@@ -312,12 +320,12 @@ fn unwrapped(req: &mut Request, taken: Value) -> Value {
 /// 0123
 /// ```
 #[php_function]
-fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown> {
+fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
     let mut stack = Stack::of(req, array)?;
     let rows = stack.array.snapshot_refs();
     let Some((_, first)) = rows.first().cloned() else {
         stack.finish(req);
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     req.addref(&first);
     let mut rebuilt = PhpArray::new(req)?;
@@ -336,7 +344,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
     }
     shifted_iterators(req, stack.array);
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt.hand_on_unmigrated())?;
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(unwrapped(req, first))
 }
@@ -448,7 +456,7 @@ fn array_unshift(
     let argc = u32::try_from(argc).unwrap_or(u32::MAX);
     stack.array.iterators_advance(req, argc);
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt.hand_on_unmigrated())?;
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(count)
 }
@@ -689,7 +697,7 @@ fn array_splice(
         rebuilt.set_next_free(req, 0)?;
     }
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt.hand_on_unmigrated())?;
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     match removed {
         Some(removed) => Ok(removed),

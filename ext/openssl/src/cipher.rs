@@ -376,7 +376,7 @@ fn openssl_encrypt(
             return Ok(OrFalse::False);
         };
         let bytes = PhpString::new(req, &bytes)?;
-        tag.set(req, Untyped(Value::string(bytes.hand_on_unmigrated())))?;
+        tag.set(req, Untyped(bytes.into_value()))?;
     } else if tag.is_given() {
         tag.set(req, Untyped(Value::null()))?;
     } else if auth.is_aead() {
@@ -841,16 +841,16 @@ fn openssl_seal(
         let len = i64::try_from(sealed.data.len()).unwrap_or(0);
         if len > 0 {
             let bytes = PhpString::new(req, &sealed.data)?;
-            sealed_data.set(req, Untyped(Value::string(bytes.hand_on_unmigrated())))?;
+            sealed_data.set(req, Untyped(bytes.into_value()))?;
             let mut list = PhpArray::new(req)?;
             for key in &sealed.keys {
                 let key = PhpString::new(req, key)?;
                 list.append(req, Value::string(key.hand_on_unmigrated()))?;
             }
-            encrypted_keys.set(req, Untyped(list.into_value().hand_on_unmigrated()))?;
+            encrypted_keys.set(req, Untyped(list.into_value()))?;
             if iv.is_given() {
                 let bytes = PhpString::new(req, &sealed.iv)?;
-                iv.set(req, Untyped(Value::string(bytes.hand_on_unmigrated())))?;
+                iv.set(req, Untyped(bytes.into_value()))?;
             }
         }
         Ok(OrFalse::Value(len))
@@ -934,7 +934,7 @@ fn openssl_open(
             return Ok(false);
         };
         let bytes = PhpString::new(req, &opened)?;
-        output.set(req, Untyped(Value::string(bytes.hand_on_unmigrated())))?;
+        output.set(req, Untyped(bytes.into_value()))?;
         Ok(true)
     })
 }

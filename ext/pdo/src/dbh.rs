@@ -1685,7 +1685,11 @@ impl PDO {
     /// SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
     /// ```
     #[php(tentative)]
-    fn getAttribute(req: &mut Request, this: This<Self>, attribute: i64) -> Result<Value, Thrown> {
+    fn getAttribute(
+        req: &mut Request,
+        this: This<Self>,
+        attribute: i64,
+    ) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         let attr = attribute;
         clear_error(req, this);
@@ -1703,23 +1707,23 @@ impl PDO {
                 d.stringify,
             )
         }) else {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         };
         let (persistent, case, nulls, mode, name, class, args, fetch, stringify) = state;
         match attr {
-            PDO::ATTR_PERSISTENT => return Ok(Value::bool(persistent)),
-            PDO::ATTR_CASE => return Ok(Value::int(case.code())),
-            PDO::ATTR_ORACLE_NULLS => return Ok(Value::int(nulls.code())),
+            PDO::ATTR_PERSISTENT => return Ok(Owner::take(req, Value::bool(persistent))),
+            PDO::ATTR_CASE => return Ok(Owner::take(req, Value::int(case.code()))),
+            PDO::ATTR_ORACLE_NULLS => return Ok(Owner::take(req, Value::int(nulls.code()))),
             PDO::ATTR_ERRMODE => {
-                return Ok(Value::int(match mode {
+                let code = match mode {
                     OnError::Silent => 0,
                     OnError::Warn => 1,
                     OnError::Throw => 2,
-                }));
+                };
+                return Ok(Owner::take(req, Value::int(code)));
             }
             PDO::ATTR_DRIVER_NAME => {
-                return crate::string(req, name.unwrap_or("").as_bytes())
-                    .map(Owner::hand_on_unmigrated);
+                return crate::string(req, name.unwrap_or("").as_bytes());
             }
             PDO::ATTR_STATEMENT_CLASS => {
                 let mut out = PhpArray::new(req)?;
@@ -1733,19 +1737,26 @@ impl PDO {
                     req.addref(&Value::array(args));
                     out.append(req, Value::array(args))?;
                 }
-                return Ok(out.into_value().hand_on_unmigrated());
+                return Ok(out.into_value());
             }
-            PDO::ATTR_DEFAULT_FETCH_MODE => return Ok(Value::int(i64::from(fetch))),
-            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Value::bool(stringify)),
+            PDO::ATTR_DEFAULT_FETCH_MODE => {
+                return Ok(Owner::take(req, Value::int(i64::from(fetch))));
+            }
+            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Owner::take(req, Value::bool(stringify))),
             _ => {}
         }
         match on_connection(req, this, |req, conn| conn.attribute(req, attr))? {
-            Ok(Some(Some(value))) => Ok(value),
+            // The driver's value comes with its one owner, the caller's.
+            Ok(Some(Some(value))) => {
+                let owner = Owner::take(req, value);
+                req.release(value);
+                Ok(owner)
+            }
             Ok(Some(None)) => unsupported(req, this, "driver does not support that attribute")
-                .map(|()| Value::bool(false)),
-            Ok(None) => Ok(Value::bool(false)),
+                .map(|()| Owner::take(req, Value::bool(false))),
+            Ok(None) => Ok(Owner::take(req, Value::bool(false))),
             Err(()) => unsupported(req, this, "driver does not support getting attributes")
-                .map(|()| Value::bool(false)),
+                .map(|()| Owner::take(req, Value::bool(false))),
         }
     }
 

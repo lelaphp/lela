@@ -531,7 +531,7 @@ fn read_body(
             }
             trav = t.next();
         }
-        out.set(req, Untyped(headers.into_value().hand_on_unmigrated()))?;
+        out.set(req, Untyped(headers.into_value()))?;
     }
     Ok(result)
 }

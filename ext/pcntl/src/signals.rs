@@ -176,10 +176,7 @@ pub(crate) fn pcntl_signal_get_handler(
     let number = i32::try_from(signal).unwrap_or(i32::MAX);
     let held = req.state::<State>().signals.handlers.get(&number).copied();
     Ok(Untyped(match held {
-        Some(handler) => {
-            req.addref(&handler);
-            handler
-        }
+        Some(handler) => handler,
         None => Value::int(0),
     }))
 }
@@ -415,7 +412,7 @@ pub(crate) fn pcntl_sigprocmask(
                 numbers.append(req, Value::int(number))?;
             }
         }
-        old_signals.set(req, Untyped(numbers.into_value().hand_on_unmigrated()))?;
+        old_signals.set(req, Untyped(numbers.into_value()))?;
     }
     Ok(true)
 }

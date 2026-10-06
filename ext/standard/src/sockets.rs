@@ -231,10 +231,8 @@ fn addslashes(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// A string of the request's as a value.
-fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(
-        PhpString::new(req, bytes)?.hand_on_unmigrated(),
-    ))
+fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `ZEND_TRY_ASSIGN_REF_LONG` and `ZEND_TRY_ASSIGN_REF_STR` of the two
@@ -743,7 +741,7 @@ fn stream_socket_accept(
     match socket.accept(req, timeval(timeout), peer_name.is_given())? {
         Ok((client, peer)) => {
             if let Some(peer) = peer {
-                peer_name.set(req, Untyped(Value::string(peer.hand_on_unmigrated())))?;
+                peer_name.set(req, Untyped(peer.into_value()))?;
             }
             Ok(Untyped(OrFalse::Value(client.into_resource())))
         }
@@ -830,8 +828,7 @@ fn stream_socket_recvfrom(
     match socket.recvfrom(req, len, flags, want_addr)? {
         Some((bytes, from)) => {
             if let Some(from) = from
-                && let Err(thrown) =
-                    address.set(req, Untyped(Value::string(from.hand_on_unmigrated())))
+                && let Err(thrown) = address.set(req, Untyped(from.into_value()))
             {
                 bytes.give_up(req);
                 return Err(thrown);
@@ -1074,7 +1071,7 @@ fn stream_get_transports(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.transports() {
         let value = string_value(req, name.as_bytes())?;
-        out.append(req, value)?;
+        out.append(req, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }

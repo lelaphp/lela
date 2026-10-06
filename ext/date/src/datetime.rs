@@ -1081,7 +1081,7 @@ fn date_modify(
     if !modify(req, object, modifier.as_bytes(), None)? {
         return Ok(OrFalse::False);
     }
-    Ok(OrFalse::Value(again(req, object)))
+    Ok(OrFalse::Value(again(object)))
 }
 
 /// `date_add(DateTime $object, DateInterval $interval): DateTime`, and
@@ -1104,7 +1104,7 @@ fn date_add(
     interval: Instance<DateInterval>,
 ) -> Result<Instance<DateTime>, Thrown> {
     add(req, object.object(), interval.object())?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_sub(DateTime $object, DateInterval $interval): DateTime`.
@@ -1125,7 +1125,7 @@ fn date_sub(
     interval: Instance<DateInterval>,
 ) -> Result<Instance<DateTime>, Thrown> {
     sub(req, object.object(), interval.object(), None)?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_timezone_get(DateTimeInterface $object): DateTimeZone|false`,
@@ -1176,7 +1176,7 @@ fn date_timezone_set(
     timezone: Instance<DateTimeZone>,
 ) -> Result<Instance<DateTime>, Thrown> {
     timezone_set(req, object.object(), timezone.object())?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_offset_get(DateTimeInterface $object): int`, and `getOffset`.
@@ -1263,7 +1263,7 @@ fn date_time_set(
     #[php(default = 0)] microsecond: i64,
 ) -> Result<Instance<DateTime>, Thrown> {
     time_set(req, object.object(), hour, minute, second, microsecond)?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_date_set(DateTime $object, int $year, int $month, int $day):
@@ -1286,7 +1286,7 @@ fn date_date_set(
     day: i64,
 ) -> Result<Instance<DateTime>, Thrown> {
     date_set(req, object.object(), year, month, day)?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_isodate_set(DateTime $object, int $year, int $week, int
@@ -1309,7 +1309,7 @@ fn date_isodate_set(
     #[php(default = 1)] dayOfWeek: i64,
 ) -> Result<Instance<DateTime>, Thrown> {
     isodate_set(req, object.object(), year, week, dayOfWeek)?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_timestamp_set(DateTime $object, int $timestamp): DateTime`,
@@ -1330,7 +1330,7 @@ fn date_timestamp_set(
     timestamp: i64,
 ) -> Result<Instance<DateTime>, Thrown> {
     timestamp_set(req, object.object(), timestamp)?;
-    Ok(again(req, object.object()))
+    Ok(again(object.object()))
 }
 
 /// `date_timestamp_get(DateTimeInterface $object): int`, and
@@ -1736,7 +1736,7 @@ impl DateTime {
     ) -> Result<Instance<DateTime>, Thrown> {
         let object = this.object();
         modify(req, object, modifier.as_bytes(), Some("DateTime::modify"))?;
-        Ok(again(req, object))
+        Ok(again(object))
     }
 
     /// `DateTime::add(DateInterval $interval): DateTime`, `date_add`'s
@@ -1748,7 +1748,7 @@ impl DateTime {
         interval: Instance<DateInterval>,
     ) -> Result<Instance<DateTime>, Thrown> {
         add(req, this.object(), interval.object())?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTime::sub(DateInterval $interval): DateTime`.
@@ -1769,7 +1769,7 @@ impl DateTime {
         interval: Instance<DateInterval>,
     ) -> Result<Instance<DateTime>, Thrown> {
         sub(req, this.object(), interval.object(), Some("DateTime::sub"))?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTimeInterface::getTimezone(): DateTimeZone|false`,
@@ -1791,7 +1791,7 @@ impl DateTime {
         timezone: Instance<DateTimeZone>,
     ) -> Result<Instance<DateTime>, Thrown> {
         timezone_set(req, this.object(), timezone.object())?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTimeInterface::getOffset(): int`, `date_offset_get`'s body.
@@ -1824,7 +1824,7 @@ impl DateTime {
         #[php(default = 0)] microsecond: i64,
     ) -> Result<Instance<DateTime>, Thrown> {
         time_set(req, this.object(), hour, minute, second, microsecond)?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTime::setDate(int $year, int $month, int $day): DateTime`,
@@ -1838,7 +1838,7 @@ impl DateTime {
         day: i64,
     ) -> Result<Instance<DateTime>, Thrown> {
         date_set(req, this.object(), year, month, day)?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTime::setISODate(...)`, `date_isodate_set`'s body.
@@ -1851,7 +1851,7 @@ impl DateTime {
         #[php(default = 1)] dayOfWeek: i64,
     ) -> Result<Instance<DateTime>, Thrown> {
         isodate_set(req, this.object(), year, week, dayOfWeek)?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTime::setTimestamp(int $timestamp): DateTime`,
@@ -1863,7 +1863,7 @@ impl DateTime {
         timestamp: i64,
     ) -> Result<Instance<DateTime>, Thrown> {
         timestamp_set(req, this.object(), timestamp)?;
-        Ok(again(req, this.object()))
+        Ok(again(this.object()))
     }
 
     /// `DateTime::setMicrosecond(int $microsecond): static`.
@@ -1902,8 +1902,7 @@ impl DateTime {
         let mut time = time_of(req, object)?;
         time.us = microsecond;
         set_time(req, object, Some(time))?;
-        // `RETURN_OBJ_COPY`, answered as `static`.
-        req.addref(&object.as_value());
+        // `RETURN_OBJ_COPY`, answered as `static`, the engine's own owner.
         Ok(Static(object))
     }
 

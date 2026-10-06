@@ -601,9 +601,7 @@ impl Number {
     /// -0.50|7
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let value = rendered(req, this.object())?;
-        req.addref(&Value::string(value));
-        Ok(value)
+        rendered(req, this.object())
     }
 
     /// `__serialize(): array`: `['value' => string]`.

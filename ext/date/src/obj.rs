@@ -351,9 +351,9 @@ pub(super) fn interval_of(req: &mut Request, object: PhpObject) -> Result<(RelTi
     }
 }
 
-/// `RETURN_OBJ_COPY`: the object with one more owner, answered as a `C`.
-pub(super) fn again<C: Class>(req: &mut Request, object: PhpObject) -> Instance<C> {
-    req.addref(&object.as_value());
+/// `RETURN_OBJ_COPY`: the object answered as a `C`, a view the engine
+/// takes its own owner of as it takes any returned view's.
+pub(super) fn again<C: Class>(object: PhpObject) -> Instance<C> {
     Instance::of(object)
 }
 

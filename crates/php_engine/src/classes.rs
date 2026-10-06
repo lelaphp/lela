@@ -727,8 +727,9 @@ impl Closure {
         closure: Instance<Closure>,
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
-    ) -> Result<Option<Instance<Closure>>, Thrown> {
-        do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))
+    ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
+        let made = do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))?;
+        Ok(made.map(|bound| Owner::adopt(req, bound)))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -797,8 +798,9 @@ impl Closure {
         this: This<Self>,
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
-    ) -> Result<Option<Instance<Closure>>, Thrown> {
-        do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))
+    ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
+        let made = do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))?;
+        Ok(made.map(|bound| Owner::adopt(req, bound)))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,
@@ -848,14 +850,14 @@ impl Closure {
         this: This<Self>,
         newThis: PhpObject,
         args: NamedVariadic<Value>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let closure = this.object();
         let Some(info) = closure.closure(req).cloned() else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let class = newThis.class();
         if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         }
         // `fci.named_params`, placed by `zend_call_function` over the
         // closure's function.
@@ -867,7 +869,11 @@ impl Closure {
             &placed.arguments,
             &placed.extra_named,
         )?;
-        Ok(returned.deref())
+        // The call's value is the caller's, a reference's referent taken
+        // out of it.
+        let owner = Owner::take(req, returned.deref());
+        req.release(returned);
+        Ok(owner)
     }
 
     /// `Closure::fromCallable(callable $callback): Closure`,
@@ -961,13 +967,12 @@ impl Closure {
     fn fromCallable(
         req: &mut Request,
         callback: Raw<Callable>,
-    ) -> Result<Instance<Closure>, Thrown> {
+    ) -> Result<Owner<Instance<Closure>>, Thrown> {
         let given = callback.value();
         if let Some(object) = given.as_object().copied()
             && object.closure(req).is_some()
         {
-            req.addref(&given);
-            return Ok(Instance::of(object));
+            return Ok(Owner::take(req, object).into_instance());
         }
         // A trampoline a `get_closure` handler made has no scope, which
         // `zend_create_closure_from_callable` refuses with no reason.
@@ -997,7 +1002,8 @@ impl Closure {
                 }));
             }
         };
-        fake_closure(req, &callable).map(Instance::of)
+        let made = fake_closure(req, &callable)?;
+        Ok(Owner::adopt(req, made).into_instance())
     }
 
     /// `Closure::getCurrent(): Closure` (8.5), `ZEND_METHOD(Closure,
@@ -1022,7 +1028,6 @@ impl Closure {
                 "Current function is not a closure",
             ));
         };
-        req.addref(&closure.as_value());
         Ok(Instance::of(closure))
     }
 }
@@ -1671,8 +1676,9 @@ impl Exception {
     /// Stack trace:
     /// #0 {main}
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        req.exception_string(this.object())
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        let made = req.exception_string(this.object());
+        crate::api::values::adopted(req, made)
     }
 }
 
@@ -2058,7 +2064,6 @@ fn throwable_property<T: FromArgument>(
     name: &[u8],
 ) -> Result<Raw<T>, Thrown> {
     let value = this.prop(req, name).unwrap_or_default();
-    req.addref(&value);
     Raw::from_value(req, value)
 }
 

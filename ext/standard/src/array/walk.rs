@@ -588,11 +588,7 @@ fn find(
 #[php_function]
 fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((_, value)) => {
-            let value = value.deref();
-            req.addref(&value);
-            Ok(value)
-        }
+        Some((_, value)) => Ok(value.deref()),
         None => Ok(Value::null()),
     }
 }
@@ -612,11 +608,7 @@ fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<
 #[php_function]
 fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((key, _)) => {
-            let value = key_value(&key);
-            req.addref(&value);
-            Ok(value)
-        }
+        Some((key, _)) => Ok(key_value(&key)),
         None => Ok(Value::null()),
     }
 }

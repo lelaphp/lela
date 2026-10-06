@@ -495,12 +495,13 @@ fn clone(
     req: &mut Request,
     object: PhpObject,
     #[php(default = [])] withProperties: Passed<PhpArray>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let with = match withProperties {
         Passed::Given(with) => Some(with),
         Passed::Omitted => None,
     };
-    req.clone_object(object, with)
+    let made = req.clone_object(object, with);
+    crate::api::values::adopted(req, made)
 }
 
 /// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`

@@ -221,8 +221,8 @@ fn headers_sent(
     let (file, at) = sent.clone().unwrap_or_default();
     line.set(req, Untyped(Value::int(i64::from(at))))?;
     if filename.is_given() {
-        let file = Value::string(PhpString::new(req, &file)?.hand_on_unmigrated());
-        filename.set(req, Untyped(file))?;
+        let file = PhpString::new(req, &file)?;
+        filename.set(req, Untyped(file.into_value()))?;
     }
     Ok(sent.is_some())
 }

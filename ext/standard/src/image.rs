@@ -1683,7 +1683,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Value, Thrown> {
 fn clear_info(req: &mut Request, image_info: Ref<Untyped<php::Value>>) -> Result<(), Thrown> {
     if image_info.is_given() {
         let empty = php::PhpArray::new(req)?;
-        image_info.set(req, Untyped(php::Value::array(empty.hand_on_unmigrated())))?;
+        image_info.set(req, Untyped(empty.into_value()))?;
     }
     Ok(())
 }
@@ -1755,7 +1755,7 @@ fn answer(
                 info.set(req, php::Key::Str(name.hand_on_unmigrated()), value)?;
             }
         }
-        image_info.set(req, Untyped(php::Value::array(info.hand_on_unmigrated())))?;
+        image_info.set(req, Untyped(info.into_value()))?;
     }
     let Some(data) = found.data else {
         return Ok(OrFalse::False);

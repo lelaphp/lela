@@ -632,7 +632,6 @@ fn stream_context_get_default(
     if let Some(options) = options {
         parse_options(req, res, options)?;
     }
-    req.addref(&res.resource().as_value());
     Ok(Untyped(res.resource()))
 }
 
@@ -656,7 +655,6 @@ fn stream_context_set_default(
 ) -> Result<Untyped<Resource>, Thrown> {
     let res = StreamCtx::default_ctx(req)?;
     parse_options(req, res, options)?;
-    req.addref(&res.resource().as_value());
     Ok(Untyped(res.resource()))
 }
 

@@ -716,11 +716,11 @@ fn do_match(
     // `zend_try_array_init`: `$matches` is `[]` before anything else.
     if wants {
         let empty = PhpArray::new(req)?;
-        matches.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
+        matches.set(req, Untyped(empty.into_value()))?;
     }
     let (value, found) = match_impl(req, &pattern, subject, wants, global, flags, offset)?;
     if let Some(found) = found {
-        matches.set(req, Untyped(found.into_value().hand_on_unmigrated()))?;
+        matches.set(req, Untyped(found.into_value()))?;
     }
     Ok(value)
 }

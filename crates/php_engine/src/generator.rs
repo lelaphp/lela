@@ -1710,14 +1710,12 @@ pub(crate) fn iterator_rewind(req: &mut Request, generator: PhpObject) -> Result
 // ----- the methods -----
 
 /// `RETURN_COPY_DEREF` of `value` where it is set, `null` where it is
-/// not.
-fn copy_deref(req: &mut Request, value: Value) -> Value {
+/// not: the view, which the engine takes its owner of as the return.
+fn copy_deref(value: Value) -> Value {
     if value.tag() == TypeTag::Undef {
         return Value::null();
     }
-    let value = value.deref();
-    req.addref(&value);
-    value
+    value.deref()
 }
 
 /// The receiver's value past `root`'s: `null` once the generator has
@@ -1729,7 +1727,7 @@ fn yielded_now(req: &mut Request, this: PhpObject, pick: fn(&ZendGenerator) -> V
         return Value::null();
     }
     let value = read(req, root, pick).unwrap_or_else(Value::undef);
-    copy_deref(req, value)
+    copy_deref(value)
 }
 
 /// `final class Generator implements Iterator`, `@strict-properties`
@@ -1974,7 +1972,6 @@ impl Generator {
                 "Cannot get return value of a generator that hasn't returned",
             ));
         }
-        req.addref(&retval);
         Ok(retval)
     }
 

@@ -58,7 +58,11 @@ pub(crate) fn room(req: &mut Request, len: usize) -> Result<Vec<u8>, Thrown> {
 }
 
 /// Assign through a by-reference parameter.
-pub(crate) fn assign(req: &mut Request, out: &Out, value: Value) -> Result<(), Thrown> {
+pub(crate) fn assign(
+    req: &mut Request,
+    out: &Out,
+    value: impl php_ext::abi::IntoReturn,
+) -> Result<(), Thrown> {
     out.set(req, Untyped(value))
 }
 
@@ -145,7 +149,7 @@ fn from_fd_set(
             out.set(req, key, element)?;
         }
     }
-    target.set(req, Some(out.hand_on_unmigrated()))
+    target.set(req, Some(out))
 }
 
 /// `socket_select(?array &$read, ?array &$write, ?array &$except, ?int
@@ -660,7 +664,7 @@ fn name(
         }
     };
     let value = string(req, &text)?;
-    assign(req, address, value.hand_on_unmigrated())?;
+    assign(req, address, value)?;
     if let Some(at) = at {
         assign(req, port, Value::int(i64::from(at)))?;
     }
@@ -984,8 +988,8 @@ fn socket_recv(
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
     let got = ffi::recv(fd, &mut buf, c_int(flags));
     let value = match got {
-        Ok(n) if n > 0 => string(req, &buf[..n])?.hand_on_unmigrated(),
-        _ => Value::null(),
+        Ok(n) if n > 0 => string(req, &buf[..n])?,
+        _ => Owner::take(req, Value::null()),
     };
     assign(req, &data, value)?;
     match got {
@@ -1108,7 +1112,7 @@ fn socket_recvfrom(
         }
     };
     let bytes = string(req, &buf[..n])?;
-    assign(req, &data, bytes.hand_on_unmigrated())?;
+    assign(req, &data, bytes)?;
     let (text, at) = match (&from, family) {
         (Addr::V4(v4), libc::AF_INET) => (ntop(&from), Some(v4.port())),
         (Addr::V6(v6), libc::AF_INET6) => (ntop(&from), Some(v6.port())),
@@ -1118,7 +1122,7 @@ fn socket_recvfrom(
         _ => (Vec::new(), None),
     };
     let text = string(req, &text)?;
-    assign(req, &address, text.hand_on_unmigrated())?;
+    assign(req, &address, text)?;
     if let Some(at) = at {
         assign(req, &port, Value::int(i64::from(at)))?;
     }
@@ -1244,13 +1248,13 @@ fn socket_create_pair(
         }
     };
     let empty = PhpArray::new(req)?;
-    assign(req, &pair, empty.into_value().hand_on_unmigrated())?;
+    assign(req, &pair, empty.into_value())?;
     let mut out = PhpArray::new(req)?;
     for fd in fds {
         let made = new_socket(req, Sock::owning(fd, c_int(domain)))?;
         out.append(req, made.into_value().hand_on_unmigrated())?;
     }
-    assign(req, &pair, out.into_value().hand_on_unmigrated())?;
+    assign(req, &pair, out.into_value())?;
     Ok(true)
 }
 

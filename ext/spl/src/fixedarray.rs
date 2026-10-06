@@ -638,8 +638,7 @@ fn read(req: &mut Request, object: PhpObject, offset: Option<&Value>) -> Result<
         ));
     };
     let at = inside(req, object, offset)?;
-    let value = with(req, object, |a| a.elements[at])?;
-    Ok(crate::copied(req, value))
+    with(req, object, |a| a.elements[at])
 }
 
 fn write(
@@ -725,7 +724,8 @@ impl ObjectHandlers for Handlers {
             return call_method(req, &object, b"offsetGet", &[offset])
                 .map(Owner::hand_on_unmigrated);
         }
-        read(req, object, offset)
+        // The slot hands the engine an owner of what it read.
+        read(req, object, offset).map(|v| crate::copied(req, v))
     }
 
     fn write_dimension(

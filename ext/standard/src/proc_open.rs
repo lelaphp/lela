@@ -903,7 +903,7 @@ fn proc_open(
             held.push(stream.hand_on_unmigrated().resource());
         }
     }
-    pipes.set(req, Untyped(Value::array(opened.hand_on_unmigrated())))?;
+    pipes.set(req, Untyped(opened.into_value()))?;
     let kind = process_type(req);
     let process = Process {
         child: pid,

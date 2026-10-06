@@ -630,7 +630,6 @@ impl ReflectionFunctionAbstract {
         let Some(this) = closure.closure(req).and_then(|info| info.this) else {
             return Ok(None);
         };
-        req.addref(&this.as_value());
         Ok(Some(this))
     }
 
@@ -1694,12 +1693,6 @@ fn trace_of(req: &mut Request, kept: PhpObject, options: i64) -> Result<Owner<Ph
     }
 }
 
-/// An object the reflector hands back, one more owner of it.
-fn handed(req: &mut Request, object: PhpObject) -> PhpObject {
-    req.addref(&object.as_value());
-    object
-}
-
 /// `ReflectionGenerator` as the stub declares it.
 #[php_class(final, not_serializable, size = 96, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionGenerator;
@@ -1917,7 +1910,7 @@ impl ReflectionGenerator {
     /// ```
     fn getThis(req: &mut Request, this: This<Self>) -> Result<Option<PhpObject>, Thrown> {
         let (_, execution) = standing_generator(req, this.object())?;
-        Ok(execution.this.map(|object| handed(req, object)))
+        Ok(execution.this)
     }
 
     /// `ReflectionGenerator::getExecutingGenerator()`: the generator
@@ -1942,7 +1935,7 @@ impl ReflectionGenerator {
     ) -> Result<Instance<crate::Generator>, Thrown> {
         let (kept, execution) = standing_generator(req, this.object())?;
         let executing = execution.executing.unwrap_or(kept);
-        Ok(Instance::of(handed(req, executing)))
+        Ok(Instance::of(executing))
     }
 
     /// `ReflectionGenerator::isClosed()`: `execute_data == NULL`, the
@@ -2792,7 +2785,7 @@ impl ReflectionFiber {
     /// ```
     fn getFiber(req: &mut Request, this: This<Self>) -> Result<Instance<crate::Fiber>, Thrown> {
         let (kept, _) = kept_execution(req, this.object())?;
-        Ok(Instance::of(handed(req, kept)))
+        Ok(Instance::of(kept))
     }
 
     /// `ReflectionFiber::getExecutingFile()`: the file of the innermost

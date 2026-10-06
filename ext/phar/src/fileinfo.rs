@@ -578,11 +578,11 @@ impl PharFileInfo {
         req: &mut Request,
         this: This<Self>,
         #[php(default = [])] unserializeOptions: Passed<PhpArray>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let this = this.object();
         held(req, this)?;
         let Some(mut meta) = entry_of(req, this).map(|e| std::mem::take(&mut e.metadata)) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let value = metadata_value(
             req,

@@ -517,7 +517,7 @@ fn openssl_pkey_export(
             return Ok(false);
         }
         let pem = PhpString::new(req, &out.contents())?;
-        output.set(req, Untyped(Value::string(pem.hand_on_unmigrated())))?;
+        output.set(req, Untyped(pem.into_value()))?;
         Ok(true)
     })
 }

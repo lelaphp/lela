@@ -437,14 +437,14 @@ pub(crate) fn poll(
         Some(links) => array_of(req, links, &dont_poll)?,
         None => PhpArray::new(req)?,
     };
-    reject.set(req, rejected.hand_on_unmigrated())?;
+    reject.set(req, rejected)?;
     if let (Some(links), Some(kept)) = (&read_links, &read_conns) {
         let ready = array_of(req, links, kept)?;
-        read.set(req, Some(ready.hand_on_unmigrated()))?;
+        read.set(req, Some(ready))?;
     }
     if let (Some(links), Some(kept)) = (&error_links, &error_conns) {
         let ready = array_of(req, links, kept)?;
-        error.set(req, Some(ready.hand_on_unmigrated()))?;
+        error.set(req, Some(ready))?;
     }
     Ok(match ready {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),

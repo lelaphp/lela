@@ -377,7 +377,7 @@ fn msg_receive(
     error_code.set(req, Untyped(Value::int(0)))?;
     if !unserialize {
         let text = PhpString::new(req, &text)?;
-        message.set(req, text.into_value().hand_on_unmigrated())?;
+        message.set(req, text)?;
         return Ok(true);
     }
     let mut reader = Unserializer::new(req, &text)?;
@@ -390,7 +390,10 @@ fn msg_receive(
         message.set(req, Value::bool(false))?;
         return Ok(false);
     };
-    message.set(req, value)?;
+    // The unserialised value is its one owner, the cell's to keep.
+    let owner = Owner::take(req, value);
+    req.release(value);
+    message.set(req, owner)?;
     Ok(true)
 }
 

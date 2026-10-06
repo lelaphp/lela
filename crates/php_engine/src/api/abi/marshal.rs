@@ -743,10 +743,12 @@ impl<T> Ref<T> {
     }
 }
 
-impl<T: IntoReturn> Ref<T> {
+impl<T> Ref<T> {
     /// Assign through the reference, `ZEND_TRY_ASSIGN_REF`; nothing where
-    /// the argument is absent.
-    pub fn set(&self, req: &mut Request, value: T) -> Result<(), Thrown> {
+    /// the argument is absent. The value is taken as a native's return
+    /// is ([`IntoReturn`]): an [`Owner`](crate::api::values::Owner) is
+    /// moved to the cell, and a view is one more owner, the cell's.
+    pub fn set(&self, req: &mut Request, value: impl IntoReturn) -> Result<(), Thrown> {
         let value = value.into_return(req)?;
         if let Some(cell) = self.cell {
             return cell.set(req, value);
@@ -908,7 +910,13 @@ impl<T: NullDefault> NullDefault for Passed<T> {}
 // ---------------------------------------------------------------- returns
 
 /// A type a native may return (design §7.1): its declared type and its
-/// conversion to the value the engine is handed.
+/// conversion to the value the engine is handed. An [`Owner`] is moved
+/// to the engine; a view is the engine's to own, so its conversion takes
+/// an owner of its own, `RETURN_COPY` (`Z_TRY_ADDREF`): a native returns
+/// an argument, an element of one or a property as it reads it, and a
+/// value it made as the owner it was made with.
+///
+/// [`Owner`]: crate::api::values::Owner
 pub trait IntoReturn: Sized {
     /// Whether this return declares nothing, which `#[php(tentative)]`
     /// refuses at build time.
@@ -937,7 +945,8 @@ impl IntoReturn for Value {
     fn declared() -> Option<Type> {
         Some(Type::Mixed)
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        req.addref(&self);
         Ok(self)
     }
 }
@@ -954,17 +963,21 @@ impl<T: IntoReturn> IntoReturn for Untyped<T> {
 }
 
 /// A `Value` returned as it is under `T`'s declaration: php verifies an
-/// internal return only in debug builds.
+/// internal return only in debug builds. A view, which the engine takes
+/// an owner of.
 impl<T: FromArgument> IntoReturn for Raw<T> {
     const MASK: u32 = T::MASK;
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        req.addref(&self.value);
         Ok(self.value)
     }
 }
 
+/// A return of a scalar or a view, the value it makes owned by the
+/// engine: `Z_TRY_ADDREF` takes nothing of a scalar.
 macro_rules! plain_return {
     ($t:ty, $ty:expr, $mask:expr, $make:expr) => {
         impl IntoReturn for $t {
@@ -972,8 +985,10 @@ macro_rules! plain_return {
             fn declared() -> Option<Type> {
                 Some($ty)
             }
-            fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-                Ok(($make)(self))
+            fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+                let value = ($make)(self);
+                req.addref(&value);
+                Ok(value)
             }
         }
     };
@@ -1045,8 +1060,10 @@ impl IntoReturn for Resource {
     fn declared() -> Option<Type> {
         None
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(Value::resource(self))
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        let value = Value::resource(self);
+        req.addref(&value);
+        Ok(value)
     }
 }
 
@@ -1069,8 +1086,10 @@ impl<C: Class> IntoReturn for Instance<C> {
     fn declared() -> Option<Type> {
         Some(named::<C>())
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(self.object.as_value())
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        let value = self.object.as_value();
+        req.addref(&value);
+        Ok(value)
     }
 }
 

@@ -562,7 +562,7 @@ fn sort(
         }
         _ => regular(req, object, a, b),
     });
-    array.set(req, sorted.hand_on_unmigrated())?;
+    array.set(req, sorted)?;
     answer.map(|()| true)
 }
 
@@ -600,7 +600,7 @@ fn sort_with_sort_keys(
         req.addref(&value);
         sorted.append(req, value)?;
     }
-    array.set(req, sorted.hand_on_unmigrated())?;
+    array.set(req, sorted)?;
     Ok(true)
 }
 

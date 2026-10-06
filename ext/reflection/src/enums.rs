@@ -426,7 +426,11 @@ impl ReflectionEnumUnitCase {
     /// ```
     fn getValue(req: &mut Request, this: This<Self>) -> Result<Instance<crate::UnitEnum>, Thrown> {
         let (class, name) = this_case(req, this.object())?;
-        case_object(req, class, &name).map(Instance::of)
+        let case = case_object(req, class, &name)?;
+        // The class's constant keeps the case; the engine takes its own
+        // owner of the view returned.
+        req.release(case.as_value());
+        Ok(Instance::of(case))
     }
 }
 
@@ -458,10 +462,7 @@ impl ReflectionEnumBackedCase {
         let value = case.prop(req, b"value").unwrap_or_default();
         let backing = match (value.as_int(), value.as_php_string()) {
             (Some(int), _) => Some(Union::A(int)),
-            (None, Some(&string)) => {
-                req.addref(&value);
-                Some(Union::B(string))
-            }
+            (None, Some(&string)) => Some(Union::B(string)),
             (None, None) => None,
         };
         req.release(case.as_value());

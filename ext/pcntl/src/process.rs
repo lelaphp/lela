@@ -165,7 +165,7 @@ fn waited(
         if child > 0 {
             usage_into(req, &mut array, &usage)?;
         }
-        resource_usage.set(req, Untyped(array.into_value().hand_on_unmigrated()))?;
+        resource_usage.set(req, Untyped(array.into_value()))?;
     }
     status.set(req, Untyped(Value::int(word.into())))?;
     Ok(child.into())
@@ -292,7 +292,7 @@ pub(crate) fn pcntl_waitid(
     };
     if info.is_given() {
         let array = crate::signals::siginfo(req, libc::SIGCHLD, &posted)?;
-        info.set(req, Untyped(array.into_value().hand_on_unmigrated()))?;
+        info.set(req, Untyped(array.into_value()))?;
     }
     Ok(true)
 }

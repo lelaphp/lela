@@ -292,7 +292,7 @@ fn exec(
             _ => PhpArray::new(req)?,
         };
         let done = php_exec(req, Mode::Gather, &command, Some(&mut array));
-        output.set(req, Untyped(Value::array(array.hand_on_unmigrated())))?;
+        output.set(req, Untyped(array.into_value()))?;
         done?
     } else {
         php_exec(req, Mode::Last, &command, None)?

@@ -220,7 +220,7 @@ fn openssl_pkcs12_export(
             return Ok(false);
         };
         let der = PhpString::new(req, &out.contents())?;
-        output.set(req, Untyped(Value::string(der.hand_on_unmigrated())))?;
+        output.set(req, Untyped(der.into_value()))?;
         Ok(true)
     })
 }
@@ -293,7 +293,7 @@ fn openssl_pkcs12_read(
                 list.into_value().hand_on_unmigrated(),
             )?;
         }
-        certificates.set(req, Untyped(out.into_value().hand_on_unmigrated()))?;
+        certificates.set(req, Untyped(out.into_value()))?;
         Ok(true)
     })
 }

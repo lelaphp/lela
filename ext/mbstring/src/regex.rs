@@ -473,7 +473,7 @@ fn ereg(
     }
     if matches.is_given() {
         let empty = PhpArray::new(req)?;
-        matches.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
+        matches.set(req, Untyped(empty.into_value()))?;
     }
     let enc = mbctype(req);
     if !check(string.as_bytes(), enc.mbfl) {
@@ -493,7 +493,7 @@ fn ereg(
     }
     if matches.is_given() {
         let found = groups(req, &re, &region, subject, false)?;
-        matches.set(req, Untyped(found.into_value().hand_on_unmigrated()))?;
+        matches.set(req, Untyped(found.into_value()))?;
     }
     Ok(true)
 }

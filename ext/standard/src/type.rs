@@ -294,12 +294,12 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         let converted = match target {
             "null" => {
                 req.release(now);
-                Value::null()
+                Owner::take(req, Value::null())
             }
             "array" => {
                 let mut array = PhpArray::new(req)?;
                 array.append(req, now)?;
-                Value::array(array.hand_on_unmigrated())
+                array.into_value()
             }
             // `object_init` and `scalar` added to its table, which is
             // the object an array of that one row casts to.
@@ -309,45 +309,52 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
                 row.set(req, key, now)?;
                 let object = to_object(req, &Value::array(*row));
                 row.give_up(req);
-                Value::object(object?.hand_on_unmigrated())
+                object?.into_value()
             }
         };
         var.set(req, converted)?;
         return Ok(true);
     }
     let converted = match name.as_slice() {
-        b"integer" | b"int" => Value::int(to_long(req, &current)?),
-        b"float" | b"double" => Value::float(to_double(req, &current)?),
+        b"integer" | b"int" => {
+            let n = to_long(req, &current)?;
+            Owner::take(req, Value::int(n))
+        }
+        b"float" | b"double" => {
+            let f = to_double(req, &current)?;
+            Owner::take(req, Value::float(f))
+        }
         b"string" => match to_string(req, &current) {
-            Ok(string) => Value::string(string.hand_on_unmigrated()),
+            Ok(string) => string.into_value(),
             // `convert_to_string` leaves the empty string behind a
             // conversion that threw.
             Err(thrown) => {
                 let empty = PhpString::new(req, b"")?;
-                var.set(req, Value::string(empty.hand_on_unmigrated()))?;
+                var.set(req, empty.into_value())?;
                 return Err(thrown);
             }
         },
         b"array" => {
             if current.as_array().is_some() {
-                req.addref(&current);
-                current
+                Owner::take(req, current)
             } else if matches!(current.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                Value::array(php_ext::values::PhpArray::new(req)?.hand_on_unmigrated())
+                php_ext::values::PhpArray::new(req)?.into_value()
             } else {
-                Value::array(to_array(req, &current)?.hand_on_unmigrated())
+                to_array(req, &current)?.into_value()
             }
         }
         b"object" => {
             if current.as_object().is_some() {
-                req.addref(&current);
-                current
+                Owner::take(req, current)
             } else {
-                Value::object(to_object(req, &current)?.hand_on_unmigrated())
+                to_object(req, &current)?.into_value()
             }
         }
-        b"bool" | b"boolean" => Value::bool(truthy(req, &current)),
-        b"null" => Value::null(),
+        b"bool" | b"boolean" => {
+            let truth = truthy(req, &current);
+            Owner::take(req, Value::bool(truth))
+        }
+        b"null" => Owner::take(req, Value::null()),
         b"resource" => {
             return Err(throw_error(
                 req,
@@ -832,8 +839,8 @@ fn is_callable(
         callable(req, &value)
     };
     if callable_name.is_given() {
-        let name = Value::string(self::callable_name(req, &value)?.hand_on_unmigrated());
-        callable_name.set(req, Untyped(name))?;
+        let name = self::callable_name(req, &value)?;
+        callable_name.set(req, Untyped(name.into_value()))?;
     }
     Ok(answer)
 }

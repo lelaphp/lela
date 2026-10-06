@@ -734,7 +734,7 @@ fn ftp_alloc(
         && response.is_given()
     {
         let text = PhpString::new(req, &text)?;
-        response.set(req, Untyped(Value::string(text.hand_on_unmigrated())))?;
+        response.set(req, Untyped(text.into_value()))?;
     }
     Ok(done)
 }

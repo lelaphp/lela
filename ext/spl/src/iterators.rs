@@ -493,16 +493,18 @@ impl RecursiveIteratorIterator {
 
     /// `key(): mixed`, the sub-iterator's.
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        rec_key(req, this)
+        let key = rec_key(req, this)?;
+        Ok(crate::owner_of(req, key))
     }
 
     /// `current(): mixed`, the sub-iterator's.
     #[php(tentative)]
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        rec_current(req, this)
+        let current = rec_current(req, this)?;
+        Ok(crate::owner_of(req, current))
     }
 
     /// `next(): void`.
@@ -548,10 +550,7 @@ impl RecursiveIteratorIterator {
         let levels = rec(req, this, |it| it.levels.clone())?;
         let wanted = level.unwrap_or_else(|| i64::try_from(levels.len()).unwrap_or(0) - 1);
         let found = usize::try_from(wanted).ok().and_then(|at| levels.get(at));
-        Ok(found.map(|l| {
-            req.addref(&l.iterator.as_value());
-            Instance::of(l.iterator)
-        }))
+        Ok(found.map(|l| Instance::of(l.iterator)))
     }
 
     /// `getInnerIterator(): RecursiveIterator`, the current sub-iterator.
@@ -781,10 +780,7 @@ impl IteratorIterator {
         this: This<Self>,
     ) -> Result<Option<Instance<Iterator>>, Thrown> {
         let this = checked(req, this.object())?;
-        Ok(inner(req, this)?.map(|inner| {
-            req.addref(&inner.as_value());
-            Instance::of(inner)
-        }))
+        Ok(inner(req, this)?.map(Instance::of))
     }
 
     /// `IteratorIterator::rewind(): void`: the inner rewound and its first
@@ -809,7 +805,7 @@ impl IteratorIterator {
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
         let key = dual(req, this, |it| it.key)?;
-        Ok(key.map_or_else(Value::null, |k| crate::copied(req, k)))
+        Ok(key.map_or_else(Value::null, |k| k.deref()))
     }
 
     /// `current(): mixed`: the fetched element.
@@ -817,7 +813,7 @@ impl IteratorIterator {
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
         let data = dual(req, this, |it| it.data)?;
-        Ok(data.map_or_else(Value::null, |d| crate::copied(req, d)))
+        Ok(data.map_or_else(Value::null, |d| d.deref()))
     }
 
     /// `IteratorIterator::next(): void`.
@@ -1429,7 +1425,7 @@ impl CachingIterator {
         let cache = full_cache(req, this)?;
         let key = Key::from_string(key.0);
         if let Some(value) = cache.get(&key) {
-            return Ok(crate::copied(req, value));
+            return Ok(value.deref());
         }
         let shown = match &key {
             Key::Int(n) => n.to_string(),
@@ -1482,9 +1478,7 @@ impl CachingIterator {
     #[php(tentative)]
     fn getCache(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let this = checked(req, this.object())?;
-        let cache = full_cache(req, this)?;
-        req.addref(&Value::array(cache));
-        Ok(cache)
+        full_cache(req, this)
     }
 
     /// `count(): int`, the cached elements.
@@ -1554,10 +1548,7 @@ impl RecursiveCachingIterator {
     ) -> Result<Option<Instance<RecursiveCachingIterator>>, Thrown> {
         let this = checked(req, this.object())?;
         let children = dual(req, this, |it| it.children)?;
-        Ok(children.map(|c| {
-            req.addref(&c.as_value());
-            Instance::of(c)
-        }))
+        Ok(children.map(Instance::of))
     }
 }
 
@@ -1633,13 +1624,14 @@ impl NoRewindIterator {
     /// current;2
     /// ```
     #[php(tentative)]
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match no_rewind_iter(req, this.object())? {
             Some(iter) => {
                 let data = iter.value(req)?;
-                Ok(crate::owned(req, data))
+                let data = crate::owned(req, data);
+                Ok(crate::owner_of(req, data))
             }
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
         }
     }
 
@@ -1750,7 +1742,7 @@ impl AppendIterator {
         let this = checked(req, this.object())?;
         dual_fetch(req, this, true)?;
         let data = dual(req, this, |it| it.data)?;
-        Ok(data.map_or_else(Value::null, |d| crate::copied(req, d)))
+        Ok(data.map_or_else(Value::null, |d| d.deref()))
     }
 
     /// `AppendIterator::next(): void`.
@@ -1782,9 +1774,7 @@ impl AppendIterator {
         this: This<Self>,
     ) -> Result<Instance<ArrayIterator>, Thrown> {
         let this = checked(req, this.object())?;
-        let list = appended(req, this)?;
-        req.addref(&list.as_value());
-        Ok(Instance::of(list))
+        Ok(Instance::of(appended(req, this)?))
     }
 }
 
@@ -2406,9 +2396,7 @@ impl RecursiveTreeIterator {
         if rec(req, this, |it| it.flags & Self::BYPASS_CURRENT != 0)? {
             // The element the inner iterator answered is its one owner.
             let current = rec_current(req, this)?;
-            let owner = Owner::take(req, current);
-            req.release(current);
-            return Ok(owner);
+            return Ok(crate::owner_of(req, current));
         }
         let Some(entry) = tree_entry(req, this)? else {
             return Ok(Owner::take(req, Value::null()));

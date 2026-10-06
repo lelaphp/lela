@@ -301,8 +301,14 @@ impl SoapClient {
     /// SoapClient::__doRequest() returned non string value
     /// ```
     #[php(tentative)]
-    fn __call(req: &mut Request, this: This<Self>, name: PhpString, args: PhpArray) -> R<Value> {
-        call_common(req, this.object(), name, args, None, None, None, None, None)
+    fn __call(
+        req: &mut Request,
+        this: This<Self>,
+        name: PhpString,
+        args: PhpArray,
+    ) -> R<Owner<Value>> {
+        let value = call_common(req, this.object(), name, args, None, None, None, None, None)?;
+        Ok(answered(req, value))
     }
 
     /// `SoapClient::__soapCall(string $name, array $args, ?array $options =
@@ -334,7 +340,7 @@ impl SoapClient {
         #[php(default = null)] options: Option<PhpArray>,
         #[php(default = null)] inputHeaders: Untyped<Value>,
         #[php(default = null)] outputHeaders: Ref<Untyped<Value>>,
-    ) -> R<Value> {
+    ) -> R<Owner<Value>> {
         let object = this.object();
         let mut location = None;
         let mut soap_action = None;
@@ -348,7 +354,7 @@ impl SoapClient {
         }
         let output = if outputHeaders.is_given() {
             let fresh = PhpArray::new(req)?;
-            outputHeaders.set(req, Untyped(fresh.into_value().hand_on_unmigrated()))?;
+            outputHeaders.set(req, Untyped(fresh.into_value()))?;
             Some(())
         } else {
             None
@@ -376,7 +382,7 @@ impl SoapClient {
             }
         };
         let out_ref = output.map(|()| &outputHeaders);
-        call_common(
+        let value = call_common(
             req,
             object,
             name,
@@ -386,7 +392,8 @@ impl SoapClient {
             uri.as_deref(),
             soap_headers,
             out_ref,
-        )
+        )?;
+        Ok(answered(req, value))
     }
 
     /// `SoapClient::__getFunctions(): ?array`: the description's
@@ -450,8 +457,8 @@ impl SoapClient {
     /// ```
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
-    fn __getLastRequest(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
-        Ok(slot_string(req, this.object(), ClientSlot::LastRequest))
+    fn __getLastRequest(this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(this.object(), ClientSlot::LastRequest))
     }
 
     /// `SoapClient::__getLastResponse(): ?string`.
@@ -464,8 +471,8 @@ impl SoapClient {
     /// ```
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
-    fn __getLastResponse(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
-        Ok(slot_string(req, this.object(), ClientSlot::LastResponse))
+    fn __getLastResponse(this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(this.object(), ClientSlot::LastResponse))
     }
 
     /// `SoapClient::__getLastRequestHeaders(): ?string`.
@@ -478,12 +485,8 @@ impl SoapClient {
     /// ```
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
-    fn __getLastRequestHeaders(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
-        Ok(slot_string(
-            req,
-            this.object(),
-            ClientSlot::LastRequestHeaders,
-        ))
+    fn __getLastRequestHeaders(this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(this.object(), ClientSlot::LastRequestHeaders))
     }
 
     /// `SoapClient::__getLastResponseHeaders(): ?string`.
@@ -496,12 +499,8 @@ impl SoapClient {
     /// ```
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
-    fn __getLastResponseHeaders(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
-        Ok(slot_string(
-            req,
-            this.object(),
-            ClientSlot::LastResponseHeaders,
-        ))
+    fn __getLastResponseHeaders(this: This<Self>) -> R<Option<PhpString>> {
+        Ok(slot_string(this.object(), ClientSlot::LastResponseHeaders))
     }
 
     /// `SoapClient::__doRequest(string $request, string $location, string
@@ -722,9 +721,9 @@ impl SoapClient {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] location: Option<PhpString>,
-    ) -> R<Option<PhpString>> {
+    ) -> R<Option<Owner<PhpString>>> {
         let object = this.object();
-        let old = slot_string(req, object, ClientSlot::Location);
+        let old = slot_string(object, ClientSlot::Location).map(|s| Owner::take(req, s));
         let new = match location {
             Some(l) if !l.is_empty() => {
                 req.addref(&Value::string(l));
@@ -738,11 +737,16 @@ impl SoapClient {
 }
 
 /// A string slot with one more owner, the caller's; none for `null`.
-fn slot_string(req: &mut Request, this: PhpObject, which: ClientSlot) -> Option<PhpString> {
-    let v = client_slot(this, which);
-    let s = v.as_php_string().copied()?;
-    req.addref(&v);
-    Some(s)
+fn slot_string(this: PhpObject, which: ClientSlot) -> Option<PhpString> {
+    client_slot(this, which).as_php_string().copied()
+}
+
+/// What the call pipeline answers, the value its one owner the
+/// caller's, as the owner it is.
+fn answered(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
 }
 
 /// `FETCH_THIS_SDL`.

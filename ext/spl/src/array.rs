@@ -1036,7 +1036,7 @@ impl ArrayIterator {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         Ok(match here(req, this.object())? {
-            Some((_, _, value)) => crate::copied(req, value),
+            Some((_, _, value)) => value.deref(),
             None => Value::null(),
         })
     }
@@ -1046,10 +1046,7 @@ impl ArrayIterator {
     fn key(req: &mut Request, this: This<Self>) -> Result<Option<Union<PhpString, i64>>, Thrown> {
         Ok(match here(req, this.object())? {
             Some((_, Key::Int(n), _)) => Some(Union::B(n)),
-            Some((_, Key::Str(s), _)) => {
-                req.addref(&Value::string(s));
-                Some(Union::A(s))
-            }
+            Some((_, Key::Str(s), _)) => Some(Union::A(s)),
             None => None,
         })
     }
@@ -1531,7 +1528,7 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
     };
     let table = table(req, object)?;
     if let Some(value) = table.get(req, &key)? {
-        Ok(crate::copied(req, value))
+        Ok(value.deref())
     } else {
         if warn {
             warning(req, &format!("Undefined array key {}", shown(&key)));
@@ -1969,8 +1966,13 @@ impl ObjectHandlers for Handlers {
             return Ok(Value::null());
         };
         match read {
-            DimensionRead::Warning => self::read(req, object, offset, true),
-            DimensionRead::Silent => self::read(req, object, offset, false),
+            // The slot hands the engine an owner of what it read.
+            DimensionRead::Warning => {
+                self::read(req, object, offset, true).map(|v| crate::copied(req, v))
+            }
+            DimensionRead::Silent => {
+                self::read(req, object, offset, false).map(|v| crate::copied(req, v))
+            }
             DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset => {
                 Ok(place(req, object, offset, read)?
                     .map_or_else(Value::null, |cell| cell.as_value()))

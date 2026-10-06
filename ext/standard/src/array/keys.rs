@@ -193,7 +193,7 @@ fn array_search(
     needle: Value,
     haystack: PhpArray,
     #[php(default = false)] strict: bool,
-) -> Result<OrFalse<Union<PhpString, i64>>, Thrown> {
+) -> Result<OrFalse<Union<Owner<PhpString>, i64>>, Thrown> {
     match search(req, &needle, haystack, strict)? {
         Some(key) => Ok(OrFalse::Value(key_return(req, &key))),
         None => Ok(OrFalse::False),
@@ -271,7 +271,7 @@ fn array_keys(
 /// NULL
 /// ```
 #[php_function]
-fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
+fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
     let first = array.iter().next();
     key_or_null(req, first.map(|(key, _)| key))
 }
@@ -288,22 +288,19 @@ fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<PhpString
 /// NULL
 /// ```
 #[php_function]
-fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
+fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
     let last = array.snapshot_refs().pop();
     key_or_null(req, last.map(|(key, _)| key))
 }
 
-fn key_or_null(req: &mut Request, key: Option<Key>) -> Option<Union<PhpString, i64>> {
+fn key_or_null(req: &mut Request, key: Option<Key>) -> Option<Union<Owner<PhpString>, i64>> {
     key.map(|key| key_return(req, &key))
 }
 
 /// A key as the return, `string|int`, a string one more owner.
-pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<PhpString, i64> {
+pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<Owner<PhpString>, i64> {
     match key {
-        Key::Str(s) => {
-            req.addref(&Value::string(*s));
-            Union::A(*s)
-        }
+        Key::Str(s) => Union::A(Owner::take(req, *s)),
         Key::Int(n) => Union::B(*n),
     }
 }
@@ -320,9 +317,9 @@ pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<PhpString, i64> 
 /// NULL
 /// ```
 #[php_function]
-fn array_first(req: &mut Request, array: PhpArray) -> Value {
+fn array_first(array: PhpArray) -> Value {
     let first = array.iter().next();
-    value_or_null(req, first.map(|(_, value)| value))
+    value_or_null(first.map(|(_, value)| value))
 }
 
 /// `array_last(array $array): mixed`, php's `PHP_FUNCTION(array_last)`
@@ -340,20 +337,13 @@ fn array_first(req: &mut Request, array: PhpArray) -> Value {
 /// NULL
 /// ```
 #[php_function]
-fn array_last(req: &mut Request, array: PhpArray) -> Value {
+fn array_last(array: PhpArray) -> Value {
     let last = array.snapshot_refs().pop();
-    value_or_null(req, last.map(|(_, value)| value))
+    value_or_null(last.map(|(_, value)| value))
 }
 
-fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
-    match value {
-        Some(value) => {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }
-        None => Value::null(),
-    }
+fn value_or_null(value: Option<Value>) -> Value {
+    value.map_or_else(Value::null, |value| value.deref())
 }
 
 /// `array_values(array $array): array`, php's

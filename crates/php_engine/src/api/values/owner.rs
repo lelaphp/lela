@@ -191,8 +191,9 @@ impl<T: View> Owner<T> {
     /// One more owner of what `view` names, `Z_TRY_ADDREF`: the one
     /// conversion from a view to an owner. What a native does where php
     /// copies a value it holds into a place of its own, `ZVAL_COPY` and
-    /// `zend_string_copy`, and before it returns an argument or an
-    /// element of one, `RETURN_COPY`.
+    /// `zend_string_copy`, and where it returns a view it is about to
+    /// let go of. A view returned as it stands needs none: the engine
+    /// takes its own owner of it, `RETURN_COPY` ([`IntoReturn`]).
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn take(req: &Request, view: T) -> Owner<T> {
         let counted = view.counted();

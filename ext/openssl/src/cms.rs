@@ -337,7 +337,7 @@ fn openssl_cms_read(
         };
         let (certs, crls) = cms.certs_and_crls();
         let list = pem_list(req, certs, crls)?;
-        certificates.set(req, Untyped(list.into_value().hand_on_unmigrated()))?;
+        certificates.set(req, Untyped(list.into_value()))?;
         Ok(true)
     })
 }

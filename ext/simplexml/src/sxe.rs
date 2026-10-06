@@ -1281,11 +1281,9 @@ fn set_current(req: &mut Request, object: PhpObject, made: Owner<PhpObject>) {
     }
 }
 
-/// `iter.data`, one more owner of it.
+/// `iter.data`, a view of it.
 pub(crate) fn current(req: &mut Request, object: PhpObject) -> Option<Value> {
-    let value = sxe(req, object)?.current?.as_value();
-    req.addref(&value);
-    Some(value)
+    Some(sxe(req, object)?.current?.as_value())
 }
 
 /// The name of the node `iter.data` stands for, `php_sxe_iterator_current_key`.
@@ -1308,7 +1306,10 @@ impl ClassIterator for Loop {
     }
 
     fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
-        Ok(current(req, object).unwrap_or_else(Value::null))
+        // The iterator's `current` hands its caller an owner.
+        let value = current(req, object).unwrap_or_else(Value::null);
+        req.addref(&value);
+        Ok(value)
     }
 
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {

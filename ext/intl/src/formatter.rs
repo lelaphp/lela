@@ -463,7 +463,7 @@ fn parse_currency(
         else {
             return Ok(None);
         };
-        currency.set(req, Untyped(Value::string(text.hand_on_unmigrated())))?;
+        currency.set(req, Untyped(text.into_value()))?;
         Ok(Some(number))
     })
 }

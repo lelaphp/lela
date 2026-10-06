@@ -16,7 +16,7 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, Emalloc, Key, Layout, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+    ClassId, Emalloc, Key, Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
 
 use super::{
@@ -670,13 +670,17 @@ fn unserialize(
     req: &mut Request,
     data: PhpString,
     #[php(default = [])] options: Passed<PhpArray>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let data = data.as_bytes().to_vec();
     let options = match options {
         Passed::Given(options) => Some(options),
         Passed::Omitted => None,
     };
-    php_unserialize_with_options(req, &data, options, "unserialize")
+    let value = php_unserialize_with_options(req, &data, options, "unserialize")?;
+    // The unserializer's value comes with its one owner, the caller's.
+    let owner = Owner::take(req, value);
+    req.release(value);
+    Ok(owner)
 }
 
 /// `php_unserialize_with_options`, `PHPAPI` in `php_var.h`: `data`

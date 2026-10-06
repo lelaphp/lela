@@ -47,7 +47,7 @@ use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandler
 use crate::api::call::call_named_made;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::{ObservedChain, Raised, Request};
-use crate::api::values::{PhpObject, PhpString, Value};
+use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
 use crate::exec::{self, Vm};
 use crate::observer::{FiberStatus, ObservedFiber};
@@ -659,7 +659,7 @@ impl Fiber {
         req: &mut Request,
         this: This<Self>,
         args: NamedVariadic<Value>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         switch_refused(req)?;
         let named: Vec<(PhpString, Value)> = args.named().to_vec();
         let back = start(req, this.object(), args.positional, named)?;
@@ -708,7 +708,7 @@ impl Fiber {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] value: Value,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         switch_refused(req)?;
         let this = this.object();
         if payload(req, this)?.status != Status::Suspended {
@@ -758,7 +758,7 @@ impl Fiber {
         req: &mut Request,
         this: This<Self>,
         exception: Instance<Throwable>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let throwable = exception.object();
         switch_refused(req)?;
         let this = this.object();
@@ -845,11 +845,7 @@ impl Fiber {
         let message = match fiber.status {
             Status::Dead if fiber.threw => "The fiber threw an exception",
             Status::Dead if fiber.bailout => "The fiber exited with a fatal error",
-            Status::Dead => {
-                let value = fiber.result.deref();
-                req.addref(&value);
-                return Ok(value);
-            }
+            Status::Dead => return Ok(fiber.result.deref()),
             Status::Init => "The fiber has not been started",
             Status::Running | Status::Suspended => "The fiber has not returned",
         };
@@ -873,7 +869,6 @@ impl Fiber {
     /// ```
     fn getCurrent(req: &mut Request) -> Option<Instance<Fiber>> {
         let fiber = req.fibers().active()?;
-        req.addref(&fiber.as_value());
         Some(Instance::of(fiber))
     }
 
@@ -914,7 +909,10 @@ impl Fiber {
     /// inner got to inner
     /// inner returned done
     /// ```
-    fn suspend(req: &mut Request, #[php(default = null)] value: Value) -> Result<Value, Thrown> {
+    fn suspend(
+        req: &mut Request,
+        #[php(default = null)] value: Value,
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(fiber) = req.fibers().active() else {
             return Err(fiber_error(req, "Cannot suspend outside of a fiber"));
         };
@@ -1441,7 +1439,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
             if gc.fiber.map(|gc| gc.index()) == Some(fiber.index()) {
                 gc.fiber = None;
             }
-            return delegate(req, back);
+            return delegate(req, back).map(Owner::hand_on);
         }
         if let Transfer::Value(value) = back {
             req.release(value);
@@ -1539,9 +1537,9 @@ fn switch_refused(req: &mut Request) -> Result<(), Thrown> {
 /// return, one owner; an error transfer is raised where the switch
 /// returned, the graceful exit among them; the `Bailout` is the fatal
 /// already recorded.
-fn delegate(req: &mut Request, transfer: Transfer) -> Result<Value, Thrown> {
+fn delegate(req: &mut Request, transfer: Transfer) -> Result<Owner<Value>, Thrown> {
     match transfer {
-        Transfer::Value(value) => Ok(value),
+        Transfer::Value(value) => Ok(Owner::adopt(req, value)),
         // `zend_throw_exception_internal`, which tells the hooks again of
         // a throwable a switch carried.
         Transfer::Throw(thrown) => Err(match thrown.exception().copied() {

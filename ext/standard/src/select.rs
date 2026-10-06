@@ -104,7 +104,7 @@ fn from_fd_set(
             keep(req, &mut out, &key, element)?;
         }
     }
-    target.set(req, Some(out.hand_on_unmigrated()))
+    target.set(req, Some(out))
 }
 
 /// One element copied into the array written back, key and value one
@@ -144,7 +144,7 @@ fn emulate_read_fd_set(
         }
     }
     if ret > 0 {
-        target.set(req, Some(out.hand_on_unmigrated()))?;
+        target.set(req, Some(out))?;
     } else {
         out.give_up(req);
     }
@@ -272,10 +272,10 @@ fn stream_select(
         let ready = emulate_read_fd_set(req, &read, array)?;
         if ready > 0 {
             if w_array.is_some() {
-                write.set(req, Some(PhpArray::empty()))?;
+                write.set(req, Some(Owner::take(req, PhpArray::empty())))?;
             }
             if e_array.is_some() {
-                except.set(req, Some(PhpArray::empty()))?;
+                except.set(req, Some(Owner::take(req, PhpArray::empty())))?;
             }
             return Ok(OrFalse::Value(i64::try_from(ready).unwrap_or(i64::MAX)));
         }

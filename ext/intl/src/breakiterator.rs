@@ -360,7 +360,6 @@ impl IntlBreakIterator {
             .native::<BreakObject>(req)
             .map(|o| o.text)
             .unwrap_or_default();
-        req.addref(&text);
         Ok(text.as_php_string().copied())
     }
 
@@ -561,10 +560,7 @@ impl IntlPartsIterator {
     ) -> Answer<Instance<IntlBreakIterator>> {
         let data = iterator::data(req, this.object())?;
         match data.and_then(|v| v.as_object().copied()) {
-            Some(object) => {
-                req.addref(&object.as_value());
-                Ok(Instance::of(object))
-            }
+            Some(object) => Ok(Instance::of(object)),
             None => Err(fatal(
                 req,
                 "InternalError: IntlPartsIterator holds no break iterator",

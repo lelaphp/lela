@@ -121,7 +121,6 @@ impl IntlIterator {
         let current = cursor(req, object)
             .and_then(|c| c.current)
             .unwrap_or_else(Value::null);
-        req.addref(&current);
         Ok(current)
     }
 

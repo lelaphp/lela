@@ -199,11 +199,9 @@ pub(crate) fn clear_last_headers(req: &mut Request) {
 }
 
 /// `BG(last_http_headers)`: the headers the last request of the wrapper
-/// read, one more owner for the caller.
+/// read, a view of them.
 pub(crate) fn last_headers(req: &mut Request) -> Option<PhpArray> {
-    let headers = req.state::<State>().last_http_headers?;
-    req.addref(&Value::array(headers));
-    Some(headers)
+    req.state::<State>().last_http_headers
 }
 
 /// The `http` options of the `context` a chain of requests is made

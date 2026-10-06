@@ -380,11 +380,14 @@ fn openssl_csr_new(
             Union::B(true)
         };
         if made {
-            let object = key_object(req, key, true)?;
-            private_key.set(
-                req,
-                Untyped(Value::object(object.hand_on_unmigrated().object())),
-            )?;
+            let written =
+                key_object(req, key, true).and_then(|object| private_key.set(req, object));
+            if let Err(thrown) = written {
+                if let Union::A(object) = out {
+                    object.give_up(req);
+                }
+                return Err(thrown);
+            }
         }
         Ok(out)
     })
@@ -491,7 +494,7 @@ fn openssl_csr_export(
         match export_into(req, &csr, &out, no_text) {
             Some(true) => {
                 let pem = PhpString::new(req, &out.contents())?;
-                output.set(req, Untyped(Value::string(pem.hand_on_unmigrated())))?;
+                output.set(req, Untyped(pem.into_value()))?;
                 Ok(true)
             }
             Some(false) => {

@@ -536,7 +536,7 @@ impl SplObjectStorage {
     #[php(tentative)]
     fn getInfo(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let here = with(req, this.object(), |s| s.here())?;
-        Ok(here.map_or_else(Value::null, |(_, inf)| crate::copied(req, inf)))
+        Ok(here.map_or_else(Value::null, |(_, inf)| inf.deref()))
     }
 
     /// `setInfo(mixed $info): void`; the witness is `getInfo`'s.
@@ -604,10 +604,7 @@ impl SplObjectStorage {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
         match with(req, this.object(), |s| s.here())? {
-            Some((object, _)) => {
-                req.addref(&object.as_value());
-                Ok(object)
-            }
+            Some((object, _)) => Ok(object),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -796,7 +793,7 @@ impl SplObjectStorage {
                 .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
         })?;
         match found {
-            Some(inf) => Ok(crate::copied(req, inf)),
+            Some(inf) => Ok(inf.deref()),
             None => Err(throw(req, "UnexpectedValueException", "Object not found")),
         }
     }

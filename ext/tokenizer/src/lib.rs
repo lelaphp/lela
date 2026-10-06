@@ -519,9 +519,7 @@ impl PhpToken {
     /// string(32) "echoechoechoechoechoechoechoecho"
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let text = token_text(req, this.object())?;
-        req.addref(&Value::string(text));
-        Ok(text)
+        token_text(req, this.object())
     }
 }
 

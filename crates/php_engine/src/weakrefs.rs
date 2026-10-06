@@ -821,7 +821,10 @@ impl WeakReference {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
-    fn create(req: &mut Request, object: PhpObject) -> Result<Instance<WeakReference>, Thrown> {
+    fn create(
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Owner<Instance<WeakReference>>, Thrown> {
         let referent = object;
         let existing = req.weakrefs.row(referent.index()).and_then(|holders| {
             holders.iter().find_map(|holder| match holder {
@@ -832,8 +835,7 @@ impl WeakReference {
         if let Some(at) = existing
             && let Some(reference) = stored(req, at)
         {
-            req.addref(&reference.as_value());
-            return Ok(Instance::of(reference));
+            return Ok(Owner::take(req, reference).into_instance());
         }
         let Some(class) = req.class_named(b"WeakReference") else {
             return Err(throw_error(
@@ -849,7 +851,7 @@ impl WeakReference {
             },
         )?;
         register(req, referent, Holder::Reference(reference.index()));
-        Ok(Instance::of(reference))
+        Ok(Owner::adopt(req, reference).into_instance())
     }
 
     /// `WeakReference::get(): ?object`: the referent with one more owner,
@@ -859,7 +861,6 @@ impl WeakReference {
             .object()
             .native::<WeakRef>(req)
             .and_then(|payload| payload.referent)?;
-        req.addref(&referent.as_value());
         Some(referent)
     }
 }

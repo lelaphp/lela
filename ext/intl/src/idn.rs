@@ -92,7 +92,7 @@ fn convert(
     let wants = idna_info.is_given();
     if wants {
         let empty = PhpArray::new(req)?;
-        idna_info.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
+        idna_info.set(req, Untyped(empty.into_value()))?;
     }
     // `(uint32_t)option`, C's truncation.
     let options = u32::from_le_bytes(flags.to_le_bytes()[..4].try_into().unwrap_or_default());
@@ -125,7 +125,7 @@ fn convert(
             let key = PhpString::new(req, key)?;
             info.set(req, Key::Str(key.hand_on_unmigrated()), value)?;
         }
-        if let Err(thrown) = idna_info.set(req, Untyped(info.into_value().hand_on_unmigrated())) {
+        if let Err(thrown) = idna_info.set(req, Untyped(info.into_value())) {
             text.give_up(req);
             return Err(thrown);
         }

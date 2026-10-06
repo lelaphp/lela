@@ -130,10 +130,9 @@ impl Request {
     /// value it already holds into a second place (`zend_string_copy`,
     /// `ZVAL_COPY`): the clone of the `Value` is `ZVAL_COPY_VALUE`, and
     /// this beside it is the second owner, given up with whatever row or
-    /// property the copy is put in. What a native does before it returns an argument
-    /// as its value, `RETURN_COPY` and `RETURN_STR_COPY`: the frame gives
-    /// its owner up with the call, and the caller's temporary holds the
-    /// one taken here.
+    /// property the copy is put in. A native returns an argument as it
+    /// reads it, and the engine takes the owner `RETURN_COPY` takes
+    /// ([`IntoReturn`](crate::api::abi::IntoReturn)).
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());

@@ -123,7 +123,6 @@ fn func_get_arg(req: &mut Request, position: i64) -> Result<Value, Thrown> {
     if value.tag() == TypeTag::Undef {
         return Ok(Value::null());
     }
-    req.addref(&value);
     Ok(value)
 }
 
@@ -472,7 +471,7 @@ fn get_defined_functions(
 /// int(1)
 /// ```
 #[php_function]
-fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn get_defined_vars(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let frame = match req.native_caller() {
         NativeCaller::Function(frame, _) | NativeCaller::Code(frame) => frame,
         NativeCaller::Native => {
@@ -483,7 +482,8 @@ fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {
             ));
         }
     };
-    req.defined_vars(frame)
+    let made = req.defined_vars(frame);
+    crate::api::values::adopted(req, made)
 }
 
 /// `get_resource_type($resource): string`, php's

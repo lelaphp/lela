@@ -372,7 +372,7 @@ fn instantiate<P: UriParser>(
     let parsed = parsed.and_then(|parsed| {
         match (parsed.errors, errors) {
             (Some(array), Some(errors)) => {
-                errors.set(req, Untyped(Value::array(array.hand_on_unmigrated())))?;
+                errors.set(req, Untyped(array.into_value()))?;
             }
             (Some(array), None) => array.give_up(req),
             (None, _) => {}

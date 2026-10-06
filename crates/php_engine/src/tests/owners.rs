@@ -38,6 +38,13 @@ fn owned_first(req: &mut Request, array: PhpArray) -> Owner<Value> {
     Owner::take(req, array.get(&Key::Int(0)).unwrap_or_default())
 }
 
+/// `first(array $array): mixed`: the first element, returned as the
+/// view it is, which the engine takes its own owner of.
+#[php_function]
+fn first(array: PhpArray) -> Value {
+    array.get(&Key::Int(0)).unwrap_or_default()
+}
+
 /// `fresh(): string`: a string made by the native, returned as the
 /// owner it was made with.
 #[php_function]
@@ -64,6 +71,7 @@ fn owners() -> Extension {
             drop_owner::declared(),
             give_up_owner::declared(),
             owned_first::declared(),
+            first::declared(),
             fresh::declared(),
             appended::declared(),
         ])
@@ -146,6 +154,24 @@ fn a_write_through_an_owner_moves_it_to_the_separated_copy() {
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "kept1\nx92233720368547758071\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A view returned is the engine's to own: the element outlives the
+/// array it was read from, so the slot it stands in is not handed to the
+/// string made after the array is freed, with no owner taken by the
+/// native.
+#[test]
+fn returning_a_view_of_an_element_takes_the_engines_own_owner() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} $a = [s('x')];\n$v = first($a);\nunset($a);\n$b = s('y');\necho $v, \"\\n\", $b, \"\\n\";\n"),
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "x9223372036854775807\ny9223372036854775807\n"
     );
     assert_eq!(served.exit_code, 0);
 }

@@ -28,7 +28,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
 /// `interface Traversable`, which a user class cannot implement alone.
 #[php_class(interface)]
@@ -1033,33 +1033,37 @@ impl InternalIterator {
     }
 
     /// `InternalIterator::current(): mixed`.
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
-            return funcs.current(req, walk, false);
+            let made = funcs.current(req, walk, false);
+            return crate::api::values::adopted(req, made);
         }
-        Ok(match internal_element(req, this.object())? {
+        let made = match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(key);
                 value
             }
             None => Value::null(),
-        })
+        };
+        Ok(Owner::adopt(req, made))
     }
 
     /// `InternalIterator::key(): mixed`.
-    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
-            return funcs.key(req, walk);
+            let made = funcs.key(req, walk);
+            return crate::api::values::adopted(req, made);
         }
-        Ok(match internal_element(req, this.object())? {
+        let made = match internal_element(req, this.object())? {
             Some((key, value)) => {
                 req.release(value);
                 key
             }
             None => Value::null(),
-        })
+        };
+        Ok(Owner::adopt(req, made))
     }
 
     /// `InternalIterator::next(): void`.

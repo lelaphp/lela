@@ -34,9 +34,12 @@
 //!
 //! Every constructor of the face returns the [`Owner`] a value is made
 //! with, as does every call that hands its caller a value of its own (a
-//! call's return, a conversion, a copy). The sinks move to owners one at
-//! a time (#1980): until a sink takes one, a native hands it the owner
-//! with [`Owner::hand_on_unmigrated`], the migration's debt.
+//! call's return, a conversion, a copy). A native's return takes either:
+//! an owner is moved to the engine, and a view, an argument or an
+//! element of one as the native reads it, is the engine's to own, which
+//! takes its owner as php's `RETURN_COPY` does. The sinks move to owners
+//! one at a time (#1980): until a sink takes one, a native hands it the
+//! owner with [`Owner::hand_on_unmigrated`], the migration's debt.
 
 use std::any::Any;
 use std::cmp::Ordering;

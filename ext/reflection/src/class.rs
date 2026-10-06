@@ -2154,9 +2154,7 @@ impl ReflectionClass {
     ) -> Result<PhpObject, Thrown> {
         let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
-        let instance = initialize_lazy(req, &object)?;
-        req.addref(&instance.as_value());
-        Ok(instance)
+        initialize_lazy(req, &object)
     }
 
     /// `ReflectionClass::isUninitializedLazyObject(object $object): bool`.
@@ -2215,9 +2213,7 @@ impl ReflectionClass {
     ) -> Result<PhpObject, Thrown> {
         let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
-        let instance = mark_lazy_initialized(req, &object)?;
-        req.addref(&instance.as_value());
-        Ok(instance)
+        mark_lazy_initialized(req, &object)
     }
 
     /// `ReflectionClass::getLazyInitializer(object $object): ?callable`:
@@ -2250,8 +2246,7 @@ impl ReflectionClass {
         };
         // php's `RETURN_COPY` of the zval it stored: the initializer is
         // held as the value it was given, which `Callable` would resolve
-        // again rather than hand back.
-        req.addref(&initializer);
+        // again rather than hand back; the engine takes its owner.
         answer(Ok(initializer), req)
     }
 

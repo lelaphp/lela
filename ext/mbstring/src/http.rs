@@ -218,7 +218,7 @@ fn mb_parse_str(
 ) -> Result<bool, Thrown> {
     let made = PhpArray::new(req)?;
     let array = *made;
-    result.set(req, Untyped(made.into_value().hand_on_unmigrated()))?;
+    result.set(req, Untyped(made.into_value()))?;
     let into = match result.reference() {
         Some(cell) => cell.separate_array(req)?.unwrap_or(array),
         None => array,

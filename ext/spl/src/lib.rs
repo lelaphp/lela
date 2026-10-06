@@ -414,6 +414,14 @@ fn valid(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     Ok(valid)
 }
 
+/// A value that is its one owner, as the `Owner` a native returns.
+#[cfg_attr(debug_assertions, track_caller)]
+fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
+}
+
 /// A value with a reference followed, the owner moved to what it holds.
 fn owned(req: &mut Request, value: Value) -> Value {
     let bare = value.deref();

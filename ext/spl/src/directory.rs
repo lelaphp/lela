@@ -896,7 +896,7 @@ impl DirectoryIterator {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = dir_checked(req, this.object())?;
-        Ok(crate::copied(req, this.as_value()))
+        Ok(this.as_value())
     }
 
     /// `next(): void`.
@@ -1471,10 +1471,7 @@ impl SplFileObject {
         }
         let csv = fs(req, this, |it| it.csv)?;
         Ok(match csv.and_then(|c| c.as_array().copied()) {
-            Some(csv) => {
-                req.addref(&Value::array(csv));
-                OrFalse::Value(csv)
-            }
+            Some(csv) => OrFalse::Value(csv),
             None => OrFalse::False,
         })
     }

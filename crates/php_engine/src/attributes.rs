@@ -693,10 +693,8 @@ impl SensitiveParameterValue {
 
     /// `SensitiveParameterValue::getValue(): mixed`, the value the
     /// constructor kept.
-    fn getValue(req: &mut Request, this: This<Self>) -> Value {
-        let value = this.object().slot(0).unwrap_or_default();
-        req.addref(&value);
-        value
+    fn getValue(this: This<Self>) -> Value {
+        this.object().slot(0).unwrap_or_default()
     }
 
     /// `SensitiveParameterValue::__debugInfo(): array`, empty.

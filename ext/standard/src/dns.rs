@@ -336,7 +336,7 @@ fn empty_refs(req: &mut Request, targets: &[&Out]) -> Result<(), Thrown> {
     for target in targets {
         if target.is_given() {
             let empty = PhpArray::new(req)?;
-            target.set(req, Untyped(Value::array(empty.hand_on_unmigrated())))?;
+            target.set(req, Untyped(empty.into_value()))?;
         }
     }
     Ok(())
@@ -385,11 +385,11 @@ fn dns_get_record(
     }
     if authns {
         let v = records_array(req, found.authns)?;
-        authoritative_name_servers.set(req, Untyped(Value::array(v.hand_on_unmigrated())))?;
+        authoritative_name_servers.set(req, Untyped(v.into_value()))?;
     }
     if addtl {
         let v = records_array(req, found.addtl)?;
-        additional_records.set(req, Untyped(Value::array(v.hand_on_unmigrated())))?;
+        additional_records.set(req, Untyped(v.into_value()))?;
     }
     match found.records {
         Some(records) => records_array(req, records).map(OrFalse::Value),
@@ -429,13 +429,13 @@ fn dns_get_mx(
         let v = text(req, &host)?;
         list.append(req, v)?;
     }
-    hosts.set(req, Untyped(Value::array(list.hand_on_unmigrated())))?;
+    hosts.set(req, Untyped(list.into_value()))?;
     if with_weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
             list.append(req, Value::int(weight))?;
         }
-        weights.set(req, Untyped(Value::array(list.hand_on_unmigrated())))?;
+        weights.set(req, Untyped(list.into_value()))?;
     }
     Ok(found.found)
 }
