@@ -14,8 +14,8 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Reached};
-use php_ext::values::{Key, Owner, PhpArray, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
@@ -118,9 +118,28 @@ fn reassign_this(req: &mut Request) -> Thrown {
 ///
 /// The walk holds an owner of the array, as php's `ZVAL_COPY` of it
 /// does, so an element written over the variable that held the array
-/// leaves the elements after it standing. Under `EXTR_REFS` the
-/// reference the call passed holds it, and an element made a reference
-/// over that variable replaces the variable, not the reference's value.
+/// leaves the elements after it standing, and a destructor that runs as
+/// a variable is overwritten counts that owner:
+///
+/// ```php
+/// class D { function __destruct() { debug_zval_dump($GLOBALS['arr']); } }
+/// $o = new D; $arr = ['o' => 1]; $arr['k'] = 'v';
+/// echo extract($arr), "\n";
+/// ```
+/// ```expect
+/// array(2) refcount(3){
+///   ["o"]=>
+///   int(1)
+///   ["k"]=>
+///   string(1) "v" interned
+/// }
+/// 2
+/// ```
+///
+/// Under `EXTR_REFS` the walk holds nothing, as php's ref helpers hold
+/// nothing: the reference the call passed holds the array, and an
+/// element made a reference over that variable replaces the variable,
+/// not the reference's value.
 ///
 /// ```php
 /// function f($flags) { $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';
@@ -187,20 +206,15 @@ fn extract(
     let Some(array) = given.get().copied() else {
         return Ok(0);
     };
-    // `ZVAL_COPY(&array_copy, var_array_param)`: "The array might be
-    // stored in a local variable that will be overwritten". The call
-    // passed that variable by reference, so an element written through
-    // it would give up the owner the variable held; the held walk holds
-    // the array it reaches through that reference, and what writes the
-    // array separates it. A temporary nobody else can reach is held by
-    // the call, and no code tells the owner php takes of it apart.
-    let reached = given
-        .reference()
-        .map_or(Reached::Held(array), |cell| Reached::Through(cell, array));
     let mut count = 0i64;
-    walk::held(req, reached, |req, key, entry| {
-        if let Some(target) = target(req, kind, &prefix, key)? {
-            assign(req, &target, *entry)?;
+    // `ZVAL_COPY(&array_copy, var_array_param)`
+    // (`Z/ext/standard/array.c:2649`): "The array might be stored in a
+    // local variable that will be overwritten". The walk holds that
+    // owner, so an element written over the variable leaves the rows
+    // after it standing.
+    walk::foreach(req, array, Hold::Owner, |req, row| {
+        if let Some(target) = target(req, kind, &prefix, row.key())? {
+            assign(req, &target, *row.value())?;
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))
@@ -210,15 +224,15 @@ fn extract(
 
 /// `extract` under `EXTR_REFS`, php's `php_extract_ref_*` helpers: the
 /// array the call's reference holds walked by its buckets as their
-/// `ZEND_HASH_MAP_FOREACH` walks them ([`walk::buckets`]), each row a
+/// `ZEND_HASH_MAP_FOREACH` walks them ([`walk::foreach`]), each row a
 /// variable takes made a reference in place (`ZVAL_MAKE_REF_EX`) and the
 /// variable bound to it. Overwriting a variable can serve a destructor
 /// that writes the array: a row it unsets ahead is not visited, one it
 /// rewrites is read as it now stands, one it appends is past the end,
 /// and an array it puts in the variable is not the one walked. A
 /// destructor that throws leaves the rows after it bound, as php's loop
-/// tests no `EG(exception)`. A temporary passed where a reference was asked
-/// for is walked in a cell of its own, which nobody reads after.
+/// tests no `EG(exception)`. A temporary passed where a reference was
+/// asked for is walked in a copy of its own, which nobody reads after.
 ///
 /// ```php
 /// class D { function __destruct() { unset($GLOBALS['arr']['kkkkkkkkkk']); echo "d,"; } }
@@ -252,17 +266,31 @@ fn extracted_refs(
     kind: i64,
     prefix: &[u8],
 ) -> Result<i64, Thrown> {
-    let holder = if let Some(reference) = given.reference() {
-        reference
+    // `SEPARATE_ARRAY(var_array_param)` (`Z/ext/standard/array.c:2594`):
+    // the rows are made references in place, so the array walked is the
+    // reference's alone, or a temporary's copy the call owns.
+    let (table, copy) = if let Some(reference) = given.reference() {
+        let Some(table) = reference.separate_array(req)? else {
+            return Ok(0);
+        };
+        (table, None)
     } else {
         let Some(array) = given.get().copied() else {
             return Ok(0);
         };
-        req.addref(&array.to_value());
-        PhpRef::new(req, array.to_value())?.hand_on_unmigrated()
+        let mut copy = Owner::take(req, array);
+        if let Err(thrown) = copy.separate(req) {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+        (*copy, Some(copy))
     };
     let mut count = 0i64;
-    let walked = walk::buckets(req, holder, |req, row| {
+    // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(arr, ...)` in each of the
+    // `php_extract_ref_*` helpers (`php_extract_ref_overwrite`,
+    // `Z/ext/standard/array.c:1936`), which holds nothing: the
+    // reference holds the table.
+    let walked = walk::foreach(req, table, Hold::None, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
             req.addref(&cell.as_value());
@@ -271,8 +299,8 @@ fn extracted_refs(
         }
         Ok(ControlFlow::<()>::Continue(()))
     });
-    if given.reference().is_none() {
-        req.release(holder.as_value());
+    if let Some(copy) = copy {
+        copy.give_up(req);
     }
     walked.map(|_| count)
 }

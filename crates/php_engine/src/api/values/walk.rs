@@ -1,34 +1,41 @@
 //! The walks over a table (#1980 candidate 3), each porting one of php's
-//! iteration modes once. A native that only reads the rows walks them
-//! with [`rows`], an iterator that borrows the request, so a body that
-//! could reach code of the program does not compile in it: php's walk
-//! that counts on the table's own holder to keep it, held at compile
-//! time. A native that runs code of the program for each row, a
-//! callback, a magic method or a handler a diagnostic reaches, walks
-//! the table with a callback walk, and the walk owns what it walks
-//! while that code runs:
+//! iteration modes once. A native walks a table in one of four ways:
 //!
-//! - [`held`] holds the table for the walk where the program could
-//!   give it up, php's `ZVAL_COPY` or `GC_ADDREF` of it, and
-//!   [`held_guarded`] guards its recursion beside, php's
-//!   `GC_PROTECT_RECURSION`. The default for a body that needs the
-//!   request mutably: `extract`, `serialize`, `print_r`.
-//! - [`live`] follows php's hash iterator over what a reference holds,
-//!   the iterator `foreach` by reference stands on: the holder read again
-//!   after each step, a row unset ahead skipped and one appended
-//!   visited, and php's `TypeError` once the holder holds no array or
-//!   object. `array_walk`.
-//! - [`buckets`] reads the buckets of the table a reference holds as
-//!   they stand, up to where they ended as it began, php's
-//!   `ZEND_HASH_FOREACH` over a table nothing holds for the walk:
-//!   `extract` under `EXTR_REFS`.
-//! - [`detached`] works on a private copy of the table and swaps it
-//!   back, as `php_usort` does, so code the body runs neither sees the
-//!   table changing nor changes the one being worked on. The `usort`
-//!   family.
+//! - [`rows`], the rows walk, an iterator that borrows the request, so a
+//!   body that could reach code of the program does not compile in it:
+//!   php's walk that counts on the table's own holder to keep it, held
+//!   at compile time.
+//! - [`foreach`], the foreach walk: the rows as they stand, up to where
+//!   they ended as the walk began. It holds the table where php's native
+//!   holds it ([`Hold`]) and guards its recursion where php's native
+//!   guards it ([`foreach_guarded`]), and where it holds nothing it ends
+//!   at the table's destruction. [`foreach_read`] reads each row under
+//!   the borrow first and lends only the rows whose answer can reach
+//!   code of the program, `in_array`'s comparisons. It walks an array or
+//!   an object's property table laid down for it ([`ObjectTable`]), the
+//!   declared slots and then the dynamic rows. `extract`, `serialize`, `print_r`,
+//!   `var_dump`. [`properties`] is the same walk over the table
+//!   `zend_get_properties_for` hands a reader ([`HeldProperties`]).
+//! - [`live`], the Live walk, follows php's hash iterator over what a
+//!   reference holds, the iterator `foreach` by reference stands on: the
+//!   holder read again after each step, a row unset ahead skipped and
+//!   one appended visited, and php's `TypeError` once the holder holds
+//!   no array or object. `array_walk`.
+//! - [`detached`], the Detached walk, works on a private copy of the
+//!   table and swaps it back, as `php_usort` does, so code the body runs
+//!   neither sees the table changing nor changes the one being worked
+//!   on. The `usort` family.
 //!
-//! A callback walk takes the table and lends the body each row's key
-//! and value for that step. The body answers a [`Step`]: std's
+//! The last three are the callback walks, for a native that runs code of
+//! the program for each row: a callback, a magic method or a handler a
+//! diagnostic reaches. [`foreach`] and [`live`] keep each step's key and
+//! value alive for the step and lend them to the body as a [`Row`], so a
+//! body whose code unsets the row still reads it: owned where php's
+//! native takes an owner of the row ([`live`], whose call copies its
+//! arguments), lent as views where what the walk holds keeps them, and
+//! otherwise pinned, an uncounted guard under which a free the row's
+//! last owner would make waits for the step's end, so every count the
+//! program reads is php's. The body answers a [`Step`]: std's
 //! `ControlFlow` to go on or stop early with a value, and `Err` for a
 //! throwable, which `?` hands on. [`detached`] lends the body the whole
 //! copy instead, since what walks its rows is the sort the body runs,
@@ -64,10 +71,10 @@ pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
 /// reach that code, a conversion that calls `__toString`, a diagnostic
 /// a handler reads, a release that runs a destructor, takes the request
 /// mutably. So the views the walk lends stand while it runs. A body
-/// that needs the request mutably is a callback walk's ([`held`] by
-/// default); one that reads every row and then acts on what it read
-/// ends the walk first, a `find` or a `collect` of what it read, and
-/// acts after.
+/// that needs the request mutably is a callback walk's, [`foreach`] for
+/// php's `ZEND_HASH_FOREACH`; one that reads every row and then acts on
+/// what it read ends the walk first, a `find` or a `collect` of what it
+/// read, and acts after.
 ///
 /// The compiler holds a body to that, `E0502`: here the conversion that
 /// can call `__toString` takes the request the walk borrows.
@@ -135,108 +142,149 @@ impl Iterator for Rows<'_> {
     }
 }
 
-/// A table as a held walk's caller came by it, which says whether the
-/// walk must hold it ([`held`]).
-#[derive(Debug, Clone, Copy)]
-pub enum Reached {
-    /// Held by what the caller reached it from, which cannot be written
-    /// in place while the walk runs: the call's argument, a table the
-    /// native owns, or a row of a table a held walk is lending, which is
-    /// written only after the table holding it separates. The walk takes
-    /// nothing, so the refcounts the body's code sees are php's.
-    Held(PhpArray),
-    /// Through a reference the program shares, which code the body runs
-    /// may assign over and so give the table its last owner up: the
-    /// walk holds one owner of the table the reference holds as it
-    /// starts, and under that owner what writes the table separates it.
-    Through(PhpRef, PhpArray),
+/// Whether a [`foreach`] walk holds the table it walks: php's native's
+/// own choice, named at each call site with the line of php's that makes
+/// it, never read off how the caller came by the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// php's native takes an owner of the table before it walks it,
+    /// `ZVAL_COPY` into a local or `GC_ADDREF`: the walk holds one owner
+    /// until it ends, so code the body runs that writes the table
+    /// separates it and the walk reads the rows it began with, and
+    /// nothing the program does frees the table under the walk.
+    Owner,
+    /// php's native takes none and counts on what holds the table: the
+    /// walk reads the rows as they stand, so a row the body's code
+    /// rewrites in place is read as it now is, and a table the program
+    /// gives up mid-walk is destroyed where php destroys it.
+    None,
 }
 
-impl Reached {
-    /// How a value lent as a row, or passed as an argument, reaches the
-    /// table it names: an array as it stands, a reference through the
-    /// reference; `None` for anything that names no array.
-    #[must_use]
-    pub fn of(value: &Value) -> Option<Reached> {
-        if let Some(cell) = value.as_php_ref() {
-            return cell
-                .get()
-                .as_array()
-                .map(|table| Reached::Through(*cell, *table));
-        }
-        value.as_array().map(|table| Reached::Held(*table))
-    }
-
-    /// The table walked.
-    #[must_use]
-    pub fn table(&self) -> PhpArray {
-        match self {
-            Reached::Held(table) | Reached::Through(_, table) => *table,
-        }
-    }
-
-    /// The owner the walk takes: one where the program could give the
-    /// table up, none otherwise.
-    fn hold(self, req: &Request) -> Option<Owner<PhpArray>> {
-        match self {
-            Reached::Held(_) => None,
-            Reached::Through(_, table) => Some(Owner::take(req, table)),
-        }
-    }
-}
-
-/// How a walk that guards its recursion ended ([`held_guarded`]).
+/// How a walk that guards its recursion ended ([`foreach_guarded`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "a walk inside the table already walked nothing, which the caller shows"]
 pub enum Guarded<B> {
     /// The rows were walked: `Some` what the body broke with, `None`
-    /// past the last row.
+    /// past the last row or where the table was destroyed under a walk
+    /// holding nothing.
     Walked(Option<B>),
     /// A guarded walk is inside the table already, `GC_IS_RECURSIVE`,
     /// and nothing was walked: what a dumper prints `*RECURSION*` for.
     Recursive,
 }
 
-/// php's walk over a table it holds: the rows of the table `reached`
-/// names in order, each lent to `body` with its key, a reference row
-/// lent as the reference. A table reached through a reference is held
-/// by one owner until the walk ends ([`Reached::Through`]), as php's
-/// `extract` copies its array first (`ZVAL_COPY`, "The array might be
-/// stored in a local variable that will be overwritten") and
-/// `zend_array_sort_ex` holds what it sorts, so the rows it lends stand
-/// while the body runs. The answer is what `body` broke with, `None`
-/// where the walk went past the last row.
+/// php's `ZEND_HASH_FOREACH` over `table` from a native whose body runs
+/// code of the program: the rows in order, each lent to `body` as a
+/// [`Row`] kept alive for its step, a reference row as the reference. The rows are read as they stand when the walk reaches
+/// them, up to where they ended as the walk began, php's `_count` fixed
+/// at the start: a row the body's code unsets ahead is not visited, one
+/// it rewrites in place is read as it now is, and one it appends past
+/// the end is not visited. Nothing reads the table's holder again, and
+/// nothing tests `EG(exception)`: a throwable the body's code leaves
+/// pending does not end the walk, and the body ends it by breaking or by
+/// answering `Err`. The answer is what `body` broke with, `None` where
+/// the walk went past the last row.
+///
+/// `hold` is php's native's choice ([`Hold`]). Under [`Hold::Owner`] the
+/// walk holds one owner of the table until it ends, given up as php's
+/// native gives it up ([`GiveUp`]), and lends each row as a view, which the
+/// table it holds keeps. Under [`Hold::None`] it holds none, as php's
+/// holds none, and pins each row it lends: where code the body runs
+/// gives up the row's last owner, its free, and an object's destructor
+/// with it, waits for the step's end, and where that code or the body
+/// takes an owner of it again, nothing is freed. A pin is no count, so
+/// a count the program reads during the step, and a separation a write
+/// makes, are php's. Where the program gives the table up mid-walk, the
+/// walk registers a hash iterator at the table, which the table's
+/// destruction poisons, and ends at the first step that finds it
+/// poisoned. That costs a walk one slot of the request's iterator list,
+/// taken and given back, and a table a walk names has every write that
+/// moves its rows test the list; each step costs one test of the slot,
+/// an index and a compare. An immutable table registers none, since
+/// nothing destroys one or writes it in place. A walk that ends this
+/// way is a deliberate difference from php, which a native's regression
+/// test states and a divergence row records once a compared site
+/// reaches it.
+///
+/// A row appended under the walk is past the end it fixed as it began,
+/// as php's is:
 ///
 /// ```php
-/// function f() { $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';
-///   $arr = ['arr' => 1, $k . $k => $v . $v];
-///   echo extract($arr), ','; $x = $z . $z; echo $arr, ',', $kkkkkkkkkk, "\n"; }
-/// f();
+/// class C { function __serialize(): array { $GLOBALS['r'][] = 'added'; return []; } }
+/// $r = [new C, 1];
+/// $outer = [&$r];
+/// echo serialize($outer), "\n", count($r), "\n";
 /// ```
 /// ```expect
-/// 2,1,vvvvvvvvvv
+/// a:1:{i:0;a:2:{i:0;O:1:"C":0:{}i:1;i:1;}}
+/// 3
 /// ```
-pub fn held<B>(
+///
+/// A row whose last owner the program gives up during its own step is
+/// freed as the step ends, a table's rows and an object's destructor
+/// with it. Where php reads nothing of the row after that owner goes,
+/// nothing tells the two moments apart: here `serialize`'s nested table,
+/// given up by the last row's `__serialize`, is destroyed as its step
+/// ends, and php destroys it at the `unset`, both before the next row:
+///
+/// ```php
+/// class D { function __destruct() { echo "D gone\n"; } }
+/// class C { function __serialize(): array { unset($GLOBALS['r'][0]); return []; } }
+/// $r = [[new D, new C], 1];
+/// $o = [&$r];
+/// echo serialize($o), "\n";
+/// ```
+/// ```expect
+/// D gone
+/// a:1:{i:0;a:2:{i:0;a:2:{i:0;O:1:"D":0:{}i:1;O:1:"C":0:{}}i:1;i:1;}}
+/// ```
+///
+/// The walk takes no owner of a row php's walk does not take, so it
+/// leaves no possible root of the cycle collector (design §5.12) php's
+/// does not leave: a walk over rows of arrays and objects leaves the
+/// collector's buffer as php's leaves it:
+///
+/// ```php
+/// $a = [[1], [2], new stdClass];
+/// gc_collect_cycles();
+/// $roots = gc_status()['roots'];
+/// ob_start(); print_r($a); ob_end_clean();
+/// echo gc_status()['roots'] - $roots, "\n";
+/// ```
+/// ```expect
+/// 0
+/// ```
+///
+/// An object's property table ([`ObjectTable`]) is walked in php's
+/// positions, the declared slots and then the dynamic table, a slot
+/// nothing holds stepped over as `ZEND_HASH_FOREACH_KEY_VAL_IND` steps
+/// over an `IS_INDIRECT` to `IS_UNDEF`, and each declared row keyed by
+/// its mangled name. The hold, the guard and the end at the table's
+/// destruction stand on the dynamic table, `zobj->properties`, which is
+/// what php's `GC_TRY_ADDREF` holds; a declared row is read in the slot
+/// as it stands when the walk reaches it, as php's `IS_INDIRECT` is.
+pub fn foreach<B>(
     req: &mut Request,
-    reached: Reached,
-    mut body: impl FnMut(&mut Request, &Key, &Value) -> Step<B>,
+    table: PhpArray,
+    hold: Hold,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
-    let owner = reached.hold(req);
-    let walked = lend_rows(req, reached.table(), &mut body);
-    if let Some(owner) = owner {
-        owner.give_up(req);
-    }
+    let standing = Standing::taken(req, table, hold);
+    let walked = foreach_steps(req, table.heap(), standing.watch(), &mut body);
+    standing.given_up(req);
     walked
 }
 
-/// [`held`] guarding its recursion, as php's dumpers and encoders guard
-/// a table they descend into: where a guarded walk is inside the table
-/// already (`GC_IS_RECURSIVE`) nothing is walked and the answer says
-/// so; otherwise the table is marked for the walk
-/// (`GC_PROTECT_RECURSION`) and unmarked as it ends, on every way out,
-/// inside the walk's owner, so the mark is never cleared on a freed
-/// table. An immutable table is marked by neither, as php's is not,
-/// since nothing can make one hold itself.
+/// [`foreach`] guarding its recursion, as php's dumpers guard a table
+/// they descend into: where a guarded walk is inside the table already
+/// (`GC_IS_RECURSIVE`) nothing is taken or walked and the answer says
+/// so; otherwise the table is held as `hold` says, marked for the walk
+/// (`GC_PROTECT_RECURSION`), and unmarked as it ends, on every way out,
+/// before the walk's owner is given up. A table destroyed under a walk
+/// holding nothing is not unmarked, since it is gone, where php's
+/// `GC_TRY_UNPROTECT_RECURSION` writes the freed table. An immutable
+/// table is marked by neither, as php's is not, since nothing can make
+/// one hold itself.
 ///
 /// ```php
 /// $a = [1]; $a[] = &$a;
@@ -251,56 +299,146 @@ pub fn held<B>(
 /// )
 ///
 /// ```
-pub fn held_guarded<B>(
+pub fn foreach_guarded<B>(
     req: &mut Request,
-    reached: Reached,
-    mut body: impl FnMut(&mut Request, &Key, &Value) -> Step<B>,
+    table: PhpArray,
+    hold: Hold,
+    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Guarded<B>, Thrown> {
-    let table = reached.table();
     if table.is_recursive() {
         return Ok(Guarded::Recursive);
     }
-    let owner = reached.hold(req);
+    let standing = Standing::taken(req, table, hold);
     table.protect();
-    let walked = lend_rows(req, table, &mut body);
-    table.unprotect();
-    if let Some(owner) = owner {
-        owner.give_up(req);
+    let walked = foreach_steps(req, table.heap(), standing.watch(), &mut body);
+    if standing.watch().stands(req, table.heap()) {
+        table.unprotect();
     }
+    standing.given_up(req);
     walked.map(Guarded::Walked)
 }
 
-/// The rows of `table` from its first bucket, each lent to `body`, until
-/// the last or the first that breaks or throws. The table is read again
-/// at each step, so a row stands as long as the bucket that holds it.
-fn lend_rows<B>(
+/// What a [`foreach`] walk took so that the table it walks stands, or
+/// so that it knows when the table no longer does, given back as the
+/// walk ends.
+enum Standing {
+    /// [`Hold::Owner`]: the walk's owner of the table.
+    Held(Owner<PhpArray>),
+    /// [`Hold::None`] over a table the program can destroy: the walk's
+    /// hash iterator registered at it.
+    Watched(u32),
+    /// [`Hold::None`] over an immutable table, which nothing destroys.
+    Immutable,
+}
+
+impl Standing {
+    /// What a walk over `table` takes as `hold` says.
+    fn taken(req: &mut Request, table: PhpArray, hold: Hold) -> Standing {
+        match hold {
+            Hold::Owner => Standing::Held(Owner::take(req, table)),
+            Hold::None if table.heap().is_immutable() => Standing::Immutable,
+            Hold::None => Standing::Watched(req.heap_mut().iterator_add(table.heap(), 0)),
+        }
+    }
+
+    /// How each row the walk lends knows its table still stands.
+    fn watch(&self) -> Watch {
+        match self {
+            Standing::Held(owner) if owner.heap().is_immutable() => Watch::Immutable,
+            Standing::Held(_) => Watch::Held,
+            Standing::Watched(at) => Watch::Iterator(*at),
+            Standing::Immutable => Watch::Immutable,
+        }
+    }
+
+    /// What the walk took given back: the owner given up, `zval_ptr_dtor`,
+    /// or the iterator, `zend_hash_iterator_del`.
+    fn given_up(self, req: &mut Request) {
+        match self {
+            Standing::Held(owner) => owner.give_up(req),
+            Standing::Watched(at) => req.heap_mut().iterator_del(at),
+            Standing::Immutable => {}
+        }
+    }
+}
+
+/// [`foreach`]'s loop over `table` below where its rows ended as the
+/// walk began, while `watch` says the table stands.
+fn foreach_steps<B>(
     req: &mut Request,
-    table: PhpArray,
-    body: &mut impl FnMut(&mut Request, &Key, &Value) -> Step<B>,
+    table: Arr,
+    watch: Watch,
+    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
+    let end = table.num_used();
     let mut pos = 0;
-    while let Some((at, key, value)) = table.live_from(pos) {
-        pos = at.saturating_add(1);
-        if let ControlFlow::Break(broke) = body(req, &key, &value)? {
+    while watch.stands(req, table) {
+        let Some((found, key, value)) = table.live_from(pos).filter(|(found, _, _)| *found < end)
+        else {
+            break;
+        };
+        pos = found.saturating_add(1);
+        let mut row = Row {
+            key: Owner::take(req, Key::of(key)),
+            value: Owner::take(req, Value::of_zval(value)),
+            at: At::Bucket(table, found),
+            watch,
+        };
+        let step = body(req, &mut row);
+        row.give_up(req);
+        if let ControlFlow::Break(broke) = step? {
             return Ok(Some(broke));
         }
     }
     Ok(None)
 }
 
-/// One row a [`live`] or [`buckets`] walk lends its body: the key and
-/// the value as the table held them when the walk stepped onto them,
-/// each owned by the walk for the step, so a body whose code unsets the
-/// row can still read it, and where the row stands, so the body can make
-/// it a reference in place ([`Row::make_ref`]).
+/// One row a callback walk lends its body ([`foreach`], [`live`]): the
+/// key and the value as the table held them when the walk stepped onto
+/// them, each owned by the walk for the step, so a body whose code
+/// unsets the row can still read it, and where the row stands, so the
+/// body can make it a reference in place ([`Row::make_ref`]).
 #[derive(Debug)]
 pub struct Row {
     key: Owner<Key>,
     value: Owner<Value>,
     at: At,
-    /// The walk's hash iterator, registered at the table the row is in,
-    /// which tells the row whether that table still stands.
-    iterator: u32,
+    /// How the row knows the table it is in still stands.
+    watch: Watch,
+}
+
+/// How a walk knows the table its rows are in still stands.
+#[derive(Debug, Clone, Copy)]
+enum Watch {
+    /// The walk's hash iterator, registered at the table, which the
+    /// table's destruction poisons.
+    Iterator(u32),
+    /// The walk holds an owner of the table.
+    Held,
+    /// The table is immutable: nothing destroys it, and nothing writes
+    /// it in place.
+    Immutable,
+}
+
+impl Watch {
+    /// Whether `table` still stands: the iterator still names it, or the
+    /// walk holds it, or it is immutable. The test reads the iterator
+    /// alone, never `table`, so it is sound where `table` was freed.
+    fn stands(self, req: &mut Request, table: Arr) -> bool {
+        match self {
+            Watch::Iterator(at) => req.heap_mut().iterator_on(at, table),
+            Watch::Held | Watch::Immutable => true,
+        }
+    }
+
+    /// Whether a row of `table` may be written in place: the table
+    /// stands and is not immutable.
+    fn writable(self, req: &mut Request, table: Arr) -> bool {
+        match self {
+            Watch::Iterator(_) | Watch::Held => self.stands(req, table),
+            Watch::Immutable => false,
+        }
+    }
 }
 
 /// Where a [`Row`] stands.
@@ -333,6 +471,20 @@ impl Row {
         &self.value
     }
 
+    /// The value's refcount as php's walk reads it, `Z_REFCOUNT_P` over
+    /// the bucket: the owners besides the walk's own for the step, which
+    /// php's walk does not take. One for what carries no count, as
+    /// [`Value::refcount`] answers.
+    #[must_use]
+    pub fn refcount(&self) -> u32 {
+        let count = self.value.refcount();
+        if self.value.is_refcounted() {
+            count.saturating_sub(1)
+        } else {
+            count
+        }
+    }
+
     /// The row made a reference in place, php's `ZVAL_MAKE_REF` over the
     /// bucket: the reference the table holds there already, or a new one
     /// holding the value, written into the table as it stands, shared or
@@ -352,22 +504,20 @@ impl Row {
                 "InternalError: a walk's row was made a reference after its table moved",
             )
         };
-        // The table stands while the walk's iterator still names it: a
-        // table destroyed under the walk poisons it. An object's slot
-        // stands while the reference still holds the object too.
+        // The table stands while the walk holds it or its iterator still
+        // names it: a table destroyed under the walk poisons it. An
+        // immutable table is written by nothing. An object's slot stands
+        // while the reference still holds the object too.
+        let watch = self.watch;
         let place = match self.at {
-            At::Bucket(table, pos) if req.heap_mut().iterator_on(self.iterator, table) => {
-                table.value_ref_at(pos)
-            }
+            At::Bucket(table, pos) if watch.writable(req, table) => table.value_ref_at(pos),
             At::Slot {
                 holder,
                 held,
                 owner,
                 table,
                 slot,
-            } if req.heap_mut().iterator_on(self.iterator, table)
-                && holder.get().as_object() == Some(&held) =>
-            {
+            } if watch.writable(req, table) && holder.get().as_object() == Some(&held) => {
                 let at = owner.heap().slot_ref(slot);
                 if let Some(at) = at.filter(|at| at.read().is_same_value(self.value.to_zval()))
                     && let Some((typed, name)) = req.slot_typed_property(owner.class(), slot)
@@ -543,7 +693,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
             key: Owner::take(req, Key::of(key)),
             value: Owner::take(req, Value::of_zval(value)),
             at: At::Bucket(table, found),
-            iterator: at,
+            watch: Watch::Iterator(at),
         }));
     }
     if let Some(held) = now.as_object().copied() {
@@ -618,92 +768,8 @@ fn object_row(
         key: Owner::take(req, key),
         value: Owner::take(req, Value::of_zval(value)),
         at,
-        iterator,
+        watch: Watch::Iterator(iterator),
     }))
-}
-
-/// php's walk over the buckets of a table it does not hold,
-/// `ZEND_HASH_FOREACH` as `extract`'s ref helpers walk with it
-/// (`php_extract_ref_*`, `Z/ext/standard/array.c`): the array the
-/// reference `holder` holds, separated first as php's parser separates a
-/// by-reference array argument, walked bucket by bucket from the first
-/// up to where its rows ended as the walk began. Each row is read as it
-/// stands when the walk reaches it, so a row the body's code unset ahead
-/// is not visited and one it rewrote in place is read as it now is; a
-/// row appended past the end is not visited, and the holder is never
-/// read again, so the walk goes on over the table it began on whatever
-/// the holder holds after. A throwable the body's code leaves pending
-/// does not end the walk, as php's loop tests no `EG(exception)`; the
-/// body ends it by breaking or by answering `Err`.
-///
-/// The program can give the table up mid-walk. The walk registers a
-/// hash iterator at it, which the table's destruction poisons, and ends there,
-/// so it reads nothing freed (the iterator is given back on every way
-/// out). What holds no array at the start is the `InternalError` it is.
-///
-/// ```php
-/// class D { function __destruct() { $GLOBALS['arr']['added'] = 'A'; echo "d,"; } }
-/// $o = new D; $arr = ['o' => 1, 'b' => 2];
-/// echo extract($arr, EXTR_REFS), ',', $added ?? 'unset', "\n";
-/// class E { function __destruct() { $GLOBALS['keep'] = $GLOBALS['brr']; $GLOBALS['brr'] = ['zz' => 'Z']; echo "e,"; } }
-/// $p = new E; $brr = ['p' => 1, 'q' => 2];
-/// echo extract($brr, EXTR_REFS), ',', $q, ',', $zz ?? 'unset', "\n";
-/// ```
-/// ```expect
-/// d,2,unset
-/// e,2,2,unset
-/// ```
-pub fn buckets<B>(
-    req: &mut Request,
-    holder: PhpRef,
-    mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
-) -> Result<Option<B>, Thrown> {
-    if holder.get().as_array().is_none() {
-        return Err(fatal(
-            req,
-            "InternalError: a bucket walk's reference holds no array",
-        ));
-    }
-    let Some(table) = holder.separate_array(req)? else {
-        return Err(fatal(req, "InternalError: a bucket walk's array is gone"));
-    };
-    let table = table.heap();
-    let end = table.num_used();
-    let at = req.heap_mut().iterator_add(table, 0);
-    let walked = bucket_steps(req, table, end, at, &mut body);
-    req.heap_mut().iterator_del(at);
-    walked
-}
-
-/// [`buckets`]' loop over `table` below `end`, while iterator `at` says
-/// the table stands.
-fn bucket_steps<B>(
-    req: &mut Request,
-    table: Arr,
-    end: u32,
-    at: u32,
-    body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
-) -> Result<Option<B>, Thrown> {
-    let mut pos = 0;
-    while req.heap_mut().iterator_on(at, table) {
-        let Some((found, key, value)) = table.live_from(pos).filter(|(found, _, _)| *found < end)
-        else {
-            break;
-        };
-        pos = found.saturating_add(1);
-        let mut row = Row {
-            key: Owner::take(req, Key::of(key)),
-            value: Owner::take(req, Value::of_zval(value)),
-            at: At::Bucket(table, found),
-            iterator: at,
-        };
-        let step = body(req, &mut row);
-        row.give_up(req);
-        if let ControlFlow::Break(broke) = step? {
-            return Ok(Some(broke));
-        }
-    }
-    Ok(None)
 }
 
 /// php's walk over a private copy swapped back, `php_usort`

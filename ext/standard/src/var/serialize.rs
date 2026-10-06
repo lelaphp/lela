@@ -14,7 +14,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Reached};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
@@ -170,7 +170,7 @@ impl Serializer {
         out: &mut Vec<u8>,
         value: &Value,
     ) -> Result<(), Thrown> {
-        write(req, out, value, self, false, true)
+        write(req, out, value, value.refcount(), self, false, true)
     }
 
     /// `PHP_VAR_SERIALIZE_DESTROY`: the var hash handed back to the
@@ -229,7 +229,7 @@ impl Serializer {
     /// D gone
     /// a:2:{i:0;O:1:"R":1:{i:0;O:1:"D":0:{}}i:1;O:1:"R":1:{i:0;O:1:"D":0:{}}}
     /// ```
-    fn add(&mut self, req: &mut Request, value: &Value, in_rcn_array: bool) -> i64 {
+    fn add(&mut self, req: &mut Request, value: &Value, refcount: u32, in_rcn_array: bool) -> i64 {
         self.hash.n += 1;
         let (held, is_ref, recorded) = match value.as_ref() {
             ValueRef::Reference(cell) => match cell.get().as_object() {
@@ -239,7 +239,7 @@ impl Serializer {
             ValueRef::Object(object) => {
                 let object = *object;
                 if !in_rcn_array
-                    && value.refcount() == 1
+                    && refcount == 1
                     && !object.properties_shared()
                     && !has_method(req, object.class(), b"__serialize")
                     && !has_method(req, object.class(), b"__sleep")
@@ -335,13 +335,14 @@ fn write(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,
+    refcount: u32,
     hash: &mut Serializer,
     in_rcn_array: bool,
     is_root: bool,
 ) -> Result<(), Thrown> {
     // `php_serialize_check_stack_limit`.
     call_stack_limit(req)?;
-    let already = hash.add(req, value, in_rcn_array);
+    let already = hash.add(req, value, refcount, in_rcn_array);
     if already != 0 {
         if already == -1 {
             out.extend_from_slice(b"N;");
@@ -356,7 +357,12 @@ fn write(
             return Ok(());
         }
     }
-    let reached = *value;
+    // `struc = Z_REFVAL_P(struc)`: what a reference holds is counted as
+    // the reference holds it.
+    let refcount = match value.as_php_ref() {
+        Some(cell) => cell.get().refcount(),
+        None => refcount,
+    };
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
@@ -371,18 +377,8 @@ fn write(
         ValueRef::Str(s) => write_string(out, s.as_bytes()),
         ValueRef::Array(array) => {
             out.extend_from_slice(b"a:");
-            let shared = !is_root && (in_rcn_array || array.to_value().refcount() > 1);
-            // A table reached through a reference the walk shares with
-            // the program can lose its only owner to an element's
-            // `__serialize` that assigns over the reference, and
-            // `php_var_serialize_nested_data` then reads freed rows. The
-            // held walk holds that table across its rows; any other is
-            // held by the table, argument or copy it was reached from.
-            // The test
-            // `serialize_holds_a_nested_array_a_serialize_method_gives_up`
-            // says why there is no divergence row.
-            let reached = Reached::of(&reached).unwrap_or(Reached::Held(*array));
-            nested(req, out, &value, reached, hash, shared, false)?;
+            let shared = !is_root && (in_rcn_array || refcount > 1);
+            nested(req, out, &value, *array, hash, shared, false)?;
         }
         ValueRef::Object(object) => object_value(req, out, *object, hash)?,
         _ => out.extend_from_slice(b"i:0;"),
@@ -407,21 +403,77 @@ fn write(
 /// ```expect regime=small-stack
 /// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
+///
+/// The walk holds no owner of the table, as php's holds none (#2043): a
+/// row an element's `__serialize` rewrites in place through the
+/// reference that holds the table is written as it now is, a table that
+/// assignment gives up is destroyed there, its other elements' last
+/// owner with it, and `debug_zval_dump` from inside `__serialize` counts
+/// the table's owners as php does.
+///
+/// ```php
+/// class C { function __serialize(): array { $GLOBALS['r'][1] = 'new'; return []; } }
+/// $v = 'vvvvv';
+/// $r = [new C, $v . $v];
+/// $outer = [&$r];
+/// echo serialize($outer), "\n";
+/// ```
+/// ```expect
+/// a:1:{i:0;a:2:{i:0;O:1:"C":0:{}i:1;s:3:"new";}}
+/// ```
+///
+/// ```php
+/// class D { function __destruct() { echo "D gone\n"; } }
+/// class C { function __serialize(): array { $GLOBALS['r'] = 0; echo "after assign\n"; return []; } }
+/// $r = [new D, new C];
+/// $outer = [&$r];
+/// echo serialize($outer), "\n";
+/// ```
+/// ```expect
+/// D gone
+/// after assign
+/// a:1:{i:0;a:2:{i:0;O:1:"D":0:{}i:1;O:1:"C":0:{}}}
+/// ```
+///
+/// ```php
+/// class C { function __serialize(): array { debug_zval_dump($GLOBALS['r']); return []; } }
+/// $v = 'vvvvv';
+/// $r = [new C, $v . $v];
+/// $outer = [&$r];
+/// echo serialize($outer), "\n";
+/// ```
+/// ```expect
+/// array(2) packed refcount(2){
+///   [0]=>
+///   object(C)#1 (0) refcount(3){
+///   }
+///   [1]=>
+///   string(10) "vvvvvvvvvv" refcount(1)
+/// }
+/// a:1:{i:0;a:2:{i:0;O:1:"C":0:{}i:1;s:10:"vvvvvvvvvv";}}
+/// ```
 fn nested(
     req: &mut Request,
     out: &mut Vec<u8>,
     outer: &Value,
-    reached: Reached,
+    table: PhpArray,
     hash: &mut Serializer,
     in_rcn_array: bool,
     incomplete: bool,
 ) -> Result<(), Thrown> {
-    let table = reached.table();
     let count = table.len() - usize::from(incomplete && table.iter().any(|(k, _)| is_magic(&k)));
     out.extend_from_slice(count.to_string().as_bytes());
     out.extend_from_slice(b":{");
     let mut skip_magic = incomplete;
-    walk::held(req, reached, |req, key, data| {
+    // `ZEND_HASH_FOREACH_KEY_VAL_IND(ht, ...)` (`Z/ext/standard/var.c:991`),
+    // and the same loop over what `__serialize()` answered
+    // (`Z/ext/standard/var.c:1159`), which hold nothing: a row a
+    // `__serialize` rewrites in place is written as it now is, and a
+    // table the program gives up mid-walk ends the walk, where php reads
+    // it freed, and the brace is closed after the rows written, whatever
+    // the count said.
+    walk::foreach(req, table, Hold::None, |req, row| {
+        let key = row.key();
         if skip_magic && is_magic(key) {
             skip_magic = false;
             return Ok(ControlFlow::Continue(()));
@@ -430,18 +482,20 @@ fn nested(
             Key::Int(n) => write_long(out, *n),
             Key::Str(s) => write_string(out, s.as_bytes()),
         }
-        let data = match data.as_php_ref() {
-            Some(cell) if data.refcount() == 1 => cell.get(),
-            _ => *data,
+        // `Z_ISREF_P(data) && Z_REFCOUNT_P(data) == 1`, counted as php's
+        // walk counts it, without the walk's own owner of the row.
+        let (data, refcount) = match row.value().as_php_ref() {
+            Some(cell) if row.refcount() == 1 => (cell.get(), cell.get().refcount()),
+            _ => (*row.value(), row.refcount()),
         };
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
             && inner.is_same(*outer_array)
         {
-            hash.add(req, outer, in_rcn_array);
+            hash.add(req, outer, outer.refcount(), in_rcn_array);
             out.extend_from_slice(b"N;");
             return Ok(ControlFlow::Continue(()));
         }
-        write(req, out, &data, hash, in_rcn_array, false)?;
+        write(req, out, &data, refcount, hash, in_rcn_array, false)?;
         Ok(ControlFlow::<()>::Continue(()))
     })?;
     out.push(b'}');
@@ -477,15 +531,7 @@ fn serialize_method(
     // program holds it too where its refcount says so, which php's
     // `in_rcn_array` carries into the rows.
     let shared = data.refcount() > 1;
-    let written = nested(
-        req,
-        out,
-        &object.as_value(),
-        Reached::Held(array),
-        hash,
-        shared,
-        false,
-    );
+    let written = nested(req, out, &object.as_value(), array, hash, shared, false);
     data.give_up(req);
     written
 }
@@ -544,15 +590,7 @@ fn object_value(
         names.give_up(req);
         let table = table?;
         write_class_name(req, out, object);
-        let written = nested(
-            req,
-            out,
-            &object.as_value(),
-            Reached::Held(*table),
-            hash,
-            false,
-            false,
-        );
+        let written = nested(req, out, &object.as_value(), *table, hash, false, false);
         table.give_up(req);
         return written;
     }
@@ -570,7 +608,7 @@ fn object_value(
         req,
         out,
         &object.as_value(),
-        Reached::Held(*table),
+        *table,
         hash,
         false,
         incomplete,
@@ -713,9 +751,12 @@ fn sleep_props(
     let props = object.props_for(req, PropertyPurpose::Serialize)?;
     let shown_class = String::from_utf8_lossy(class).into_owned();
     let mut out = PhpArray::new(req)?;
-    walk::held(req, Reached::Held(list), |req, _, name| {
+    // `ZEND_HASH_FOREACH_VAL_IND(sleep_retval, name_val)`
+    // (`Z/ext/standard/var.c:919`), which holds nothing: the caller owns
+    // what `__sleep()` answered.
+    walk::foreach(req, list, Hold::None, |req, row| {
         // A name the list holds by reference is what the reference holds.
-        let name = name.deref();
+        let name = row.value().deref();
         if name.as_php_string().is_none() {
             docref(
                 req,
