@@ -33,6 +33,12 @@ pub(crate) use wire::decode;
 /// could not be read.
 pub(crate) type Cached = Option<Result<Arc<Unit>, CompileError>>;
 
+/// The classes a held unit's compiler bound early, each published into
+/// the engine's arena as the unit was held (design §5.14, §6.3), by its
+/// declaration's index: none for a class the unit leaves to an opline
+/// and for one the arena could not take ([`crate::api::request::Request::publish_unit`]).
+pub(crate) type EarlyBound = Arc<[Option<crate::api::values::ClassId>]>;
+
 /// What the unit cache files a held file under, one space of names as
 /// php's `ZCSG(hash)` is (design §6.3, revision 45): the file's full
 /// path, and beside it the path as written, `accel_make_persistent_key`.
@@ -125,6 +131,9 @@ impl Stamp {
 /// over, which costs at most one more stat.
 pub(crate) struct Held {
     pub(crate) unit: Result<Arc<Unit>, CompileError>,
+    /// Its early-bound classes, published as it was held, which a
+    /// request loading the unit declares by their numbers.
+    pub(crate) early: EarlyBound,
     /// The full path, php's `script.filename`.
     pub(crate) path: Vec<u8>,
     /// The file as it was compiled; none for one held under
@@ -140,6 +149,16 @@ pub(crate) struct Held {
     /// `dynamic_members.revalidate`: the request time up to which a hit
     /// under a window is served without a stat.
     revalidate: AtomicI64,
+}
+
+/// What a file read from disk came to, for [`UnitCache::hold`]: the
+/// unit or the compiler's refusal, its early-bound classes published,
+/// the bytes it was read from and its stamp as observed.
+struct Read {
+    unit: Result<Arc<Unit>, CompileError>,
+    early: EarlyBound,
+    size: u64,
+    observed: Option<Stamp>,
 }
 
 /// What a hit on a held file is held to before it is served.
@@ -161,6 +180,7 @@ impl Held {
     pub(crate) fn preloaded(unit: Arc<Unit>, path: Vec<u8>, size: u64, order: u64) -> Held {
         Held {
             unit: Ok(unit),
+            early: Arc::new([]),
             path,
             stamp: None,
             size,
@@ -381,7 +401,8 @@ impl UnitCache {
         asked: Asked<'_>,
         compile: impl FnOnce(&[u8]) -> Result<Arc<Unit>, CompileError>,
         decode: impl FnOnce(&[u8]) -> Option<Arc<Unit>>,
-    ) -> (Cached, Filed) {
+        publish: impl FnOnce(&Arc<Unit>) -> EarlyBound,
+    ) -> (Cached, Filed, Option<EarlyBound>) {
         let Asked {
             path,
             written,
@@ -396,7 +417,11 @@ impl UnitCache {
             Levels::Disk(disk) => (false, Some(disk)),
         };
         if memory && let Some(hit) = self.held_hit(path, written.as_ref(), validation, now) {
-            return hit;
+            return (
+                Some(hit.unit.clone()),
+                Filed::Hit,
+                Some(Arc::clone(&hit.early)),
+            );
         }
         let validated = validation != Validation::Never;
         let stamped = validated || protection > 0;
@@ -412,23 +437,34 @@ impl UnitCache {
             // Held as `zend_file_cache_script_load` puts it in the shared
             // hash, a hit, except while a restart is pending.
             if !memory {
-                return (Some(Ok(unit)), Filed::Unheld);
+                return (Some(Ok(unit)), Filed::Unheld, None);
             }
             if self.restart_pending.load(Ordering::Relaxed) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                return (Some(Ok(unit)), Filed::Unheld);
+                return (Some(Ok(unit)), Filed::Unheld, None);
             }
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
-            let held = self.hold(path, validation, now, Ok(unit), kept.size, observed);
+            let early = publish(&unit);
+            let read = Read {
+                unit: Ok(unit),
+                early,
+                size: kept.size,
+                observed,
+            };
+            let held = self.hold(path, validation, now, read);
             self.hit(&held, validation, now);
-            return (Some(held.unit.clone()), Filed::Hit);
+            return (
+                Some(held.unit.clone()),
+                Filed::Hit,
+                Some(Arc::clone(&held.early)),
+            );
         }
         if memory && validation != Validation::EveryHit {
             self.misses.fetch_add(1, Ordering::Relaxed);
         }
         let Ok(source) = std::fs::read(String::from_utf8_lossy(path).as_ref()) else {
-            return (None, Filed::Unheld);
+            return (None, Filed::Unheld, None);
         };
         let unit = compile(&source);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
@@ -437,7 +473,7 @@ impl UnitCache {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
         if unheld {
-            return (Some(unit), Filed::Compiled);
+            return (Some(unit), Filed::Compiled, None);
         }
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)
             && let Some(body) = wire::encode(compiled)
@@ -446,13 +482,31 @@ impl UnitCache {
             disk.store(path, stamp, size, &body);
         }
         if !memory || self.restart_pending.load(Ordering::Relaxed) {
-            return (Some(unit), disk.map_or(Filed::Compiled, |_| Filed::Unheld));
+            return (
+                Some(unit),
+                disk.map_or(Filed::Compiled, |_| Filed::Unheld),
+                None,
+            );
         }
-        let held = self.hold(path, validation, now, unit, size, observed);
+        let early = match &unit {
+            Ok(compiled) => publish(compiled),
+            Err(_) => Arc::new([]),
+        };
+        let read = Read {
+            unit,
+            early,
+            size,
+            observed,
+        };
+        let held = self.hold(path, validation, now, read);
         if let Some(written) = written {
             self.held.alias(written, &held);
         }
-        (Some(held.unit.clone()), Filed::Held)
+        (
+            Some(held.unit.clone()),
+            Filed::Held,
+            Some(Arc::clone(&held.early)),
+        )
     }
 
     /// The first level's hit on `path`: a file the preload saved,
@@ -466,7 +520,7 @@ impl UnitCache {
         written: Option<&UnitKey>,
         validation: Validation,
         now: i64,
-    ) -> Option<(Cached, Filed)> {
+    ) -> Option<Arc<Held>> {
         // The cache bypassed, `EveryHit`, compiles afresh.
         if validation != Validation::EveryHit
             && let Some(held) = self
@@ -477,7 +531,7 @@ impl UnitCache {
             if let Some(written) = written {
                 self.held.alias(written.clone(), held);
             }
-            return Some((Some(held.unit.clone()), Filed::Hit));
+            return Some(Arc::clone(held));
         }
         let stale = self.held.get(&UnitKey::full(path))?;
         if stale.validated(validation, now) {
@@ -485,24 +539,21 @@ impl UnitCache {
             if let Some(written) = written {
                 self.held.alias(written.clone(), &stale);
             }
-            return Some((Some(stale.unit.clone()), Filed::Hit));
+            return Some(stale);
         }
         self.held.remove_all(&stale);
         None
     }
 
-    /// `unit`, compiled from `size` bytes of the file at `path` whose
-    /// stamp was `observed`, held under its full path; what another
-    /// request held for it meanwhile where it did.
-    fn hold(
-        &self,
-        path: &[u8],
-        validation: Validation,
-        now: i64,
-        unit: Result<Arc<Unit>, CompileError>,
-        size: u64,
-        observed: Option<Stamp>,
-    ) -> Arc<Held> {
+    /// What `read` compiled from the file at `path`, held under its full
+    /// path; what another request held for it meanwhile where it did.
+    fn hold(&self, path: &[u8], validation: Validation, now: i64, read: Read) -> Arc<Held> {
+        let Read {
+            unit,
+            early,
+            size,
+            observed,
+        } = read;
         let stamp = match validation {
             Validation::Never => None,
             Validation::Window { .. } | Validation::EveryHit => observed,
@@ -515,6 +566,7 @@ impl UnitCache {
             UnitKey::full(path),
             Held {
                 unit,
+                early,
                 path: path.to_vec(),
                 stamp,
                 size,

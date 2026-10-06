@@ -104,6 +104,7 @@ pub use pending::Raised;
 mod post;
 mod preload;
 mod properties;
+mod publish;
 use properties::IN_GET;
 pub(crate) use properties::{RefSource, TypedProperty, Walked};
 mod recording;
@@ -437,6 +438,11 @@ pub struct Request {
     /// held or keeps in its file cache, compiled with
     /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::declare_classes`]).
     accel_loaded: Option<Arc<Unit>>,
+    /// The unit the cache last served from what it holds, beside its
+    /// early-bound classes as they were published with it (design §6.3),
+    /// which its load declares by one insert each
+    /// ([`Request::declare_classes`]).
+    early_bound: Option<(Arc<Unit>, crate::unit_cache::EarlyBound)>,
 }
 
 /// `DEBUG_BACKTRACE_PROVIDE_OBJECT` (`Z/Zend/zend_constants.h`): a
@@ -724,6 +730,7 @@ impl Request {
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
             accel_loaded: None,
+            early_bound: None,
             #[cfg(debug_assertions)]
             frames: frames::Frames::default(),
             hold: hold::Holding::default(),
