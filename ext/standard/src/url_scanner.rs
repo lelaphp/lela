@@ -26,7 +26,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{Key, PhpString, SmartStr, walk};
+use php_ext::values::{PhpString, SmartStr};
 
 use crate::State;
 
@@ -228,13 +228,8 @@ impl Settings {
         // `check_http_host`: `EG(symbol_table)`'s `$_SERVER`, the
         // program's, not armed where the program has not made it.
         let http_host = req.global(b"_SERVER").and_then(|server| {
-            let host = walk::rows(req, *server.as_array()?).find_map(|(key, value)| match key {
-                Key::Str(name) if name.as_bytes() == b"HTTP_HOST" => value
-                    .deref()
-                    .as_php_string()
-                    .map(|host| host.as_bytes().to_vec()),
-                _ => None,
-            })?;
+            let host = server.as_array()?.find(b"HTTP_HOST")?;
+            let host = host.deref().as_php_string()?.as_bytes().to_vec();
             let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
             Some(host[..end].to_vec())
         });

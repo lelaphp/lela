@@ -530,12 +530,8 @@ impl FilterFailedException {}
 
 /// `zend_hash_str_find` over an options array: the element under a
 /// string key, a view.
-fn find(req: &Request, options: Option<&Value>, name: &[u8]) -> Option<Value> {
-    let array = *options?.deref().as_array()?;
-    walk::rows(req, array).find_map(|(key, value)| match key {
-        Key::Str(s) if s.as_bytes() == name => Some(value),
-        _ => None,
-    })
+fn find(options: Option<&Value>, name: &[u8]) -> Option<Value> {
+    options?.deref().as_array()?.find(name)
 }
 
 /// A new string of the request's as a value.
@@ -649,7 +645,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
             .options
             .as_ref()
             .is_some_and(|o| o.deref().as_array().is_some())
-        && let Some(default) = find(req, run.options.as_ref(), b"default")
+        && let Some(default) = find(run.options.as_ref(), b"default")
     {
         let default = default.deref();
         req.addref(&default);
@@ -831,10 +827,10 @@ fn filter_call(
         Union::B(long) => filter = long,
         Union::A(table) => {
             let table = Some(table.to_value());
-            if let Some(given) = find(req, table.as_ref(), b"filter") {
+            if let Some(given) = find(table.as_ref(), b"filter") {
                 filter = to_long(req, &given.deref())?;
             }
-            if let Some(given) = find(req, table.as_ref(), b"options") {
+            if let Some(given) = find(table.as_ref(), b"options") {
                 let given = given.deref();
                 if filter == FILTER_CALLBACK {
                     options = Some(given);
@@ -843,7 +839,7 @@ fn filter_call(
                     options = Some(given);
                 }
             }
-            if let Some(given) = find(req, table.as_ref(), b"flags") {
+            if let Some(given) = find(table.as_ref(), b"flags") {
                 flags = to_long(req, &given.deref())?;
                 if flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
                     flags |= FILTER_REQUIRE_SCALAR;
@@ -1086,7 +1082,7 @@ fn filter_input(
         Union::B(flags) => (None, flags),
         Union::A(table) => {
             let table = Some(table.to_value());
-            match find(req, table.as_ref(), b"flags") {
+            match find(table.as_ref(), b"flags") {
                 Some(given) => (table, to_long(req, &given.deref())?),
                 None => (table, 0),
             }
@@ -1101,9 +1097,9 @@ fn filter_input(
             &format!("input value '{}' not found", c_string(name)),
         ));
     }
-    let options = find(req, table.as_ref(), b"options").map(|o| o.deref());
+    let options = find(table.as_ref(), b"options").map(|o| o.deref());
     if options.as_ref().is_some_and(|o| o.as_array().is_some())
-        && let Some(default) = find(req, options.as_ref(), b"default")
+        && let Some(default) = find(options.as_ref(), b"default")
     {
         let default = default.deref();
         req.addref(&default);

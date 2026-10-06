@@ -190,10 +190,9 @@ fn early_find_sid(req: &mut Request, session_name: &[u8]) -> Result<(), Thrown> 
 /// session's name.
 fn find_in(req: &mut Request, input: Input, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     let array = req.input_variables(input)?;
-    let found = walk::rows(req, array).find_map(|(key, value)| match key {
-        Key::Str(s) if s.as_bytes() == name => value.deref().as_str_bytes().map(<[u8]>::to_vec),
-        _ => None,
-    });
+    let found = array
+        .find(name)
+        .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec));
     req.release(array.to_value());
     Ok(found)
 }
@@ -330,12 +329,8 @@ fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
     });
     found
         .and_then(|value| value.deref().as_array().copied())
-        .and_then(|array| {
-            walk::rows(req, array).find_map(|(had, value)| match had {
-                Key::Str(s) if s.as_bytes() == b"cancel_upload" => value.deref().as_bool(),
-                _ => None,
-            })
-        })
+        .and_then(|array| array.find(b"cancel_upload"))
+        .and_then(|value| value.deref().as_bool())
         .unwrap_or(false)
 }
 
