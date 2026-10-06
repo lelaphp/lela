@@ -123,7 +123,7 @@ impl Tree {
         // and reads it as a dead run's.
         let held = if keep { None } else { Some(hold(&named)?) };
 
-        let _ = std::fs::remove_dir_all(&named);
+        std::fs::remove_dir_all(&named).ok();
         std::fs::create_dir_all(&named)
             .with_context(|| format!("creating the scratch tree {}", named.display()))?;
         let path = std::fs::canonicalize(&named)
@@ -345,8 +345,8 @@ fn reap(base: &Path) {
         if file.try_lock().is_err() || !names(&lock, &file) {
             continue;
         }
-        let _ = std::fs::remove_dir_all(base.join(tree));
-        let _ = std::fs::remove_file(&lock);
+        std::fs::remove_dir_all(base.join(tree)).ok();
+        std::fs::remove_file(&lock).ok();
     }
 }
 
@@ -394,8 +394,8 @@ impl Drop for Tree {
         // the tree, so a sweep arriving in between finds a lock whose tree
         // is already gone and removes the lock, which is the same ending.
         if let Some((lock, _)) = &self.held {
-            let _ = std::fs::remove_dir_all(&self.path);
-            let _ = std::fs::remove_file(lock);
+            std::fs::remove_dir_all(&self.path).ok();
+            std::fs::remove_file(lock).ok();
         }
     }
 }
@@ -430,7 +430,7 @@ mod tests {
                     return Some(format!("lock {n} was swept while held"));
                 }
                 drop(file);
-                let _ = std::fs::remove_file(&lock);
+                std::fs::remove_file(&lock).ok();
                 None
             });
             taken.store(true, Ordering::Relaxed);

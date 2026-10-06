@@ -591,28 +591,27 @@ impl Request {
     /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
     /// (`Z/Zend/zend_hash.c:3396`), what `FETCH_GLOBALS` hands the
     /// program as `$GLOBALS`: a copy of the global table, every name
-    /// that has a value in the table's order, a CV the name is attached
-    /// to read where it stands and skipped where it holds nothing, a
-    /// name that reads as an integer that integer (`ZEND_HANDLE_NUMERIC_STR`),
-    /// and a reference nothing else holds its value, as
-    /// `zend_array_dup` unwraps one; each value one more owner.
+    /// that has a value in the table's order, each held as
+    /// [`Request::dup_value`] holds an element, and a name that reads as
+    /// an integer that integer (`ZEND_HANDLE_NUMERIC_STR`).
+    ///
+    /// ```php
+    /// $a = [3, 1, 2]; sort($a);
+    /// $kept = [1]; $alias = &$kept;
+    /// $all = $GLOBALS; $all['a'][] = 9; $all['kept'][] = 9;
+    /// ${'7'} = 1;
+    /// var_dump(count($a), count($kept), array_key_last($GLOBALS));
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// int(2)
+    /// int(7)
+    /// ```
     pub(crate) fn symbol_table_array(&mut self) -> Result<PhpArray, Thrown> {
-        let entries: Vec<(Vec<u8>, Symbol)> = self.globals().clone();
+        let rows = self.symbol_rows(TableId::GLOBAL);
         let mut array = PhpArray::new(self)?;
-        for (name, symbol) in entries {
-            let value = match symbol {
-                Symbol::Value(value) => value,
-                Symbol::Held(cell) => cell.get(),
-                Symbol::Indirect(frame, slot) => self.attached(TableId::GLOBAL, frame, slot),
-            };
-            if value.tag() == TypeTag::Undef {
-                continue;
-            }
-            let value = match value.as_php_ref() {
-                Some(cell) if value.refcount() == 1 => cell.get(),
-                _ => value,
-            };
-            self.addref(&value);
+        for (name, value) in rows {
+            let value = self.dup_value(value, None);
             let key = Key::from_string(PhpString::new(self, &name)?);
             array.set(self, key, value)?;
         }
@@ -620,16 +619,13 @@ impl Request {
     }
 
     /// `zend_rebuild_symbol_table` for `frame` and `zend_array_dup` of
-    /// it: every name the frame's table holds that has a value, in the
-    /// table's order, each value one more owner, a reference kept as
-    /// one; what `get_defined_vars()` answers.
+    /// it (`Z/Zend/zend_builtin_functions.c:1517`): every name the
+    /// frame's table holds that has a value, in the table's order, each
+    /// held as [`Request::dup_value`] holds an element and each name the
+    /// string it is; what `get_defined_vars()` answers.
     pub(crate) fn defined_vars(&mut self, frame: FrameRef) -> Result<PhpArray, Thrown> {
         let table = self.rebuild_symbol_table(frame);
-        let entries: Vec<(Vec<u8>, Symbol)> = self
-            .tables
-            .get(table.0 as usize)
-            .map(|table| table.entries.clone())
-            .unwrap_or_default();
+        let rows = self.symbol_rows(table);
         // `zend_array_dup` lays the copy down at the table's own size,
         // which a rebuilt table taken from `EG(symtable_cache)` may have
         // grown past eight.
@@ -643,19 +639,35 @@ impl Request {
             }
             _ => PhpArray::new(self)?,
         };
+        for (name, value) in rows {
+            let value = self.dup_value(value, None);
+            let key = Key::Str(PhpString::new(self, &name)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
+
+    /// What a copy of `table` reads, the half of `zend_array_dup_value`
+    /// that is the table's: each name in the table's order with what it
+    /// holds, an `IS_INDIRECT` bucket followed to its CV and one whose
+    /// CV holds nothing left out. Views; no owner taken.
+    fn symbol_rows(&mut self, table: TableId) -> Vec<(Vec<u8>, Value)> {
+        let entries: Vec<(Vec<u8>, Symbol)> = self
+            .tables
+            .get(table.0 as usize)
+            .map(|table| table.entries.clone())
+            .unwrap_or_default();
+        let mut rows = Vec::with_capacity(entries.len());
         for (name, symbol) in entries {
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
                 Symbol::Indirect(frame, slot) => self.attached(table, frame, slot),
             };
-            if value.tag() == TypeTag::Undef {
-                continue;
+            if value.tag() != TypeTag::Undef {
+                rows.push((name, value));
             }
-            self.addref(&value);
-            let key = Key::from_string(PhpString::new(self, &name)?);
-            array.set(self, key, value)?;
         }
-        Ok(array)
+        rows
     }
 }

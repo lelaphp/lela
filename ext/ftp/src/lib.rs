@@ -1112,7 +1112,7 @@ fn local_out(
 /// `VCWD_UNLINK(local)` after a download failed.
 fn unlink(req: &mut Request, path: &[u8]) {
     let path = String::from_utf8_lossy(cstr(path)).into_owned();
-    let _ = std::fs::remove_file(req.cwd().join(path));
+    std::fs::remove_file(req.cwd().join(path)).ok();
 }
 
 /// `ftp_get(FTP\Connection $ftp, string $local_filename, string`

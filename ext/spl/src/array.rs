@@ -410,7 +410,7 @@ impl ArrayObject {
     /// a=1;d=4;
     /// ```
     ///
-    /// Once a sort has laid the object's table down as copies of its
+    /// After a sort has laid the object's table down as copies of its
     /// declared rows, a protected one is a plain value to the count,
     /// which counts it, and iteration still leaves it out.
     ///
@@ -1809,7 +1809,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let _ = forget_position(req, object);
+        forget_position(req, object).ok();
         let held = object
             .native_mut::<SplArrayObject>(req)
             .and_then(|p| std::mem::take(&mut p.storage).held());

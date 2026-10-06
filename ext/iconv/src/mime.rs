@@ -94,7 +94,9 @@ fn encode(
     let mut buf = vec![0u8; max.saturating_add(5)];
     let mut out = Vec::new();
     let mut chars = max;
-    let _ = cd_pl.append((!name.is_empty()).then_some(name), &mut out);
+    cd_pl
+        .append((!name.is_empty()).then_some(name), &mut out)
+        .ok();
     chars = chars.wrapping_sub(name.len());
     out.extend_from_slice(b": ");
     chars = chars.wrapping_sub(2);
@@ -349,8 +351,8 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                         b'*' => scan = Scan::Language,
                         b'\r' | b'\n' => {
                             p -= 1;
-                            let _ = append(&mut out, Some(b"="), &mut cd_pl);
-                            let _ = append(&mut out, Some(b"?"), &mut cd_pl);
+                            append(&mut out, Some(b"="), &mut cd_pl).ok();
+                            append(&mut out, Some(b"?"), &mut cd_pl).ok();
                             err = append(&mut out, span(input, charset, p + 1), &mut cd_pl);
                             err?;
                             charset = None;
@@ -452,8 +454,8 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                     if c == b'\n' {
                         scan = Scan::Fold;
                     } else {
-                        let _ = append(&mut out, Some(b"\r"), &mut cd_pl);
-                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                        append(&mut out, Some(b"\r"), &mut cd_pl).ok();
+                        append(&mut out, Some(&[c]), &mut cd_pl).ok();
                         scan = Scan::Any;
                     }
                 }
@@ -464,7 +466,7 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                         break 'step;
                     }
                     if word.is_none() {
-                        let _ = append(&mut out, Some(b" "), &mut cd_pl);
+                        append(&mut out, Some(b" "), &mut cd_pl).ok();
                     }
                     blanks = None;
                     scan = Scan::Blanks;
@@ -499,7 +501,7 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                         if word.is_none()
                             && let Some(from) = blanks.take()
                         {
-                            let _ = append(&mut out, input.get(from..p), &mut cd_pl);
+                            append(&mut out, input.get(from..p), &mut cd_pl).ok();
                         }
                         word = Some(p);
                         scan = Scan::Open;
@@ -507,9 +509,9 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                     b' ' | b'\t' => {}
                     _ => {
                         if let Some(from) = blanks.take() {
-                            let _ = append(&mut out, input.get(from..p), &mut cd_pl);
+                            append(&mut out, input.get(from..p), &mut cd_pl).ok();
                         }
-                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                        append(&mut out, Some(&[c]), &mut cd_pl).ok();
                         word = None;
                         scan = mode.after_word();
                     }
@@ -526,7 +528,7 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                         scan = Scan::Open;
                     }
                     _ => {
-                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                        append(&mut out, Some(&[c]), &mut cd_pl).ok();
                     }
                 },
             }
@@ -585,7 +587,7 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
                     scan = Scan::Blanks;
                 }
                 _ => {
-                    let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                    append(&mut out, Some(&[c]), &mut cd_pl).ok();
                     scan = Scan::Word;
                 }
             }
@@ -597,7 +599,7 @@ fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error
         Scan::Any | Scan::Fold | Scan::Blanks | Scan::Word => {}
         _ if mode.go_on => {
             if scan == Scan::Open {
-                let _ = append(&mut out, Some(b"="), &mut cd_pl);
+                append(&mut out, Some(b"="), &mut cd_pl).ok();
             }
             err = Ok(());
         }

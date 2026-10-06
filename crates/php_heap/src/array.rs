@@ -765,8 +765,10 @@ impl Arr {
     // ------------------------------------------------------ the data
 
     /// `nNumUsed`: the positions written, tombstones included, which
-    /// is where `zend_close_rsrc_list` starts its walk down.
-    pub(crate) fn num_used(self) -> u32 {
+    /// is where `zend_close_rsrc_list` starts its walk down and where
+    /// `ZEND_HASH_FOREACH` fixes its end.
+    #[must_use]
+    pub fn num_used(self) -> u32 {
         self.header().num_used.get()
     }
 
@@ -1719,7 +1721,7 @@ impl crate::Heap {
     /// `_zend_hash_add_or_update_i` with `HASH_UPDATE`: the key is the
     /// bucket's own from here, one more owner unless it is interned; the
     /// value replaced, if one was, handed back to release.
-    fn array_write_str(&mut self, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
+    pub(crate) fn array_write_str(&mut self, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
         write_str(&mut self.tables(), a, key, z)
     }
 
@@ -2002,103 +2004,6 @@ impl crate::Heap {
             }
         }
         Ok(())
-    }
-
-    /// `zend_array_dup` over an object's property table that stands for
-    /// its declared slots and is shared, what `SEPARATE_ARRAY` over it
-    /// does before a write (`Z/Zend/zend_hash.c:2503-2505`): a copy that
-    /// holds each slot's value, a reference only this slot owns copied
-    /// as the value it holds, under `names[i]`, the slot's mangled name,
-    /// a slot nothing holds left out as php's copy skips an
-    /// `IS_INDIRECT` to an `UNDEF`, and then the dynamic rows, and that
-    /// holds them from then on ([`DeclaredRows::Copied`]). The object
-    /// takes the copy and the table it had, which another holder shares,
-    /// is one owner fewer. `names`
-    /// has one name per slot; a slot past its end is left out.
-    pub fn object_properties_copy(&mut self, o: crate::Obj, names: &[Str]) -> Result<Arr, Fatal> {
-        let source = o.properties();
-        let held = (0..o.slots()).filter(|i| !o.slot(*i).is_undef()).count();
-        let dynamic = source.map_or(0, |table| table.len());
-        let size = u32::try_from(held + dynamic).unwrap_or(u32::MAX);
-        let copy = self.array_mixed(size)?;
-        // `target->nInternalPointer`: the source's where it stands before
-        // the end and zero past it, then moved with the row it stands at
-        // as the holes close up; a pointer at a row the copy leaves out
-        // keeps the number it had.
-        let (from, used) = o
-            .property_table()
-            .map_or((0, 0), |table| (table.raw_pointer(), table.used()));
-        let mut pointer = if from < used { from } else { 0 };
-        let mut at = 0;
-        for (i, name) in (0..o.slots()).zip(names) {
-            let z = o.slot(i);
-            if z.is_undef() {
-                continue;
-            }
-            if i == from {
-                pointer = at;
-            }
-            at += 1;
-            let z = self.dup_value(z, source);
-            self.array_write_str(copy, *name, z)?;
-        }
-        if let Some(table) = source {
-            copy.set_next_free(table.next_free());
-            for pos in 0..table.num_used() {
-                let Some((key, z)) = table.entry_at(pos) else {
-                    continue;
-                };
-                if o.slots() + pos == from {
-                    pointer = at;
-                }
-                at += 1;
-                let z = self.dup_value(z, Some(table));
-                self.array_add_new(copy, key, z)?;
-            }
-            let _ = table.delref();
-        }
-        copy.set_raw_pointer(pointer);
-        copy.set_declared_rows(DeclaredRows::Copied);
-        self.object_set_properties(o, copy);
-        Ok(copy)
-    }
-
-    /// `zend_array_dup_value`'s copy of one element, and `zval_add_ref`
-    /// where `source` is `None`: a reference nothing but this holder
-    /// owns is copied as the value it holds, one more owner of that, so
-    /// the copy does not share a cell the original's last holder left
-    /// behind (`foreach ($a as &$v) {} unset($v);` leaves one); a
-    /// reference to the array being copied itself stays one, and every
-    /// other value is one more owner of itself.
-    ///
-    /// ```php
-    /// $a = [1, 2]; foreach ($a as &$v) {} unset($v);
-    /// $b = $a; $b[1] = 9;
-    /// $o = new stdClass; $o->p = 1; $r = &$o->p; unset($r);
-    /// $c = clone $o; $c->p = 5;
-    /// $k = [1]; $k[] = &$k; $d = $k; $d[0] = 3;
-    /// var_dump($a[1], $o->p, $k[0]);
-    /// ```
-    /// ```expect
-    /// int(2)
-    /// int(1)
-    /// int(1)
-    /// ```
-    pub(crate) fn dup_value(&self, z: Zval, source: Option<Arr>) -> Zval {
-        if let Some(r) = z.as_reference()
-            && r.refcount() == 1
-        {
-            let inner = r.val();
-            let itself = inner
-                .as_arr()
-                .is_some_and(|held| source.is_some_and(|s| held.is_same(s)));
-            if !itself {
-                self.addref(inner);
-                return inner;
-            }
-        }
-        self.addref(z);
-        z
     }
 
     /// `SEPARATE_ARRAY` (`Z/Zend/zend_execute.c`): `a` itself while it
@@ -2479,7 +2384,7 @@ impl Arr {
 /// handed back for the release that may reach user code, or the
 /// next-index insert refused because `ZEND_LONG_MAX` is taken.
 #[derive(Clone, Copy, PartialEq)]
-enum Written {
+pub(crate) enum Written {
     Added,
     Replaced(Zval),
     Refused,

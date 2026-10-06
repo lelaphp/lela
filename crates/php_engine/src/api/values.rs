@@ -51,6 +51,7 @@ mod emalloc;
 mod fresh;
 mod owner;
 mod smart_str;
+pub mod walk;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
 pub use owner::{Owner, View};
@@ -742,7 +743,7 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        let held = req.take_hold(self.to_value());
+        let held = Owner::take(req, self.to_value());
         let mut pending: Option<Thrown> = None;
         let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
@@ -760,7 +761,7 @@ impl PhpArray {
             };
             ordering.then(x.position.cmp(&y.position))
         });
-        req.release_hold(held);
+        held.give_up(req);
         sorted?;
         pending.map_or(Ok(()), Err)
     }
@@ -1410,6 +1411,26 @@ impl PhpObject {
     pub fn rebuild_properties(&self, req: &mut Request) -> Result<(), Thrown> {
         let table = req.heap_mut().object_properties(self.heap());
         req.fatal_of(table).map(|_| ())
+    }
+
+    /// `zobj->properties != NULL && GC_REFCOUNT(zobj->properties) > 1`:
+    /// whether the object's property table has a holder beside the
+    /// object, as the `(array)` cast or `get_object_vars()` leaves one
+    /// that hands the table on, so a reader that counts on one owner
+    /// reaching a value asks whether a second can.
+    ///
+    /// ```php
+    /// $t = new stdClass; $t->y = $t; $y = (array) $t; unset($t);
+    /// echo serialize($y), "\n";
+    /// ```
+    /// ```expect
+    /// a:1:{s:1:"y";O:8:"stdClass":1:{s:1:"y";r:2;}}
+    /// ```
+    #[must_use]
+    pub fn properties_shared(&self) -> bool {
+        self.heap()
+            .properties()
+            .is_some_and(|table| table.refcount() > 1)
     }
 
     /// `zend_hash_extend(Z_OBJPROP_P(obj), count + extra, ...)`: the
@@ -2840,7 +2861,8 @@ mod tests {
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
         fn dtor(req: &mut Request, r: Resource) {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
-            let _ = req.define_constant(b"dtor", Value::int(i64::from(seen)));
+            req.define_constant(b"dtor", Value::int(i64::from(seen)))
+                .ok();
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

@@ -100,7 +100,7 @@ fn rendering_script(expressions: &[&str]) -> String {
     let mut script = String::from("<?php\n");
     for expression in expressions {
         let quoted = expression.replace('\\', "\\\\").replace('\'', "\\'");
-        let _ = writeln!(script, "echo '== {quoted}', \"\\n\", {expression};");
+        writeln!(script, "echo '== {quoted}', \"\\n\", {expression};").ok();
     }
     script
 }
@@ -222,7 +222,7 @@ fn run_oracle(source: &str) -> String {
         return String::new();
     };
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(source.as_bytes());
+        stdin.write_all(source.as_bytes()).ok();
     }
     child
         .wait_with_output()

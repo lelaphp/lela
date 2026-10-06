@@ -42,7 +42,7 @@ fn the_cli_class_extensions_are_loaded() {
         .arg(&file)
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let loaded = String::from_utf8_lossy(&out.stdout);
     let loaded: Vec<&str> = loaded.trim_end().split(',').collect();
     for name in [

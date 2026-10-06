@@ -15,7 +15,7 @@ use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use methods::visibility_string;
 use pending::Saved;
@@ -847,11 +847,11 @@ impl Request {
         offset: Value,
         calls: impl FnOnce(&mut Request, Value) -> Result<T, Thrown>,
     ) -> Result<T, Thrown> {
-        let offset = self.take_hold(offset.deref());
-        let held = self.take_hold(object.as_value());
-        let called = calls(self, offset.value());
-        self.release_hold(held);
-        self.release_hold(offset);
+        let offset = Owner::take(self, offset.deref());
+        let held = Owner::take(self, object.as_value());
+        let called = calls(self, *offset);
+        held.give_up(self);
+        offset.give_up(self);
         called
     }
 

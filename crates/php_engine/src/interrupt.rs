@@ -438,6 +438,10 @@ impl Timer {
             if let Some(thread) = self.thread.take() {
                 thread.forget();
             }
+            #[expect(
+                clippy::mem_forget,
+                reason = "the forked child's copy of the schedule, whose mutex may have been copied held, is neither woken nor dropped"
+            )]
             std::mem::forget(std::mem::take(&mut self.shared));
             self.started_in = Process::current();
         }
@@ -699,7 +703,7 @@ fn terminate(seconds: i64, hard: u64) -> ! {
     let line = format!(
         "\nFatal error: Maximum execution time of {seconds}+{hard} seconds exceeded (terminated) in Unknown on line 0\n"
     );
-    let _ = std::io::stderr().write_all(line.as_bytes());
+    std::io::stderr().write_all(line.as_bytes()).ok();
     std::process::exit(124)
 }
 

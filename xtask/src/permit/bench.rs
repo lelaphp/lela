@@ -143,7 +143,7 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
 /// judge takes its scratch workspace from here too, at a directory of its
 /// own, so the one recipe stands in one place.
 pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
-    let _ = fs::remove_dir_all(dir);
+    fs::remove_dir_all(dir).ok();
     fs::create_dir_all(dir.join("docs")).with_context(|| format!("creating {}", dir.display()))?;
     let manifest = Manifest::load(root)?;
     for file in [

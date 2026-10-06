@@ -79,10 +79,11 @@ impl Conn {
     /// not forced.
     fn close(self, force: bool) {
         if !force {
-            let _ = match &self {
+            match &self {
                 Conn::Tcp(s) => s.shutdown(std::net::Shutdown::Write),
                 Conn::Unix(s) => s.shutdown(std::net::Shutdown::Write),
-            };
+            }
+            .ok();
             let mut this = self;
             let mut buf = [0u8; 8];
             while matches!(this.read(&mut buf), Ok(n) if n > 0) {}
@@ -232,14 +233,14 @@ impl OutputSink for Response {
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().write_all(bytes);
+        std::io::stderr().write_all(bytes).ok();
     }
 
     /// fd 1, the pipe the master logs, or `/dev/null` where the pool does
     /// not catch its workers' output.
     fn write_stdout(&mut self, bytes: &[u8]) -> bool {
-        let _ = std::io::stdout().lock().write_all(bytes);
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().write_all(bytes).ok();
+        std::io::stdout().lock().flush().ok();
         true
     }
 
@@ -496,7 +497,7 @@ fn build(
         .startup_errors()
         .strip_prefix(started)
         .unwrap_or_default();
-    let _ = std::io::stderr().write_all(own);
+    std::io::stderr().write_all(own).ok();
     for (kind, values, line) in [
         ("php_value", &config.php_values, 110),
         ("php_admin_value", &config.php_admin_values, 119),
@@ -890,7 +891,7 @@ impl Worker {
                         .collect(),
                 };
                 response.send_headers(&head);
-                let _ = response.write(&page.body);
+                response.write(&page.body).ok();
                 (page.code, 0)
             }
             program => {

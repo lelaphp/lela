@@ -37,7 +37,7 @@ var_dump(dba_fetch('key0', dba_open($argv[1], 'r', 'cdb')));
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("php-engine-end-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     dir.join(name)
 }
 
@@ -58,14 +58,14 @@ fn forked(name: &str, child: &str, parent: &str) -> String {
     let writer = scratch(&format!("{name}-writer.php"));
     let reader = scratch(&format!("{name}-reader.php"));
     let file = scratch(&format!("{name}.cdb"));
-    let _ = std::fs::write(&writer, WRITER);
-    let _ = std::fs::write(&reader, READER);
-    let _ = std::fs::remove_file(&file);
+    std::fs::write(&writer, WRITER).ok();
+    std::fs::write(&reader, READER).ok();
+    std::fs::remove_file(&file).ok();
     let path = file.display().to_string();
     let mut out = php(&writer, &[&path, child, parent]);
     out.push_str(&php(&reader, &[&path]));
     for made in [&writer, &reader, &file] {
-        let _ = std::fs::remove_file(made);
+        std::fs::remove_file(made).ok();
     }
     out
 }

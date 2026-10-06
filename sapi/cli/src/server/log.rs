@@ -62,6 +62,6 @@ impl Log {
         } else {
             format!("[{time}] {entry}\n")
         };
-        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+        std::io::stderr().lock().write_all(line.as_bytes()).ok();
     }
 }

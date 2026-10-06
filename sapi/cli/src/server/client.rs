@@ -85,7 +85,7 @@ impl Connection {
     /// destroys the clients: the socket shut, nothing logged.
     pub(super) fn drop_unlogged(self) {
         if let Connection::Reading(client) | Connection::Sending(client, _) = self {
-            let _ = client.stream.shutdown(Shutdown::Both);
+            client.stream.shutdown(Shutdown::Both).ok();
         }
     }
 }
@@ -385,7 +385,7 @@ fn read(site: &Arc<Site>, mut client: Client) -> Connection {
 fn close(site: &Site, client: &Client) -> Connection {
     site.log
         .write(Type::Message, &format!("{} Closing", client.name));
-    let _ = client.stream.shutdown(Shutdown::Both);
+    client.stream.shutdown(Shutdown::Both).ok();
     Connection::Closed
 }
 
@@ -680,7 +680,7 @@ impl OutputSink for WireSink {
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
@@ -885,11 +885,12 @@ fn log_response(
         if status == 200 {
             effective = 500;
         }
-        let _ = write!(
+        write!(
             line,
             " - {error} in {} on line {at}",
             String::from_utf8_lossy(file)
-        );
+        )
+        .ok();
     }
     if site.log.colored() {
         let color = match effective {

@@ -873,7 +873,7 @@ pub(crate) fn render(join: &Join) -> String {
         } else {
             String::new()
         };
-        let _ = writeln!(
+        writeln!(
             out,
             "{:<8} {:<11} {} → {}  {} site{}, {} crate{}{named}{unmatched}",
             joined.row.status.as_str(),
@@ -884,7 +884,8 @@ pub(crate) fn render(join: &Join) -> String {
             plural(joined.sites),
             joined.crates,
             plural(joined.crates),
-        );
+        )
+        .ok();
     }
     out
 }

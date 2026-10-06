@@ -246,9 +246,10 @@ impl Uri {
     /// heap.
     pub(crate) fn free(mut self, req: &mut Request) {
         // SAFETY: a URI zeroed or filled by the library, not reached after.
-        let _ = self.call(req, |uri, memory| unsafe {
+        self.call(req, |uri, memory| unsafe {
             sys::uriFreeUriMembersMmA(uri, memory)
-        });
+        })
+        .ok();
     }
 
     /// `php_uri_parser_rfc3986_parse_ex` up to its range check:

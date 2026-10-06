@@ -55,7 +55,7 @@ impl Param {
     pub fn text(&self) -> Vec<u8> {
         let mut text = String::new();
         let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-        let _ = match self {
+        match self {
             Param::Str(s) | Param::Op(s) | Param::Cond(s) => write!(text, "{}", lossy(s)),
             Param::Addr(addr) => write!(text, "{addr}"),
             Param::Num(num) => write!(text, "{num}"),
@@ -67,7 +67,8 @@ impl Param {
             Param::NumericMethod { class, name, num } => {
                 write!(text, "{}::{}#{num}", lossy(class), lossy(name))
             }
-        };
+        }
+        .ok();
         text.into_bytes()
     }
 }

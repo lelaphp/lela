@@ -151,10 +151,11 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
                 bodies.display()
             ));
         };
-        let _ = writeln!(
+        writeln!(
             arms,
             "        Opcode::{variant} => crate::handlers::{handler}::<T>(req, frame, code, op),"
-        );
+        )
+        .ok();
     }
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\

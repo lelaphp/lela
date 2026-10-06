@@ -81,6 +81,10 @@ impl Locale {
         let built = unsafe { libc::newlocale(category.mask(), name.as_ptr(), base) };
         match NonNull::new(built) {
             Some(built) => {
+                #[expect(
+                    clippy::mem_forget,
+                    reason = "`newlocale` has taken the base over, so this value's `Drop` would free it a second time"
+                )]
                 std::mem::forget(self);
                 Ok(Locale(built))
             }

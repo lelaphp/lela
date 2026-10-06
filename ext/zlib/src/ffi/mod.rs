@@ -426,7 +426,7 @@ impl Deflate {
     pub(crate) fn end(mut self, req: &mut Request) {
         // SAFETY: an initialised stream, ended once, here, as `self` is
         // given up.
-        let _ = self.0.call(req, |z| unsafe { z::deflateEnd(z) });
+        self.0.call(req, |z| unsafe { z::deflateEnd(z) }).ok();
     }
 }
 
@@ -507,7 +507,7 @@ impl Inflate {
     pub(crate) fn end(mut self, req: &mut Request) {
         // SAFETY: an initialised stream, ended once, here, as `self` is
         // given up.
-        let _ = self.0.call(req, |z| unsafe { z::inflateEnd(z) });
+        self.0.call(req, |z| unsafe { z::inflateEnd(z) }).ok();
     }
 }
 

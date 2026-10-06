@@ -70,7 +70,7 @@ pub(crate) fn wrap(req: &mut Request, set: ResultSet) -> Result<Instance<mysqli_
     let object = match new_object(req, class) {
         Ok(object) => object,
         Err(thrown) => {
-            let _ = set.free(req, false);
+            set.free(req, false).ok();
             return Err(thrown);
         }
     };
@@ -1043,7 +1043,7 @@ impl Props for ResultProps {
             .map(std::mem::take)
             .unwrap_or_default();
         if let Rows::Stored(set) | Rows::Used(set) = rows {
-            let _ = set.free(req, false);
+            set.free(req, false).ok();
         }
     }
 }

@@ -798,7 +798,7 @@ impl Zstd {
                     ..
                 })) => {
                     let mut skip = vec![0; length as usize];
-                    let _ = self.feed.read_exact(&mut skip);
+                    self.feed.read_exact(&mut skip).ok();
                     if self.feed.starved {
                         Made::Stopped(Stop::Starved, self.feed.reads)
                     } else {

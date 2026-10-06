@@ -55,6 +55,11 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"   # `manifest::Manifest`, `reading::Reading` are the names the design uses
 missing_errors_doc = "allow"        # every Result here is anyhow with context; the doc would say "on failure"
 must_use_candidate = "allow"        # the harness's constructors are not misused by discarding
+# An owner is handed on or given up, never dropped in silence (design §5.1,
+# #1980): `let _ =` on a must-use value and `mem::forget` are refused. A
+# discard that is meant names itself, so a reader sees it.
+let_underscore_must_use = "warn"
+mem_forget = "warn"
 
 [workspace.dependencies]
 anyhow = "1"

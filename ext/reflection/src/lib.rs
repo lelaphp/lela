@@ -5082,24 +5082,27 @@ fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> 
             .collect::<Vec<_>>()
             .join(",")
         };
-        let _ = writeln!(
+        writeln!(
             out,
             "    {indent}Entry [ {} <{modifiable}> ]",
             String::from_utf8_lossy(&decl.name.0)
-        );
-        let _ = writeln!(
+        )
+        .ok();
+        writeln!(
             out,
             "    {indent}  Current = '{}'",
             String::from_utf8_lossy(entry.value.as_deref().unwrap_or_default())
-        );
+        )
+        .ok();
         if entry.modified {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "    {indent}  Default = '{}'",
                 String::from_utf8_lossy(entry.master.as_deref().unwrap_or_default())
-            );
+            )
+            .ok();
         }
-        let _ = writeln!(out, "    {indent}}}");
+        writeln!(out, "    {indent}}}").ok();
     }
     out
 }
@@ -5415,11 +5418,12 @@ fn extension_string(
         .map(str::to_owned)
         .unwrap_or_default();
     let version = req.extension_version(extension).unwrap_or_default();
-    let _ = writeln!(
+    writeln!(
         out,
         "{indent}Extension [ <persistent> extension #{} {name} version {version} ] {{",
         req.extension_number(extension)
-    );
+    )
+    .ok();
     let dependencies = req.extension_dependencies(extension);
     if !dependencies.is_empty() {
         out.push_str("\n  - Dependencies {\n");
@@ -5434,27 +5438,28 @@ fn extension_string(
                 .version
                 .map(|v| format!(" {v}"))
                 .unwrap_or_default();
-            let _ = writeln!(
+            writeln!(
                 out,
                 "{indent}    Dependency [ {} ({kind}{rel}{version}) ]",
                 dependency.name
-            );
+            )
+            .ok();
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
     let ini = extension_ini_string(req, extension, indent);
     if !ini.is_empty() {
         out.push_str("\n  - INI {\n");
         out.push_str(&ini);
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
     let constants = req.extension_constants(extension);
     if !constants.is_empty() {
-        let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());
+        write!(out, "\n  - Constants [{}] {{\n", constants.len()).ok();
         for constant in &constants {
             out.push_str(&const_string(req, &constant.0, "    "));
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
     let functions = req.extension_functions(extension);
     if !functions.is_empty() {
@@ -5462,19 +5467,19 @@ fn extension_string(
         for function in functions {
             out.push_str(&function_string(req, function, "    "));
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
     let classes = extension_classes(req, extension);
     if !classes.is_empty() {
-        let _ = write!(out, "\n  - Classes [{}] {{", classes.len());
+        write!(out, "\n  - Classes [{}] {{", classes.len()).ok();
         let sub_indent = format!("{indent}    ");
         for (class, _) in classes {
             out.push('\n');
             out.push_str(&class_string(req, class, None, &sub_indent)?);
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
-    let _ = writeln!(out, "{indent}}}");
+    writeln!(out, "{indent}}}").ok();
     Ok(out)
 }
 
@@ -5644,13 +5649,13 @@ fn class_string(
         .into_iter()
         .partition(|(constant, _)| constant.is_case);
     if !cases.is_empty() {
-        let _ = write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len());
+        write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len()).ok();
         for (case, _) in &cases {
             out.push_str(&enum_case_string(req, case, decl.backing, &sub_indent));
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
-    let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
+    write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len()).ok();
     for (constant, scope) in &constants {
         out.push_str(&class_const_string(
             req,
@@ -5660,7 +5665,7 @@ fn class_string(
             &sub_indent,
         )?);
     }
-    let _ = writeln!(out, "{indent}  }}");
+    writeln!(out, "{indent}  }}").ok();
 
     let properties: Vec<(PropertyDecl, ClassId)> = linked_properties(req, class)
         .into_iter()
@@ -5680,11 +5685,11 @@ fn class_string(
             .iter()
             .filter(|(p, _)| p.is_instance == is_instance)
             .collect();
-        let _ = write!(out, "\n{indent}  - {block} [{}] {{\n", chosen.len());
+        write!(out, "\n{indent}  - {block} [{}] {{\n", chosen.len()).ok();
         for (property, declaring) in chosen {
             out.push_str(&property_string(req, *declaring, property, &sub_indent));
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
 
         // `zend_get_properties_no_lazy_init(Z_OBJ_P(obj))` less every
         // name `ce->properties_info` has and every mangled one, which
@@ -5693,19 +5698,21 @@ fn class_string(
         // reflector, after `Properties` and before `Methods`.
         if is_instance && let Some(object) = object {
             let dynamic = undeclared_properties(req, class, object);
-            let _ = write!(
+            write!(
                 out,
                 "\n{indent}  - Dynamic properties [{}] {{\n",
                 dynamic.len()
-            );
+            )
+            .ok();
             for name in &dynamic {
-                let _ = writeln!(
+                writeln!(
                     out,
                     "{sub_indent}Property [ <dynamic> public ${} ]",
                     String::from_utf8_lossy(name)
-                );
+                )
+                .ok();
             }
-            let _ = writeln!(out, "{indent}  }}");
+            writeln!(out, "{indent}  }}").ok();
         }
 
         let block = if is_instance {
@@ -5717,7 +5724,7 @@ fn class_string(
             .iter()
             .filter(|m| m.decl.is_instance == is_instance)
             .collect();
-        let _ = write!(out, "\n{indent}  - {block} [{}] {{", chosen.len());
+        write!(out, "\n{indent}  - {block} [{}] {{", chosen.len()).ok();
         if chosen.is_empty() {
             out.push('\n');
         }
@@ -5725,9 +5732,9 @@ fn class_string(
             out.push('\n');
             out.push_str(&method_string(req, method, class, &sub_indent));
         }
-        let _ = writeln!(out, "{indent}  }}");
+        writeln!(out, "{indent}  }}").ok();
     }
-    let _ = writeln!(out, "{indent}}}");
+    writeln!(out, "{indent}}}").ok();
     Ok(out)
 }
 
@@ -5886,11 +5893,11 @@ fn class_header(
         (false, ClassKind::Trait) => "Trait",
         (false, ClassKind::Enum) => "Enum",
     };
-    let _ = write!(out, "{indent}{kind} [ ");
+    write!(out, "{indent}{kind} [ ").ok();
     let internal = decl.file.0.is_empty();
     out.push_str(if internal { "<internal" } else { "<user" });
     if internal && let Some(extension) = req.class_extension_name(class) {
-        let _ = write!(out, ":{extension}");
+        write!(out, ":{extension}").ok();
     }
     out.push_str("> ");
     // `ce->get_iterator`, which `zend_implement_iterator` and
@@ -5933,7 +5940,7 @@ fn class_header(
     }
     out.push_str(&String::from_utf8_lossy(&decl.name.0));
     if let Some(parent) = &decl.parent {
-        let _ = write!(out, " extends {}", String::from_utf8_lossy(&parent.0));
+        write!(out, " extends {}", String::from_utf8_lossy(&parent.0)).ok();
     }
     if decl.kind == ClassKind::Enum {
         match decl.backing {
@@ -5952,20 +5959,21 @@ fn class_header(
             } else {
                 "implements"
             };
-            let _ = write!(out, " {word} {name}");
+            write!(out, " {word} {name}").ok();
         } else {
-            let _ = write!(out, ", {name}");
+            write!(out, ", {name}").ok();
         }
     }
     out.push_str(" ] {\n");
     if !internal {
-        let _ = writeln!(
+        writeln!(
             out,
             "{indent}  @@ {} {}-{}",
             String::from_utf8_lossy(&decl.file.0),
             decl.line,
             decl.end_line
-        );
+        )
+        .ok();
     }
 }
 
@@ -6022,13 +6030,14 @@ fn class_const_string(
     // `zend_update_class_constant` hands back the table's value; here
     // one owner of it is this rendering's, given up once it is read.
     req.release(value);
-    let _ = writeln!(
+    writeln!(
         out,
         "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",
         if constant.is_final { "final " } else { "" },
         visibility_word(constant.visibility),
         String::from_utf8_lossy(&constant.name.0)
-    );
+    )
+    .ok();
     Ok(out)
 }
 
@@ -6047,14 +6056,15 @@ fn enum_case_string(
         out.push_str(&String::from_utf8_lossy(doc));
         out.push('\n');
     }
-    let _ = write!(
+    write!(
         out,
         "{indent}Case {}",
         String::from_utf8_lossy(&case.name.0)
-    );
+    )
+    .ok();
     if backing != EnumBacking::Pure {
         let value = eval_const_expr(req, &case.value, None).unwrap_or_default();
-        let _ = write!(out, " = {}", value_string(req, &value));
+        write!(out, " = {}", value_string(req, &value)).ok();
         // `eval_const_expr`'s value is the caller's, given up once read.
         req.release(value);
     }
@@ -6131,19 +6141,19 @@ fn property_string(
         out.push_str("virtual ");
     }
     if let Some(ty) = &property.ty {
-        let _ = write!(out, "{} ", type_to_string(ty));
+        write!(out, "{} ", type_to_string(ty)).ok();
     }
-    let _ = write!(out, "${}", String::from_utf8_lossy(name));
+    write!(out, "${}", String::from_utf8_lossy(name)).ok();
     let evaluated = (property.is_instance)
         .then(|| req.evaluated_default(declaring, name))
         .flatten();
     match (&property.default, &property.ty) {
         _ if is_virtual => {}
         (Some(_), _) if let Some(value) = evaluated => {
-            let _ = write!(out, " = {}", value_default_string(req, &value));
+            write!(out, " = {}", value_default_string(req, &value)).ok();
         }
         (Some(default), _) => {
-            let _ = write!(out, " = {}", default_value_string(req, default));
+            write!(out, " = {}", default_value_string(req, default)).ok();
         }
         (None, None) => out.push_str(" = NULL"),
         (None, Some(_)) => {}
@@ -6164,12 +6174,13 @@ fn property_string(
     if hooked || !hooks.is_empty() {
         out.push_str(" {");
         for (kind, is_final) in hooks {
-            let _ = write!(
+            write!(
                 out,
                 " {}{};",
                 if is_final { "final " } else { "" },
                 kind.name()
-            );
+            )
+            .ok();
         }
         out.push_str(" }");
     }
@@ -6199,7 +6210,7 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
                 if !is_list {
                     match key {
                         Key::Str(s) => {
-                            let _ = write!(out, "'{}'", escaped(s.as_bytes()));
+                            write!(out, "'{}'", escaped(s.as_bytes())).ok();
                         }
                         Key::Int(n) => out.push_str(&n.to_string()),
                     }
@@ -6297,10 +6308,10 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
         }
         match key {
             Key::Str(s) => {
-                let _ = write!(out, "'{}' => ", escaped(s.as_bytes()));
+                write!(out, "'{}' => ", escaped(s.as_bytes())).ok();
             }
             Key::Int(n) => {
-                let _ = write!(out, "{n} => ");
+                write!(out, "{n} => ").ok();
             }
         }
         out.push_str(&exported_value(req, element));
@@ -6362,10 +6373,10 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
                 }
                 match key {
                     Some(ConstExpr::Str(s)) => {
-                        let _ = write!(out, "'{}' => ", escaped(s));
+                        write!(out, "'{}' => ", escaped(s)).ok();
                     }
                     Some(key) => {
-                        let _ = write!(out, "{} => ", exported(req, key));
+                        write!(out, "{} => ", exported(req, key)).ok();
                     }
                     None => {}
                 }
@@ -6614,7 +6625,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
                     text.push_str(", ");
                 }
                 if let Some(name) = name {
-                    let _ = write!(text, "{}: ", String::from_utf8_lossy(&name.0));
+                    write!(text, "{}: ", String::from_utf8_lossy(&name.0)).ok();
                 }
                 text.push_str(&ast_export(req, value, 0));
             }
@@ -6646,7 +6657,7 @@ fn escaped(bytes: &[u8]) -> String {
             0x1B => out.push_str("\\e"),
             32..=126 => out.push(char::from(byte)),
             _ => {
-                let _ = write!(out, "\\x{byte:02X}");
+                write!(out, "\\x{byte:02X}").ok();
             }
         }
     }
@@ -7314,11 +7325,11 @@ fn function_header(
         out.push_str(", deprecated");
     }
     if internal && let Some(module) = module {
-        let _ = write!(out, ":{module}");
+        write!(out, ":{module}").ok();
     }
     if let Some((_, words)) = method {
         for word in words {
-            let _ = write!(out, ", {word}");
+            write!(out, ", {word}").ok();
         }
     }
     out.push_str("> ");
@@ -7332,14 +7343,14 @@ fn function_header(
         if !method.is_instance {
             out.push_str("static ");
         }
-        let _ = write!(out, "{} method ", visibility_word(method.visibility));
+        write!(out, "{} method ", visibility_word(method.visibility)).ok();
     } else {
         out.push_str("function ");
     }
     if decl.returns_by_ref {
         out.push('&');
     }
-    let _ = writeln!(out, "{} ] {{", String::from_utf8_lossy(&decl.name.0));
+    writeln!(out, "{} ] {{", String::from_utf8_lossy(&decl.name.0)).ok();
 }
 
 /// The rest of `_function_string`: a user function's `@@ file start -
@@ -7375,29 +7386,32 @@ fn function_body(
     indent: &str,
 ) {
     if !decl.file.0.is_empty() {
-        let _ = writeln!(
+        writeln!(
             out,
             "{indent}  @@ {} {} - {}",
             String::from_utf8_lossy(&decl.file.0),
             decl.line,
             decl.end_line
-        );
+        )
+        .ok();
     }
     let param_indent = format!("{indent}  ");
     if !bound.is_empty() {
-        let _ = write!(
+        write!(
             out,
             "\n{param_indent}- Bound Variables [{}] {{\n",
             bound.len()
-        );
+        )
+        .ok();
         for (at, name) in bound.iter().enumerate() {
-            let _ = writeln!(
+            writeln!(
                 out,
                 "{param_indent}    Variable #{at} [ ${} ]",
                 String::from_utf8_lossy(name)
-            );
+            )
+            .ok();
         }
-        let _ = writeln!(out, "{param_indent}}}");
+        writeln!(out, "{param_indent}}}").ok();
     }
     function_parameter_string(req, out, decl, arg_info, &param_indent);
     if let Some(returns) = &decl.return_type {
@@ -7406,9 +7420,9 @@ fn function_body(
         } else {
             "Return"
         };
-        let _ = writeln!(out, "  {indent}- {word} [ {} ]", type_to_string(returns));
+        writeln!(out, "  {indent}- {word} [ {} ]", type_to_string(returns)).ok();
     }
-    let _ = writeln!(out, "{indent}}}");
+    writeln!(out, "{indent}}}").ok();
 }
 
 /// `required_num_args`: the parameters up to the last one that is
@@ -7439,7 +7453,7 @@ fn parameter_string(
         "<optional> "
     });
     if let Some(ty) = &parameter.ty {
-        let _ = write!(out, "{} ", type_to_string(ty));
+        write!(out, "{} ", type_to_string(ty)).ok();
     }
     if parameter.by_ref {
         out.push('&');
@@ -7447,7 +7461,7 @@ fn parameter_string(
     if parameter.variadic {
         out.push_str("...");
     }
-    let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
+    write!(out, "${}", String::from_utf8_lossy(&parameter.name.0)).ok();
     // A native's default is the text `gen_stub.php` wrote into the arg
     // info, `<default>` where it wrote none; a user function's is the
     // zval `RECV_INIT` holds, which `format_default_value` prints and
@@ -7455,11 +7469,11 @@ fn parameter_string(
     if !required && !parameter.variadic {
         match (parameter.default.expr(), internal) {
             (Some(expr), true) => {
-                let _ = write!(out, " = {}", const_expr_string(expr));
+                write!(out, " = {}", const_expr_string(expr)).ok();
             }
             (None, true) => out.push_str(" = <default>"),
             (Some(expr), false) => {
-                let _ = write!(out, " = {}", default_value_string(req, expr));
+                write!(out, " = {}", default_value_string(req, expr)).ok();
             }
             (None, false) => {}
         }
@@ -7504,12 +7518,12 @@ fn function_parameter_string(
         return;
     }
     out.push('\n');
-    let _ = writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len());
+    writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len()).ok();
     for (offset, parameter) in decl.parameters.clone().iter().enumerate() {
         let row = parameter_string(req, parameter, offset, offset < required, internal);
-        let _ = writeln!(out, "{indent}  {row}");
+        writeln!(out, "{indent}  {row}").ok();
     }
-    let _ = writeln!(out, "{indent}}}");
+    writeln!(out, "{indent}}}").ok();
 }
 
 /// A native parameter's default as `gen_stub.php` writes it into
@@ -8535,7 +8549,7 @@ impl ReflectionZendExtension {
             (&row.url, "<", ">"),
         ] {
             if !field.is_empty() {
-                let _ = write!(text, "{before}{field}{after} ");
+                write!(text, "{before}{field}{after} ").ok();
             }
         }
         text.push_str("]\n");

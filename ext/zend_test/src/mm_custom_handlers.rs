@@ -154,5 +154,5 @@ impl ObserveAllocations for Printer {
 /// php's `printf`: the process's standard out, past the request's.
 /// A write the process cannot make is dropped, as `printf`'s is.
 fn print(line: std::fmt::Arguments<'_>) {
-    let _ = std::io::stdout().lock().write_fmt(line);
+    std::io::stdout().lock().write_fmt(line).ok();
 }

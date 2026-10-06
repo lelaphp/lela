@@ -844,7 +844,7 @@ impl Request {
                     .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
                     .map(|(_, value)| *value)
             };
-            let _ = write!(out, "#{num} ");
+            write!(out, "#{num} ").ok();
             num += 1;
             match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
                 None => out.push_str("[internal function]: "),
@@ -860,7 +860,7 @@ impl Request {
                         }),
                         None => 0,
                     };
-                    let _ = write!(out, "{}({line}): ", String::from_utf8_lossy(&file));
+                    write!(out, "{}({line}): ", String::from_utf8_lossy(&file)).ok();
                 }
             }
             for key in ["class", "type", "function"] {
@@ -887,7 +887,7 @@ impl Request {
             out.push_str(")\n");
         }
         if include_main {
-            let _ = write!(out, "#{num} {{main}}");
+            write!(out, "#{num} {{main}}").ok();
         }
         out
     }

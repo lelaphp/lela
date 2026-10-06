@@ -29,7 +29,7 @@ impl Server {
             .and_then(|probe| probe.local_addr())
             .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port());
         let root = std::env::temp_dir().join(format!("php-server-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
         for (file, text) in files {
             std::fs::write(root.join(file), text).unwrap_or_else(|e| panic!("writing {file}: {e}"));
@@ -97,7 +97,7 @@ impl Server {
     pub fn connect(&self) -> TcpStream {
         let stream =
             TcpStream::connect(&self.address).unwrap_or_else(|e| panic!("connecting: {e}"));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
         stream
     }
 
@@ -110,7 +110,9 @@ impl Server {
     /// not yet read.
     pub fn send(&self, path: &str) -> TcpStream {
         let mut stream = self.connect();
-        let _ = stream.write_all(format!("GET {path} HTTP/1.0\r\nHost: x\r\n\r\n").as_bytes());
+        stream
+            .write_all(format!("GET {path} HTTP/1.0\r\nHost: x\r\n\r\n").as_bytes())
+            .ok();
         stream
     }
 
@@ -143,8 +145,8 @@ impl Server {
                 return status.code();
             }
             if Instant::now() > deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                self.child.kill().ok();
+                self.child.wait().ok();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -159,16 +161,16 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.root);
+        self.child.kill().ok();
+        self.child.wait().ok();
+        std::fs::remove_dir_all(&self.root).ok();
     }
 }
 
 /// The body of the response read to its end from `stream`.
 pub fn body(stream: &mut TcpStream) -> String {
     let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
+    stream.read_to_end(&mut response).ok();
     let text = String::from_utf8_lossy(&response).into_owned();
     match text.split_once("\r\n\r\n") {
         Some((_, body)) => body.to_owned(),

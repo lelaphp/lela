@@ -13,9 +13,9 @@ const SOURCE: &str = "<html>\n<?php\n/** doc */\n$name = \"world\"; // greet\nec
 
 fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("php-highlight-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let path = dir.join("hl.php");
-    let _ = std::fs::write(&path, SOURCE);
+    std::fs::write(&path, SOURCE).ok();
     path
 }
 

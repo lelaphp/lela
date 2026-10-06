@@ -314,7 +314,7 @@ fn pcre_literals(pattern: &str) -> String {
                             None => break,
                         }
                     }
-                    let _ = write!(out, "\\x{{{value:x}}}");
+                    write!(out, "\\x{{{value:x}}}").ok();
                 }
                 Some((_, next)) => {
                     out.push('\\');

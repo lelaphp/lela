@@ -3650,7 +3650,7 @@ fn release_levels(req: &mut Request, object: PhpObject) {
     for level in levels.into_iter().rev() {
         level.release(req);
     }
-    let _ = fit_iterators(req, object);
+    fit_iterators(req, object).ok();
 }
 
 /// `spl_recursive_it_iterator`, whose functions are the methods' own
@@ -3689,7 +3689,7 @@ impl ClassIterator for RecWalk {
         for level in levels.into_iter().rev() {
             level.release(req);
         }
-        let _ = fit_iterators(req, object);
+        fit_iterators(req, object).ok();
     }
 }
 

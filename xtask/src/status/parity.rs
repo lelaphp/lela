@@ -343,16 +343,17 @@ fn markdown(parity: &Parity) -> String {
             .reading
             .as_ref()
             .map_or(super::NO_READING, |r| r.status.as_str());
-        let _ = writeln!(
+        writeln!(
             out,
             "| {} | {} | {} | {status} |",
             cell(&suite.name),
             suite.state.as_str(),
             counts.join(" | ")
-        );
+        )
+        .ok();
     }
     let total = &parity.total;
-    let _ = writeln!(
+    writeln!(
         out,
         "\n{} of {} target tests met over the {} of {} suites held to a target; the other {} count in no total.",
         total.met,
@@ -360,7 +361,7 @@ fn markdown(parity: &Parity) -> String {
         total.held,
         total.suites,
         total.suites - total.held
-    );
+    ).ok();
     let mut rulings: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
     let mut unbuilt = Vec::new();
     for o in &parity.outside {
@@ -370,24 +371,26 @@ fn markdown(parity: &Parity) -> String {
         }
     }
     for (ruling, suites) in rulings {
-        let _ = writeln!(
+        writeln!(
             out,
             "\nOutside parity by the ruling on #{ruling}: {}.",
             suites.join(", ")
-        );
+        )
+        .ok();
     }
     if !unbuilt.is_empty() {
-        let _ = writeln!(
+        writeln!(
             out,
             "\nOutside parity, not built by the pinned php: {}.",
             unbuilt.join(", ")
-        );
+        )
+        .ok();
     }
     if parity.unbuilt_from == UnbuiltFrom::Readings {
-        let _ = writeln!(
+        writeln!(
             out,
             "\nWithout the pinned php-src at the pin's commit on this machine (`status --section oracle` says why), the suites not built are named only where a reading measured them."
-        );
+        ).ok();
     }
     out
 }

@@ -228,8 +228,8 @@ fn dropped() -> bool {
 /// The bytes to stdout as they are.
 fn raw(bytes: &[u8]) {
     let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(bytes);
-    let _ = stdout.flush();
+    stdout.write_all(bytes).ok();
+    stdout.flush().ok();
 }
 
 /// `phpdbg_out`: the bytes as they are, the newline fact untouched.
@@ -244,8 +244,8 @@ pub fn out(bytes: &[u8]) {
 /// (`Z/Zend/Optimizer/zend_dump.c`), the newline fact untouched.
 pub fn dump(bytes: &[u8]) {
     let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(bytes);
-    let _ = stderr.flush();
+    stderr.write_all(bytes).ok();
+    stderr.flush().ok();
 }
 
 /// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their last.
@@ -327,7 +327,7 @@ impl OutputSink for Sink {
     }
 
     fn flush(&mut self) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
     }
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
@@ -342,7 +342,7 @@ impl OutputSink for Sink {
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
@@ -393,7 +393,7 @@ pub fn replay(written: &[Written]) -> bool {
     for each in written {
         match each {
             Written::Out(bytes) => {
-                let _ = sink.write(bytes);
+                sink.write(bytes).ok();
             }
             Written::Log(entry) => {
                 logged = true;

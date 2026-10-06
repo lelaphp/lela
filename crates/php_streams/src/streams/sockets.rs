@@ -351,7 +351,7 @@ impl Socket {
     fn read_now(sock: &mut Sock, buf: &mut [u8]) -> std::io::Result<usize> {
         sock.set_blocking(false)?;
         let read = sock.read(buf);
-        let _ = sock.set_blocking(true);
+        sock.set_blocking(true).ok();
         read
     }
 }
@@ -745,9 +745,9 @@ impl Socket {
         let peeked = if self.is_blocked {
             // `MSG_DONTWAIT` on a socket that blocks: made non-blocking
             // for the one call, as [`Socket::read_now`] makes it.
-            let _ = sock.set_blocking(false);
+            sock.set_blocking(false).ok();
             let peeked = crate::api::net::peek_fd(sock.fd(), &mut byte);
-            let _ = sock.set_blocking(true);
+            sock.set_blocking(true).ok();
             peeked
         } else {
             crate::api::net::peek_fd(sock.fd(), &mut byte)
@@ -787,7 +787,7 @@ impl Socket {
                         accept_nodelay: true,
                     })
                 {
-                    let _ = client.set_nodelay(true);
+                    client.set_nodelay(true).ok();
                 }
                 (Sock::Tcp(client), inet_text(&addr))
             }
@@ -1020,10 +1020,10 @@ fn connect_inet(
             bind_local(req, fd.as_fd(), &addr, local, *local_port);
         }
         if udp && options.so_broadcast {
-            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
         }
         if !udp && options.tcp_nodelay {
-            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true);
+            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true).ok();
         }
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         match crate::api::net::connect_fd(
@@ -1106,17 +1106,17 @@ fn bind_inet(
                 continue;
             }
         };
-        let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true);
+        crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true).ok();
         if addr.is_ipv6()
             && let Some(only) = options.ipv6_v6only
         {
-            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only);
+            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only).ok();
         }
         if options.so_reuseport {
-            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true);
+            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true).ok();
         }
         if udp && options.so_broadcast {
-            let _ = crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true);
+            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
         }
         if let Err(error) = crate::api::net::bind_fd(fd.as_fd(), &addr) {
             last = failure(&error);
