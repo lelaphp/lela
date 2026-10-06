@@ -637,7 +637,7 @@ fn fill(
     object: PhpObject,
     kind: Kind,
     flags: Flags,
-    mut out: Value,
+    out: Value,
     mut next: i64,
     count: usize,
     grouped: bool,
@@ -648,10 +648,42 @@ fn fill(
     let mut key = None;
     if grouped {
         let fetched = value(req, object, next, None)?;
-        key = Some(Value::string(to_string(req, &fetched)?));
+        let text = to_string(req, &fetched);
         req.release(fetched);
+        key = Some(Value::string(text?));
         next += 1;
     }
+    // The group key is given up where the row's columns throw, as the
+    // VM frees what the native made.
+    match columns(
+        req, object, kind, flags, out, next, count, with, class, class_args,
+    ) {
+        Ok(out) => Ok(Some((out, key))),
+        Err(thrown) => {
+            if let Some(key) = key {
+                req.release(key);
+            }
+            Err(thrown)
+        }
+    }
+}
+
+/// [`fill`]'s columns from `next` on, laid into `out` as `kind` asks,
+/// and the class's constructor or the fetch function served over them:
+/// the row.
+#[allow(clippy::too_many_arguments)]
+fn columns(
+    req: &mut Request,
+    object: PhpObject,
+    kind: Kind,
+    flags: Flags,
+    mut out: Value,
+    mut next: i64,
+    count: usize,
+    with: &With,
+    class: Option<ClassId>,
+    class_args: Option<PhpArray>,
+) -> Result<Value, Thrown> {
     if kind == Kind::Class && flags.has(Flag::Serialize) {
         let payload = value(req, object, next, None)?;
         let bytes = payload
@@ -743,7 +775,7 @@ fn fill(
         }
         out = answered?;
     }
-    Ok(Some((out, key)))
+    Ok(out)
 }
 
 /// One column of an object's row, `zend_update_property_ex`: a write
@@ -1535,18 +1567,34 @@ fn grouped_rows(
     // Each group key as it was first seen, what the table keeps under
     // it: the last row for `FETCH_UNIQUE`, every row for `FETCH_GROUP`.
     let mut groups: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
-    while let Some((row, key)) = shaped(
-        req,
-        object,
-        how | flags.0,
-        Orientation::Forward,
-        0,
-        true,
-        with,
-    )? {
-        let key = key
-            .and_then(|k| k.as_str_bytes().map(<[u8]>::to_vec))
-            .unwrap_or_default();
+    loop {
+        let fetched = shaped(
+            req,
+            object,
+            how | flags.0,
+            Orientation::Forward,
+            0,
+            true,
+            with,
+        );
+        let (row, key) = match fetched {
+            Ok(Some(fetched)) => fetched,
+            Ok(None) => break,
+            // What was grouped before the throw is given up with the
+            // answer, as the VM frees it.
+            Err(thrown) => {
+                for row in groups.into_iter().flat_map(|(_, rows)| rows) {
+                    req.release(row);
+                }
+                return Err(thrown);
+            }
+        };
+        // The key's string, read once and given up.
+        let key = key.map_or_else(Vec::new, |k| {
+            let bytes = k.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
+            req.release(k);
+            bytes
+        });
         match groups.iter_mut().find(|(seen, _)| *seen == key) {
             Some((_, rows)) if flags.has(Flag::Unique) => {
                 for old in std::mem::replace(rows, vec![row]) {
@@ -1558,7 +1606,7 @@ fn grouped_rows(
         }
     }
     for (key, rows) in groups {
-        let key = Key::from_string(PhpString::new(req, &key)?);
+        let key = symtable_key(req, &key)?;
         if flags.has(Flag::Unique) {
             for row in rows {
                 out.set(req, key.clone(), row)?;

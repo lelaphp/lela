@@ -77,3 +77,21 @@ try { $db->query('SELECT 1 UNION SELECT 2')->fetchAll(PDO::FETCH_FUNC, 'f'); } c
     };
     assert_eq!(stdout, "two\n");
 }
+
+/// `fetchAll` under `FETCH_GROUP` or `FETCH_UNIQUE` reads each row's
+/// group key as a string and gives it up once the row is placed, the key
+/// a decimal names included, and gives up the rows it grouped where a
+/// fetch throws partway (#2117).
+#[test]
+fn a_grouped_fetch_all_keeps_no_key_and_no_row() {
+    let Some(stdout) = armed(
+        r#"$q = "SELECT 'aa' AS a, 'bb' AS b UNION SELECT 'aa', 'cc' UNION SELECT '12', 'dd'";
+$g = $db->query($q)->fetchAll(PDO::FETCH_COLUMN | PDO::FETCH_GROUP); $u = $db->query($q)->fetchAll(PDO::FETCH_UNIQUE);
+echo implode(',', $g['aa']), ' ', $g[12][0], ' ', $u['aa']['b'], "\n";
+try { $db->query($q)->fetchAll(PDO::FETCH_FUNC | PDO::FETCH_GROUP, function ($b) { if ($b == 'dd') throw new Exception('dd'); return $b; }); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(stdout, "bb,cc dd cc\ndd\n");
+}
