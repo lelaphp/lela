@@ -507,8 +507,13 @@ unsafe fn alt_names(bio: &Bio<'_>, ext: *mut sys::X509_EXTENSION) -> bool {
                 // SAFETY: these three kinds hold an IA5String.
                 bio.write(&unsafe { Asn1String::of(d.cast()) }.data);
             }
-            // SAFETY: the sink and the name are live.
-            None => _ = unsafe { GENERAL_NAME_print(bio.as_ptr(), name) },
+            // php's `openssl_x509v3_subjectAltName` prints the other kinds
+            // with OpenSSL's own printer and reads nothing of what it
+            // answers.
+            None => {
+                // SAFETY: the BIO and the name are live.
+                let _printed = unsafe { GENERAL_NAME_print(bio.as_ptr(), name) };
+            }
         }
         if i + 1 < items.len() {
             bio.write(b", ");
