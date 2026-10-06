@@ -9802,7 +9802,9 @@ impl Emit<'_> {
     /// The opline over a jump table, `SWITCH_LONG`, `SWITCH_STRING` or
     /// `MATCH`: the constant slot the array will take, reserved as
     /// `zend_emit_op` adds the constant when the opline is emitted, and
-    /// the opline over the subject and it.
+    /// the opline over the subject and it. A constant subject takes its
+    /// slot first, `zend_emit_op` setting `op1` before `op2`
+    /// (`Z/Zend/zend_compile.c:2294`, `:2298`).
     ///
     /// ```php
     /// function c($t) { return match ($t) { 'x' => 1, 'y' => 2, default => null }; }
@@ -9821,8 +9823,8 @@ impl Emit<'_> {
     /// NULL
     /// ```
     fn emit_table(&mut self, opcode: Opcode, subject: Where) -> Table {
-        let slot = self.literal(Zval::null());
         let (op1_type, op1) = self.operand(subject);
+        let slot = self.literal(Zval::null());
         let at = self.push(Opline {
             opcode,
             op1_type,

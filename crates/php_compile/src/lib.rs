@@ -696,6 +696,27 @@ mod tests {
         );
     }
 
+    /// A constant subject over a jump table: `zend_emit_op` sets `op1`
+    /// before `op2`, so the subject's slot comes before the table's.
+    #[test]
+    fn a_constant_subject_takes_its_slot_before_the_jump_table() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php switch ('z') { case 'a': echo 1; break; case 'b': echo 2; }");
+        let switch = unit
+            .main
+            .oplines
+            .iter()
+            .find(|op| op.opcode == Opcode::SwitchString)
+            .map(|op| (op.op1_type, op.op1, op.op2_type, op.op2));
+        assert_eq!(
+            switch,
+            Some((OperandKind::Const, 0, OperandKind::Const, 1)),
+            "a string jump table over two cases"
+        );
+        assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"z"[..]));
+        assert!(unit.main.literals[1].as_arr().is_some());
+    }
+
     /// `zend_resolve_goto_label` nulls the label's slot once it has found
     /// the label (`Z/Zend/zend_compile.c:5907`), and every later
     /// constant is appended after it (`zend_add_literal`), the
