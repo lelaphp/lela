@@ -99,3 +99,29 @@ fn the_url_rewriter_gives_its_buffers_back_at_the_request_s_end() {
         assert_eq!(stdout, written);
     }
 }
+
+/// `count()` of a `Countable` holds an owner of the object across its
+/// `count()` method, as php's `ZEND_COUNT` takes `GC_ADDREF` and gives
+/// `OBJ_RELEASE` back after, so a method that frees the variable holding
+/// the object reads a live `$this`, and the table its dump lays down is
+/// freed with the object after the call (#2082, Zend/tests/gh21605.phpt).
+#[test]
+fn count_of_a_countable_holds_the_object_across_its_method() {
+    let (stdout, fatal) = armed(
+        r#"<?php
+class C implements Countable {
+    public $p = 1;
+    public function count(): int { global $c; $c = null; var_dump($this); return 42; }
+    public function __destruct() { echo "destructed\n"; }
+}
+$c = new C;
+var_dump(count($c));
+echo "after\n";
+"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "object(C)#1 (1) {\n  [\"p\"]=>\n  int(1)\n}\ndestructed\nint(42)\nafter\n"
+    );
+}
