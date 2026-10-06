@@ -14,7 +14,7 @@
 use php_ext::abi::AfterLog;
 use php_sapi::tier::{self, Flow, FrameRef, Hooked, Opcode, Request, Site, Stepped, Tier};
 
-use crate::bp::At;
+use crate::bp::{At, OpArray};
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
 use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind, Session};
@@ -686,6 +686,22 @@ fn leaves(opcode: Opcode) -> bool {
 /// order, and the prompt where one of them stops: `Some` where the
 /// prompt ended the request.
 fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Option<Flow> {
+    // `PHPDBG_BP_RESOLVE_MASK` (`phpdbg_prompt.c:1650-1653`), first,
+    // whatever else the loop is under: the breakpoints set on this op
+    // array's oplines resolved, and said so, before each of its oplines.
+    if session::with(|s| s.breaks.resolves()).unwrap_or(false) {
+        let serves = tier::serves(req, at.frame);
+        let (function, class) = match &serves {
+            tier::Serves::Code => (None, None),
+            tier::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
+        };
+        let op = OpArray {
+            file: &position.file,
+            function,
+            class,
+        };
+        session::with(|s| s.breaks.resolve(op, position.oplines));
+    }
     // `PHPDBG_IS_INITIALIZING` (`phpdbg_prompt.c:1704-1708`): what the
     // init files serve runs uninterrupted, logged by no oplog, but for
     // the throwable nothing catches, which is checked first. php's `-rr`

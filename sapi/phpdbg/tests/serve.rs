@@ -1340,3 +1340,159 @@ fn ev_after_exec_to_a_second_refused_context_evaluates() {
         assert_eq!(served.status, Some(255));
     }
 }
+
+/// The path [`debugged`] writes the program of `name` to, as the binary
+/// names it, before it is written.
+fn file_of(name: &str) -> String {
+    std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("sapi-phpdbg-{name}-{}", std::process::id()))
+        .join("t.php")
+        .display()
+        .to_string()
+}
+
+/// `out` with each `(opline #N)` php prints an address in cut to `N`, and
+/// the numbers cut, in their order.
+fn addresses_cut(out: &str) -> (String, Vec<u64>) {
+    const AT: &str = "(opline #";
+    let (mut cut, mut numbers, mut rest) = (String::new(), Vec::new(), out);
+    while let Some(start) = rest.find(AT) {
+        let (head, tail) = rest.split_at(start + AT.len());
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        numbers.push(tail[..digits].parse().unwrap());
+        cut.push_str(head);
+        cut.push('N');
+        rest = &tail[digits..];
+    }
+    cut.push_str(rest);
+    (cut, numbers)
+}
+
+/// Three functions, the last declared where the run reaches it.
+const FUNCTIONS: &str = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n";
+
+/// A breakpoint on an opline of a function, a method or a file's code
+/// is resolved before each opline of that op array runs, where its name
+/// is the op array's as declared, and php says so each time
+/// (`phpdbg_resolve_op_array_breaks`, `Z/sapi/phpdbg/phpdbg_bp.c:536`):
+/// with the number and the address of the breakpoint the opline table
+/// took last, an opline past the op array's end refused instead (the
+/// pinned phpdbg's bytes for `phpdbg -qIb -n`, the addresses cut).
+#[test]
+fn an_opline_breakpoint_is_resolved_before_each_opline_of_its_op_array() {
+    let (out, file) = debugged("resolved-function", FUNCTIONS, "b foo#0\nr\nc\nq\n");
+    assert_eq!(
+        addresses_cut(&out).0,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Breakpoint #0 added at foo#0]\n\
+             prompt> [Breakpoint #0 resolved at foo#0 (opline #N)]\n\
+             [Breakpoint #0 in foo()#0 at {file}:3, hits: 1]\n\
+             >00003:   $a = 1;\n \
+             00004:   return $a;\n \
+             00005: }}\n\
+             prompt> [Breakpoint #0 resolved at foo#0 (opline #N)]\n\
+             [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    let (out, file) = debugged("resolved-pending", FUNCTIONS, "b baz#0\nr\nc\nq\n");
+    assert_eq!(
+        addresses_cut(&out).0,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Pending breakpoint #0 at baz#0]\n\
+             prompt> [Breakpoint #0 resolved at baz#0 (opline #N)]\n\
+             [Breakpoint #0 in baz()#0 at {file}:11, hits: 1]\n\
+             >00011:     return 3;\n \
+             00012:   }}\n \
+             00013: }}\n\
+             prompt> [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    let (out, file) = debugged("resolved-past", FUNCTIONS, "b baz#8\nr\nq\n");
+    assert_eq!(
+        out,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Pending breakpoint #0 at baz#8]\n\
+             prompt> [There are only 2 oplines in function baz (breaking at opline 8 impossible)]\n\
+             [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    let method =
+        "<?php\nclass A {\n  function b() {\n    $x = 2;\n    return $x;\n  }\n}\n(new A)->b();\n";
+    let (out, file) = debugged("resolved-method", method, "b A::b#0\nr\nc\nq\n");
+    assert_eq!(
+        addresses_cut(&out).0,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Breakpoint #0 added at A::b#0]\n\
+             prompt> [Breakpoint #0 resolved at A::b#0 (opline #N)]\n\
+             [Breakpoint #0 in A::b()#0 at {file}:4, hits: 1]\n\
+             >00004:     $x = 2;\n \
+             00005:     return $x;\n \
+             00006:   }}\n\
+             prompt> [Breakpoint #0 resolved at A::b#0 (opline #N)]\n\
+             [Script ended normally]\n\
+             prompt> "
+        )
+    );
+}
+
+/// The notice names the breakpoint and the address the opline table took
+/// last, which need not be the one resolved, and a file's own code is
+/// resolved by its path (the pinned phpdbg's bytes for `phpdbg -qIb -n`,
+/// the addresses cut).
+#[test]
+fn a_resolved_notice_names_the_opline_table_s_last_breakpoint() {
+    // foo's notice names bar's breakpoint, the opline table's last.
+    let (out, file) = debugged("resolved-last", FUNCTIONS, "b foo#0\nb bar#0\nr\nc\nc\nq\n");
+    let (cut, numbers) = addresses_cut(&out);
+    assert_eq!(
+        cut,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Breakpoint #0 added at foo#0]\n\
+             prompt> [Breakpoint #1 added at bar#0]\n\
+             prompt> [Breakpoint #1 resolved at foo#0 (opline #N)]\n\
+             [Breakpoint #0 in foo()#0 at {file}:3, hits: 1]\n\
+             >00003:   $a = 1;\n \
+             00004:   return $a;\n \
+             00005: }}\n\
+             prompt> [Breakpoint #1 resolved at foo#0 (opline #N)]\n\
+             [Breakpoint #1 resolved at bar#0 (opline #N)]\n\
+             [Breakpoint #1 in bar()#0 at {file}:7, hits: 1]\n\
+             >00007:   return 2;\n \
+             00008: }}\n \
+             00009: if (true) {{\n\
+             prompt> [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] == pair[1]),
+        "{numbers:?}"
+    );
+    let (out, file) = debugged(
+        "resolved-file",
+        FUNCTIONS,
+        &format!("b {}:#0\nr\nq\n", file_of("resolved-file")),
+    );
+    assert_eq!(
+        addresses_cut(&out).0,
+        format!(
+            "[Successful compilation of {file}]\n\
+             prompt> [Pending breakpoint #0 at {file}:0]\n\
+             prompt> [Breakpoint #0 resolved at {file}#0 (opline #N)]\n\
+             [Breakpoint #0 in #0 at {file}:9, hits: 1]\n\
+             >00009: if (true) {{\n \
+             00010:   function baz() {{\n \
+             00011:     return 3;\n\
+             prompt> "
+        )
+    );
+}
