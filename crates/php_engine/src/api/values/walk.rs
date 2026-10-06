@@ -30,7 +30,7 @@ use php_heap::{Arr, PropertyTable, TableRow};
 
 use crate::api::raising::{Thrown, fatal, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
 
 /// What a walk's body answers for one row: `Continue` to go on to the
 /// next, `Break` to end the walk there with what the walk answers, and
@@ -201,28 +201,25 @@ pub struct Row {
     key: Owner<Key>,
     value: Owner<Value>,
     at: At,
-    holder: PhpRef,
+    /// The walk's hash iterator, registered at the table the row is in,
+    /// which tells the row whether that table still stands.
+    iterator: u32,
 }
 
-/// Where a [`Row`] stands, and what the holder named when the walk read
-/// it.
+/// Where a [`Row`] stands.
 #[derive(Debug, Clone, Copy)]
 enum At {
-    /// Bucket `pos` of the array the holder holds.
+    /// Bucket `pos` of an array, an object's dynamic table among them.
     Bucket(Arr, u32),
-    /// Declared slot `slot` of `owner`, the instance of the object the
-    /// holder holds (a lazy object's is its own once initialised).
+    /// Declared slot `slot` of `owner`, whose dynamic table is `table`:
+    /// the instance of the object `held` the reference `holder` held (a
+    /// lazy object's is its own once initialised).
     Slot {
+        holder: PhpRef,
         held: PhpObject,
         owner: PhpObject,
-        slot: u32,
-    },
-    /// Bucket `pos` of the dynamic table `table` of the object the holder
-    /// holds.
-    Entry {
-        held: PhpObject,
         table: Arr,
-        pos: u32,
+        slot: u32,
     },
 }
 
@@ -252,45 +249,45 @@ impl Row {
         if let Some(cell) = self.value.as_php_ref() {
             return Ok(*cell);
         }
-        let stands = |req: &mut Request| {
+        let moved = |req: &mut Request| {
             fatal(
                 req,
-                "InternalError: a live walk's row was made a reference after its table moved",
+                "InternalError: a walk's row was made a reference after its table moved",
             )
         };
-        let now = self.holder.get();
+        // The table stands while the walk's iterator still names it: a
+        // table destroyed under the walk poisons it. An object's slot
+        // stands while the reference still holds the object too.
         let place = match self.at {
-            At::Bucket(table, pos) => now
-                .as_array()
-                .filter(|held| held.heap().is_same(table))
-                .and_then(|_| table.value_ref_at(pos)),
-            At::Entry { held, table, pos } => now
-                .as_object()
-                .filter(|object| **object == held)
-                .and_then(|_| table.value_ref_at(pos)),
-            At::Slot { held, owner, slot } => {
-                if now.as_object() != Some(&held) {
-                    return Err(stands(req));
-                }
-                let Some(at) = owner.heap().slot_ref(slot) else {
-                    return Err(stands(req));
-                };
-                if let Some((typed, name)) = req.slot_typed_property(owner.class(), slot) {
-                    if !at.read().is_same_value(self.value.to_zval()) {
-                        return Err(stands(req));
-                    }
+            At::Bucket(table, pos) if req.heap_mut().iterator_on(self.iterator, table) => {
+                table.value_ref_at(pos)
+            }
+            At::Slot {
+                holder,
+                held,
+                owner,
+                table,
+                slot,
+            } if req.heap_mut().iterator_on(self.iterator, table)
+                && holder.get().as_object() == Some(&held) =>
+            {
+                let at = owner.heap().slot_ref(slot);
+                if let Some(at) = at.filter(|at| at.read().is_same_value(self.value.to_zval()))
+                    && let Some((typed, name)) = req.slot_typed_property(owner.class(), slot)
+                {
                     req.fetch_typed_slot_ref(at, &typed, &name)?;
                     let Some(cell) = Value::of_zval(at.read()).as_php_ref().copied() else {
-                        return Err(stands(req));
+                        return Err(moved(req));
                     };
                     return Ok(self.lend(req, cell));
                 }
-                Some(at)
+                at
             }
+            At::Bucket(..) | At::Slot { .. } => None,
         };
         let Some(place) = place.filter(|place| place.read().is_same_value(self.value.to_zval()))
         else {
-            return Err(stands(req));
+            return Err(moved(req));
         };
         let cell = req.reference(*self.value)?;
         place.write(cell.as_value().to_zval());
@@ -433,7 +430,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
             key: Owner::take(req, Key::of(key)),
             value: Owner::take(req, Value::of_zval(value)),
             at: At::Bucket(table, found),
-            holder,
+            iterator: at,
         }));
     }
     if let Some(held) = now.as_object().copied() {
@@ -455,14 +452,14 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
 fn object_row(
     req: &mut Request,
     holder: PhpRef,
-    at: u32,
+    iterator: u32,
     held: PhpObject,
     owner: PhpObject,
     table: PropertyTable,
 ) -> Result<Option<Row>, Thrown> {
     let declared = table.declared();
-    let pos = req.heap_mut().iterator_pos(at, table.table());
-    let lead = req.heap_mut().iterator_lead(at);
+    let pos = req.heap_mut().iterator_pos(iterator, table.table());
+    let lead = req.heap_mut().iterator_lead(iterator);
     let mut found = if lead < declared {
         lead
     } else {
@@ -484,10 +481,10 @@ fn object_row(
     }
     let heap = req.heap_mut();
     if next < declared {
-        heap.iterator_set_lead(at, next);
+        heap.iterator_set_lead(iterator, next);
     } else {
-        heap.iterator_set_lead(at, declared);
-        heap.iterator_set_pos(at, next - declared);
+        heap.iterator_set_lead(iterator, declared);
+        heap.iterator_set_pos(iterator, next - declared);
     }
     let (key, at) = match row {
         TableRow::Slot(slot) => {
@@ -497,24 +494,21 @@ fn object_row(
                     "InternalError: a declared slot of an object's table with no name",
                 ));
             };
-            (
-                Key::Str(crate::api::values::PhpString::of(name)),
-                At::Slot { held, owner, slot },
-            )
-        }
-        TableRow::Entry(key) => (
-            Key::of(key),
-            At::Entry {
+            let at = At::Slot {
+                holder,
                 held,
+                owner,
                 table: table.table(),
-                pos: found - declared,
-            },
-        ),
+                slot,
+            };
+            (Key::Str(PhpString::of(name)), at)
+        }
+        TableRow::Entry(key) => (Key::of(key), At::Bucket(table.table(), found - declared)),
     };
     Ok(Some(Row {
         key: Owner::take(req, key),
         value: Owner::take(req, Value::of_zval(value)),
         at,
-        holder,
+        iterator,
     }))
 }
