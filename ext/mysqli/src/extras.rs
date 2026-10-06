@@ -244,7 +244,7 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             None => 0,
         };
         let message = match cells.get(2) {
-            Some((_, v)) => crate::bytes_of(req, v)?,
+            Some((_, v)) => crate::string_of(req, v)?,
             None => Vec::new(),
         };
         list.push(Warning { message, errno });

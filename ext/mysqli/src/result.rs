@@ -183,7 +183,7 @@ pub(crate) fn fetch_object(
     // `"O|Ch"`: the class by `try_convert_to_string`, whose refusal is the
     // conversion's `Error` and not a `TypeError` of the parameter, before
     // the arguments are held.
-    let class = crate::bytes_of(req, &class.value())?;
+    let class = crate::string_of(req, &class.value())?;
     let args = args.hold(req)?;
     let args = given.then_some(args);
     let Some(target) = autoload(req, &class)? else {

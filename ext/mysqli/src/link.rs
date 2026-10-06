@@ -952,7 +952,7 @@ pub(crate) fn options(
     };
     let as_long = |_: &mut Request| long;
     let text = match option {
-        3 | 4 | 5 | 7 | 35 | 43 => Some(crate::bytes_of(req, &value)?),
+        3 | 4 | 5 | 7 | 35 | 43 => Some(crate::string_of(req, &value)?),
         _ => None,
     };
     let text = text.unwrap_or_default();

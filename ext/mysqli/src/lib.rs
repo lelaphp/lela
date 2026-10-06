@@ -611,7 +611,7 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
 
 /// `zval_get_string`'s bytes: the string it answers is the caller's, so
 /// it is given back once they are copied.
-pub(crate) fn bytes_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+pub(crate) fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let text = php_ext::coerce::to_string(req, value)?;
     let bytes = text.as_bytes().to_vec();
     req.release(Value::string(text));
