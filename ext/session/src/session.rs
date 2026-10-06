@@ -10,7 +10,7 @@ use std::io::Read;
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpArray;
+use php_ext::values::{PhpArray, walk};
 
 use crate::{
     Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, ini_long,
@@ -487,13 +487,10 @@ fn find_id(req: &mut Request) {
     let name = ini(req, b"session.name");
     let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
         let array = req.superglobal(global)?;
-        let found = array
-            .snapshot()
-            .into_iter()
-            .find_map(|(key, value)| match key {
-                php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice() => Some(value),
-                _ => None,
-            })?;
+        let found = walk::rows(req, array).find_map(|(key, value)| match key {
+            php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice() => Some(value.deref()),
+            _ => None,
+        })?;
         Some(found.as_str_bytes().map(<[u8]>::to_vec))
     };
     if ini_bool(req, b"session.use_cookies")
@@ -856,7 +853,7 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         let name = ini(req, b"session.name");
         let cookie_carries_it = ini_bool(req, b"session.use_cookies")
             && req.superglobal(b"_COOKIE").is_some_and(|cookies| {
-                cookies.snapshot().into_iter().any(|(key, _)| {
+                walk::rows(req, cookies).any(|(key, _)| {
                     matches!(key, php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice())
                 })
             });

@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{float_to_long, numeric_string, type_name};
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::State;
 use crate::conv::put;
@@ -183,43 +183,13 @@ fn socket_addrinfo_lookup(
     #[php(default = null)] service: Option<PhpString>,
     #[php(default = [])] hints: PhpArray,
 ) -> Result<OrFalse<PhpArray>, Thrown> {
-    let mut want = [0i32; 4];
-    let entries = hints.snapshot();
-    if !entries.is_empty() && hints.is_list() {
+    if !hints.is_empty() && hints.is_list() {
         return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
     }
-    for (key, hint) in entries {
-        let Key::Str(key) = key else {
-            return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
-        };
-        let name = String::from_utf8_lossy(key.as_bytes()).into_owned();
-        let slot = match name.as_str() {
-            "ai_flags" => 0,
-            "ai_family" => 1,
-            "ai_socktype" => 2,
-            "ai_protocol" => 3,
-            _ => return Err(argument_error(req, "ValueError", 3, HINT_KEYS)),
-        };
-        let Some(n) = try_long(&hint) else {
-            let given = type_name(req, &hint);
-            let tail = format!("\"{name}\" key must be of type int, {given} given");
-            return Err(argument_error(req, "TypeError", 3, &tail));
-        };
-        if slot == 1 {
-            if n != i64::from(libc::AF_INET) && n != i64::from(libc::AF_INET6) {
-                return Err(argument_error(
-                    req,
-                    "ValueError",
-                    3,
-                    "\"ai_family\" key must be AF_INET or AF_INET6",
-                ));
-            }
-        } else if !(0..=i64::from(i32::MAX)).contains(&n) {
-            let tail = format!("\"{name}\" key must be between 0 and {}", i32::MAX);
-            return Err(argument_error(req, "ValueError", 3, &tail));
-        }
-        want[slot] = i32::try_from(n).unwrap_or(0);
-    }
+    let want = match hints_wanted(req, hints) {
+        Ok(want) => want,
+        Err((kind, tail)) => return Err(argument_error(req, kind, 3, &tail)),
+    };
     let cut = |bytes: &[u8]| CString::new(crate::addr::c_str(bytes)).unwrap_or_default();
     let host = cut(host.as_bytes());
     let service = service.map(|s| cut(s.as_bytes()));
@@ -239,6 +209,49 @@ fn socket_addrinfo_lookup(
         out.append(req, object.as_value())?;
     }
     Ok(OrFalse::Value(out))
+}
+
+/// The four `hints` `getaddrinfo(3)` is handed, by key, read in one walk;
+/// the `Err` is the kind and the text of php's refusal of the first row
+/// that is not one, raised once the walk has ended.
+fn hints_wanted(req: &Request, hints: PhpArray) -> Result<[i32; 4], (&'static str, String)> {
+    let mut want = [0i32; 4];
+    for (key, hint) in walk::rows(req, hints) {
+        let hint = hint.deref();
+        let Key::Str(key) = key else {
+            return Err(("ValueError", HINT_KEYS.to_owned()));
+        };
+        let name = String::from_utf8_lossy(key.as_bytes()).into_owned();
+        let slot = match name.as_str() {
+            "ai_flags" => 0,
+            "ai_family" => 1,
+            "ai_socktype" => 2,
+            "ai_protocol" => 3,
+            _ => return Err(("ValueError", HINT_KEYS.to_owned())),
+        };
+        let Some(n) = try_long(&hint) else {
+            let given = type_name(req, &hint);
+            return Err((
+                "TypeError",
+                format!("\"{name}\" key must be of type int, {given} given"),
+            ));
+        };
+        if slot == 1 {
+            if n != i64::from(libc::AF_INET) && n != i64::from(libc::AF_INET6) {
+                return Err((
+                    "ValueError",
+                    "\"ai_family\" key must be AF_INET or AF_INET6".to_owned(),
+                ));
+            }
+        } else if !(0..=i64::from(i32::MAX)).contains(&n) {
+            return Err((
+                "ValueError",
+                format!("\"{name}\" key must be between 0 and {}", i32::MAX),
+            ));
+        }
+        want[slot] = i32::try_from(n).unwrap_or(0);
+    }
+    Ok(want)
 }
 
 /// The entry an `AddressInfo` holds, and an `InternalError` for one

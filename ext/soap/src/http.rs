@@ -15,7 +15,7 @@ use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{
     Handshake, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx, Streams as _, Xport,
 };
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
@@ -158,8 +158,8 @@ pub(crate) fn http_context_headers(
             http_context_add_header(s.as_bytes(), flags.0, flags.1, flags.2, soap_headers);
         }
         ValueRef::Array(a) => {
-            for (_, value) in a.snapshot() {
-                if let ValueRef::Str(s) = value.as_ref()
+            for (_, value) in walk::rows(req, *a) {
+                if let ValueRef::Str(s) = value.deref().as_ref()
                     && !s.is_empty()
                 {
                     http_context_add_header(s.as_bytes(), flags.0, flags.1, flags.2, soap_headers);
@@ -1292,7 +1292,7 @@ fn request_headers(
         has_proxy_authorization = proxy_authentication(this, &mut h);
     }
     // Send cookies along with request.
-    let has_cookies = cookie_header(this, uri, head.use_ssl, &mut h);
+    let has_cookies = cookie_header(req, this, uri, head.use_ssl, &mut h);
     http_context_headers(
         req,
         context,
@@ -1453,7 +1453,13 @@ fn digest_authorization(
 /// `secure` or goes over TLS, as `name=value` joined by `; `; whether
 /// the header was written, which a cookie array that is a list or empty
 /// writes none of.
-fn cookie_header(this: PhpObject, uri: &UriStruct, use_ssl: bool, h: &mut Vec<u8>) -> bool {
+fn cookie_header(
+    req: &Request,
+    this: PhpObject,
+    uri: &UriStruct,
+    use_ssl: bool,
+    h: &mut Vec<u8>,
+) -> bool {
     let cookies = client_slot(this, ClientSlot::Cookies);
     let Some(cookies) = cookies.as_array() else {
         return false;
@@ -1465,7 +1471,8 @@ fn cookie_header(this: PhpObject, uri: &UriStruct, use_ssl: bool, h: &mut Vec<u8
     let host = host_of(uri);
     let mut first = true;
     h.extend_from_slice(b"Cookie: ");
-    for (key, data) in cookies.snapshot() {
+    for (key, data) in walk::rows(req, *cookies) {
+        let data = data.deref();
         let (Key::Str(name), Some(data)) = (key, data.as_array()) else {
             continue;
         };

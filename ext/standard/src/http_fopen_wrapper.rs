@@ -20,7 +20,7 @@ use php_ext::request::{
     Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, SocketOptions, Stream,
     StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, Value, ValueRef, walk};
 use php_ext_uri::UriStruct;
 
 use crate::State;
@@ -273,7 +273,9 @@ impl HttpOptions {
         let string = |value: &Value| value.as_str_bytes().map(<[u8]>::to_vec);
         let filled = |value: &Value| string(value).filter(|s| !s.is_empty());
         options.method = get(req, b"http", b"method").as_ref().and_then(filled);
-        options.header = get(req, b"http", b"header").as_ref().and_then(header_of);
+        options.header = get(req, b"http", b"header")
+            .as_ref()
+            .and_then(|value| header_of(req, value));
         options.user_agent = get(req, b"http", b"user_agent").as_ref().and_then(string);
         options.content = get(req, b"http", b"content").as_ref().and_then(filled);
         options.proxy = get(req, label.as_bytes(), b"proxy")
@@ -307,12 +309,12 @@ impl HttpOptions {
 /// `header` as `php_stream_url_wrap_http_ex` joins it: an array's string
 /// members each followed by `\r\n`, or a string that is not empty; then
 /// trimmed at both ends, and `None` where nothing is left.
-fn header_of(value: &Value) -> Option<Vec<u8>> {
+fn header_of(req: &Request, value: &Value) -> Option<Vec<u8>> {
     let joined = match value.as_ref() {
         ValueRef::Array(lines) => {
             let mut joined = Vec::new();
-            for (_, line) in lines.snapshot() {
-                if let Some(line) = line.as_str_bytes() {
+            for (_, line) in walk::rows(req, *lines) {
+                if let Some(line) = line.deref().as_str_bytes() {
                     joined.extend_from_slice(line);
                     joined.extend_from_slice(b"\r\n");
                 }
@@ -638,8 +640,8 @@ fn tunnel(
     {
         match value.as_ref() {
             ValueRef::Array(lines) => {
-                for (_, line) in lines.snapshot() {
-                    if let Some(line) = line.as_str_bytes()
+                for (_, line) in walk::rows(req, *lines) {
+                    if let Some(line) = line.deref().as_str_bytes()
                         && proxy_authorization(line, &mut header)
                     {
                         break;

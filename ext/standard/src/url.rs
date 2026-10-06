@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, StreamCtx, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
@@ -129,13 +129,14 @@ fn get_headers(
         stream.free(req);
         return Ok(OrFalse::False);
     };
+    // The lines read first, as bytes: what `add_header` writes is the
+    // answer, never the stream's `wrapper_data`.
+    let lines: Vec<Vec<u8>> = walk::rows(req, lines)
+        .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
+        .collect();
     let mut headers = PhpArray::new(req)?;
-    for (_, line) in lines.snapshot() {
-        let line = line.deref();
-        let ValueRef::Str(line) = line.as_ref() else {
-            continue;
-        };
-        add_header(req, &mut headers, line.as_bytes(), associative)?;
+    for line in lines {
+        add_header(req, &mut headers, &line, associative)?;
     }
     stream.free(req);
     Ok(OrFalse::Value(headers))

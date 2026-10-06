@@ -8,7 +8,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, numeric_string, to_double, to_long};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Key, Value, ValueRef, walk};
 use php_ext_pcre::Regex;
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
@@ -22,7 +22,7 @@ use crate::{Outcome, Run, find, sanitizing, string_value};
 
 /// `FETCH_LONG_OPTION`: `zval_get_long` of the option where it is set.
 fn long_option(req: &mut Request, run: &Run, name: &[u8]) -> Result<Option<i64>, Thrown> {
-    match find(run.options.as_ref(), name) {
+    match find(req, run.options.as_ref(), name) {
         Some(value) => Ok(Some(to_long(req, &value.deref())?)),
         None => Ok(None),
     }
@@ -30,15 +30,15 @@ fn long_option(req: &mut Request, run: &Run, name: &[u8]) -> Result<Option<i64>,
 
 /// `FETCH_DOUBLE_OPTION`: `zval_get_double` of the option where it is set.
 fn double_option(req: &mut Request, run: &Run, name: &[u8]) -> Result<Option<f64>, Thrown> {
-    match find(run.options.as_ref(), name) {
+    match find(req, run.options.as_ref(), name) {
         Some(value) => Ok(Some(to_double(req, &value.deref())?)),
         None => Ok(None),
     }
 }
 
 /// `FETCH_STRING_OPTION`: the option where it is set and a string.
-fn string_option(run: &Run, name: &[u8]) -> Option<Vec<u8>> {
-    find(run.options.as_ref(), name)?
+fn string_option(req: &Request, run: &Run, name: &[u8]) -> Option<Vec<u8>> {
+    find(req, run.options.as_ref(), name)?
         .deref()
         .as_str_bytes()
         .map(<[u8]>::to_vec)
@@ -265,7 +265,7 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
         return Ok(Outcome::Failed);
     }
     let mut decimal = b'.';
-    if let Some(given) = string_option(run, b"decimal") {
+    if let Some(given) = string_option(req, run, b"decimal") {
         match given.as_slice() {
             [one] => decimal = *one,
             _ => {
@@ -277,7 +277,7 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
             }
         }
     }
-    let thousand = match string_option(run, b"thousand") {
+    let thousand = match string_option(req, run, b"thousand") {
         Some(given) if given.is_empty() => {
             return Err(value_error(
                 req,
@@ -454,7 +454,7 @@ fn matched(req: &mut Request, pattern: &[u8], s: &[u8]) -> Result<Outcome, Throw
 /// string(56) "Malformed UTF-8 characters, possibly incorrectly encoded"
 /// ```
 pub(crate) fn regexp(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
-    let Some(regexp) = string_option(run, b"regexp") else {
+    let Some(regexp) = string_option(req, run, b"regexp") else {
         return Err(value_error(req, run, "\"regexp\" option is missing"));
     };
     matched(req, &regexp, s)
@@ -689,7 +689,7 @@ pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
     if sanitizing::url_bytes(s).len() != s.len() {
         return Ok(Outcome::Failed);
     }
-    let name = string_option(run, b"uri_parser_class");
+    let name = string_option(req, run, b"uri_parser_class");
     let parser = match name.as_deref() {
         None | Some(b"parse_url") => None,
         Some(name) => match Parser::named(name) {
@@ -759,10 +759,9 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         req.release(parts);
         return Ok(None);
     };
-    let entries = array.snapshot();
     let part = |name: &[u8]| {
-        entries.iter().find_map(|(key, value)| match key {
-            Key::Str(k) if k.as_bytes() == name => value.as_str_bytes().map(<[u8]>::to_vec),
+        walk::rows(req, array).find_map(|(key, value)| match key {
+            Key::Str(k) if k.as_bytes() == name => value.deref().as_str_bytes().map(<[u8]>::to_vec),
             _ => None,
         })
     };
@@ -771,8 +770,8 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         user: part(b"user"),
         password: part(b"pass"),
         host: part(b"host"),
-        port: entries.iter().find_map(|(key, value)| match key {
-            Key::Str(k) if k.as_bytes() == b"port" => value.as_int(),
+        port: walk::rows(req, array).find_map(|(key, value)| match key {
+            Key::Str(k) if k.as_bytes() == b"port" => value.deref().as_int(),
             _ => None,
         }),
         path: part(b"path"),
@@ -1034,7 +1033,7 @@ pub(crate) fn ip(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thro
 /// filter_var(): "separator" option must be one character long
 /// ```
 pub(crate) fn mac(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
-    let wanted = string_option(run, b"separator");
+    let wanted = string_option(req, run, b"separator");
     if wanted.as_ref().is_some_and(|w| w.len() != 1) {
         return Err(value_error(
             req,

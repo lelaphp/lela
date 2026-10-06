@@ -57,7 +57,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::{Input, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `IF_G`'s input arrays: each variable [`sapi_filter`] was handed, raw,
 /// by where it came from; `None` where none came.
@@ -530,15 +530,12 @@ impl FilterFailedException {}
 
 /// `zend_hash_str_find` over an options array: the element under a
 /// string key, a view.
-fn find(options: Option<&Value>, name: &[u8]) -> Option<Value> {
+fn find(req: &Request, options: Option<&Value>, name: &[u8]) -> Option<Value> {
     let array = *options?.deref().as_array()?;
-    array
-        .snapshot_refs()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(s) if s.as_bytes() == name => Some(value),
-            _ => None,
-        })
+    walk::rows(req, array).find_map(|(key, value)| match key {
+        Key::Str(s) if s.as_bytes() == name => Some(value),
+        _ => None,
+    })
 }
 
 /// A new string of the request's as a value.
@@ -652,7 +649,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
             .options
             .as_ref()
             .is_some_and(|o| o.deref().as_array().is_some())
-        && let Some(default) = find(run.options.as_ref(), b"default")
+        && let Some(default) = find(req, run.options.as_ref(), b"default")
     {
         let default = default.deref();
         req.addref(&default);
@@ -834,10 +831,10 @@ fn filter_call(
         Union::B(long) => filter = long,
         Union::A(table) => {
             let table = Some(table.to_value());
-            if let Some(given) = find(table.as_ref(), b"filter") {
+            if let Some(given) = find(req, table.as_ref(), b"filter") {
                 filter = to_long(req, &given.deref())?;
             }
-            if let Some(given) = find(table.as_ref(), b"options") {
+            if let Some(given) = find(req, table.as_ref(), b"options") {
                 let given = given.deref();
                 if filter == FILTER_CALLBACK {
                     options = Some(given);
@@ -846,7 +843,7 @@ fn filter_call(
                     options = Some(given);
                 }
             }
-            if let Some(given) = find(table.as_ref(), b"flags") {
+            if let Some(given) = find(req, table.as_ref(), b"flags") {
                 flags = to_long(req, &given.deref())?;
                 if flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
                     flags |= FILTER_REQUIRE_SCALAR;
@@ -931,7 +928,7 @@ fn array_handler(
                 return Err(arg_type_error(req, 2, "contain only string keys"));
             }
         };
-        let Some(found) = lookup(input, name.as_bytes(), false) else {
+        let Some(found) = lookup(req, input, name.as_bytes(), false) else {
             if add_empty {
                 req.addref(&Value::string(name));
                 out.set(req, Key::Str(name), Value::null())?;
@@ -998,15 +995,12 @@ fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
 /// `zend_hash_find` by a variable name, a view: a string key alone, or
 /// with `numeric` the integer key the name is, as `zend_symtable_find`
 /// reads it.
-fn lookup(array: PhpArray, name: &[u8], numeric: bool) -> Option<Value> {
-    array
-        .snapshot()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(s) if s.as_bytes() == name => Some(value),
-            Key::Int(n) if numeric && n.to_string().as_bytes() == name => Some(value),
-            _ => None,
-        })
+fn lookup(req: &Request, array: PhpArray, name: &[u8], numeric: bool) -> Option<Value> {
+    walk::rows(req, array).find_map(|(key, value)| match key {
+        Key::Str(s) if s.as_bytes() == name => Some(value.deref()),
+        Key::Int(n) if numeric && n.to_string().as_bytes() == name => Some(value.deref()),
+        _ => None,
+    })
 }
 
 // ------------------------------------------------------------ natives
@@ -1029,7 +1023,7 @@ fn filter_has_var(req: &mut Request, input_type: i64, var_name: PhpString) -> Re
     let Some(array) = storage(req, input_type)? else {
         return Ok(false);
     };
-    let found = lookup(array, var_name.as_bytes(), false).is_some();
+    let found = lookup(req, array, var_name.as_bytes(), false).is_some();
     req.release(array.to_value());
     Ok(found)
 }
@@ -1070,7 +1064,7 @@ fn filter_input(
         return Ok(Value::bool(false));
     }
     let array = storage(req, r#type)?;
-    let found = array.and_then(|array| lookup(array, name, false).map(|v| v.deref()));
+    let found = array.and_then(|array| lookup(req, array, name, false).map(|v| v.deref()));
     if let Some(found) = &found {
         req.addref(found);
     }
@@ -1092,7 +1086,7 @@ fn filter_input(
         Union::B(flags) => (None, flags),
         Union::A(table) => {
             let table = Some(table.to_value());
-            match find(table.as_ref(), b"flags") {
+            match find(req, table.as_ref(), b"flags") {
                 Some(given) => (table, to_long(req, &given.deref())?),
                 None => (table, 0),
             }
@@ -1107,9 +1101,9 @@ fn filter_input(
             &format!("input value '{}' not found", c_string(name)),
         ));
     }
-    let options = find(table.as_ref(), b"options").map(|o| o.deref());
+    let options = find(req, table.as_ref(), b"options").map(|o| o.deref());
     if options.as_ref().is_some_and(|o| o.as_array().is_some())
-        && let Some(default) = find(options.as_ref(), b"default")
+        && let Some(default) = find(req, options.as_ref(), b"default")
     {
         let default = default.deref();
         req.addref(&default);

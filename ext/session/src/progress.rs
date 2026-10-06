@@ -11,7 +11,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
 
 use crate::{State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value};
 
@@ -190,13 +190,10 @@ fn early_find_sid(req: &mut Request, session_name: &[u8]) -> Result<(), Thrown> 
 /// session's name.
 fn find_in(req: &mut Request, input: Input, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     let array = req.input_variables(input)?;
-    let found = array
-        .snapshot()
-        .into_iter()
-        .find_map(|(key, value)| match key {
-            Key::Str(s) if s.as_bytes() == name => value.as_str_bytes().map(<[u8]>::to_vec),
-            _ => None,
-        });
+    let found = walk::rows(req, array).find_map(|(key, value)| match key {
+        Key::Str(s) if s.as_bytes() == name => value.deref().as_str_bytes().map(<[u8]>::to_vec),
+        _ => None,
+    });
     req.release(array.to_value());
     Ok(found)
 }
@@ -313,7 +310,7 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
         .as_ref()
         .and_then(|progress| progress.key.clone());
     if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
-        let cancel = cancelled(vars, &key);
+        let cancel = cancelled(req, vars, &key);
         with(req, |progress| progress.cancel_upload |= cancel);
         let data = rendered(req)?;
         let key = Key::Str(PhpString::new(req, &key)?);
@@ -325,25 +322,19 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
 
 /// `php_check_cancel_upload`: the progress array the session holds under
 /// the key, with `cancel_upload` set to `true` in it.
-fn cancelled(vars: PhpArray, key: &[u8]) -> bool {
-    let found = vars
-        .snapshot()
-        .into_iter()
-        .find_map(|(had, value)| match had {
-            Key::Str(s) if s.as_bytes() == key => Some(value),
-            Key::Int(n) if n.to_string().as_bytes() == key => Some(value),
-            _ => None,
-        });
+fn cancelled(req: &Request, vars: PhpArray, key: &[u8]) -> bool {
+    let found = walk::rows(req, vars).find_map(|(had, value)| match had {
+        Key::Str(s) if s.as_bytes() == key => Some(value),
+        Key::Int(n) if n.to_string().as_bytes() == key => Some(value),
+        _ => None,
+    });
     found
         .and_then(|value| value.deref().as_array().copied())
         .and_then(|array| {
-            array
-                .snapshot()
-                .into_iter()
-                .find_map(|(had, value)| match had {
-                    Key::Str(s) if s.as_bytes() == b"cancel_upload" => value.as_bool(),
-                    _ => None,
-                })
+            walk::rows(req, array).find_map(|(had, value)| match had {
+                Key::Str(s) if s.as_bytes() == b"cancel_upload" => value.deref().as_bool(),
+                _ => None,
+            })
         })
         .unwrap_or(false)
 }
