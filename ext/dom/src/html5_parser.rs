@@ -832,7 +832,8 @@ fn finish(
     url: Option<Vec<u8>>,
 ) -> Result<Value, Thrown> {
     let doc = new_html_doc(req)?;
-    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?;
+    let private = crate::private::Private::new(req)?;
+    let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
     let converted = dom_mut(req, object).and_then(|d| {
         convert(
@@ -997,21 +998,30 @@ pub(crate) fn create_from_file(
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.
     let mut encoding = encoding;
-    if encoding.is_none()
-        && let Some(charset) = php_ext_libxml::sniff_charset_from_stream(req, stream)?
-    {
-        encoding = Encoding::by_name(&charset);
+    if encoding.is_none() {
+        match php_ext_libxml::sniff_charset_from_stream(req, stream) {
+            Ok(Some(charset)) => encoding = Encoding::by_name(&charset),
+            Ok(None) => {}
+            Err(thrown) => {
+                stream.free(req);
+                return Err(thrown);
+            }
+        }
     }
     let mut source = Vec::new();
     let mut chunks = Vec::new();
     let read = loop {
         match stream.read(req, BUFFER) {
-            Ok(Some(chunk)) if !chunk.is_empty() => {
-                chunks.push(chunk.len());
+            Ok(Some(chunk)) => {
+                let len = chunk.len();
                 source.extend_from_slice(chunk.as_bytes());
                 req.release(Value::string(chunk));
+                if len == 0 {
+                    break Ok(());
+                }
+                chunks.push(len);
             }
-            Ok(_) => break Ok(()),
+            Ok(None) => break Ok(()),
             Err(thrown) => break Err(thrown),
         }
     };
@@ -1042,5 +1052,6 @@ pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<PhpObje
     }
     let doc = new_html_doc(req)?;
     doc.set_doc_string(DocString::Encoding, Some(encoding));
-    crate::modern::document_object(req, "Dom\\HTMLDocument", doc)
+    let private = crate::private::Private::new(req)?;
+    crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)
 }

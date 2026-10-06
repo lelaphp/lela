@@ -170,6 +170,7 @@ fn create_from(
     if i32::try_from(data.len()).is_err() {
         let text = format!("Cannot read images with more than {} bytes", i32::MAX);
         docref(req, Level::Warning, &text);
+        req.release(Value::string(data));
         stream.free(req);
         return Ok(OrFalse::False);
     }
@@ -182,8 +183,10 @@ fn create_from(
         }
         other => other,
     };
-    let image = gd(req, || Image::decode(format, data.as_bytes()))?;
+    let image = gd(req, || Image::decode(format, data.as_bytes()));
+    req.release(Value::string(data));
     stream.free(req);
+    let image = image?;
     if image.is_none() {
         let text = format!(
             "\"{}\" is not a valid {name} file",
