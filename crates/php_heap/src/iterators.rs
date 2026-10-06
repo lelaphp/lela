@@ -235,7 +235,9 @@ impl Iterators {
     /// iterator `idx` stands at in `a`. An iterator that named another
     /// table, one the loop's subject was replaced by, is moved onto `a`,
     /// at the copy's position where `zend_array_dup` made `a` from the
-    /// table it walked, and at `a`'s internal pointer otherwise.
+    /// table it walked, and at `a`'s internal pointer otherwise, which
+    /// for an object's table is its place among the declared slots
+    /// (`HtIter::lead`) as well as in its own buckets.
     pub(crate) fn pos(&mut self, idx: u32, a: Arr) -> u32 {
         let Some(iter) = self.get(idx).copied() else {
             return a.num_used();
@@ -248,6 +250,7 @@ impl Iterators {
             if let Some(iter) = self.get_mut(idx) {
                 iter.ht = Target::Table(a);
                 iter.pos = a.position();
+                iter.lead = a.lead();
             }
         }
         self.get(idx).map_or(a.num_used(), |iter| iter.pos)
@@ -423,6 +426,7 @@ impl Heap {
         if let Some(iter) = self.iterators.get_mut(idx) {
             iter.ht = Target::Table(held);
             iter.pos = pos;
+            iter.lead = held.lead();
         }
         Ok((pos, held))
     }
