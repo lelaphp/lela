@@ -90,10 +90,12 @@ pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
 /// kept past it, the same view a `collect` of the rows hands on: a view
 /// carries no owner (design §5.1), so once the walk ends nothing keeps
 /// the row it names, and code of the program can give it up. A debug
-/// build catches its use while the request is served: the freed-use
-/// guard refuses and reports an owner taken or given up on the freed
-/// block, and the quarantine holds the freed slot back from reuse and
-/// reports a write into it as the slot leaves.
+/// build catches two uses of it while the request is served: the
+/// freed-use guard refuses and reports an owner taken or given up on
+/// the freed block, and the quarantine holds the freed slot back from
+/// reuse and reports a write into it as the slot leaves. A read through
+/// it is caught by neither; the quarantine only keeps the slot from
+/// being another value's for its bin's next sixteen frees.
 ///
 /// `array_key_last` and `array_last` read the last row on it, a
 /// reference row followed:
