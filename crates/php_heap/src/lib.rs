@@ -55,6 +55,7 @@ mod sensed;
 mod sort;
 mod stack;
 mod string;
+mod table_copy;
 mod zval;
 
 pub use array::DeclaredRows;

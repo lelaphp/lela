@@ -14,7 +14,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `zend_lookup_class_ex`: a leading `\` dropped, the table under the
 /// lowered name, and the autoloaders where the table has none and
@@ -515,21 +515,21 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         }
         return Ok(array);
     }
+    // The fast copy (`Z/Zend/zend_builtin_functions.c:852`): a class
+    // that declares nothing hands its own table on.
+    if let Some(array) = crate::ops::object_symtable(req, object)? {
+        return Ok(array);
+    }
     let rows = req.property_rows(object)?;
     let mut array = PhpArray::new(req)?;
     for (key, value, declared) in rows {
-        let value = if value.tag() == TypeTag::Reference && value.refcount() == 1 {
-            value.deref()
-        } else {
-            value
-        };
         // An integer key, which only a loophole such as
         // `object_properties_load` leaves in the table, is no name the
         // access rule is asked about (`zend_hash_index_add`).
         let name = match key {
             Key::Int(n) => {
                 if !array.contains(&key) {
-                    req.addref(&value);
+                    let value = req.dup_value(value, None);
                     array.add_new(req, Key::Int(n), value)?;
                 }
                 continue;
@@ -544,7 +544,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
         if !seen {
             continue;
         }
-        req.addref(&value);
+        let value = req.dup_value(value, None);
         req.addref(&Value::string(name));
         let key = if declared.is_some() {
             Key::Str(name)
@@ -588,7 +588,7 @@ fn answered_vars(
         // properties, which no access rule holds (`zend_hash_index_add`).
         let name = match key {
             Key::Int(n) => {
-                req.addref(&value);
+                let value = req.dup_value(value, None);
                 array.set(req, Key::Int(n), value)?;
                 continue;
             }
@@ -603,7 +603,7 @@ fn answered_vars(
             Key::from_string(name)
         };
         req.addref(&Value::string(name));
-        req.addref(&value);
+        let value = req.dup_value(value, None);
         array.add_new(req, key, value)?;
     }
     Ok(array)
@@ -630,6 +630,9 @@ fn answered_vars(
 fn get_mangled_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
+    if let Some(array) = crate::ops::object_symtable(req, object)? {
+        return Ok(array);
+    }
     let rows = req.properties_no_lazy_init(object)?;
     crate::ops::mangled_array(req, object, rows)
 }
