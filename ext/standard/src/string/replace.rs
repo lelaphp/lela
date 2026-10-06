@@ -123,16 +123,26 @@ fn replace_common(
     let result = match subject {
         Union::A(subjects) => {
             let mut out = PhpArray::new(req)?;
-            for (key, entry) in subjects.snapshot() {
-                // `zval_try_get_tmp_string` over the row, given up after
-                // the replacement as `zend_tmp_string_release` gives it up.
-                let subject = to_string(req, &entry.deref())?;
-                let replaced = in_subject(req, &search, &replace, subject, case_sensitive);
-                req.release(Value::string(subject));
-                let (value, n) = replaced?;
-                count += n;
-                let key = owned_key(req, &key);
-                out.set(req, key, Value::string(value))?;
+            let filled = (|| {
+                for (key, entry) in subjects.snapshot() {
+                    // `zval_try_get_tmp_string` over the row, given up
+                    // after the replacement as `zend_tmp_string_release`
+                    // gives it up.
+                    let subject = to_string(req, &entry.deref())?;
+                    let replaced = in_subject(req, &search, &replace, subject, case_sensitive);
+                    req.release(Value::string(subject));
+                    let (value, n) = replaced?;
+                    count += n;
+                    let key = owned_key(req, &key);
+                    out.set(req, key, Value::string(value))?;
+                }
+                Ok(())
+            })();
+            // The array built so far is given up with the throw, as the
+            // VM frees the return value php's native leaves under one.
+            if let Err(thrown) = filled {
+                req.release(Value::array(out));
+                return Err(thrown);
             }
             Union::A(out)
         }
@@ -142,7 +152,14 @@ fn replace_common(
             Union::B(value)
         }
     };
-    counted.set(req, Untyped(Value::int(count)))?;
+    if let Err(thrown) = counted.set(req, Untyped(Value::int(count))) {
+        let made = match result {
+            Union::A(array) => Value::array(array),
+            Union::B(string) => Value::string(string),
+        };
+        req.release(made);
+        return Err(thrown);
+    }
     Ok(result)
 }
 

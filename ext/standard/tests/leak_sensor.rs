@@ -207,10 +207,12 @@ fn str_replace_gives_up_the_strings_it_reads() {
     let stdout = armed(
         "<?php $r = str_repeat('r', 20); $s = str_repeat('s', 2);\n\
          echo str_replace([$s, 'x', 7], [$r, 8, $r], 'ssx7'), \"\\n\";\n\
-         foreach (str_replace([$s, 'q'], $r, [-1 => -1, 'k' => 'ss', 3 => 1.5]) as $k => $v) { echo $k, '=', $v, \"\\n\"; }\n",
+         foreach (str_replace([$s, 'q'], $r, [-1 => -1, 'k' => 'ss', 3 => 1.5]) as $k => $v) { echo $k, '=', $v, \"\\n\"; }\n\
+         class T { function __toString(): string { throw new Exception('t'); } }\n\
+         try { str_replace('s', $r, [$s, new T]); } catch (Exception $e) { echo $e->getMessage(), \"\\n\"; }\n",
     );
     assert_eq!(
         stdout,
-        "rrrrrrrrrrrrrrrrrrrr8rrrrrrrrrrrrrrrrrrrr\n-1=-1\nk=rrrrrrrrrrrrrrrrrrrr\n3=1.5\n"
+        "rrrrrrrrrrrrrrrrrrrr8rrrrrrrrrrrrrrrrrrrr\n-1=-1\nk=rrrrrrrrrrrrrrrrrrrr\n3=1.5\nt\n"
     );
 }
