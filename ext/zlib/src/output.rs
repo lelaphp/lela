@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{PhpString, ValueRef};
+use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::encode::{DEFAULT_STRATEGY, MAX_MEM_LEVEL, size_guess};
@@ -144,15 +144,19 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
         let text = to_string(req, &value)?;
-        let text = text.as_bytes();
-        let has = |word: &[u8]| text.windows(word.len()).any(|w| w == word);
-        globals(req).coding = if has(b"gzip") {
+        let has = |word: &[u8]| text.as_bytes().windows(word.len()).any(|w| w == word);
+        let coding = if has(b"gzip") {
             Coding::Gzip
         } else if has(b"deflate") {
             Coding::Deflate
         } else {
             Coding::None
         };
+        // `convert_to_string(enc)` converts the element in place and
+        // takes no owner; the string `to_string` answered with one is
+        // given up.
+        req.release(Value::string(text));
+        globals(req).coding = coding;
     }
     Ok(globals(req).coding)
 }
