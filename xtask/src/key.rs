@@ -63,7 +63,7 @@ use crate::git::{self, Index, Stamp};
 /// Every key is the one the tree hash over the files on disk gave before
 /// #2163, byte for byte: the blob id of each file under the scope and its
 /// closure, then the blob id of the sorted `<id> <path>` listing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Snapshot {
     root: PathBuf,
     /// `HEAD`'s short id when the snapshot was taken, the stamp's commit.
@@ -78,6 +78,10 @@ pub struct Snapshot {
     /// content: a key asked of a path outside them is refused, since the
     /// files it would hash were never read ([`Snapshot::disk_over`]).
     covers: Option<Vec<PathBuf>>,
+    /// Each key asked of the snapshot, by path: a run that stamps one
+    /// scope twice, as `done` stamps the workspace for its verdict and
+    /// holds its ticket's reading to it, hashes the listing once.
+    keys: Mutex<BTreeMap<PathBuf, String>>,
 }
 
 /// The commits read in this process, by root and id: a commit's files
@@ -147,6 +151,7 @@ impl Snapshot {
             files: files.into_iter().collect(),
             tracked: tracked.into_iter().collect(),
             covers: Some(covers),
+            keys: Mutex::default(),
         })
     }
 
@@ -237,6 +242,7 @@ impl Snapshot {
             files,
             tracked: on_disk,
             covers: None,
+            keys: Mutex::default(),
         })
     }
 
@@ -251,6 +257,7 @@ impl Snapshot {
             tracked: files.clone(),
             files,
             covers: None,
+            keys: Mutex::default(),
         })
     }
 
@@ -281,6 +288,7 @@ impl Snapshot {
             tracked: files.clone(),
             files,
             covers: None,
+            keys: Mutex::default(),
         });
         if let Ok(mut held) = read.lock() {
             held.insert(at, Arc::clone(&snapshot));
@@ -300,7 +308,14 @@ impl Snapshot {
     /// manifest, the one kind of path it can widen. A path outside what a
     /// [`Snapshot::disk_over`] was read under is refused.
     pub fn key(&self, path: &Path) -> Result<String> {
-        self.over(&closure(&self.root, path)?)
+        if let Some(key) = self.keys.lock().ok().and_then(|k| k.get(path).cloned()) {
+            return Ok(key);
+        }
+        let key = self.over(&closure(&self.root, path)?)?;
+        if let Ok(mut keys) = self.keys.lock() {
+            keys.insert(path.to_path_buf(), key.clone());
+        }
+        Ok(key)
     }
 
     /// The stamp of the sources under `path`: its key, and the commit
