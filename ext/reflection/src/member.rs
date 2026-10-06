@@ -899,7 +899,7 @@ impl ReflectionProperty {
                 .this()
                 .and_then(|this| kept_class(req, this))
                 .unwrap_or(class);
-            req.addref(&value);
+            let value = Owner::take(req, value);
             write_static_prop(req, asked, &name, value)?;
             return Ok(());
         }
