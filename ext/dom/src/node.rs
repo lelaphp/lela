@@ -1135,13 +1135,12 @@ fn clone_node_of(req: &mut Request, this: PhpObject, recursive: bool) -> Result<
         if is_document {
             let mut private = Private::new(req)?;
             let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
+                private.free(req);
                 return Ok(Value::bool(false));
             };
-            let copy = crate::modern::document_object(req, modern_document_class(n), node)?;
+            let copy =
+                crate::modern::document_object(req, modern_document_class(n), node, private)?;
             copy_document_ref(req, this, copy);
-            if let Some(d) = crate::dom_mut(req, copy) {
-                d.obj.set_private_data(Box::new(private));
-            }
             return Ok(copy.as_value());
         }
         let cloned = match crate::dom_mut(req, this).and_then(|d| crate::private::of(&mut d.obj)) {

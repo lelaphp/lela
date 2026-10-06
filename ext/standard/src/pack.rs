@@ -103,7 +103,6 @@ fn put_long(out: &mut [u8], value: i64, size: usize, big: bool) {
 ///   - Return [ array|false ]
 /// }
 /// ```
-#[allow(clippy::too_many_lines)]
 #[php_function]
 fn pack(
     req: &mut Request,
@@ -111,7 +110,27 @@ fn pack(
     values: Variadic<Value>,
 ) -> Result<PhpString, Thrown> {
     let mut argv = values.0;
+    let mut converted = Vec::new();
     let format = format.as_bytes().to_vec();
+    let packed = packed(req, &format, &mut argv, &mut converted);
+    for at in converted {
+        req.release(argv[at]);
+    }
+    packed
+}
+
+/// `pack`'s three passes over `argv`. An argument a `*` count reads
+/// whole is converted where it stands, as php's `try_convert_to_string`
+/// converts the frame's slot, and its index is pushed onto `converted`:
+/// the string is the native's to give up once the passes are done,
+/// whichever way they end, as the frame's slot is php's.
+#[allow(clippy::too_many_lines)]
+fn packed(
+    req: &mut Request,
+    format: &[u8],
+    argv: &mut [Value],
+    converted: &mut Vec<usize>,
+) -> Result<PhpString, Thrown> {
     let num_args = argv.len();
     // Pass one: the codes and their counts.
     let mut codes: Vec<(u8, i64)> = Vec::new();
@@ -127,7 +146,7 @@ fn pack(
                 arg = -1;
                 i += 1;
             } else if c.is_ascii_digit() {
-                arg = atoi(&format, i);
+                arg = atoi(format, i);
                 while i < format.len() && format[i].is_ascii_digit() {
                     i += 1;
                 }
@@ -154,6 +173,7 @@ fn pack(
                     // it stands, so the packing pass reads the string.
                     let s = to_string(req, &argv[currentarg].deref())?;
                     argv[currentarg] = Value::string(s);
+                    converted.push(currentarg);
                     arg = i64::try_from(s.len()).unwrap_or(INT_MAX);
                     if code == b'Z' {
                         arg += 1;
@@ -255,17 +275,16 @@ fn pack(
                     count
                 };
                 let value = next_value(&mut current);
-                let s = to_string(req, &value)?;
+                let s = crate::tmp_string_bytes(req, &value)?;
                 let pad = if code == b'A' { b' ' } else { 0 };
                 out[pos..pos + count].fill(pad);
                 let n = s.len().min(copy);
-                out[pos..pos + n].copy_from_slice(&s.as_bytes()[..n]);
+                out[pos..pos + n].copy_from_slice(&s[..n]);
                 pos += count;
             }
             b'h' | b'H' => {
                 let value = next_value(&mut current);
-                let s = to_string(req, &value)?;
-                let digits = s.as_bytes();
+                let digits = crate::tmp_string_bytes(req, &value)?;
                 let mut left = count;
                 if left > digits.len() {
                     docref(

@@ -231,3 +231,21 @@ echo implode(',', [new A, 2.5, new A]), ' ', implode([1.5]), "\n";
     );
     assert_eq!(stdout, "aaa,2.5,aaa 1.5\n");
 }
+
+/// `pack` gives up the string each `a`, `A`, `Z`, `h` and `H` code
+/// reads, as php's `zend_tmp_string_release`, and the string a `*`
+/// count converted its argument to where it stood, as php's frame gives
+/// up its slot (#2095).
+#[test]
+fn pack_gives_up_the_strings_it_reads() {
+    let stdout = armed(
+        "<?php $s = str_repeat('s', 2); $h = str_repeat('4', 2);\n\
+         echo bin2hex(pack('a4A*Z*h*H2', $s, $s, $s, $h, $h)), \"\\n\";\n\
+         echo pack('a*', 12.5), \"\\n\";\n\
+         try { pack('a*C', $s); } catch (ValueError $e) { echo $e->getMessage(), \"\\n\"; }\n",
+    );
+    assert_eq!(
+        stdout,
+        "7373000073737373004444\n12.5\nType C: too few arguments\n"
+    );
+}
