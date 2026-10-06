@@ -468,9 +468,10 @@ impl Request {
     /// space, the request's own or the published arena's (design §5.14),
     /// an enum's own `cases`, `from` and `tryFrom` the functions that
     /// serve them, and `record`, or else the record made over the table
-    /// as it stands. The two are one class but where the preload
-    /// publishes a class of its request's. None where the arena has no
-    /// room for its functions.
+    /// as it stands. `from` and `class` are the same class except where
+    /// the preload publishes a class its request declared: `from` the
+    /// request's own number, `class` the published one. None where the
+    /// arena has no room for its functions.
     pub(super) fn bound_as(
         &mut self,
         from: ClassId,

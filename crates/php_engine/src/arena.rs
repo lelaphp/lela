@@ -13,11 +13,15 @@
 //! with [`Column::fill`]. A request reads a row with [`Column::get`]: two
 //! acquire loads and nothing taken, as php reads a `zend_class_entry *` from
 //! shared memory. A row is found once it is filled and only then, and a
-//! number is handed out only after its row is filled, so whatever
+//! publisher hands a number on only after its row is filled, so whatever
 //! carried the number to a request (the preload's tables, the unit
-//! cache) carried the row with it. No row is written after it is
-//! filled, freed or reused while the arena stands; an opcache restart
-//! replaces the arena once no request holds it (#2184).
+//! cache) carried the row with it. A number reserved by a publication
+//! that failed is never filled: a hole no request is handed, which the
+//! restart counts as waste. No row is written after its number is
+//! handed on, nor freed or reused while the arena stands: what a class
+//! builds once and keeps (its placed properties) its publisher builds
+//! before handing the number on. An opcache restart replaces the arena
+//! once no request holds it (#2184).
 //!
 //! Nothing here is `unsafe`: the slots are `OnceLock`s, so a row is
 //! `Sync` where its type is, and the segments never reallocate, so a
@@ -35,8 +39,10 @@ use crate::enums::EnumMethod;
 /// holds twice the one before.
 const FIRST: usize = 64;
 
-/// How many segments a column has room for: enough that the last one
-/// ends past the most rows a number can name, `1 << 29`.
+/// How many segments a column has room for: 24 hold
+/// `FIRST * ((1 << 24) - 1)` rows, past the `1 << 29` a function's
+/// number can name; a class's could name more, and its column is held
+/// to what the segments hold ([`Column::below`]).
 const SEGMENTS: usize = 24;
 
 /// One kind of row of the arena, numbered from zero in the order its
@@ -60,12 +66,15 @@ fn locate(at: u32) -> Option<(usize, usize)> {
 }
 
 impl<T> Column<T> {
-    /// An empty column whose numbers stay below `limit`.
+    /// An empty column whose numbers stay below `limit`, and below the
+    /// rows its segments hold.
     fn below(limit: u32) -> Column<T> {
+        let held = FIRST.saturating_mul((1 << SEGMENTS) - 1);
+        let held = u32::try_from(held).unwrap_or(u32::MAX);
         Column {
             segments: std::array::from_fn(|_| OnceLock::new()),
             reserved: AtomicU32::new(0),
-            limit,
+            limit: limit.min(held),
         }
     }
 

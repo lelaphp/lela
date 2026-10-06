@@ -548,7 +548,8 @@ pub(crate) enum MemberAt {
 /// holds its declaration and the declaration's index there, for a class
 /// that uses traits the class composed with them at its link, which is
 /// the table's row in its place (`zend_do_bind_traits`); beside them its
-/// placed properties, once read ([`Request::placed_properties`]), and
+/// placed properties, once read ([`Request::placed_properties`]), or
+/// for a published class once its publisher built them, and
 /// what binding it settled ([`Bound`]). Where it stands in
 /// `EG(class_table)` is the table's ([`Named`]), not the row's.
 pub(crate) struct Declared {

@@ -177,8 +177,9 @@ impl Request {
     /// The place of a native among the natives, in one count from zero:
     /// a native function or method at its own number, which is dense
     /// from zero, and an enum's method after them at its place among
-    /// the published enums' methods and the request's; none for any other function, a user
-    /// one, a call's trampoline or `zend_pass_function`. Where php's
+    /// the published enums' methods and the request's; none for any
+    /// other function, a user one, a call's trampoline or
+    /// `zend_pass_function`. Where php's
     /// internal runtime cache gives each native its own extension slot
     /// (`zend_observer_fcall_internal_function_extension`).
     pub(super) fn native_place(&self, function: Function) -> Option<usize> {

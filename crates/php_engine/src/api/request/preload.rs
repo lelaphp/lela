@@ -120,22 +120,10 @@ impl<T> Keyed<T> {
         self.own.push(row);
     }
 
-    /// The request's own rows, taken out with their keys, each beside
-    /// its key.
-    fn take_own(&mut self) -> Vec<(Box<[u8]>, T)> {
-        let first = self.preloaded.len();
-        let mut keys: Vec<(usize, Box<[u8]>)> = std::mem::take(&mut self.own_keys)
-            .into_iter()
-            .map(|(key, at)| (at, key))
-            .collect();
-        keys.sort_by_key(|(at, _)| *at);
-        let mut rows: Vec<Option<T>> = std::mem::take(&mut self.own)
-            .into_iter()
-            .map(Some)
-            .collect();
-        keys.into_iter()
-            .filter_map(|(at, key)| Some((key, rows.get_mut(at.checked_sub(first)?)?.take()?)))
-            .collect()
+    /// The request's own rows and their keys, given up.
+    fn clear_own(&mut self) {
+        self.own.clear();
+        self.own_keys.clear();
     }
 }
 
@@ -649,6 +637,10 @@ impl Request {
         let mut renumbered: HashMap<ClassId, ClassId> = HashMap::new();
         for local in self.publication_order(rows) {
             let published = self.publish_class(local, &renumbered)?;
+            // `zend_build_properties_info_table` at the link: the placed
+            // properties built before any request is handed the number,
+            // so no request writes the published row.
+            let _ = self.placed_properties(published);
             renumbered.insert(local, published);
         }
         let shared = |class: ClassId| renumbered.get(&class).copied().unwrap_or(class);
@@ -695,8 +687,8 @@ impl Request {
             }
             published.push(function);
         }
-        let _ = self.declared.take_own();
-        let _ = self.aliases.take_own();
+        self.declared.clear_own();
+        self.aliases.clear_own();
         self.own_classes.clear();
         self.enum_functions.clear();
         Ok(Published {
@@ -982,6 +974,11 @@ mod tests {
                             return Err(String::from("the request stopped listening"));
                         }
                     }
+                    // Every number published so far still names its
+                    // class, however many the request declared meanwhile.
+                    for (class, name) in &published {
+                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                    }
                 }
                 Ok(published)
             });
@@ -1080,6 +1077,13 @@ mod tests {
         assert_eq!(order, ["C", "T", "P"]);
         let child = names.first().map(|(class, _)| *class);
         assert!(child.is_some_and(ClassId::is_published));
+        for (class, name) in &names {
+            let row = req.arena.class(*class);
+            assert!(
+                row.is_some_and(|row| row.placed.get().is_some()),
+                "{name}'s placed properties"
+            );
+        }
         for method in [&b"t"[..], b"p"] {
             let found = child.and_then(|child| req.method_named(child, method));
             assert!(found.is_some_and(|found| req.user_function(found).is_some()));
