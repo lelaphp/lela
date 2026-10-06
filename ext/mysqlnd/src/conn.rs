@@ -272,22 +272,18 @@ impl ConnData {
     }
 
     /// `send_command_handle_OK`.
-    pub(crate) fn handle_ok(
-        &mut self,
-        req: &mut Request,
-        ignore_upsert: bool,
-    ) -> Result<bool, Thrown> {
-        let Some(ok) = self.read_ok(req)? else {
+    pub(crate) fn handle_ok(&mut self, req: &mut Request, ignore_upsert: bool) -> bool {
+        let Some(ok) = self.read_ok(req) else {
             if self.error.errno != cr::SERVER_GONE_ERROR {
                 self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
             }
-            return Ok(false);
+            return false;
         };
         if let Some(e) = ok.error {
             e.set_on(&mut self.error);
             self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
             self.upsert.affected_rows_to_error();
-            return Ok(false);
+            return false;
         }
         self.last_message = ok.message;
         if !ignore_upsert {
@@ -297,14 +293,14 @@ impl ConnData {
             self.upsert.affected_rows = ok.affected_rows;
             self.upsert.last_insert_id = ok.last_insert_id;
         }
-        Ok(true)
+        true
     }
 
     /// `send_command_handle_EOF`.
-    pub(crate) fn handle_eof(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        let Some(eof) = self.read_eof(req)? else {
+    pub(crate) fn handle_eof(&mut self, req: &mut Request) -> bool {
+        let Some(eof) = self.read_eof(req) else {
             self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
-            return Ok(false);
+            return false;
         };
         if let Some(e) = eof.error {
             e.set_on(&mut self.error);
@@ -320,7 +316,7 @@ impl ConnData {
                 ),
             );
         }
-        Ok(true)
+        true
     }
 
     /// `send_command_handle_response`: the OK or EOF read, and php's
@@ -332,11 +328,11 @@ impl ConnData {
         silent: bool,
         command: Com,
         ignore_upsert: bool,
-    ) -> Result<bool, Thrown> {
+    ) -> bool {
         let ok = if eof {
-            self.handle_eof(req)?
+            self.handle_eof(req)
         } else {
-            self.handle_ok(req, ignore_upsert)?
+            self.handle_ok(req, ignore_upsert)
         };
         if !silent && self.error.errno == cr::MALFORMED_PACKET {
             docref(
@@ -349,7 +345,7 @@ impl ConnData {
                 ),
             );
         }
-        Ok(ok)
+        ok
     }
 
     /// A command and its OK, `mysqlnd_command`'s common shape.
@@ -361,7 +357,7 @@ impl ConnData {
         silent: bool,
     ) -> Result<bool, Thrown> {
         Ok(self.send_command(req, command, arg, silent)?
-            && self.handle_response(req, false, silent, command, true)?)
+            && self.handle_response(req, false, silent, command, true))
     }
 
     // ---- connecting
@@ -552,7 +548,7 @@ impl ConnData {
         db: &[u8],
         flags: u32,
     ) -> Result<bool, Thrown> {
-        let Some(greet) = self.read_greet(req)? else {
+        let Some(greet) = self.read_greet(req) else {
             docref(
                 req,
                 Level::Warning,
@@ -678,7 +674,7 @@ impl ConnData {
         stmt: Option<&mut Option<Box<Res>>>,
     ) -> Result<bool, Thrown> {
         self.upsert.affected_rows_to_error();
-        let Some(header) = self.read_rset_header(req)? else {
+        let Some(header) = self.read_rset_header(req) else {
             if self.error.errno != cr::SERVER_GONE_ERROR
                 && self.error.errno != cr::CLIENT_INTERACTION_TIMEOUT
             {
@@ -731,7 +727,7 @@ impl ConnData {
                 self.stats.inc(Stat::NonRsetQuery);
                 Ok(true)
             }
-            RsetHeader::Fields(count) => self.read_fields_header(req, count, stmt),
+            RsetHeader::Fields(count) => Ok(self.read_fields_header(req, count, stmt)),
         }
     }
 
@@ -743,7 +739,7 @@ impl ConnData {
         req: &mut Request,
         count: u64,
         mut stmt: Option<&mut Option<Box<Res>>>,
-    ) -> Result<bool, Thrown> {
+    ) -> bool {
         self.error.errno = 0;
         self.last_message = None;
         self.stats.inc(Stat::RsetQuery);
@@ -760,17 +756,17 @@ impl ConnData {
                 _ => Box::new(Res::new(count)),
             },
         };
-        if !result.read_metadata(req, self)? {
+        if !result.read_metadata(req, self) {
             if let Some(held) = stmt {
                 *held = Some(result);
             }
-            return Ok(false);
+            return false;
         }
-        let Some(eof) = self.read_eof(req)? else {
+        let Some(eof) = self.read_eof(req) else {
             if let Some(held) = stmt {
                 *held = None;
             }
-            return Ok(false);
+            return false;
         };
         self.upsert.warning_count = eof.warning_count;
         self.upsert.server_status = eof.server_status;
@@ -790,7 +786,7 @@ impl ConnData {
             Some(held) => *held = Some(result),
             None => self.current_result = Some(result),
         }
-        Ok(true)
+        true
     }
 
     /// `mysqlnd_conn_data::more_results`.
@@ -839,22 +835,18 @@ impl ConnData {
     }
 
     /// `mysqlnd_conn_data::store_result`.
-    pub(crate) fn store(&mut self, req: &mut Request) -> Result<Option<Box<Res>>, Thrown> {
-        if self.current_result.is_none() {
-            return Ok(None);
-        }
+    pub(crate) fn store(&mut self, req: &mut Request) -> Option<Box<Res>> {
+        self.current_result.as_ref()?;
         if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
             self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
-            return Ok(None);
+            return None;
         }
         self.stats.inc(Stat::BufferedSets);
-        let Some(mut result) = self.current_result.take() else {
-            return Ok(None);
-        };
-        if !result.store(req, self, false)? {
-            return Ok(None);
+        let mut result = self.current_result.take()?;
+        if !result.store(req, self, false) {
+            return None;
         }
-        Ok(Some(result))
+        Some(result)
     }
 
     // ---- the other commands
@@ -862,7 +854,7 @@ impl ConnData {
     /// `mysqlnd_command::init_db`.
     pub(crate) fn select_db(&mut self, req: &mut Request, db: &[u8]) -> Result<bool, Thrown> {
         let ok = self.send_command(req, Com::InitDb, db, false)?
-            && self.handle_response(req, false, false, Com::InitDb, true)?;
+            && self.handle_response(req, false, false, Com::InitDb, true);
         self.upsert.affected_rows_to_error();
         Ok(ok)
     }
@@ -870,7 +862,7 @@ impl ConnData {
     /// `mysqlnd_command::ping`.
     pub(crate) fn ping(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         let ok = self.send_command(req, Com::Ping, &[], true)?
-            && self.handle_response(req, false, true, Com::Ping, true)?;
+            && self.handle_response(req, false, true, Com::Ping, true);
         self.upsert.affected_rows_to_error();
         Ok(ok)
     }
@@ -880,7 +872,7 @@ impl ConnData {
         if !self.send_command(req, Com::Statistics, &[], false)? {
             return Ok(None);
         }
-        self.read_stats(req)
+        Ok(self.read_stats(req))
     }
 
     /// `mysqlnd_conn_data::kill`: killing one's own connection reads no
@@ -889,8 +881,7 @@ impl ConnData {
         let read_response = u64::from(pid) != self.thread_id;
         let sent = self.send_command(req, Com::ProcessKill, &pid.to_le_bytes(), false)?;
         let ok = sent
-            && (!read_response
-                || self.handle_response(req, false, false, Com::ProcessKill, true)?);
+            && (!read_response || self.handle_response(req, false, false, Com::ProcessKill, true));
         if read_response {
             self.upsert.affected_rows_to_error();
         } else if sent {
@@ -924,13 +915,13 @@ impl ConnData {
     ) -> Result<bool, Thrown> {
         let arg = (option as u16).to_le_bytes();
         Ok(self.send_command(req, Com::SetOption, &arg, false)?
-            && self.handle_response(req, true, false, Com::SetOption, true)?)
+            && self.handle_response(req, true, false, Com::SetOption, true))
     }
 
     /// `mysqlnd_command::debug`: `COM_DEBUG`, answered by an EOF.
     pub(crate) fn debug(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         Ok(self.send_command(req, Com::Debug, &[], false)?
-            && self.handle_response(req, true, false, Com::Debug, true)?)
+            && self.handle_response(req, true, false, Com::Debug, true))
     }
 
     /// `mysqlnd_command::refresh`.
@@ -1152,7 +1143,7 @@ impl ConnData {
     /// `mysqlnd_conn_data::free_contents`.
     pub(crate) fn free_contents(&mut self, req: &mut Request) {
         if let Some(mut result) = self.current_result.take() {
-            let _ = result.free(req, self, true);
+            result.free(req, self, true).ok();
         }
         self.net.close(req);
         self.scheme = None;

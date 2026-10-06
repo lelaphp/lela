@@ -84,11 +84,11 @@ pub(crate) fn handle(
     }
     if !ok {
         conn.net.send(req, &[], &mut conn.stats, &mut conn.error);
-        conn.handle_response(req, false, false, Com::Query, false)?;
+        conn.handle_response(req, false, false, Com::Query, false);
         return Ok((false, true));
     }
     let (passed, warning) = send_file(req, conn, filename)?;
-    let answered = conn.handle_response(req, false, false, Com::Query, false)?;
+    let answered = conn.handle_response(req, false, false, Com::Query, false);
     Ok((passed && answered, warning))
 }
 
@@ -134,27 +134,19 @@ fn send_file(
         ));
     };
     let mut failed_read = false;
+    // `mysqlnd_local_infile_read`'s `php_stream_read` into the buffer
+    // the loop sends from, with no string of the request's between.
+    let mut buf = [0; CHUNK];
     loop {
-        let chunk = match stream.read(req, CHUNK) {
-            Ok(Some(chunk)) => {
-                let bytes = chunk.as_bytes().to_vec();
-                chunk.give_up(req);
-                if bytes.is_empty() {
-                    break;
-                }
-                bytes
-            }
-            Ok(None) => {
+        let chunk = match stream.read_into(req, &mut buf) {
+            Some(0) => break,
+            Some(read) => &buf[..read],
+            None => {
                 failed_read = true;
                 break;
             }
-            Err(thrown) => {
-                stream.close(req);
-                stream.give_up(req);
-                return Err(thrown);
-            }
         };
-        if conn.net.send(req, &chunk, &mut conn.stats, &mut conn.error) == 0 {
+        if conn.net.send(req, chunk, &mut conn.stats, &mut conn.error) == 0 {
             conn.error.client(cr::SERVER_LOST, LOST_CONN);
             stream.close(req);
             stream.give_up(req);

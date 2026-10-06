@@ -767,7 +767,10 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             // object is cast as it stands.
             let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
                 PropertiesFor::Rows(rows) => rows,
-                PropertiesFor::Standard => req.properties_no_lazy_init(o)?,
+                PropertiesFor::Standard => match object_symtable(req, o)? {
+                    Some(array) => return Ok(array),
+                    None => req.properties_no_lazy_init(o)?,
+                },
                 // `zend_get_properties_for` answering `NULL`:
                 // `ZVAL_EMPTY_ARRAY` (`Z/Zend/zend_execute.h:280`).
                 PropertiesFor::Null => return Ok(PhpArray::empty()),
@@ -818,10 +821,10 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// ```
 ///
 /// php hands the object's own table back where it can
-/// (`zend_proptable_to_symtable`), and duplicates it where the class
-/// declares a property or has handlers of its own; a duplicate holds a
-/// reference nothing else holds as its value (`zend_array_dup_element`),
-/// so the cast of a property bound by reference once is no reference:
+/// ([`object_symtable`]), and copies it where the class declares a
+/// property, has handlers of its own or is inside a walk of itself; a
+/// copy holds each row as [`Request::dup_value`] holds an element, so
+/// the cast of a property bound by reference once is no reference:
 ///
 /// ```php
 /// class Foo { public $foo; }
@@ -841,17 +844,23 @@ pub(crate) fn mangled_array(
     rows: Vec<(Key, Value)>,
 ) -> Result<PhpArray, Thrown> {
     let mangled = mangled_names(req, object);
-    let duplicate = !mangled.is_empty() || req.own_handlers(object.class()).is_some();
+    let source = object.heap().properties();
+    let duplicate = !mangled.is_empty()
+        || req.own_handlers(object.class()).is_some()
+        || source.is_some_and(|table| table.is_recursive());
     let mut array = req.array()?;
     let mut at = 0;
     for (key, entry) in rows {
-        let entry = match entry.as_ref() {
-            ValueRef::Reference(cell) if duplicate && cell.heap().refcount() == 1 => entry.deref(),
-            _ => entry,
+        // The table php hands on as it stands holds each row as it is;
+        // a copy of it holds each as its copy does.
+        let entry = if duplicate {
+            req.dup_value(entry, source)
+        } else {
+            req.addref(&entry);
+            entry
         };
         let name = match key {
             Key::Int(n) => {
-                req.addref(&entry);
                 array.set(req, Key::Int(n), entry)?;
                 continue;
             }
@@ -864,10 +873,53 @@ pub(crate) fn mangled_array(
             req.addref(&Value::string(name));
             Key::from_string(name)
         };
-        req.addref(&entry);
         array.set(req, key, entry)?;
     }
     Ok(array)
+}
+
+/// `zend_proptable_to_symtable` over the object's own table where php
+/// hands that table on (`Z/Zend/zend_execute.h:274`,
+/// `Z/Zend/zend_builtin_functions.c:855`, `:939`): an object of no lazy
+/// kind whose class declares no property and answers the standard
+/// `get_properties`, with a table no walk of itself is inside
+/// (`GC_IS_RECURSIVE`). The table itself with one more owner, so the
+/// `(array)` cast, `get_object_vars()` and `get_mangled_object_vars()`
+/// cost what php's do; a copy of it where the class's handlers are its
+/// own (`always_duplicate`), and a converted one where a name reads as
+/// an integer ([`Request::proptable_to_symtable`]). `None` where the
+/// table is not all php's would hold, which [`mangled_array`] builds
+/// from the rows.
+///
+/// ```php
+/// $o = new stdClass; $o->a = str_repeat('a', 40);
+/// $m = memory_get_usage(); $x = (array) $o; $y = get_object_vars($o); $z = get_mangled_object_vars($o); echo memory_get_usage() - $m, "\n";
+/// #[AllowDynamicProperties] class D { public $d = 1; }
+/// $d = new D; $d->e = 2;
+/// $m = memory_get_usage(); $w = (array) $d; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 0
+/// 376
+/// ```
+pub(crate) fn object_symtable(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Option<PhpArray>, Thrown> {
+    let o = object.heap();
+    let Some(table) = o.properties() else {
+        return Ok(None);
+    };
+    if o.slots() > 0
+        || o.laziness() != php_heap::Laziness::Eager
+        || table.is_recursive()
+        || req.object_handlers(o).properties_overloaded()
+    {
+        return Ok(None);
+    }
+    let always_duplicate = req.own_handlers(object.class()).is_some();
+    let array = req.proptable_to_symtable(table, always_duplicate)?;
+    Ok(Some(PhpArray::of(array)))
 }
 
 /// One declared instance property as `zend_mangle_property_name` reads
@@ -1762,10 +1814,13 @@ pub(crate) fn debug_rows(
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the
 /// `Z_TYPE_P(expr) == IS_OBJECT` arm of `ZEND_CAST` above it: an object
 /// is itself with one more owner; `null` is an empty `stdClass`; an
-/// array is a `stdClass` whose properties are its elements, an integer
-/// key spelt in decimal (`zend_symtable_to_proptable`), each value with
-/// one more owner; and a scalar or a resource is a `stdClass` with the
-/// one property `scalar` holding it, a NAN warning on the way. The
+/// array is a `stdClass` whose table is the array itself, one more
+/// owner of it, where its keys are all strings, and otherwise a copy of
+/// it with each integer key spelt in decimal
+/// ([`Request::properties_from_array`], whose witness holds the cast's
+/// `memory_get_usage()` delta to php's); and a scalar or a resource is
+/// a `stdClass` with the one property `scalar` holding it, a NAN
+/// warning on the way. The
 /// object handed back is the caller's to own, and the `Err` is the
 /// memory limit ending the request.
 ///
@@ -4603,7 +4658,7 @@ pub(crate) fn array_key_exists(
         ValueRef::Int(n) => return Ok(array.heap().contains(php_heap::Key::Long(n))),
         _ => {}
     }
-    let held = req.take_hold(Value::array(array));
+    let held = Owner::take(req, Value::array(array));
     let converted = match key.as_ref() {
         ValueRef::Undef => {
             undefined(req);
@@ -4618,7 +4673,7 @@ pub(crate) fn array_key_exists(
         }
         _ => array_offset(req, &key, false),
     };
-    if req.let_go(held).freed() {
+    if held.let_go(req).freed() {
         return Ok(false);
     }
     let key = converted?;
@@ -4714,9 +4769,9 @@ pub(crate) fn isset_dim(
     // `zend_find_array_dim_slow`: a handler that took the container's
     // last owner destroys the table, and the entry is then not found.
     let key = if offset.deref().as_float().is_some() {
-        let held = req.take_hold(array.to_value());
+        let held = Owner::take(req, array.to_value());
         let key = isset_offset(req, offset, constant);
-        if req.let_go(held).freed() {
+        if held.let_go(req).freed() {
             return key.map(|_| empty);
         }
         key?
@@ -4856,9 +4911,9 @@ pub(crate) fn unset_dim(
             // after it: a handler that unset the container took the last
             // owner, and the table is destroyed here rather than
             // deleted from.
-            let held = req.take_hold(array.to_value());
+            let held = Owner::take(req, array.to_value());
             let n = double_to_long(req, f);
-            if req.let_go(held).freed() || req.is_pending() {
+            if held.let_go(req).freed() || req.is_pending() {
                 return Ok(());
             }
             php_heap::Key::Long(n)
@@ -5178,7 +5233,7 @@ fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
         // `op_str = zend_string_copy(Z_STR_P(op))`: a handler the warning
         // reaches may give up the string's every other owner, and the
         // deprecation after it names the string.
-        let held = req.take_hold(Value::string(s));
+        let held = Owner::take(req, Value::string(s));
         if trailing {
             warning(req, "A non-numeric value encountered");
         }
@@ -5192,7 +5247,7 @@ fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
                 ),
             );
         }
-        req.let_go(held);
+        held.let_go(req);
         return Ok(Some(capped));
     }
     if let Some(b) = value.as_bool() {
@@ -5645,7 +5700,7 @@ mod tests {
             return Value::null();
         };
         for (k, v) in entries {
-            let _ = a.set(req, k, v);
+            a.set(req, k, v).ok();
         }
         Value::array(a)
     }

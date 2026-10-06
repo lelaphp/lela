@@ -86,11 +86,11 @@ fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
             Some(prefix) => {
                 let paths = lock.expand(prefix)?;
                 if paths.is_empty() {
-                    let _ = writeln!(
+                    writeln!(
                         out,
                         "    # {ty}: {} is not a Cargo.lock package at this revision; nothing to deny",
                         package_of(prefix)
-                    );
+                    ).ok();
                 }
                 paths
             }
@@ -113,12 +113,13 @@ fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
 
 /// One `{ path, reason }` row of a `disallowed-*` list.
 fn entry(out: &mut String, path: &str, reason: &str) {
-    let _ = writeln!(
+    writeln!(
         out,
         "    {{ path = {}, reason = {} }},",
         toml_string(path),
         toml_string(reason)
-    );
+    )
+    .ok();
 }
 
 fn toml_string(s: &str) -> String {

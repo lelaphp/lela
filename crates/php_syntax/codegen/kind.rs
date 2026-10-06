@@ -460,11 +460,11 @@ fn emit_enum(buf: &mut String, kinds: &Kinds) {
         } else {
             format!("`{symbol}`")
         };
-        let _ = writeln!(buf, "    /// {shown}\n    {variant},");
+        writeln!(buf, "    /// {shown}\n    {variant},").ok();
     }
     buf.push_str("    // --- keywords (case-insensitive; see `from_keyword`) ---\n");
     for (text, variant) in &kinds.keywords {
-        let _ = writeln!(buf, "    /// `{text}`\n    {variant},");
+        writeln!(buf, "    /// `{text}`\n    {variant},").ok();
     }
     buf.push_str("    // --- token classes ---\n");
     for (name, variant) in &kinds.classes {
@@ -476,17 +476,17 @@ fn emit_enum(buf: &mut String, kinds: &Kinds) {
                  /// contextual-keyword rules decide.\n",
             );
         } else {
-            let _ = writeln!(buf, "    /// Token class `<{name}>`.");
+            writeln!(buf, "    /// Token class `<{name}>`.").ok();
         }
-        let _ = writeln!(buf, "    {variant},");
+        writeln!(buf, "    {variant},").ok();
     }
     buf.push_str("    // --- extras: kinds the schema cannot express (see header) ---\n");
     for (variant, doc, _) in &kinds.extras {
-        let _ = writeln!(buf, "    /// {doc}\n    {variant},");
+        writeln!(buf, "    /// {doc}\n    {variant},").ok();
     }
     buf.push_str("    // --- nodes (schema order) ---\n");
     for (name, variant) in &kinds.nodes {
-        let _ = writeln!(buf, "    /// `{name}`\n    {variant},");
+        writeln!(buf, "    /// `{name}`\n    {variant},").ok();
     }
     buf.push_str("}\n\n");
 }
@@ -530,16 +530,17 @@ fn emit_impl(buf: &mut String, kinds: &Kinds) {
 }
 
 fn emit_range_predicate(buf: &mut String, name: &str, doc: &str, variants: &[&str]) {
-    let _ = writeln!(buf, "    /// {doc}");
+    writeln!(buf, "    /// {doc}").ok();
     if let (Some(first), Some(last)) = (variants.first(), variants.last()) {
-        let _ = writeln!(
+        writeln!(
             buf,
             "    pub fn {name}(self) -> bool {{\n        \
              (Self::{first} as u16..=Self::{last} as u16).contains(&(self as u16))\n    \
              }}"
-        );
+        )
+        .ok();
     } else {
-        let _ = writeln!(buf, "    pub fn {name}(self) -> bool {{ false }}");
+        writeln!(buf, "    pub fn {name}(self) -> bool {{ false }}").ok();
     }
 }
 
@@ -563,7 +564,7 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
         .collect();
     by_text.sort_by(|a, b| a.0.cmp(b.0));
     for (text, variant) in by_text {
-        let _ = writeln!(buf, "            \"{text}\" => Self::{variant},");
+        writeln!(buf, "            \"{text}\" => Self::{variant},").ok();
     }
     buf.push_str("            _ => return None,\n        };\n        Some(kind)\n    }\n");
 }

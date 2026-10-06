@@ -73,7 +73,7 @@ pub(crate) fn wrap(
     let object = match new_object(req, class) {
         Ok(object) => object,
         Err(thrown) => {
-            let _ = set.free(req, false);
+            set.free(req, false).ok();
             return Err(thrown);
         }
     };
@@ -186,19 +186,11 @@ pub(crate) fn fetch_object(
     // `"O|Ch"`: the class by `try_convert_to_string`, whose refusal is the
     // conversion's `Error` and not a `TypeError` of the parameter, before
     // the arguments are held.
-    let class = php_ext::coerce::to_string(req, &class.value())?;
-    let args = match args.hold(req) {
-        Ok(args) => args,
-        Err(thrown) => {
-            class.give_up(req);
-            return Err(thrown);
-        }
-    };
+    let class = crate::string_of(req, &class.value())?;
+    let args = args.hold(req)?;
     let args = given.then_some(args);
-    let target = autoload(req, class.as_bytes());
-    let given = String::from_utf8_lossy(class.as_bytes()).into_owned();
-    class.give_up(req);
-    let Some(target) = target? else {
+    let Some(target) = autoload(req, &class)? else {
+        let given = String::from_utf8_lossy(&class).into_owned();
         return Err(arg_type_error(
             req,
             on.at(2),
@@ -1066,7 +1058,7 @@ impl Props for ResultProps {
             .map(std::mem::take)
             .unwrap_or_default();
         if let Rows::Stored(set) | Rows::Used(set) = rows {
-            let _ = set.free(req, false);
+            set.free(req, false).ok();
         }
     }
 }

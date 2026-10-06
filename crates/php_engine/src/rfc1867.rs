@@ -822,7 +822,7 @@ fn parts(
             if let Some(path) = &temp_path
                 && cancel_upload != UPLOAD_ERROR_E
             {
-                let _ = std::fs::remove_file(path);
+                std::fs::remove_file(path).ok();
             }
             None
         } else {

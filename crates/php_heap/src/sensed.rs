@@ -54,6 +54,57 @@ pub(crate) enum Sensed {
     Unconsumed {
         site: &'static std::panic::Location<'static>,
     },
+    /// Blocks the heap still held where the request ended, once every
+    /// block of the request's lifetime was freed by name: how many, the
+    /// bytes its accounting counted in them, the first its walk met
+    /// (`zend_mm_check_leaks`), the name of the [`Origin`] it was
+    /// allocated for, and where allocations are traced, the frames that
+    /// allocated it (`zend_leak_info`'s `filename` and `lineno`).
+    Leak {
+        bytes: usize,
+        blocks: usize,
+        first: Held,
+        named: String,
+        trace: Option<String>,
+    },
+}
+
+/// One block a heap held where the request ended: where it stands and the
+/// bytes it takes, what php's `zend_leak_info` names first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub(crate) at: usize,
+    pub(crate) size: usize,
+}
+
+/// Whose code a debug build's heap allocates for: a number the engine
+/// gives the heap where an extension's native or lifecycle hook begins
+/// and takes back where it ends, its `module_number`, and which the heap
+/// keeps beside every block it hands out, so a block still held where
+/// the request ends is named with the extension that allocated it. It is
+/// what php's debug heap keeps as `__zend_filename` and `__zend_lineno`
+/// in each block's `zend_mm_debug_info` (`Z/Zend/zend_alloc.c:2311`),
+/// kept per extension rather than per line, and beside the block rather
+/// than in it, so `memory_get_usage()` reads what a release build's
+/// does, which is what the oracle's release build reads. The default is
+/// zero, `Core`'s number, which the engine's own code allocates under.
+/// One `u16`, so a chunk's zeroed table of them reads as `Core`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[repr(transparent)]
+pub struct Origin(u16);
+
+impl Origin {
+    /// The origin numbered `number`.
+    #[must_use]
+    pub const fn new(number: u16) -> Origin {
+        Origin(number)
+    }
+
+    /// Its number.
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        self.0
+    }
 }
 
 impl Sensed {
@@ -75,6 +126,21 @@ impl Sensed {
             )),
             Sensed::Unconsumed { site } => Fatal::Error(format!(
                 "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"
+            )),
+            Sensed::Leak {
+                bytes,
+                blocks,
+                first,
+                named,
+                trace,
+            } => Fatal::Error(format!(
+                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {named}{}",
+                if blocks == 1 { "block" } else { "blocks" },
+                first.size,
+                first.at,
+                trace
+                    .map(|trace| format!(" at:\n{trace}"))
+                    .unwrap_or_default()
             )),
         }
     }

@@ -15,7 +15,7 @@ fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
 /// [`debugged`] with `flags` on the line after `-qIb -n`.
 fn debugged_with(name: &str, flags: &[&str], source: &str, commands: &str) -> (String, String) {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
     let file = std::fs::canonicalize(&file).unwrap();
@@ -35,7 +35,7 @@ fn debugged_with(name: &str, flags: &[&str], source: &str, commands: &str) -> (S
         .write_all(commands.as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         file.display().to_string(),
@@ -46,7 +46,7 @@ fn debugged_with(name: &str, flags: &[&str], source: &str, commands: &str) -> (S
 /// `flags` over a program of `source`, with nothing on stdin.
 fn ran(name: &str, flags: &[&str], source: &str) -> (String, String, Option<i32>) {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_phpdbg"))
@@ -55,7 +55,7 @@ fn ran(name: &str, flags: &[&str], source: &str) -> (String, String, Option<i32>
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -237,7 +237,7 @@ fn initialized(
     stdin: &str,
 ) -> (String, String, String) {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
     let file = std::fs::canonicalize(&file).unwrap();
@@ -259,7 +259,7 @@ fn initialized(
         .write_all(stdin.as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         file.display().to_string(),
@@ -553,13 +553,13 @@ fn under_phpdbg_with(
     setup: &Setup<'_>,
 ) -> Served {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let dir = std::fs::canonicalize(&dir).unwrap();
     let file = dir.join("t.php");
     std::fs::write(&file, source).unwrap();
     for (path, text) in setup.files {
         let path = dir.join(path);
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).ok();
         std::fs::write(path, text).unwrap();
     }
     let init_file = dir.join("init");
@@ -583,7 +583,7 @@ fn under_phpdbg_with(
     let mut input = child.stdin.take().unwrap();
     let stdin = stdin.to_owned();
     let writer = std::thread::spawn(move || {
-        let _ = input.write_all(stdin.as_bytes());
+        input.write_all(stdin.as_bytes()).ok();
     });
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -605,7 +605,7 @@ fn under_phpdbg_with(
     });
     let err = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+        std::io::Read::read_to_end(&mut stderr, &mut bytes).ok();
         bytes
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -616,16 +616,16 @@ fn under_phpdbg_with(
         if std::time::Instant::now() > deadline
             || read.load(std::sync::atomic::Ordering::Relaxed) >= limit
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill().ok();
+            child.wait().ok();
             break None;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    let _ = writer.join();
+    writer.join().ok();
     let out = out.join().unwrap();
     let err = err.join().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     Served {
         out: String::from_utf8_lossy(&out).into_owned(),
         err: String::from_utf8_lossy(&err).into_owned(),

@@ -11,9 +11,9 @@ use std::process::{Command, Stdio};
 
 fn scratch(name: &str, source: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("php-process-stdin-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let path = dir.join(name);
-    let _ = std::fs::write(&path, source);
+    std::fs::write(&path, source).ok();
     path
 }
 
@@ -29,7 +29,7 @@ fn php(stdin: &str, words: &[&str]) -> (String, i32) {
         .spawn()
         .unwrap_or_else(|e| panic!("running php: {e}"));
     if let Some(mut pipe) = child.stdin.take() {
-        let _ = pipe.write_all(stdin.as_bytes());
+        pipe.write_all(stdin.as_bytes()).ok();
     }
     let out = child
         .wait_with_output()

@@ -59,12 +59,22 @@ pub(super) struct Progress {
     /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
     /// names a diagnostic's origin by when no function is active.
     phase: Phase,
+    /// `CG(unclean_shutdown)`: a fatal's `zend_bailout` was served, so
+    /// the request ends without the frames it never unwound, and a debug
+    /// build's shutdown collection and request leak sensor stay silent, as
+    /// php's `zend_mm_shutdown` is told to be (`Z/main/main.c:2050`).
+    /// Nothing reads it in a release build, which keeps php's fast
+    /// teardown, so only a debug build keeps it.
+    #[cfg(debug_assertions)]
+    unclean: bool,
 }
 
 impl Default for Progress {
     fn default() -> Progress {
         Progress {
             phase: Phase::Startup,
+            #[cfg(debug_assertions)]
+            unclean: false,
         }
     }
 }
@@ -183,12 +193,23 @@ impl Request {
         self.end_at_level(level, message, &file, line);
     }
 
+    /// `CG(unclean_shutdown)`: whether a fatal's `zend_bailout` was
+    /// served in this request ([`Progress`]).
+    #[cfg(debug_assertions)]
+    pub(super) fn unclean_shutdown(&self) -> bool {
+        self.progress.unclean
+    }
+
     /// `zend_bailout` under way, the fatal already rendered: every frame
     /// still open to an observer ended with no value while the frames
     /// still stand ([`crate::observer::end_all`]), since the serving that
     /// catches the fatal pops them on its way out.
     pub(super) fn leave_by_zend_bailout(&mut self) {
         self.bailout = true;
+        #[cfg(debug_assertions)]
+        {
+            self.progress.unclean = true;
+        }
         crate::observer::end_all(self);
     }
 

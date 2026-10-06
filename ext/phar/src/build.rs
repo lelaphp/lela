@@ -401,11 +401,11 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
             a.is_temporary_alias = old_temp;
         }
         if readd && let Some(old) = old {
-            let _ = table.alias_map.add(&old, id);
+            table.alias_map.add(&old, id).ok();
         }
         return Err(throw(req, "PharException", &error));
     }
-    let _ = archives(req).alias_map.add(alias, id);
+    archives(req).alias_map.add(alias, id).ok();
     Ok(())
 }
 
@@ -597,7 +597,7 @@ pub(crate) fn unlink_archive(req: &mut Request, name: &[u8]) -> Result<(), Throw
     let fname = fname_of(req, id);
     archives(req).last = None;
     archive::delref(req, id);
-    let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(&fname));
+    std::fs::remove_file(std::ffi::OsStr::from_bytes(&fname)).ok();
     Ok(())
 }
 

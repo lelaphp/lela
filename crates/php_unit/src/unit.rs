@@ -126,7 +126,7 @@ impl Unit {
         let shared = Arc::new(self);
         // A unit is published once; a clone published again keeps the
         // first binding, the cell being the clone's too.
-        let _ = shared.cell.0.set(Arc::downgrade(&shared));
+        shared.cell.0.set(Arc::downgrade(&shared)).ok();
         shared
     }
 }

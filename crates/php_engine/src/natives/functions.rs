@@ -430,9 +430,11 @@ fn get_defined_functions(
 }
 
 /// `get_defined_vars(): array`, php's `ZEND_FUNCTION(get_defined_vars)`
-/// (`Z/Zend/zend_builtin_functions.c:1528`): the calling frame's symbol
-/// table, rebuilt for a function frame that has none, copied: every
-/// variable that holds a value, a reference kept as one.
+/// (`Z/Zend/zend_builtin_functions.c:1517`): the calling frame's symbol
+/// table, rebuilt for a function frame that has none, copied as
+/// `zend_array_dup` copies it ([`Request::defined_vars`]): every
+/// variable that holds a value, a reference another variable shares
+/// kept as one.
 ///
 /// ```php
 /// function g() { return get_defined_vars(); }
@@ -450,6 +452,24 @@ fn get_defined_functions(
 ///   ["z"]=>
 ///   &int(1)
 /// }
+/// ```
+///
+/// A reference only the variable holds, what `sort()` leaves a variable
+/// it took and `extract()` one it bound to an array since gone, is
+/// copied as its value, so writing to the copy changes no variable:
+///
+/// ```php
+/// function f() {
+///     $a = [3, 1, 2]; sort($a);
+///     $src = ['b' => [1]]; extract($src, EXTR_REFS); unset($src);
+///     $vars = get_defined_vars(); $vars['a'][] = 9; $vars['b'][] = 9;
+///     var_dump(count($a), count($b));
+/// }
+/// f();
+/// ```
+/// ```expect
+/// int(3)
+/// int(1)
 /// ```
 #[php_function]
 fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {

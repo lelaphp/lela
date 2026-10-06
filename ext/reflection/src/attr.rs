@@ -678,9 +678,9 @@ impl ReflectionAttribute {
             return PhpString::new(req, out.as_bytes());
         }
         out.push_str(" {\n");
-        let _ = writeln!(out, "  - Arguments [{}] {{", kept.attribute.arguments.len());
+        writeln!(out, "  - Arguments [{}] {{", kept.attribute.arguments.len()).ok();
         for (at, argument) in kept.attribute.arguments.iter().enumerate() {
-            let _ = write!(out, "    Argument #{at} [ ");
+            write!(out, "    Argument #{at} [ ").ok();
             if let Some(name) = &argument.name {
                 out.push_str(&String::from_utf8_lossy(&name.0));
                 out.push_str(" = ");

@@ -94,6 +94,21 @@ impl Default for Constants {
 }
 
 impl Request {
+    /// The values of the rows this request added to `EG(zend_constants)`
+    /// given up, a debug build's teardown, as `zend_shutdown_executor_values`
+    /// destroys the request's constants before the object store
+    /// (`Z/Zend/zend_execute_API.c:286-307`), since a constant may hold an
+    /// object. A release build leaves them to the heap's mass release.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_constants(&mut self) {
+        for row in std::mem::take(&mut self.constants.constants)
+            .into_iter()
+            .rev()
+        {
+            self.release(row.value);
+        }
+    }
+
     /// `PHP_SAPI` as `php_module_startup` registers it: the engine's
     /// interned string for the host's name, where the engine has one.
     pub(super) fn register_sapi_constant(&mut self) {

@@ -8,8 +8,10 @@
 //! time limit suspended (#1814), allocations as an extension observes
 //! them (design §7.1), the statements a Zend extension is told of
 //! under extended info (#1823), and a debug build's freed-use guard
-//! as a program meets it (#1990), and the owner type as one
-//! meets it (#1995).
+//! (#1990) and request leak sensor (#1992) as a program meets them,
+//! the owner type as one meets it (#1995), a table copied as php
+//! copies it (#2005), and the callback walks as a native meets them
+//! (#1980).
 
 use crate::api;
 
@@ -18,6 +20,8 @@ mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]
 mod freed_use;
+#[cfg(debug_assertions)]
+mod leak_sensor;
 mod lifecycle;
 mod observer;
 mod observer_notices;
@@ -28,5 +32,8 @@ mod periodic;
 mod pool;
 mod statements;
 mod stepped;
+#[cfg(debug_assertions)]
+mod table_copy;
 pub(crate) mod test_ext;
 mod time_limit;
+mod walks;

@@ -273,7 +273,7 @@ impl Request {
     /// initialises a lazy object, whose instance's table is then the one
     /// the pointer moves over, and at `DateInterval` writes the fields
     /// into it. The object whose table it is rides beside it.
-    fn pointer_table(
+    pub(crate) fn pointer_table(
         &mut self,
         object: PhpObject,
         separate: bool,
@@ -461,20 +461,42 @@ impl Request {
     /// protected property, `\0C\0p` for a private one `C` declared, and
     /// the name itself for a public one, interned as php's are.
     pub(crate) fn slot_names(&mut self, class: ClassId) -> Result<Vec<php_heap::Str>, Thrown> {
-        let placed = self.placed_properties(class).to_vec();
-        let mut names = Vec::with_capacity(placed.len());
-        for (declaring, property) in &placed {
-            let prefix: Vec<u8> = match property.visibility {
-                Visibility::Public => Vec::new(),
-                Visibility::Protected => b"\0*\0".to_vec(),
-                Visibility::Private => self
-                    .class_decl(*declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
-                    .unwrap_or_default(),
-            };
-            let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
-            names.push(name.heap());
+        let slots = self.placed_properties(class).len();
+        let mut names = Vec::with_capacity(slots);
+        for at in 0..slots {
+            if let Some(name) = self.slot_name_at(class, at)? {
+                names.push(name);
+            }
         }
         Ok(names)
+    }
+
+    /// [`Request::slot_names`]'s key for slot `slot` alone; `None` past
+    /// the last slot.
+    pub(crate) fn slot_name(
+        &mut self,
+        class: ClassId,
+        slot: u32,
+    ) -> Result<Option<php_heap::Str>, Thrown> {
+        match usize::try_from(slot) {
+            Ok(at) => self.slot_name_at(class, at),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn slot_name_at(&mut self, class: ClassId, at: usize) -> Result<Option<php_heap::Str>, Thrown> {
+        let Some((declaring, property)) = self.placed_properties(class).get(at).cloned() else {
+            return Ok(None);
+        };
+        let prefix: Vec<u8> = match property.visibility {
+            Visibility::Public => Vec::new(),
+            Visibility::Protected => b"\0*\0".to_vec(),
+            Visibility::Private => self
+                .class_decl(declaring)
+                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
+                .unwrap_or_default(),
+        };
+        let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
+        Ok(Some(name.heap()))
     }
 }

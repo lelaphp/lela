@@ -2496,7 +2496,7 @@ impl Ops for Stdio {
             };
         }
         if let Some(path) = self.temp_name.take() {
-            let _ = std::fs::remove_file(path);
+            std::fs::remove_file(path).ok();
         }
         0
     }

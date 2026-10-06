@@ -82,7 +82,8 @@ impl PropertyTable {
     /// The positions the declared slots take before the table's own
     /// buckets: one per slot while they stand for the declared rows,
     /// none once the table holds copies of them.
-    fn declared(self) -> u32 {
+    #[must_use]
+    pub fn declared(self) -> u32 {
         match self.table.declared_rows() {
             DeclaredRows::Slots => self.object.slots(),
             DeclaredRows::Copied => 0,

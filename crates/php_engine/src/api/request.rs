@@ -76,7 +76,6 @@ pub use ini::IniEntry;
 pub(crate) use ini::{ini_atol, ini_truth};
 pub use ini_files::IniFiles;
 mod hold;
-pub(crate) use hold::Hold;
 mod hooks;
 mod inspect;
 mod lazy;
@@ -119,6 +118,8 @@ mod static_props;
 mod static_vars;
 mod symbol_tables;
 mod table;
+#[cfg(debug_assertions)]
+mod teardown;
 mod temporary;
 pub use temporary::TemporaryGuard;
 mod ticks;
@@ -150,6 +151,25 @@ pub struct ExtensionId(pub(crate) u32);
 impl ExtensionId {
     /// `Core`, the engine's own natives, classes, constants and ini.
     pub(crate) const CORE: ExtensionId = ExtensionId(0);
+
+    /// The extension at `at` in `module_registry`.
+    pub(crate) fn at(at: usize) -> ExtensionId {
+        ExtensionId(u32::try_from(at).unwrap_or(u32::MAX))
+    }
+
+    /// The origin a debug build's heap tags what it allocates for this
+    /// extension with ([`php_heap::Origin`]): its number.
+    #[cfg(debug_assertions)]
+    pub(crate) fn origin(self) -> php_heap::Origin {
+        php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
+    }
+
+    /// The extension a debug build's heap names by `origin`, the inverse
+    /// of [`ExtensionId::origin`].
+    #[cfg(debug_assertions)]
+    pub(crate) fn of_origin(origin: php_heap::Origin) -> ExtensionId {
+        ExtensionId(u32::from(origin.number()))
+    }
 }
 
 pub use crate::interrupt::Periodic;
@@ -591,6 +611,10 @@ impl Request {
         // The main chunk holds it, so nothing refuses it; a heap that
         // did would refuse the first push again, with php's fatal.
         let mut heap = Heap::new();
+        #[cfg(debug_assertions)]
+        if shared.sense_leaks == crate::engine::LeakSensor::Traced {
+            heap.trace_allocations();
+        }
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
@@ -970,10 +994,12 @@ mod tests {
     }
 
     /// The same entry, serving: what a native class's `__destruct` is,
-    /// a Rust body on the request that served it.
+    /// a Rust body on the request that served it, which gives up the
+    /// string it made once it is written.
     fn writes_d(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
         let text = req.string(b"d\n")?;
         req.write(text.as_bytes());
+        req.release(crate::api::values::Value::string(text));
         Ok(crate::api::values::Value::null())
     }
 

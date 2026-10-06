@@ -576,7 +576,7 @@ fn shell_exec(
     };
     let mut written = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_end(&mut written);
+        pipe.read_to_end(&mut written).ok();
     }
     pclose(child);
     // The pipe is read through php's plain stream, whose reads clear the

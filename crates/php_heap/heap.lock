@@ -22,6 +22,7 @@ Arr::iter
 Arr::len
 Arr::live_from
 Arr::next_free
+Arr::num_used
 Arr::position
 Arr::protect
 Arr::refcount
@@ -90,6 +91,7 @@ Heap::block
 Heap::block_resize
 Heap::call_destructors
 Heap::close_resources
+Heap::dup_value
 Heap::free_block
 Heap::free_object_storage
 Heap::gc_call_destructor
@@ -107,6 +109,7 @@ Heap::interned_find
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
+Heap::iterator_on
 Heap::iterator_pos
 Heap::iterator_pos_ex
 Heap::iterator_set_lead
@@ -139,6 +142,7 @@ Heap::object_with
 Heap::objects
 Heap::observe_allocations
 Heap::overflow_rendered
+Heap::proptable_to_symtable
 Heap::reference
 Heap::reference_separate
 Heap::reference_set
@@ -155,9 +159,11 @@ Heap::resource_persistent
 Heap::resource_sized
 Heap::resource_with
 Heap::resources
+Heap::sense_leaks
 Heap::sensor
 Heap::separate
 Heap::set_memory_limit
+Heap::set_origin
 Heap::stored
 Heap::string
 Heap::string_append
@@ -166,7 +172,9 @@ Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate
 Heap::string_with
+Heap::symtable_to_proptable
 Heap::take_sensed
+Heap::trace_allocations
 Heap::unobserve_allocations
 Heap::unpin
 HeapHooks
@@ -233,9 +241,13 @@ Obj::unprotect
 ObjectId
 ObserveAllocations
 ObserveAllocations::observe
+Origin
+Origin::new
+Origin::number
 PropBit
 PropertyTable
 PropertyTable::backward
+PropertyTable::declared
 PropertyTable::end
 PropertyTable::forward
 PropertyTable::is_empty
@@ -328,6 +340,7 @@ Zval::double
 Zval::fe_pos
 Zval::indirect
 Zval::is_refcounted
+Zval::is_same_value
 Zval::is_undef
 Zval::kind
 Zval::long

@@ -204,7 +204,7 @@ impl Kept {
             sink.send_headers(&headers);
         }
         // The request has ended; a refusal now has no request to abort.
-        let _ = sink.write(&self.body);
+        sink.write(&self.body).ok();
         sink.flush();
     }
 }

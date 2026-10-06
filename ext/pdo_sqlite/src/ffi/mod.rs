@@ -425,6 +425,10 @@ impl Db {
             }));
         }
         let inner = self.0;
+        #[expect(
+            clippy::mem_forget,
+            reason = "the connection is closed above, so its `Drop` would close it again; the allocation is freed once below"
+        )]
         std::mem::forget(self);
         // SAFETY: the allocation `open` leaked, its connection closed and
         // its last owner forgotten, freed once.

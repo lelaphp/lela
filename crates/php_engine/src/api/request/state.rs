@@ -35,6 +35,15 @@ impl Request {
         }
     }
 
+    /// Every extension's request state dropped, in reverse bundle order,
+    /// before a debug build's request leak sensor reads the heap, so a
+    /// state that kept a block of the request's past `rshutdown` leaves
+    /// it held. A state touched after this is built afresh.
+    #[cfg(debug_assertions)]
+    pub(super) fn drop_request_states(&mut self) {
+        drop(std::mem::take(&mut self.state));
+    }
+
     /// The request state of the calling extension, `T` being the type it
     /// declared with `request_state::<T>()` (ADR-0005). A type no bundled
     /// extension declared is built on first touch here, where the design

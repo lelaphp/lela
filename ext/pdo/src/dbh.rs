@@ -317,7 +317,7 @@ impl ObjectHandlers for Handlers {
         let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
-            let _ = roll_back_open(req, &mut *conn, tracked);
+            let _rolled_back = roll_back_open(req, &mut *conn, tracked);
             if let Some(stmt) = held.0 {
                 req.release(stmt.as_value());
             }
@@ -946,10 +946,11 @@ fn attribute_set(
                 }
             };
             dbh_mut(req, object, |d| d.stringify = stringify);
-            let _ = with_connection(req, object, |req, conn| {
-                let _ = conn.set_attribute(req, attr, value);
+            with_connection(req, object, |req, conn| {
+                conn.set_attribute(req, attr, value).ok();
                 Ok(())
-            });
+            })
+            .ok();
             return Ok(true);
         }
         PDO::ATTR_STATEMENT_CLASS => return set_statement_class(req, object, value, value_arg),

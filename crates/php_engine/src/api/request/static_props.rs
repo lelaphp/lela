@@ -31,6 +31,18 @@ pub(super) struct StaticProps {
 }
 
 impl Request {
+    /// Every `static` property's slot given up, a debug build's teardown,
+    /// as `zend_shutdown_executor_values` releases the static members
+    /// before the final collection, since they may hold roots
+    /// (`Z/Zend/zend_execute_API.c:311-332`). A release build leaves them
+    /// to the heap's mass release.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_static_members(&mut self) {
+        for (_, value) in std::mem::take(&mut self.static_props.slots) {
+            self.release(value);
+        }
+    }
+
     /// `zend_std_get_static_property_with_info`
     /// (`Z/Zend/zend_object_handlers.c:2118`): the slot of the `static`
     /// property `name` on `class`, named by the class that declared it,

@@ -276,6 +276,33 @@ impl Request {
         self.fatal_of(copied)
     }
 
+    /// [`Heap::dup_value`], the one rule a copy of a table holds an
+    /// element by (`zend_array_dup_value`): `value` with one more owner,
+    /// or the value of a reference nothing else holds with one more
+    /// owner of that, unless that value is `source`, the table copied.
+    pub(crate) fn dup_value(&self, value: Value, source: Option<Arr>) -> Value {
+        Value::of_zval(self.heap.dup_value(value.to_zval(), source))
+    }
+
+    /// [`Heap::symtable_to_proptable`]: an array's table as an object's,
+    /// `a` itself with one more owner where its keys are all strings.
+    pub(crate) fn symtable_to_proptable(&mut self, a: Arr) -> Result<Arr, Thrown> {
+        let table = Heap::symtable_to_proptable(&mut Hooks(self), a);
+        self.fatal_of(table)
+    }
+
+    /// [`Heap::proptable_to_symtable`]: an object's table as an array's,
+    /// `a` itself with one more owner where no name reads as an integer
+    /// and nothing asks for a copy.
+    pub(crate) fn proptable_to_symtable(
+        &mut self,
+        a: Arr,
+        always_duplicate: bool,
+    ) -> Result<Arr, Thrown> {
+        let table = Heap::proptable_to_symtable(&mut Hooks(self), a, always_duplicate);
+        self.fatal_of(table)
+    }
+
     /// `SEPARATE_ARRAY`: `a` itself with one owner, else a copy of it
     /// with one, `a` one owner fewer.
     pub(crate) fn array_separate(&mut self, a: Arr) -> Result<Arr, Thrown> {

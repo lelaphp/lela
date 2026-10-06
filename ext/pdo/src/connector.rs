@@ -498,9 +498,7 @@ pub trait Connection: Any + Send {
 
     /// `get_gc`: the values the connection owns, for the cycle
     /// collector.
-    fn gc(&self, visit: &mut dyn FnMut(Value)) {
-        let _ = visit;
-    }
+    fn gc(&self, _visit: &mut dyn FnMut(Value)) {}
 
     /// `closer`, where what the connection owns of the request's is
     /// given back; what it holds of its library goes with its `Drop`.

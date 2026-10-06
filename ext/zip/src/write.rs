@@ -374,14 +374,14 @@ impl Archive {
         });
         drop(out);
         if let Err(status) = flushed {
-            let _ = std::fs::remove_file(&tmp);
+            std::fs::remove_file(&tmp).ok();
             if status != Status::default() {
                 self.error = status;
             }
             return Err(Failed);
         }
         if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
+            std::fs::remove_file(&tmp).ok();
             self.error = Status::of(Er::Rename, e.raw_os_error().unwrap_or(0));
             return Err(Failed);
         }
@@ -441,7 +441,7 @@ impl Archive {
         let mut last = 0;
         for _ in 0..100 {
             let mut r = [0u8; 6];
-            let _ = getrandom::fill(&mut r);
+            getrandom::fill(&mut r).ok();
             let suffix: String = r
                 .iter()
                 .map(|b| {
@@ -461,7 +461,8 @@ impl Archive {
                 .open(&tmp)
             {
                 Ok(f) => {
-                    let _ = f.set_permissions(std::fs::Permissions::from_mode(mode));
+                    f.set_permissions(std::fs::Permissions::from_mode(mode))
+                        .ok();
                     return Ok((tmp, f));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

@@ -10,9 +10,12 @@
 //!
 //! The binary is `php-witness`, `sapi/cli`'s host built with
 //! `php_engine`'s `witness-trace`, which this module builds once per run
-//! with cargo where the run meets its first such fence. Its build shares
-//! the engine's compiled crates with this harness's, since both turn the
-//! same features on, so the build is the bundle, the host and a link. It
+//! with cargo where the run meets its first such fence, in the profile
+//! this harness was built in (`Profile::this_build`, #1994). A lane whose
+//! harness is the correctness lanes' build serves its `process` fences in
+//! that build too. The build shares the engine's compiled crates with
+//! this harness's, since both turn the same features on in one profile:
+//! it is the bundle, the host and a link. It
 //! runs under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
@@ -36,6 +39,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::anchor::Entry;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::profile::Profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
@@ -79,7 +83,7 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        let _ = binary.fpm.set(Ok(fpm));
+        binary.fpm.set(Ok(fpm)).ok();
         binary
     }
 
@@ -251,16 +255,19 @@ fn built<'a>(
         .map_err(|why| anyhow!("{why}"))
 }
 
-/// `cargo build -p <package> --bin <binary> --features witness-trace` in
-/// `root`, and where cargo put the binary: the target directory cargo
-/// was told of, or `root`'s own.
+/// `cargo build --profile <this build's> -p <package> --bin <binary>
+/// --features witness-trace` in `root`, and where cargo put the binary:
+/// the target directory cargo was told of, or `root`'s own.
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
     let (package, binary) = (host.package(), host.witness);
+    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .args([
             "build",
             "--quiet",
+            "--profile",
+            profile.name(),
             "--package",
             &package,
             "--bin",
@@ -278,7 +285,7 @@ fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
     }
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| root.join("target"), |dir| root.join(dir));
-    let built = target.join("debug").join(binary);
+    let built = profile.binary(&target, binary);
     if !built.is_file() {
         bail!("cargo built {binary} and it is not at {}", built.display());
     }

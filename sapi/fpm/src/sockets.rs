@@ -281,7 +281,7 @@ impl Sockets {
                 return true;
             }
             if listening.domain == Domain::Unix {
-                let _ = std::fs::remove_file(OsStr::from_bytes(&listening.key));
+                std::fs::remove_file(OsStr::from_bytes(&listening.key)).ok();
             }
             false
         });
@@ -307,10 +307,11 @@ impl Sockets {
             set.extend_from_slice(&listening.key);
             set.push(b'=');
             set.extend_from_slice(listening.sock.as_raw_fd().to_string().as_bytes());
-            let _ = nix::fcntl::fcntl(
+            nix::fcntl::fcntl(
                 listening.sock.as_fd(),
                 nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-            );
+            )
+            .ok();
         }
         let mut vars: Vec<(String, Vec<u8>)> = sets
             .into_iter()
@@ -343,7 +344,7 @@ impl Sockets {
     pub(crate) fn unlink_all(&self) {
         for listening in &self.list {
             if listening.domain == Domain::Unix {
-                let _ = std::fs::remove_file(OsStr::from_bytes(&listening.key));
+                std::fs::remove_file(OsStr::from_bytes(&listening.key)).ok();
             }
         }
     }
@@ -402,7 +403,7 @@ fn new_listening(
             );
             return None;
         }
-        let _ = std::fs::remove_file(OsStr::from_bytes(&path));
+        std::fs::remove_file(OsStr::from_bytes(&path)).ok();
         let mask = nix::sys::stat::Mode::from_bits_truncate(
             nix::libc::mode_t::try_from(0o777 ^ permissions.mode).unwrap_or(0),
         );

@@ -44,7 +44,7 @@ echo strlen($z->getFromName('a.txt')), "\n";
 "#
     );
     let out = serve(&code);
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         String::from_utf8_lossy(&out),
         "1\n2 note 12 259\nxy 1\n30\n"

@@ -92,7 +92,7 @@ fn escape_json(text: &[u8]) -> Vec<u8> {
             c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
-                    let _ = write!(out, "\\u{unit:04x}");
+                    write!(out, "\\u{unit:04x}").ok();
                 }
             }
             c => out.push(c),

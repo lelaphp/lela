@@ -327,7 +327,7 @@ impl UnitCache {
     /// The preload's tables and saved scripts published, once: the
     /// first publication stands.
     pub(crate) fn publish_preload(&self, preloaded: Preloaded) {
-        let _ = self.preloaded.set(preloaded);
+        self.preloaded.set(preloaded).ok();
     }
 
     /// The file held under `key`, a full path or a path as written: a

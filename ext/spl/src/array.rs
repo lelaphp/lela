@@ -1822,7 +1822,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let _ = forget_position(req, object);
+        forget_position(req, object).ok();
         let held = object
             .native_mut::<SplArrayObject>(req)
             .and_then(|p| std::mem::take(&mut p.storage).held());

@@ -351,7 +351,7 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let Some(response) = self.read_auth_response(req)? else {
+        let Some(response) = self.read_auth_response(req) else {
             return Ok((false, None));
         };
         if response.response_code == 0xFE {
@@ -413,7 +413,7 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let response = self.read_change_user_response(req)?;
+        let response = self.read_change_user_response(req);
         let mut ok = response.is_some();
         let mut switch = None;
         let asked_323 = response.as_ref().is_some_and(|r| r.asked_323);
@@ -434,7 +434,7 @@ impl ConnData {
             ok = false;
             let version = self.server_version();
             if version > 50113 && version < 50118 {
-                let _ = self.read_ok(req)?;
+                let _ = self.read_ok(req);
             }
         }
         if ok {
@@ -521,7 +521,7 @@ impl ConnData {
         if password.is_empty() {
             return Ok(Ok(()));
         }
-        let Some(result) = self.read_cached_sha2(req)? else {
+        let Some(result) = self.read_cached_sha2(req) else {
             return Ok(Ok(()));
         };
         match result.response_code {
@@ -598,7 +598,7 @@ impl ConnData {
             self.state = ConnState::QuitSent;
             return Ok(None);
         }
-        if let Some(key) = self.read_public_key(req)? {
+        if let Some(key) = self.read_public_key(req) {
             return Ok(Some(key));
         }
         raise(

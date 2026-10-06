@@ -247,12 +247,8 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             }
             None => 0,
         };
-        let message = match cells.get(2).map(|(_, v)| to_string(req, v)) {
-            Some(Ok(text)) => {
-                let bytes = text.as_bytes().to_vec();
-                text.give_up(req);
-                bytes
-            }
+        let message = match cells.get(2).map(|(_, v)| crate::string_of(req, v)) {
+            Some(Ok(bytes)) => bytes,
             Some(Err(thrown)) => {
                 row.give_up(req);
                 return Err(thrown);

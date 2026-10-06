@@ -391,7 +391,7 @@ fn free_bound(req: &mut Request, driver: Option<&mut dyn Statement>, mut bound: 
             is_parameter: bound.is_parameter,
             value: &mut bound.value,
         };
-        let _ = driver.bind(req, param, BindEvent::Free);
+        driver.bind(req, param, BindEvent::Free).ok();
     }
     req.release(bound.value);
     req.release(bound.driver_params);

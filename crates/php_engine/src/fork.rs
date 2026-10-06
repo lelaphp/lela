@@ -111,7 +111,7 @@ impl Thread {
     /// Joined, once its owner has told it to end.
     pub(crate) fn join(self) {
         // A thread that panicked has ended all the same.
-        let _ = self.handle.join();
+        self.handle.join().ok();
     }
 
     /// Forgotten, in a process forked from the one that started it, which
@@ -119,6 +119,10 @@ impl Thread {
     /// there is nothing to join, and the child's copy of the number
     /// counted it.
     pub(crate) fn forget(self) {
+        #[expect(
+            clippy::mem_forget,
+            reason = "a forked child's copy of a thread that is not there: there is nothing to join"
+        )]
         std::mem::forget(self.handle);
     }
 
@@ -216,7 +220,7 @@ mod tests {
     fn a_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let Some(thread) = spawn("php-test", move || {
-            let _ = rx.recv();
+            rx.recv().ok();
         }) else {
             return;
         };

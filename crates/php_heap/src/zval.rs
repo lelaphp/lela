@@ -392,6 +392,29 @@ impl Zval {
         self.kind
     }
 
+    /// Whether `other` is the same value of the same type: the identity
+    /// of a slot's content, the type and, for a type that carries one,
+    /// the payload word, whatever the `u2` word carries (a bucket's is
+    /// its hash chain); a double's bits rather than its number, so a NaN
+    /// is itself.
+    #[must_use]
+    pub fn is_same_value(self, other: Zval) -> bool {
+        self.kind == other.kind
+            && match self.kind {
+                ZvalType::Undef | ZvalType::Null | ZvalType::False | ZvalType::True => true,
+                ZvalType::Long
+                | ZvalType::Double
+                | ZvalType::String
+                | ZvalType::Array
+                | ZvalType::Object
+                | ZvalType::Resource
+                | ZvalType::Reference
+                | ZvalType::ConstExpr
+                | ZvalType::Indirect
+                | ZvalType::Ptr => self.value == other.value,
+            }
+    }
+
     /// `Z_ISUNDEF`.
     #[must_use]
     pub const fn is_undef(self) -> bool {

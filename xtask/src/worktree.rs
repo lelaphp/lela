@@ -372,7 +372,7 @@ fn seed(dir: &Path, root: &Path) {
     });
     let failed = match copied {
         Ok(out) if out.status.success() => {
-            let _ = fs::remove_file(to.join("xtask"));
+            fs::remove_file(to.join("xtask")).ok();
             say(
                 ADD,
                 "seeded target/debug from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates",
@@ -389,7 +389,7 @@ fn seed(dir: &Path, root: &Path) {
         }
         Err(err) => format!("cp did not run ({err})"),
     };
-    let _ = fs::remove_dir_all(&to);
+    fs::remove_dir_all(&to).ok();
     complain(ADD, &format!("{failed}; the worktree starts cold"));
 }
 

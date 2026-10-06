@@ -484,7 +484,7 @@ impl Request {
                 let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
-                let _ = handler(self, original.as_deref());
+                handler(self, original.as_deref()).ok();
                 self.catch_bailout();
             }
             if let Some(at) = self.ini.changed.iter().position(|(n, ..)| *n == name) {
@@ -1392,7 +1392,7 @@ impl Request {
         };
         // The memory limit's fatal is recorded and ends the request.
         if let Ok(mut table) = table {
-            let _ = table.add(self);
+            table.add(self).ok();
             self.ini.bytes = Some(table);
         }
     }

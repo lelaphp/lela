@@ -1228,7 +1228,7 @@ fn opcache_is_script_cached_in_file_cache(
 /// opcache.jit_max_trace_length => 1024 => 1024
 /// ```
 fn info(req: &mut Request) {
-    let _ = info_rows(req);
+    info_rows(req).ok();
     display_ini_entries(req);
 }
 

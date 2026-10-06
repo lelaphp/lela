@@ -469,7 +469,7 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
     let store = Store::of_workspace(&fixture);
     let heap = store.read("budget", "php_heap").unwrap().unwrap();
     assert_eq!(heap.status, Status::Fail);
-    let _ = std::fs::remove_dir_all(fixture.join("target"));
+    std::fs::remove_dir_all(fixture.join("target")).ok();
 }
 
 /// `lock_packages` counts third-party packages, those with a `source`, and
@@ -486,7 +486,7 @@ fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates()
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let _ = std::fs::remove_dir_all(fixture.join("target"));
+    std::fs::remove_dir_all(fixture.join("target")).ok();
     assert!(!out.status.success(), "{stdout}");
     assert!(
         stdout.contains("third-party Cargo.lock packages: 161 over the ceiling of 160"),

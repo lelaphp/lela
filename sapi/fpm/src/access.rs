@@ -43,11 +43,12 @@ pub(crate) fn open(fpm: &mut Fpm, reopen: bool) -> i32 {
         zlog!(Debug @ fpm_log_open:46, "open access log ({})", String::from_utf8_lossy(&log));
         if reopen {
             if let Some(old) = &mut fpm.pools[p].access_log {
-                let _ = nix::unistd::dup2(std::os::fd::AsFd::as_fd(&file), old);
-                let _ = nix::fcntl::fcntl(
+                nix::unistd::dup2(std::os::fd::AsFd::as_fd(&file), old).ok();
+                nix::fcntl::fcntl(
                     std::os::fd::AsFd::as_fd(old),
                     nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-                );
+                )
+                .ok();
             }
             fpm.kill_all(nix::sys::signal::Signal::SIGQUIT);
         } else {

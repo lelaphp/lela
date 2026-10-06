@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, OrFalse, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -288,7 +288,7 @@ pub(crate) fn deactivate(req: &mut Request) {
     for (key, plinks) in req.state::<State>().plinks.drain() {
         for handle in plinks.open {
             if !matches!(end_psession(req, handle), Ok(true)) {
-                let _ = handle.close(req, CloseType::Explicit);
+                handle.close(req, CloseType::Explicit).ok();
                 continue;
             }
             give_to_pool(req, &key, handle);
@@ -310,7 +310,7 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
         None => Some(kept),
     };
     if let Some(past) = past {
-        let _ = past.close(req);
+        past.close(req).ok();
     }
 }
 
@@ -617,7 +617,7 @@ fn free_link(req: &mut Request, object: PhpObject) {
         Link::Closed => return,
     };
     if mysql.mysql.is_some() {
-        let _ = close_conn(req, &mut mysql, CloseType::Explicit, open);
+        close_conn(req, &mut mysql, CloseType::Explicit, open).ok();
     }
 }
 
@@ -974,12 +974,7 @@ pub(crate) fn options(
     };
     let as_long = |_: &mut Request| long;
     let text = match option {
-        3 | 4 | 5 | 7 | 35 | 43 => {
-            let text = to_string(req, &value)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            Some(bytes)
-        }
+        3 | 4 | 5 | 7 | 35 | 43 => Some(crate::string_of(req, &value)?),
         _ => None,
     };
     let text = text.unwrap_or_default();

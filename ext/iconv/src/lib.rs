@@ -457,7 +457,7 @@ fn substr(input: &[u8], offset: i64, len: i64, charset: &[u8]) -> Result<Vec<u8>
     }
     by_errno(errno, false)?;
     if let Some(cd) = back.as_mut() {
-        let _ = cd.append(None, &mut out);
+        cd.append(None, &mut out).ok();
     }
     Ok(out)
 }

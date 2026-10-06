@@ -537,7 +537,7 @@ pub(crate) fn parse(
     }
     phar.fp = Some(archive::Fp::opened(bytes, phar.flags));
     let id = archives(req).insert(phar);
-    let _ = archives(req).fname_map.add(fname, id);
+    archives(req).fname_map.add(fname, id).ok();
     let refuse = |req: &mut Request, text: String| {
         archive::fname_map_del(req, fname);
         Ok(Err(Some(text)))
@@ -561,7 +561,7 @@ pub(crate) fn parse(
                 ),
             );
         }
-        let _ = archives(req).alias_map.add(&actual, id);
+        archives(req).alias_map.add(&actual, id).ok();
         if let Some(a) = archives(req).get_mut(id) {
             a.alias = Some(actual);
             a.is_temporary_alias = false;
@@ -579,7 +579,7 @@ pub(crate) fn parse(
                     ),
                 );
             }
-            let _ = archives(req).alias_map.add(given, id);
+            archives(req).alias_map.add(given, id).ok();
         }
         if let Some(a) = archives(req).get_mut(id) {
             a.alias = Some(given.map_or_else(|| fname.to_vec(), <[u8]>::to_vec));
@@ -834,7 +834,7 @@ pub(crate) fn flush(
             if is_default_stub {
                 dropped.extend(a.manifest.update(b".phar/stub.php", e).1);
             } else if !a.manifest.contains(b".phar/stub.php") {
-                let _ = a.manifest.add(b".phar/stub.php", e);
+                a.manifest.add(b".phar/stub.php", e).ok();
             }
         }
         for mut e in dropped {

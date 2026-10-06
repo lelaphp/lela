@@ -171,7 +171,7 @@ fn escaped(bytes: &[u8]) -> String {
                 b'\\' => out.push('\\'),
                 0x1b => out.push('e'),
                 _ => {
-                    let _ = write!(out, "x{c:02X}");
+                    write!(out, "x{c:02X}").ok();
                 }
             }
         } else {

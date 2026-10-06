@@ -10,7 +10,6 @@ use std::ffi::CString;
 use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key as ArrayKey, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -101,14 +100,6 @@ pub(crate) fn object_of(
         payload.private = private;
     }
     Ok(object.into_instance())
-}
-
-/// `zval_try_get_string`'s bytes, the string given up once read.
-fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let text = to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(bytes)
 }
 
 /// The key an `OpenSSLAsymmetricKey` holds, and whether it is private.
@@ -208,7 +199,10 @@ pub(crate) fn key_from(
             defer(req, thrown);
             return Ok(None);
         };
-        phrase = Some(string_bytes(req, &given)?);
+        phrase = Some(match given.as_ref() {
+            ValueRef::Str(s) => s.as_bytes().to_vec(),
+            _ => crate::xp_ssl::string_of(req, &given)?,
+        });
         let Some(inner) = array.get(&ArrayKey::Int(0)) else {
             let thrown = throw_error(req, "ValueError", form);
             defer(req, thrown);
@@ -245,10 +239,8 @@ pub(crate) fn key_from(
         if !matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             return Ok(None);
         }
-        let owned = to_string(req, &value)?;
-        let bytes = owned.as_bytes().to_vec();
-        owned.give_up(req);
-        let text = bytes.as_slice();
+        let text = crate::xp_ssl::string_of(req, &value)?;
+        let text = text.as_slice();
         let mut file: Option<CString> = None;
         if text.len() > 7 && text.starts_with(b"file://") {
             let Some(path) = check_path(req, text, Origin::Arg(arg), true) else {

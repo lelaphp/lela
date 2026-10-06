@@ -28,14 +28,14 @@ fn scratch(name: &str) -> PathBuf {
         "php_engine_observer_notices_{name}_{}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).ok();
     dir
 }
 
 fn serve_main(engine: &Engine, dir: &Path, source: &str) -> Served {
     let main = dir.join("main.php");
-    let _ = std::fs::write(&main, source);
+    std::fs::write(&main, source).ok();
     engine.serve_capture_in(
         dir,
         main.to_string_lossy().as_bytes(),
@@ -139,7 +139,7 @@ const INCLUDED: &str = "<?php\nclass B extends A {}\nclass A {}\nfunction f() {}
 
 /// The notices of including [`INCLUDED`], on two requests of one engine.
 fn included_twice(engine: &Engine, dir: &Path, rec: &Recording) -> [Vec<Event>; 2] {
-    let _ = std::fs::write(dir.join("inc.php"), INCLUDED);
+    std::fs::write(dir.join("inc.php"), INCLUDED).ok();
     let main = "<?php\ninclude __DIR__ . '/inc.php';\n";
     rec.mark("first");
     serve_main(engine, dir, main);
@@ -615,7 +615,7 @@ fn a_handler_added_in_a_fiber_and_a_load_in_one_are_the_requests() {
             .build("test_ext_0")])
         .build();
     let dir = scratch("fiber");
-    let _ = std::fs::write(dir.join("inc.php"), "<?php\nfunction g() {}\nclass K {}\n");
+    std::fs::write(dir.join("inc.php"), "<?php\nfunction g() {}\nclass K {}\n").ok();
     rec.mark("built");
     serve_main(
         &engine,

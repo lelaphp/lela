@@ -31,7 +31,7 @@ fn a_preloaded_function_calls_ffi() {
         .arg(&main)
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     // The whole of stdout: the preload's request sends no head, as the
     // oracle's does not (#1633).
     let stdout = String::from_utf8_lossy(&out.stdout);

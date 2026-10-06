@@ -41,12 +41,12 @@ fn a_request_that_sleeps_holds_back_the_next() {
 fn a_slow_client_holds_back_no_other() {
     let server = Server::start("slow-client", &[("fast.php", FAST)], &[]);
     let mut slow = server.connect();
-    let _ = slow.write_all(b"GET /fast.php HTTP/1.0\r\nHo");
+    slow.write_all(b"GET /fast.php HTTP/1.0\r\nHo").ok();
     std::thread::sleep(Duration::from_millis(100));
     let began = Instant::now();
     assert_eq!(server.get("/fast.php"), "fast");
     assert!(began.elapsed() < Duration::from_secs(5));
-    let _ = slow.write_all(b"st: x\r\n\r\n");
+    slow.write_all(b"st: x\r\n\r\n").ok();
     assert_eq!(body(&mut slow), "fast");
     assert_eq!(server.stop(), Some(0));
 }

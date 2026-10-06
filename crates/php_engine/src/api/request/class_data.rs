@@ -68,6 +68,24 @@ pub(super) struct ClassDataTables {
 }
 
 impl Request {
+    /// Each class's mutable data given up, a debug build's teardown, as
+    /// `zend_cleanup_mutable_class_data` and the walk of
+    /// `zend_shutdown_executor_values` release a class's evaluated
+    /// constants and its default properties before the object store,
+    /// since either may hold an object (`Z/Zend/zend_execute_API.c:334-358`).
+    /// A release build leaves them to the heap's mass release.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_class_data(&mut self) {
+        for (_, data) in std::mem::take(&mut self.class_data.rows) {
+            for (_, value) in data.constants {
+                self.release(value);
+            }
+            for value in data.defaults.into_iter().flatten() {
+                self.release(value);
+            }
+        }
+    }
+
     /// What `zend_object_alloc(sizeof(custom), ce)` counts of an object
     /// of `class` past the header and the declared slots (design §5.13):
     /// the fields of the struct the nearest internal class above it

@@ -215,11 +215,12 @@ fn zend_version(req: &Request) -> String {
         &PHP_VERSION[2..]
     );
     for zend in req.zend_extensions() {
-        let _ = writeln!(
+        writeln!(
             text,
             "    with {} v{}, {}, by {}",
             zend.name, zend.version, zend.copyright, zend.author
-        );
+        )
+        .ok();
     }
     text
 }

@@ -343,7 +343,7 @@ fn taken(req: &mut Request, object: PhpObject) -> Option<TokenSet> {
 /// The set put back once its allocations are brought to its shape; the
 /// memory limit's fatal is recorded on the request, which it ends.
 fn put(req: &mut Request, object: PhpObject, mut set: TokenSet) {
-    let _ = set.settle(req);
+    set.settle(req).ok();
     if let Some(Dom {
         extra: Extra::TokenList(slot),
         ..

@@ -144,10 +144,11 @@ impl Drop for Pool {
         if matches!(self.master.try_wait(), Ok(Some(_))) {
             return;
         }
-        let _ = Command::new("kill")
+        Command::new("kill")
             .arg("-TERM")
             .arg(self.master.id().to_string())
-            .status();
+            .status()
+            .ok();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if matches!(self.master.try_wait(), Ok(Some(_))) {
@@ -155,8 +156,8 @@ impl Drop for Pool {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.master.kill();
-        let _ = self.master.wait();
+        self.master.kill().ok();
+        self.master.wait().ok();
     }
 }
 

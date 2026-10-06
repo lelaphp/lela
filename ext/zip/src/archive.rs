@@ -545,19 +545,20 @@ impl Archive {
     fn replay(&self, mut f: Stdio, len: u64, start: u64, cdir: &[u8]) -> Stdio {
         let tail = len.min(65_577);
         f.seek(len - tail);
-        let _ = f.read(&mut vec![0; usize::try_from(tail).unwrap_or(0)]);
+        f.read(&mut vec![0; usize::try_from(tail).unwrap_or(0)])
+            .ok();
         if start < len - tail {
             f.seek(start);
             let mut at = 0;
             while let Some(lens) = cdir.get(at + 28..at + 34) {
                 let mut piece = vec![0; 46];
-                let _ = f.read(&mut piece);
+                f.read(&mut piece).ok();
                 for k in 0..3 {
                     piece.resize(
                         usize::from(u16::from_le_bytes([lens[2 * k], lens[2 * k + 1]])),
                         0,
                     );
-                    let _ = f.read(&mut piece);
+                    f.read(&mut piece).ok();
                     at += piece.len();
                 }
                 at += 46;
@@ -570,7 +571,7 @@ impl Archive {
                 if f.read(&mut head).is_ok_and(|n| n == 30) {
                     let n = u16::from_le_bytes([head[26], head[27]]);
                     let m = u16::from_le_bytes([head[28], head[29]]);
-                    let _ = f.read(&mut vec![0; usize::from(n) + usize::from(m)]);
+                    f.read(&mut vec![0; usize::from(n) + usize::from(m)]).ok();
                 }
             }
         }
@@ -875,7 +876,7 @@ impl Archive {
             .set_external_attributes(idx, OPSYS_DEFAULT, EXT_ATTRIB_DEFAULT_DIR)
             .is_err()
         {
-            let _ = self.delete(idx);
+            self.delete(idx).ok();
             return Err(Failed);
         }
         Ok(idx)

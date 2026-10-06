@@ -725,11 +725,11 @@ fn extra_args<'a>(flags: &[String], ini: impl IntoIterator<Item = &'a String>) -
     }
     let mut rendered = String::new();
     for flag in flags {
-        let _ = write!(rendered, " {flag}");
+        write!(rendered, " {flag}").ok();
     }
     rendered.push(' ');
     for (name, value) in settings {
-        let _ = write!(rendered, " -d \"{name}={}\"", addslashes(value));
+        write!(rendered, " -d \"{name}={}\"", addslashes(value)).ok();
     }
     rendered
 }
@@ -819,7 +819,7 @@ impl Written {
 
 impl Drop for Written {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        fs::remove_file(&self.path).ok();
     }
 }
 

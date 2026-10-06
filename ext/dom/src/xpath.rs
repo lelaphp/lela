@@ -296,7 +296,7 @@ fn item_object(
             {
                 d.extra = Extra::NamespaceParent(parent_obj);
                 // The parent's owner is the namespace node's from here.
-                let _ = parent_value.hand_on_unmigrated();
+                let _parent = parent_value.hand_on_unmigrated();
             } else {
                 parent_value.give_up(req);
             }

@@ -233,7 +233,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
          ///\n\
          /// ```php\n",
     );
-    let _ = writeln!(out, "/// var_dump(extension_loaded('{name}'));");
+    writeln!(out, "/// var_dump(extension_loaded('{name}'));").ok();
     out.push_str(
         "/// ```\n\
          /// ```expect\n\
@@ -243,7 +243,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
          \x20   ExtensionBuilder::default()\n\
          \x20       .request_state::<State>()\n",
     );
-    let _ = writeln!(out, "        .build(\"{name}\")");
+    writeln!(out, "        .build(\"{name}\")").ok();
     out.push_str("}\n");
     out
 }
@@ -255,7 +255,7 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
 pub(crate) fn lint_attributes(manifest: &Manifest, row: &str) -> String {
     let mut out = String::new();
     for rule in denied_lints(manifest, row) {
-        let _ = writeln!(out, "// seams.toml rule {}: {}", rule.id, rule.text);
+        writeln!(out, "// seams.toml rule {}: {}", rule.id, rule.text).ok();
         let lints: Vec<String> = rule
             .predicate
             .deny_lints
@@ -283,7 +283,7 @@ fn deny(lints: &[String]) -> String {
     let mut out = String::from("#![deny(\n");
     for (at, lint) in lints.iter().enumerate() {
         let comma = if at + 1 == lints.len() { "" } else { "," };
-        let _ = writeln!(out, "    {lint}{comma}");
+        writeln!(out, "    {lint}{comma}").ok();
     }
     out.push_str(")]\n");
     out

@@ -322,7 +322,7 @@ impl Drop for Fds {
     fn drop(&mut self) {
         if self.process {
             for fd in self.fds.iter_mut().filter_map(Option::take) {
-                let _ = std::os::fd::IntoRawFd::into_raw_fd(fd);
+                let _left_open = std::os::fd::IntoRawFd::into_raw_fd(fd);
             }
         }
     }
@@ -689,6 +689,10 @@ pub(crate) struct Shared {
     /// ([`EngineBuilder::trace_natives_to`]).
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
+    /// Whether a debug build's request leak sensor is armed, and whether
+    /// it traces allocations ([`EngineBuilder::sense_leaks`]).
+    #[cfg(debug_assertions)]
+    pub(crate) sense_leaks: LeakSensor,
     pub(crate) entry: Loop,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
@@ -2443,9 +2447,52 @@ pub struct EngineBuilder {
     configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
+    #[cfg(debug_assertions)]
+    sense_leaks: LeakSensor,
+}
+
+/// A debug build's request leak sensor (#1992, #1993), as a host sets it
+/// for every request of its engine ([`EngineBuilder::sense_leaks`]).
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeakSensor {
+    /// Unarmed: a debug request ends as a release one does.
+    #[default]
+    Off,
+    /// Armed: each request ends in php's debug shutdown, every block of
+    /// the request's lifetime freed by name, and in the `InternalError`
+    /// naming what the heap still held and the extension whose native or
+    /// lifecycle hook allocated the first of it; silent after a fatal.
+    Armed,
+    /// Armed, and every allocation keeps the backtrace that made it, so
+    /// the `InternalError` names the frames that allocated the first
+    /// block too: for digging locally, since each allocation then pays a
+    /// backtrace's capture, which costs many times the allocation.
+    Traced,
+}
+
+#[cfg(debug_assertions)]
+impl LeakSensor {
+    /// Whether a request ends in php's debug shutdown and its walk.
+    pub(crate) fn armed(self) -> bool {
+        self != LeakSensor::Off
+    }
 }
 
 impl EngineBuilder {
+    /// A debug build's request leak sensor, for every request of the
+    /// engine ([`LeakSensor`]). The hosts arm it from `PHP_SENSE_LEAKS=1`
+    /// and trace allocations under it from `PHP_SENSE_LEAKS_BACKTRACE=1`,
+    /// read once as they build their engine (`php_sapi::prepare`). It is
+    /// off by default until the leaks the corpus has are fixed (#2057);
+    /// turning it on by default is #1992's last step.
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn sense_leaks(mut self, sensor: LeakSensor) -> EngineBuilder {
+        self.sense_leaks = sensor;
+        self
+    }
+
     /// Every request of the engine records the natives it enters and
     /// appends them to `path` as it ends, one line each,
     /// [`Entered::line`](crate::test::Entered::line): what the `php`
@@ -2813,6 +2860,8 @@ impl EngineBuilder {
                 ini_files,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
+                #[cfg(debug_assertions)]
+                sense_leaks: self.sense_leaks,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -2947,7 +2996,7 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     for function in declared {
         for parameter in &function.parameters {
             if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
-                let _ = strings.intern(written);
+                strings.intern(written).ok();
             }
         }
     }
@@ -2961,7 +3010,7 @@ fn permanent_names(
 ) -> Strings {
     let mut names = Strings::new();
     for known in KNOWN_STRINGS {
-        let _ = names.intern(known.as_bytes());
+        names.intern(known.as_bytes()).ok();
     }
     let declared = functions
         .iter()
@@ -2973,7 +3022,7 @@ fn permanent_names(
                 .chain(decl.constants.iter().map(|constant| &constant.name))
         }));
     for name in declared {
-        let _ = names.intern(&name.0);
+        names.intern(&name.0).ok();
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
     // of each string a native's `#[\Deprecated]` is written with, so a
@@ -2995,7 +3044,7 @@ fn permanent_names(
         .chain(constants.iter().flat_map(|decl| &decl.attributes));
     for argument in attributed.flat_map(|attribute| &attribute.arguments) {
         if let ConstExpr::Str(written) = &argument.value {
-            let _ = names.intern(written);
+            names.intern(written).ok();
         }
     }
     names
@@ -3175,7 +3224,7 @@ impl EngineEnd {
     /// From here the drop of the engine's last clone ends `shared`, on a
     /// request under the host's name `sapi_name`.
     fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
-        let _ = self.0.set((Arc::clone(shared), sapi_name));
+        self.0.set((Arc::clone(shared), sapi_name)).ok();
     }
 }
 
@@ -3259,6 +3308,8 @@ impl Engine {
             configure: &[],
             #[cfg(feature = "witness-trace")]
             trace_to: None,
+            #[cfg(debug_assertions)]
+            sense_leaks: LeakSensor::Off,
         }
     }
 
@@ -3598,11 +3649,12 @@ impl Engine {
             .iter()
             .filter_map(|e| e.zend.as_ref())
         {
-            let _ = writeln!(
+            writeln!(
                 text,
                 "    with {} v{}, {}, by {}",
                 row.name, row.version, row.copyright, row.author
-            );
+            )
+            .ok();
         }
         text
     }
@@ -3782,7 +3834,7 @@ impl Engine {
     fn arm_preloaded(&self, req: &mut Request) {
         if let Some(preloaded) = self.shared.units.preloaded() {
             for global in &preloaded.arms {
-                let _ = req.arm(*global);
+                req.arm(*global).ok();
             }
         }
     }
@@ -3913,8 +3965,8 @@ impl Engine {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
             let _ = req.header_add(line.as_bytes(), true, 0);
         }
-        let _ = crate::output::start_at_request(&mut req);
-        let _ = req.hash_environment();
+        crate::output::start_at_request(&mut req).ok();
+        req.hash_environment().ok();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
         // sent by it and a session may still start; and once, as php
@@ -3944,7 +3996,9 @@ impl Engine {
             // as the uncaught fatal, and `zend_bailout` to the `zend_catch`
             // of `php_request_startup`, which answers `FAILURE`; a fatal
             // the `rinit` met was rendered where it was raised.
-            let _ = req.thrown_without_frame(&thrown);
+            if let Ok(undef) = req.thrown_without_frame(&thrown) {
+                req.release(undef);
+            }
             return Begun::Failed(req);
         }
         self.arm_preloaded(&mut req);
@@ -3956,9 +4010,9 @@ impl Engine {
         // (`Z/sapi/cli/php_cli.c:941`), and the standard handles
         // registered.
         if !web {
-            let _ = req.arm(php_unit::AutoGlobal::Server);
+            req.arm(php_unit::AutoGlobal::Server).ok();
         }
-        let _ = req.register_file_handles(false);
+        req.register_file_handles(false).ok();
         req.enter_phase(crate::api::request::Phase::Running);
         Begun::Started(req)
     }
@@ -4221,6 +4275,12 @@ impl Engine {
         req: &mut Request,
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
+        // `PG(report_memleaks)` as `php_request_shutdown` reads it first.
+        // The debug teardown below runs where the request leak sensor is
+        // armed ([`EngineBuilder::sense_leaks`]); unarmed, a debug request
+        // ends as a release one does.
+        #[cfg(debug_assertions)]
+        let report_memleaks = req.ini_flag(b"report_memleaks");
         end_phase(&self.shared.extensions, req, |e| e.rshutdown);
         crate::output::deactivate(req);
         req.catch_bailout();
@@ -4235,6 +4295,11 @@ impl Engine {
         req.destroy_symbol_table();
         req.destroy_static_vars();
         req.free_default_arguments();
+        #[cfg(debug_assertions)]
+        if self.shared.sense_leaks.armed() {
+            req.free_executor_values();
+            req.shutdown_collect();
+        }
         req.free_object_storage();
         req.free_in_autoload();
         // `zend_deactivate`'s `zend_ini_deactivate`, after
@@ -4246,10 +4311,16 @@ impl Engine {
         // down and the request globals freed (`Z/main/main.c:2026-2029`),
         // and before the host's deactivation hands over what is left.
         end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
-        // A debug build's last sensing point, after the request's last
-        // release.
+        // A debug build's request leak sensor, after the request's last
+        // release, then its last sensing point, which raises what the
+        // leak sensor recorded as it raises every other sensor's defect.
         #[cfg(debug_assertions)]
-        req.end_in_sensed();
+        {
+            if self.shared.sense_leaks.armed() {
+                req.sense_leaks(report_memleaks);
+            }
+            req.end_in_sensed();
+        }
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
@@ -4316,8 +4387,11 @@ fn end_phase(
     req: &mut Request,
     hook: fn(&Extension) -> Option<EndFunction>,
 ) {
-    for serve in extensions.iter().rev().filter_map(hook) {
-        serve(req);
+    for (at, extension) in extensions.iter().enumerate().rev() {
+        let Some(serve) = hook(extension) else {
+            continue;
+        };
+        req.serve_for(ExtensionId::at(at), serve);
         req.catch_bailout();
     }
 }
@@ -4507,13 +4581,13 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
     if let Some(offset) = unit.halt_offset {
         let key = crate::api::request::halt_offset_key(&unit.main.filename.0);
         if req.constant_named(&key).is_none() {
-            let _ = req.define_constant(&key, Value::int(offset));
+            req.define_constant(&key, Value::int(offset)).ok();
         }
     }
     for global in &unit.arms {
         // What a callback can raise is the memory limit, which the
         // loop meets again at its first allocation.
-        let _ = req.arm(*global);
+        req.arm(*global).ok();
     }
     // `compile_file` records what it raises and emits it once the
     // compile has declared the file's functions and early-bound its
@@ -4696,11 +4770,11 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Thrown> {
     let mut served = Ok(());
-    for extension in extensions {
+    for (at, extension) in extensions.iter().enumerate() {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        served = rinit(req);
+        served = req.serve_for(ExtensionId::at(at), rinit);
         if served.is_err() {
             break;
         }
@@ -5073,15 +5147,16 @@ mod tests {
     #[test]
     fn a_preloaded_script_runs_once_and_its_declarations_stand_in_every_request() {
         let dir = std::env::temp_dir().join(format!("engine-preload-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let script = dir.join("preload.inc");
-        let _ = std::fs::write(
+        std::fs::write(
             &script,
             "<?php\necho \"preloading\\n\";\nfunction pre_f() { return 'f'; }\n\
              class PreA { function m() { return 'm'; } }\nclass PreB extends PreA {}\n\
              interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
              class Late extends Missing {}\n",
-        );
+        )
+        .ok();
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
             .ini("t.preload", script.as_os_str().as_encoded_bytes())
@@ -5094,7 +5169,7 @@ mod tests {
         let first = engine.serve_capture(&program, crate::test::Capture::default());
         let second = engine.serve_capture(&program, crate::test::Capture::default());
         let resolved = script.canonicalize().unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(
             String::from_utf8_lossy(&first.stdout),
             format!(
@@ -5146,9 +5221,9 @@ mod tests {
     fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
         let dir = std::env::temp_dir().join(format!("engine-file-cache-{}", std::process::id()));
         let cache = dir.join("cache");
-        let _ = std::fs::create_dir_all(&cache);
+        std::fs::create_dir_all(&cache).ok();
         let script = dir.join("kept.inc");
-        let _ = std::fs::write(&script, "<?php return 'kept';");
+        std::fs::write(&script, "<?php return 'kept';").ok();
         let script = script.canonicalize().unwrap_or_default();
         let engine = || {
             Engine::cli_builder()
@@ -5158,7 +5233,7 @@ mod tests {
         };
         let program = format!("<?php echo include '{}';", script.display());
         let first = engine().serve_capture(&program, crate::test::Capture::default());
-        let _ = std::fs::write(&script, "<?php return 'compiled';");
+        std::fs::write(&script, "<?php return 'compiled';").ok();
         let second = engine().serve_capture(&program, crate::test::Capture::default());
         let kept = engine();
         let kept_at = crate::unit_cache::Disk {
@@ -5171,9 +5246,9 @@ mod tests {
         if let Some(byte) = stale.get_mut(8) {
             *byte ^= 1;
         }
-        let _ = std::fs::write(&kept_at, &stale);
+        std::fs::write(&kept_at, &stale).ok();
         let third = kept.serve_capture(&program, crate::test::Capture::default());
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
@@ -6027,7 +6102,7 @@ mod tests {
         assert_eq!(first.bytes(), b"shared");
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A tree of files for one test, under the system's temporary
@@ -6040,7 +6115,7 @@ mod tests {
     impl Files {
         fn new(name: &str, files: &[(&str, &str)]) -> Files {
             let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::remove_dir_all(&dir).ok();
             assert!(std::fs::create_dir_all(&dir).is_ok());
             for (file, text) in files {
                 assert!(std::fs::write(dir.join(file), text).is_ok());
@@ -6071,7 +6146,7 @@ mod tests {
 
     impl Drop for Files {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
+            std::fs::remove_dir_all(&self.dir).ok();
         }
     }
 
@@ -6287,7 +6362,7 @@ mod tests {
             .build()
             .serve(described(), &mut masked);
         assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request

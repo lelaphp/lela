@@ -45,6 +45,11 @@ use std::sync::OnceLock;
 use crate::hooks::Fatal;
 use crate::observe::{Allocation, AllocationObserverId, ObserveAllocations, Observers};
 
+#[cfg(debug_assertions)]
+mod leaks;
+#[cfg(debug_assertions)]
+mod origins;
+
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
 pub(crate) const CHUNK_SIZE: usize = 2 * 1024 * 1024;
@@ -177,6 +182,10 @@ struct Chunk {
     /// the heap that laid the chunk down.
     #[cfg(debug_assertions)]
     sensed: *const crate::sensed::Record,
+    /// A debug build's table of the origins of the chunk's blocks
+    /// ([`origins`]), null where the system could not give it.
+    #[cfg(debug_assertions)]
+    origins: Option<NonNull<crate::sensed::Origin>>,
 }
 
 /// The header takes page zero and nothing more, which is what
@@ -203,6 +212,9 @@ struct Huge {
     at: NonNull<u8>,
     size: usize,
     node: NonNull<u8>,
+    /// A debug build's origin of the block ([`origins`]).
+    #[cfg(debug_assertions)]
+    origin: crate::sensed::Origin,
 }
 
 /// The per-request heap: its chunks, its thirty free lists, its huge
@@ -253,6 +265,14 @@ pub(crate) struct Mm {
     /// ([`Quarantine`]), held back from the free list.
     #[cfg(debug_assertions)]
     quarantine: [Quarantine; BINS],
+    /// A debug build's origin of what it allocates from here on
+    /// ([`Mm::set_origin`]).
+    #[cfg(debug_assertions)]
+    origin: crate::sensed::Origin,
+    /// A debug build's backtrace of every block it has out, where
+    /// allocations are traced ([`Mm::trace_allocations`]).
+    #[cfg(debug_assertions)]
+    traces: Option<std::collections::HashMap<usize, std::backtrace::Backtrace>>,
 }
 
 impl Mm {
@@ -282,6 +302,10 @@ impl Mm {
             sensed: crate::sensed::Sensor::new(),
             #[cfg(debug_assertions)]
             quarantine: [Quarantine::EMPTY; BINS],
+            #[cfg(debug_assertions)]
+            origin: crate::sensed::Origin::default(),
+            #[cfg(debug_assertions)]
+            traces: None,
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             mm.chunk_init(chunk, 0);
@@ -373,6 +397,8 @@ impl Mm {
     #[inline]
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let at = self.alloc_heap(size)?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Allocated {
                 at: at.as_ptr().addr(),
@@ -397,6 +423,8 @@ impl Mm {
     ) -> Result<NonNull<u8>, Fatal> {
         // SAFETY: the caller's contract, handed on.
         let to = unsafe { self.realloc_heap(at, copy, size) }?;
+        #[cfg(debug_assertions)]
+        self.trace(Some(at), to);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Reallocated {
                 from: at.as_ptr().addr(),
@@ -417,6 +445,10 @@ impl Mm {
     pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
         // SAFETY: the caller's contract, handed on.
         unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Freed {
                 at: at.as_ptr().addr(),
@@ -738,7 +770,10 @@ impl Mm {
             None => self.alloc_small_slow(bin_num)?,
         };
         #[cfg(debug_assertions)]
-        freed::handed_out(slot, BIN_DATA_SIZE[bin_num]);
+        {
+            freed::handed_out(slot, BIN_DATA_SIZE[bin_num]);
+            origins::write(slot, self.origin);
+        }
         Ok(slot)
     }
 
@@ -829,7 +864,10 @@ impl Mm {
         self.size += pages_count as usize * PAGE_SIZE;
         self.peak = self.peak.max(self.size);
         #[cfg(debug_assertions)]
-        freed::handed_out(at, pages_count as usize * PAGE_SIZE);
+        {
+            freed::handed_out(at, pages_count as usize * PAGE_SIZE);
+            origins::write(at, self.origin);
+        }
         Ok(at)
     }
 
@@ -955,6 +993,8 @@ impl Mm {
             return;
         };
         self.chunks.remove(at);
+        #[cfg(debug_assertions)]
+        origins::give_back(chunk);
         let count = self.chunks.len();
         // php compares the chunks a request holds against a running
         // average of what it has been holding; a heap here serves one
@@ -1142,6 +1182,8 @@ impl Mm {
             at,
             size: new_size,
             node,
+            #[cfg(debug_assertions)]
+            origin: self.origin,
         });
         self.real_size += new_size;
         self.real_peak = self.real_peak.max(self.real_size);
@@ -1189,7 +1231,12 @@ impl Drop for Mm {
     /// chunk and huge block this request mapped is given back, so nothing
     /// a request allocated outlives it.
     fn drop(&mut self) {
-        for chunk in self.chunks.drain(..).chain(self.cached.drain(..)) {
+        for chunk in self.chunks.drain(..) {
+            #[cfg(debug_assertions)]
+            origins::give_back(chunk);
+            chunk_free(chunk, CHUNK_SIZE);
+        }
+        for chunk in self.cached.drain(..) {
             chunk_free(chunk, CHUNK_SIZE);
         }
         for block in self.huge.drain(..) {
@@ -1229,7 +1276,7 @@ impl Mm {
     /// header naming this heap's sensed record in a debug build.
     fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {
         #[cfg(debug_assertions)]
-        chunk_init(chunk, num, self.sensed.record_at());
+        chunk_init(chunk, num, self.sensed.record_at(), origins::table());
         #[cfg(not(debug_assertions))]
         chunk_init(chunk, num);
     }
@@ -1241,6 +1288,7 @@ fn chunk_init(
     chunk: NonNull<Chunk>,
     num: u32,
     #[cfg(debug_assertions)] sensed: *const crate::sensed::Record,
+    #[cfg(debug_assertions)] origins: Option<NonNull<crate::sensed::Origin>>,
 ) {
     let mut header = Chunk {
         free_pages: PAGES - FIRST_PAGE,
@@ -1250,6 +1298,8 @@ fn chunk_init(
         map: [0; PAGES as usize],
         #[cfg(debug_assertions)]
         sensed,
+        #[cfg(debug_assertions)]
+        origins,
     };
     header.free_map[0] = (1 << FIRST_PAGE) - 1;
     header.map[0] = IS_LRUN | FIRST_PAGE;

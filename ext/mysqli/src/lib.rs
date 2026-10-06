@@ -609,6 +609,15 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// `zval_get_string`'s bytes: the string it answers is the caller's, so
+/// it is given back once they are copied.
+pub(crate) fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let text = php_ext::coerce::to_string(req, value)?;
+    let bytes = text.as_bytes().to_vec();
+    text.give_up(req);
+    Ok(bytes)
+}
+
 /// The ini entry as `OnUpdateString` keeps it: `None` for no value or an
 /// empty one.
 pub(crate) fn ini_string(req: &Request, name: &[u8]) -> Option<Vec<u8>> {

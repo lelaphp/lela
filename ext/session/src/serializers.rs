@@ -208,7 +208,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
                 break;
             }
             Err(thrown) => {
-                let _ = reader.finish(req);
+                reader.finish(req).ok();
                 return Err(thrown);
             }
         }

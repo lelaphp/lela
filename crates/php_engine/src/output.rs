@@ -1265,7 +1265,7 @@ pub(crate) fn header_add(
         } else if name.eq_ignore_ascii_case(b"Content-Length") {
             // Req #44164: a script that sets the length cannot know the
             // size after compression, so compression is switched off.
-            let _ = req.ini_set(b"zlib.output_compression", b"0");
+            req.ini_set(b"zlib.output_compression", b"0").ok();
         }
     }
     if response_code != 0 {

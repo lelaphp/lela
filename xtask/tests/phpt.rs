@@ -780,7 +780,7 @@ fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
     assert!(
         reading
             .message
-            .contains("cargo build -p php_sapi_cli -p php_sapi_cgi"),
+            .contains("cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi"),
         "{}",
         reading.message
     );
@@ -1096,8 +1096,8 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     let made = outside.join().unwrap();
     let (segment, keyed) = made.perl.split_once(' ').unwrap_or((&made.perl, ""));
     let after = ipcs();
-    let _ = Command::new("ipcrm").args(["-m", segment]).status();
-    let _ = Command::new("ipcrm").args(["-q", keyed]).status();
+    Command::new("ipcrm").args(["-m", segment]).status().ok();
+    Command::new("ipcrm").args(["-q", keyed]).status().ok();
     assert!(
         !segment.is_empty() && !keyed.is_empty(),
         "perl made {:?}",
@@ -1742,7 +1742,7 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     first.kill().unwrap();
     first.wait().unwrap();
     let pid = fs::read_to_string(&held).unwrap();
-    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+    Command::new("kill").args(["-9", pid.trim()]).status().ok();
 
     // Another process's run, in the machine's temporary directory, whose
     // first scratch tree sweeps every dead run's standing there.

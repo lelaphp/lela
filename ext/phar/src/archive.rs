@@ -589,7 +589,7 @@ pub(crate) fn get_archive(
             {
                 table.alias_map.remove(&current);
             }
-            let _ = table.alias_map.add(alias, last.id);
+            table.alias_map.add(alias, last.id).ok();
             if let Some(cache) = &mut table.last {
                 cache.alias = Some(alias.to_vec());
             }
@@ -640,7 +640,7 @@ pub(crate) fn get_archive(
             {
                 table.alias_map.remove(&current);
             }
-            let _ = table.alias_map.add(alias, id);
+            table.alias_map.add(alias, id).ok();
         }
         remember(req, id, None);
         return Ok(id);
@@ -655,7 +655,7 @@ pub(crate) fn get_archive(
     let table = archives(req);
     if let Some(id) = table.by_fname(&real) {
         if let Some(alias) = alias {
-            let _ = table.alias_map.add(alias, id);
+            table.alias_map.add(alias, id).ok();
         }
         remember(req, id, None);
         return Ok(id);

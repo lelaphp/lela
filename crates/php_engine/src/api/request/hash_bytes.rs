@@ -238,6 +238,23 @@ impl Request {
         added
     }
 
+    /// `shutdown_executor`'s frees of the two tables a debug build of php
+    /// frees by name (`Z/Zend/zend_execute_API.c:496-502`): every
+    /// `EG(symtable_cache)` kept, then `EG(included_files)` with the path
+    /// strings it holds. A release build leaves them to the heap's mass
+    /// release, as php's fast shutdown leaves them.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_hash_tables(&mut self) {
+        for bytes in std::mem::take(&mut self.hash_bytes.symtable_cache) {
+            bytes.free(self);
+        }
+        let included = std::mem::take(&mut self.included_files);
+        for path in included.paths {
+            self.release(crate::api::values::Value::string(path));
+        }
+        included.table.free(self);
+    }
+
     /// `zend_rebuild_symbol_table`'s table for a function frame with
     /// `last_var` CVs, before they are appended: one `EG(symtable_cache)`
     /// kept, extended to them (`zend_hash_extend`), or a new one,
@@ -315,7 +332,7 @@ impl Request {
         };
         if added {
             // The memory limit's fatal is recorded and ends the request.
-            let _ = bytes.add(self);
+            bytes.add(self).ok();
         } else {
             bytes.del(last);
         }

@@ -71,7 +71,7 @@ impl Connection for Link {
             .append(true)
             .open(&self.log)
         {
-            let _ = log.write_all(b"closed\n");
+            log.write_all(b"closed\n").ok();
         }
     }
 }
@@ -97,7 +97,7 @@ fn counted() -> Extension {
 #[test]
 fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_request() {
     let log = std::env::temp_dir().join(format!("t1798-pdo-pool-{}.log", std::process::id()));
-    let _ = std::fs::remove_file(&log);
+    std::fs::remove_file(&log).ok();
     let engine = Engine::builder()
         .extensions(&[
             php_ext_spl::extension(),
@@ -118,5 +118,5 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
     let served = engine.serve_capture(&script, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
     assert_eq!(closed(), "closed\nclosed\n");
-    let _ = std::fs::remove_file(&log);
+    std::fs::remove_file(&log).ok();
 }

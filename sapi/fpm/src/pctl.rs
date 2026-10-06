@@ -154,7 +154,7 @@ impl Fpm {
         // before the exec, as `fpm_php_cleanup` ends it.
         drop(self.engine.take());
         crate::stdio::restore_original_stderr(self, true);
-        let _ = crate::ffi::restore_defaults();
+        crate::ffi::restore_defaults().ok();
         let argv: Vec<std::ffi::CString> = self
             .argv
             .iter()
@@ -233,7 +233,7 @@ fn kill_idle_child(fpm: &mut Fpm, pool: usize, child: usize) {
         Signal::SIGQUIT
     };
     target.idle_kill = true;
-    let _ = kill(Pid::from_raw(target.pid), signal);
+    kill(Pid::from_raw(target.pid), signal).ok();
 }
 
 /// `fpm_pctl_perform_idle_server_maintenance`: each pool's idle and

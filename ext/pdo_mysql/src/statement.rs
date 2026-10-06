@@ -490,12 +490,12 @@ impl Statement for Stmt {
 
     /// `pdo_mysql_stmt_dtor`.
     fn close(&mut self, req: &mut Request) {
-        let _ = self.free_rows(req);
+        self.free_rows(req).ok();
         if let Some(ps) = self.ps.take() {
-            let _ = ps.close(req, false);
+            ps.close(req, false).ok();
         }
         if !self.done {
-            let _ = self.drain(req);
+            self.drain(req).ok();
         }
     }
 }

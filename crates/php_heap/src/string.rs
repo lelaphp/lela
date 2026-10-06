@@ -445,14 +445,19 @@ impl Str {
     /// is what php does in `zend_add_interned_string`.
     #[must_use]
     pub fn hash(&self) -> u64 {
+        self.cache_hash();
+        self.header().h.get()
+    }
+
+    /// The hash written to the cache where it is unset, and none returned:
+    /// what php's `zend_add_interned_string` asks of `zend_string_hash_val`
+    /// before it publishes a string, so that a string a second thread can
+    /// name is never written again.
+    pub(crate) fn cache_hash(self) {
         let header = self.header();
-        let cached = header.h.get();
-        if cached != 0 {
-            return cached;
+        if header.h.get() == 0 {
+            header.h.set(hash_func(self.bytes()));
         }
-        let hash = hash_func(self.bytes());
-        header.h.set(hash);
-        hash
     }
 
     /// One byte of the string written where it stands, the
@@ -769,9 +774,9 @@ impl Permanent {
     /// Publish `s` under `hash`, php's `zend_add_interned_string`
     /// (`Z/Zend/zend_string.c:173-185`). php takes the hash before it
     /// publishes, so that a table's string is immutable from the moment
-    /// a second thread can name it; [`Str::hash`] here is that act.
+    /// a second thread can name it; [`Str::cache_hash`] here is that act.
     pub(crate) fn add(&mut self, hash: u64, s: Str) {
-        let _ = s.hash();
+        s.cache_hash();
         self.slots.entry(hash).or_default().push(Interned(s));
     }
 
@@ -879,9 +884,9 @@ impl Table {
     /// (`Z/Zend/zend_string.c:173-185`), with the room the add takes out
     /// of `mm`: the whole array on the first add, the doubled one on the
     /// add that fills it. php takes the hash before it publishes;
-    /// [`Str::hash`] here is that act.
+    /// [`Str::cache_hash`] here is that act.
     pub(crate) fn add(&mut self, mm: &mut Mm, s: Str) -> Result<(), Fatal> {
-        let _ = s.hash();
+        s.cache_hash();
         let arr = match self.arr {
             Some(arr) => arr,
             None => *self.arr.insert(table_header(REQUEST_TABLE_SIZE)?),
@@ -892,6 +897,28 @@ impl Table {
     /// How many strings are here, `zend_hash_num_elements`.
     pub(crate) fn count(&self) -> usize {
         self.arr.as_ref().map_or(0, Arr::len)
+    }
+}
+
+impl Table {
+    /// `zend_interned_strings_deactivate` (`Z/Zend/zend_string.c:346`) in
+    /// a debug build's teardown before the request leak sensor: every
+    /// string the request interned freed, then the table's data, then its
+    /// header.
+    #[cfg(debug_assertions)]
+    pub(crate) fn destroy(&mut self, mm: &mut Mm) {
+        let Some(arr) = self.arr.take() else {
+            return;
+        };
+        for (_, z) in &arr {
+            if let Some(s) = z.as_str() {
+                // SAFETY: the string was interned out of `mm` and the
+                // table, freed with it, is its last name.
+                unsafe { mm.free(s.address()) };
+            }
+        }
+        crate::array::free_table_data(mm, arr);
+        crate::array::free_table_header(arr);
     }
 }
 
@@ -991,7 +1018,7 @@ unsafe impl Sync for Frozen {}
 /// long as a request can be served.
 fn froze(bytes: &[u8]) -> Option<Str> {
     let s = persistent(bytes).ok()?;
-    let _ = s.hash();
+    s.cache_hash();
     if bytes.is_empty() {
         s.mark_valid_utf8();
     }

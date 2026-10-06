@@ -208,6 +208,10 @@ impl Block {
     /// The block given up unfreed: its address, which `FFI::free` frees.
     pub(crate) fn release(self) -> usize {
         let addr = self.addr.get();
+        #[expect(
+            clippy::mem_forget,
+            reason = "the block is given up unfreed, and its address is `FFI::free`'s to free"
+        )]
         std::mem::forget(self);
         addr
     }

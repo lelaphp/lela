@@ -14,7 +14,9 @@ use php_unit::decl::{PropertyDecl, Visibility};
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
 
 use frames::Link;
 
@@ -1673,9 +1675,9 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
-        self.release_hold(held);
+        held.give_up(self);
         served
     }
 
@@ -1863,9 +1865,9 @@ impl Request {
         // an `__isset` that gives up every other owner does not free
         // the object the `__get` is served on.
         if let Some(issetter) = issetter {
-            let held = self.take_hold(object.as_value());
+            let held = Owner::take(self, object.as_value());
             let served = self.isset_then_get(object, name, read, issetter, getter);
-            self.release_hold(held);
+            held.give_up(self);
             if let Some(served) = served? {
                 return Ok(served);
             }
@@ -2266,14 +2268,14 @@ impl Request {
         value: Value,
         strict: bool,
     ) -> Result<Value, Thrown> {
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let verified = self.hold_to_property_type(typed, name, value, strict);
         let Ok(landing) = verified else {
-            self.let_go(held);
+            held.let_go(self);
             return verified;
         };
         if object.as_value().refcount() > 1 {
-            self.let_go(held);
+            held.let_go(self);
             return Ok(landing);
         }
         let class = self.class_name(typed.declaring);
@@ -2283,7 +2285,7 @@ impl Request {
             "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
         );
-        self.let_go(held);
+        held.let_go(self);
         self.release(landing);
         Err(error)
     }
@@ -2960,25 +2962,41 @@ impl Request {
         checked
     }
 
-    /// `object_and_properties_init` over `zend_symtable_to_proptable`,
-    /// the `(object)` cast of an array: each element laid into the new
-    /// object's dynamic table under its key as a property name, one
-    /// owner of it taken and a reference kept as the reference, with no
-    /// handler in the way, so a key a handler would refuse, a mangled
-    /// one that opens with a NUL byte, is laid down as it is.
+    /// `zend_cast_zval_to_object`'s array arm
+    /// (`Z/Zend/zend_execute.h:225`), the `(object)` cast of an array:
+    /// [`Request::symtable_to_proptable`] over it laid down as the new
+    /// object's table, which is the array itself, one more owner of it,
+    /// where its keys are all strings, and a copy of an immutable one,
+    /// with no handler in the way, so a key a handler would refuse, a
+    /// mangled one that opens with a NUL byte, is laid down as it is.
+    /// The cast of an array that is kept costs the object's forty bytes,
+    /// as php's does, and a write to either holder separates the two:
+    ///
+    /// ```php
+    /// $a = []; foreach (['x', 'y', 'z'] as $k) { $a[$k] = str_repeat($k, 40); }
+    /// $m = memory_get_usage(); $o = (object) $a; echo memory_get_usage() - $m, "\n";
+    /// $o->x = 1; $a['y'] = 2; echo $a['x'][0], $o->y[0], "\n";
+    /// ```
+    /// ```expect
+    /// 40
+    /// xy
+    /// ```
     pub(crate) fn properties_from_array(
         &mut self,
         object: PhpObject,
         array: PhpArray,
     ) -> Result<(), Thrown> {
-        for (key, entry) in array.snapshot_refs() {
-            let name = key.to_prop_name(self)?;
-            self.addref(&entry);
-            let o = object.heap();
-            let table = self.separated_properties(o)?;
-            self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
-            name.give_up(self);
+        let table = self.symtable_to_proptable(array.heap())?;
+        let table = if table.is_immutable() {
+            self.array_dup(table)?
+        } else {
+            table
+        };
+        let o = object.heap();
+        if let Some(old) = self.heap.object_take_properties(o) {
+            self.release(Value::array(PhpArray::of(old)));
         }
+        self.heap.object_set_properties(o, table);
         Ok(())
     }
 
@@ -3033,16 +3051,16 @@ impl Request {
                 &format!("Cannot create dynamic property {class_name}::${shown}"),
             ));
         }
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         crate::api::raising::deprecated(
             self,
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
         if object.as_value().refcount() > 1 {
-            self.let_go(held);
+            held.let_go(self);
             return Ok(());
         }
-        self.let_go(held);
+        held.let_go(self);
         if self.is_pending() {
             return Err(Thrown::of(None));
         }
@@ -3786,10 +3804,10 @@ impl Request {
         // gives up every other owner does not free the object the
         // `__get` is served on.
         self.guard_take(object, name, IN_ISSET);
-        let held = self.take_hold(object.as_value());
+        let held = Owner::take(self, object.as_value());
         let answered = self.isset_then_truth(object, name, test, issetter);
         self.guard_drop(object, name, IN_ISSET);
-        self.release_hold(held);
+        held.give_up(self);
         answered
     }
 

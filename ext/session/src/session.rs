@@ -265,7 +265,7 @@ pub(super) fn decode(req: &mut Request, data: &[u8]) -> Result<bool, Thrown> {
         Err(thrown) if thrown.cause(req) == Cause::Fatal => {
             // `zend_catch { php_session_cancel_decode(); zend_bailout(); }`:
             // what the cancel raises in turn cannot outlive the fatal.
-            let _ = cancel_decode(req);
+            cancel_decode(req).ok();
             return Err(thrown);
         }
         decoded => decoded,
@@ -395,9 +395,9 @@ pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// ```
 pub(super) fn rshutdown(req: &mut Request) {
     if req.state::<State>().status == Status::Active {
-        let _ = flush(req, true);
+        flush(req, true).ok();
     }
-    let _ = rshutdown_globals(req);
+    rshutdown_globals(req).ok();
     let handlers = std::mem::take(&mut req.state::<State>().handlers);
     handlers.release(req);
     req.state::<State>().thrown = None;
@@ -631,7 +631,9 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     let mut collect = immediate;
     if !collect && probability > 0 {
         let mut draw = [0u8; 8];
-        let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut draw));
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut draw))
+            .ok();
         let range = u64::try_from(divisor).unwrap_or(1);
         collect = i64::try_from(u64::from_le_bytes(draw) % range).unwrap_or(0) < probability;
     }

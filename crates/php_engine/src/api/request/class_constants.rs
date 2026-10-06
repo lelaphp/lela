@@ -40,6 +40,18 @@ pub(super) struct ClassConstants {
 }
 
 impl Request {
+    /// The enum cases given up, a debug build's teardown: php's case
+    /// objects stand in the class's constant table, which
+    /// `zend_shutdown_executor_values` releases before the object store
+    /// (`Z/Zend/zend_execute_API.c:334-346`). A release build leaves them
+    /// to the heap's mass release.
+    #[cfg(debug_assertions)]
+    pub(super) fn free_enum_cases(&mut self) {
+        for (_, case) in std::mem::take(&mut self.class_constants.enum_cases) {
+            self.release(case.as_value());
+        }
+    }
+
     /// `CE_CONSTANTS_TABLE(ce)` as `zend_do_inheritance` leaves it, read
     /// by walking the declarations instead of copying them: the class's
     /// own constants, then its parent's and its interfaces', and a

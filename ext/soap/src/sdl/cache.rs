@@ -1155,7 +1155,7 @@ fn get_sdl_from_cache(path: &std::path::Path, uri: &[u8], t: i64) -> Option<(Sdl
     match sdl_deserialize(&buf, uri, t) {
         Cached::Read(sdl, cached) => Some((*sdl, cached)),
         Cached::Stale => {
-            let _ = std::fs::remove_file(path);
+            std::fs::remove_file(path).ok();
             None
         }
         Cached::Missing => None,
@@ -1184,7 +1184,7 @@ fn add_sdl_to_cache(dir: &std::path::Path, path: &std::path::Path, uri: &[u8], t
     if valid && std::fs::rename(&temp.1, path).is_ok() {
         return;
     }
-    let _ = std::fs::remove_file(&temp.1);
+    std::fs::remove_file(&temp.1).ok();
 }
 
 /// `tmp.wsdl.XXXXXX`, as `mkstemp` names one.

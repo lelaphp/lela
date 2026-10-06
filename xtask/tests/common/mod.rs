@@ -14,7 +14,7 @@ use xtask::manifest::{self, Manifest};
 /// not the workspace's. `permit --bench` builds the same repository for
 /// the same reason, with the recipe stated there too.
 pub fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
-    let _ = std::fs::remove_dir_all(dir);
+    std::fs::remove_dir_all(dir).ok();
     std::fs::create_dir_all(dir.join("docs"))
         .with_context(|| format!("creating {}", dir.display()))?;
     let manifest = Manifest::load(root)?;

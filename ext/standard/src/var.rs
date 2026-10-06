@@ -9,6 +9,8 @@
 //! over four spaces of indent per level, a property's visibility in its
 //! name rather than beside it, and no type or length anywhere.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, True, Union,
 };
@@ -17,6 +19,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Guarded, Reached};
 use php_ext::values::{HeldRow, Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
@@ -721,24 +724,40 @@ pub(super) fn render(
 ) -> Result<(), Thrown> {
     // `case IS_REFERENCE`: php renders what the cell holds, at this
     // level and with no mark of its own.
+    let reached = *value;
     let value = value.deref();
     // php asks no stack limit here and runs to the thread's end; this
     // walk is held to the floor short of it.
     call_stack_end(req)?;
-    if let Some(array) = value.as_array() {
+    if let Some(array) = value.as_array().copied() {
         out.extend_from_slice(b"Array\n");
         // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
         // only where the array is refcounted; an immutable one is marked
         // by neither, since nothing can make one hold itself.
-        if array.is_recursive() {
+        //
+        // The walk holds an array it reached through a reference the
+        // program shares, which an element's `__debugInfo` may assign
+        // over; the test
+        // `print_r_holds_a_nested_array_a_debug_info_method_gives_up`
+        // says why there is no divergence row. A table an object's row
+        // holds alone is no held walk's row, and the program can still
+        // give it up from a nested `__debugInfo`, as php can (#2105). The
+        // `(` is laid down
+        // before the walk and taken back where the walk found the table
+        // marked, since that walk wrote nothing after it.
+        let opened = out.len();
+        let mut printed = Printed::open(out, indent, false);
+        let reached = Reached::of(&reached).unwrap_or(Reached::Held(array));
+        let walked = walk::held_guarded(req, reached, |req, key, element| {
+            printed.row(req, out, key, element)?;
+            Ok(ControlFlow::<()>::Continue(()))
+        })?;
+        if walked == Guarded::Recursive {
+            out.truncate(opened);
             out.extend_from_slice(b" *RECURSION*");
             return Ok(());
         }
-        array.protect();
-        let rows = array.snapshot();
-        let rendered = hash(req, out, &rows, indent, false);
-        array.unprotect();
-        return rendered;
+        return printed.close(out);
     }
     if let Some(object) = value.as_object() {
         let Some(decl) = req.class_decl(object.class()) else {
@@ -816,36 +835,74 @@ fn hash(
     indent: usize,
     is_object: bool,
 ) -> Result<(), Thrown> {
-    out.extend(std::iter::repeat_n(b' ', indent));
-    out.extend_from_slice(b"(\n");
-    // php checks no `EG(exception)` between rows, so a throwable an
-    // element's debug table left pending waits while the rest print, a
-    // later one chained onto it.
-    let mut pending: Option<Thrown> = None;
+    let mut printed = Printed::open(out, indent, is_object);
     for (key, element) in rows {
+        printed.row(req, out, key, element)?;
+    }
+    printed.close(out)
+}
+
+/// One `print_hash` as it is written: its indent, whether its keys are
+/// an object's, and the throwable a row left pending.
+struct Printed {
+    indent: usize,
+    is_object: bool,
+    /// php checks no `EG(exception)` between rows, so a throwable an
+    /// element's debug table left pending waits while the rest print, a
+    /// later one chained onto it.
+    pending: Option<Thrown>,
+}
+
+impl Printed {
+    /// The `(` and the newline after it.
+    fn open(out: &mut Vec<u8>, indent: usize, is_object: bool) -> Printed {
+        out.extend(std::iter::repeat_n(b' ', indent));
+        out.extend_from_slice(b"(\n");
+        Printed {
+            indent,
+            is_object,
+            pending: None,
+        }
+    }
+
+    /// One row, `[key] => ` and its value, and the newline after it; the
+    /// `Err` is a fatal, which ends the walk.
+    fn row(
+        &mut self,
+        req: &mut Request,
+        out: &mut Vec<u8>,
+        key: &Key,
+        element: &Value,
+    ) -> Result<(), Thrown> {
+        let indent = self.indent;
         out.extend(std::iter::repeat_n(b' ', indent + INDENT));
         out.push(b'[');
         match key {
             Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
-            Key::Str(s) if is_object => unmangled(out, s.as_bytes()),
+            Key::Str(s) if self.is_object => unmangled(out, s.as_bytes()),
             Key::Str(s) => out.extend_from_slice(s.as_bytes()),
         }
         out.extend_from_slice(b"] => ");
         if let Err(thrown) = render(req, out, element, indent + INDENT + INDENT) {
-            let thrown = match pending.take() {
+            let thrown = match self.pending.take() {
                 Some(earlier) => earlier.chain(req, thrown),
                 None => thrown,
             };
             if thrown.exception().is_none() {
                 return Err(thrown);
             }
-            pending = Some(thrown);
+            self.pending = Some(thrown);
         }
         out.push(b'\n');
+        Ok(())
     }
-    out.extend(std::iter::repeat_n(b' ', indent));
-    out.extend_from_slice(b")\n");
-    pending.map_or(Ok(()), Err)
+
+    /// The `)` and the newline after it, and what a row left pending.
+    fn close(self, out: &mut Vec<u8>) -> Result<(), Thrown> {
+        out.extend(std::iter::repeat_n(b' ', self.indent));
+        out.extend_from_slice(b")\n");
+        self.pending.map_or(Ok(()), Err)
+    }
 }
 
 /// `zend_unmangle_property_name_ex`: the class a mangled name carries

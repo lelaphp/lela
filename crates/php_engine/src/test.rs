@@ -112,7 +112,7 @@ pub(crate) fn append_trace(path: &Path, trace: &[Entered]) {
         .append(true)
         .open(path)
     {
-        let _ = file.write_all(lines.as_bytes());
+        file.write_all(lines.as_bytes()).ok();
     }
 }
 

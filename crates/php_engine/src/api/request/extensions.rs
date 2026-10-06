@@ -300,7 +300,7 @@ impl Request {
                     b'-' | b'.' | b'_' => anchor.push(char::from(b)),
                     _ if b.is_ascii_alphanumeric() => anchor.push(char::from(b)),
                     _ => {
-                        let _ = write!(anchor, "%{b:02X}");
+                        write!(anchor, "%{b:02X}").ok();
                     }
                 }
             }
@@ -395,7 +395,7 @@ impl Request {
                     out.extend_from_slice(b"<tr>");
                     for (i, cell) in cells.iter().enumerate() {
                         let class = if i == 0 { "e" } else { "v" };
-                        let _ = write!(Bytes(&mut out), "<td class=\"{class}\">");
+                        write!(Bytes(&mut out), "<td class=\"{class}\">").ok();
                         if cell.is_empty() {
                             out.extend_from_slice(b"<i>no value</i>");
                         } else {
@@ -409,13 +409,14 @@ impl Request {
                     let _ = columns;
                     let spaces = 74_usize.saturating_sub(header.len()) / 2;
                     let pad = " ".repeat(spaces.max(1));
-                    let _ = writeln!(Bytes(&mut out), "{pad}{header}{pad}");
+                    writeln!(Bytes(&mut out), "{pad}{header}{pad}").ok();
                 }
                 (InfoRow::Colspan(columns, header), false) => {
-                    let _ = writeln!(
+                    writeln!(
                         Bytes(&mut out),
                         "<tr class=\"h\"><th colspan=\"{columns}\">{header}</th></tr>"
-                    );
+                    )
+                    .ok();
                 }
                 (InfoRow::Written(bytes), _) => out.extend_from_slice(bytes),
             }

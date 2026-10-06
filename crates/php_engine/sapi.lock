@@ -15,6 +15,7 @@ IniFile
 IniFiles
 IniOrigin
 IniValue
+LeakSensor
 Method
 Observables
 OutputSink

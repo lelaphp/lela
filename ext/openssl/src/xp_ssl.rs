@@ -382,8 +382,9 @@ fn option(req: &Request, context: Option<StreamCtx>, name: &[u8]) -> Option<Valu
     context.and_then(|context| context.option(req, b"ssl", name))
 }
 
-/// `try_convert_to_string` of a value.
-fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+/// `try_convert_to_string` of a value: its bytes, the string
+/// `zval_get_string` answered given back.
+pub(crate) fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let text = to_string(req, value)?;
     let bytes = text.as_bytes().to_vec();
     text.give_up(req);
@@ -1387,7 +1388,7 @@ impl Layer {
             } else {
                 Readiness::Writable
             };
-            let _ = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
+            let _ready = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
         };
         if socket.blocked != blocked {
             socket.set_blocking(blocked);
@@ -1551,14 +1552,14 @@ impl Layer {
                     break;
                 }
                 if retry {
-                    let _ = socket.wait(wait_for(err), left);
+                    let _ready = socket.wait(wait_for(err), left);
                 }
             } else {
                 if err == SSL_ERROR_NONE {
                     break;
                 }
                 if began_blocked {
-                    let _ = socket.wait(wait_for(err), left);
+                    let _ready = socket.wait(wait_for(err), left);
                 }
             }
             if !retry {

@@ -248,10 +248,10 @@ fn truncate(buf: &mut Vec<u8>, size: usize, space: usize) {
 fn write_target(target: &Target, bytes: &[u8]) {
     match target {
         Target::File(fd) => {
-            let _ = nix::unistd::write(fd.as_fd(), bytes);
+            nix::unistd::write(fd.as_fd(), bytes).ok();
         }
         _ => {
-            let _ = std::io::stderr().write_all(bytes);
+            std::io::stderr().write_all(bytes).ok();
         }
     }
 }
@@ -289,7 +289,7 @@ fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Opti
         truncate(&mut buf, state.limit.min(MAX_BUF_LENGTH), 1);
     }
     if syslog {
-        let _ = nix::syslog::syslog(state.level.severity(), &*String::from_utf8_lossy(&buf));
+        nix::syslog::syslog(state.level.severity(), &*String::from_utf8_lossy(&buf)).ok();
         buf.push(b'\n');
     } else {
         buf.push(b'\n');
@@ -300,7 +300,7 @@ fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Opti
         && !state.launched
         && level >= Level::Notice
     {
-        let _ = std::io::stderr().write_all(&buf);
+        std::io::stderr().write_all(&buf).ok();
     }
 }
 
@@ -534,16 +534,16 @@ impl Stream {
         if self.use_fd {
             match &self.dest {
                 Dest::Fd(fd) => {
-                    let _ = nix::unistd::write(fd.as_fd(), bytes);
+                    nix::unistd::write(fd.as_fd(), bytes).ok();
                 }
                 Dest::Log => write_target(&state().target, bytes),
                 Dest::Stderr => {
-                    let _ = std::io::stderr().write_all(bytes);
+                    std::io::stderr().write_all(bytes).ok();
                 }
             }
         }
         if self.use_stderr {
-            let _ = std::io::stderr().write_all(bytes);
+            std::io::stderr().write_all(bytes).ok();
         }
     }
 
@@ -625,7 +625,7 @@ impl Stream {
     fn buf_flush(&mut self) {
         if self.use_syslog {
             let line = String::from_utf8_lossy(&self.buf[..self.len]).into_owned();
-            let _ = nix::syslog::syslog(state().level.severity(), &*line);
+            nix::syslog::syslog(state().level.severity(), &*line).ok();
         }
         if self.use_external {
             let external = state().external;

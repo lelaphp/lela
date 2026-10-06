@@ -21,11 +21,11 @@ fn the_extension_is_loaded() {
 #[test]
 fn a_failed_preload_refuses_startup() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ffi-preload-refused");
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let first = dir.join("first.h");
     let second = dir.join("second.h");
-    let _ = std::fs::write(&first, "#define FFI_SCOPE \"S\"\nint abs(int);\n");
-    let _ = std::fs::write(&second, "#define FFI_SCOPE \"S\"\nlong abs(long);\n");
+    std::fs::write(&first, "#define FFI_SCOPE \"S\"\nint abs(int);\n").ok();
+    std::fs::write(&second, "#define FFI_SCOPE \"S\"\nlong abs(long);\n").ok();
     let missing = dir.join("missing.h");
     let both = format!("{}:{}", first.display(), second.display());
     for (list, warning) in [

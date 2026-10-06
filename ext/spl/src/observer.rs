@@ -137,36 +137,6 @@ impl StorageState {
     }
 }
 
-/// One more owner of a row's object or information across a call that
-/// can reach PHP code: php's `GC_ADDREF(obj)` or `ZVAL_COPY(&zv,
-/// &element->inf)` before the call and its `OBJ_RELEASE` or
-/// `zval_ptr_dtor` after. The call may detach the row and give up every
-/// other owner; what is held stands until [`Held::let_go`]. Neither
-/// `Copy` nor `Clone`, so one taken is one given back.
-#[must_use = "a held value is an owner, given back through Held::let_go"]
-struct Held(Value);
-
-impl Held {
-    fn take(req: &Request, value: Value) -> Held {
-        req.addref(&value);
-        Held(value)
-    }
-
-    /// What is held; the copy owns nothing of its own.
-    fn value(&self) -> Value {
-        self.0
-    }
-
-    /// The owner given back, `OBJ_RELEASE` or `zval_ptr_dtor`: at the
-    /// last one the value is freed, its destructor served.
-    // Taking the hold is the point: one given back cannot be given back
-    // again.
-    #[allow(clippy::needless_pass_by_value)]
-    fn let_go(self, req: &mut Request) {
-        req.release(self.0);
-    }
-}
-
 /// `spl_handler_SplObjectStorage`, and `MultipleIterator`'s beside it.
 pub(crate) struct Handlers;
 
@@ -1252,7 +1222,7 @@ impl MultipleIterator {
         with(req, this, |s| s.reset())?;
         while let Some((iterator, held, _)) = held_here(req, this)? {
             let answered = crate::method(req, iterator, b"valid");
-            held.let_go(req);
+            held.give_up(req);
             let answered = answered?;
             let valid = answered.as_bool() == Some(true);
             answered.give_up(req);
@@ -1422,11 +1392,11 @@ fn add_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), T
         };
         let (at, object, inf) = row;
         from = at + 1;
-        let held_object = Held::take(req, object.as_value());
-        let inf = Held::take(req, inf);
-        let attached = storage_attach(req, this, object, inf.value());
-        inf.let_go(req);
-        held_object.let_go(req);
+        let held_object = Owner::take(req, object.as_value());
+        let inf = Owner::take(req, inf);
+        let attached = storage_attach(req, this, object, *inf);
+        inf.give_up(req);
+        held_object.give_up(req);
         if let Err(thrown) = attached {
             break Err(thrown);
         }
@@ -1464,12 +1434,12 @@ fn remove_all_except(req: &mut Request, this: PhpObject, other: PhpObject) -> Re
     let mut from = 0;
     while let Some((at, object, _)) = with(req, this, |s| s.row_at(from))? {
         from = at + 1;
-        let held = Held::take(req, object.as_value());
+        let held = Owner::take(req, object.as_value());
         let tested = match storage_contains(req, other, object) {
             Ok(false) => storage_detach(req, this, object).map(|_| ()),
             kept => kept.map(|_| ()),
         };
-        held.let_go(req);
+        held.give_up(req);
         tested?;
     }
     Ok(())
@@ -1764,11 +1734,11 @@ impl ObjectHandlers for Handlers {
             let Some(other) = other else {
                 return Ok(Some(std::cmp::Ordering::Greater));
             };
-            let inf = Held::take(req, inf);
-            let other = Held::take(req, other);
-            let ordering = compare(req, &inf.value(), &other.value());
-            other.let_go(req);
-            inf.let_go(req);
+            let inf = Owner::take(req, inf);
+            let other = Owner::take(req, other);
+            let ordering = compare(req, &inf, &other);
+            other.give_up(req);
+            inf.give_up(req);
             let ordering = ordering?;
             if ordering != std::cmp::Ordering::Equal {
                 return Ok(Some(ordering));
@@ -1894,15 +1864,15 @@ fn serialize_rows(
 ) -> Result<(), Thrown> {
     let mut pos = 0;
     while let Some((_, object, inf)) = with(req, this, |s| s.row_at(pos))? {
-        let object = Held::take(req, object.as_value());
-        let inf = Held::take(req, inf);
-        let written = serializer.write(req, out, &object.value()).and_then(|()| {
+        let object = Owner::take(req, object.as_value());
+        let inf = Owner::take(req, inf);
+        let written = serializer.write(req, out, &object).and_then(|()| {
             out.push(b',');
-            serializer.write(req, out, &inf.value())
+            serializer.write(req, out, &inf)
         });
         let next = with(req, this, |s| s.forward_from(pos));
-        object.let_go(req);
-        inf.let_go(req);
+        object.give_up(req);
+        inf.give_up(req);
         written?;
         out.push(b';');
         pos = next?;
@@ -2017,9 +1987,9 @@ fn read_storage(
 fn held_here(
     req: &mut Request,
     this: PhpObject,
-) -> Result<Option<(PhpObject, Held, Value)>, Thrown> {
+) -> Result<Option<(PhpObject, Owner<Value>, Value)>, Thrown> {
     let here = with(req, this, |s| s.here())?;
-    Ok(here.map(|(iterator, inf)| (iterator, Held::take(req, iterator.as_value()), inf)))
+    Ok(here.map(|(iterator, inf)| (iterator, Owner::take(req, iterator.as_value()), inf)))
 }
 
 /// Each sub-iterator served `method`, from the first row by the
@@ -2028,7 +1998,7 @@ fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown>
     with(req, this, |s| s.reset())?;
     while let Some((iterator, held, _)) = held_here(req, this)? {
         let served = crate::effect(req, iterator, method);
-        held.let_go(req);
+        held.give_up(req);
         served?;
         with(req, this, |s| s.forward())?;
     }
@@ -2066,10 +2036,10 @@ fn get_all_rows(
 ) -> Result<(), Thrown> {
     with(req, this, |s| s.reset())?;
     while let Some((iterator, held, inf)) = held_here(req, this)? {
-        let inf = Held::take(req, inf);
-        let row = get_one(req, this, iterator, inf.value(), method, out);
-        held.let_go(req);
-        inf.let_go(req);
+        let inf = Owner::take(req, inf);
+        let row = get_one(req, this, iterator, *inf, method, out);
+        held.give_up(req);
+        inf.give_up(req);
         row?;
         with(req, this, |s| s.forward())?;
     }
