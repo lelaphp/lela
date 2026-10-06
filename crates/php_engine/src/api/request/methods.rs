@@ -16,6 +16,34 @@ use crate::engine::{MethodAt, NativeMethod};
 
 use super::{Member, MemberAt, Request};
 
+/// One row of a linked class's function table, `ce->function_table`,
+/// named by value: the class whose table it is and the row the linked
+/// record holds there, read by [`Request::row_method`]. It names the
+/// row, not a reference into the request's tables, so it is `Copy`, is
+/// kept across calls into the engine, and stands as long as the
+/// record, which the link wrote once and nothing writes after. What php
+/// holds as a `zend_function *` out of the table, `intern->ptr` for a
+/// `ReflectionMethod`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodRow {
+    class: ClassId,
+    row: Row<ClassId>,
+}
+
+impl MethodRow {
+    /// The class whose function table holds the row: the class the
+    /// lookup or the walk was asked about.
+    pub fn class(self) -> ClassId {
+        self.class
+    }
+
+    /// `common.scope`: the class that declared the method, the table's
+    /// own class for one it declares, a trait's method among them.
+    pub fn scope(self) -> ClassId {
+        self.row.holder_in(self.class)
+    }
+}
+
 impl Request {
     /// The class a method belongs to, `func->common.scope`: a native
     /// method's class, or the request's `ClassId` for the class of a
@@ -93,36 +121,61 @@ impl Request {
     /// Call to private method G::hidden() from scope D
     /// ```
     pub fn method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let row = self.method_row(class, name)?;
+        let MethodRow { class, row } = self.method_row(class, name)?;
         self.method_function(row.holder_in(class), row.at)
     }
 
     /// [`Request::method_named`] for a method `class` declares itself,
     /// none where the entry under the name is one it inherited.
     fn own_method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let row = self.method_row(class, name)?;
+        let MethodRow { row, .. } = self.method_row(class, name)?;
         self.method_function(class, row.at)
             .filter(|_| row.holder.is_none())
     }
 
-    /// The row of `class`'s function table under the name.
-    fn method_row(&self, class: ClassId, name: &[u8]) -> Option<Row<ClassId>> {
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
+    /// [`MethodRow`]: the row of `class`'s function table under the
+    /// name, whatever its case, which [`Request::row_method`] reads;
+    /// none where the table has no entry of that name. One lookup in the class's linked
+    /// record, the name compared through the row, so nothing is lowered
+    /// or allocated.
+    pub fn method_row(&self, class: ClassId, name: &[u8]) -> Option<MethodRow> {
         let record = self.linked_class(class)?;
-        record
+        let row = record
             .methods
             .find(name, |row| self.row_method_name(class, *row))
-            .copied()
+            .copied()?;
+        Some(MethodRow { class, row })
+    }
+
+    /// `ZEND_HASH_FOREACH_PTR(&ce->function_table, mptr)`: every row of
+    /// `class`'s function table in php's order, each a [`MethodRow`]
+    /// [`Request::row_method`] reads; nothing for a class with no linked
+    /// record. The rows are read off the record in place, so the walk
+    /// allocates nothing.
+    pub fn method_rows(&self, class: ClassId) -> impl ExactSizeIterator<Item = MethodRow> + '_ {
+        self.linked_class(class)
+            .map_or(&[][..], |record| record.methods.rows())
+            .iter()
+            .map(move |&row| MethodRow { class, row })
+    }
+
+    /// The declaration of the method a row of a function table is, which
+    /// [`MethodRow::scope`] declared.
+    pub fn row_method(&self, row: MethodRow) -> Option<&MethodDecl> {
+        self.row_method_at(row.class, row.row)
+            .map(|(_, method)| method)
     }
 
     /// The name of the method a row of `class`'s function table is.
     fn row_method_name(&self, class: ClassId, row: Row<ClassId>) -> &[u8] {
-        self.row_method(class, row)
+        self.row_method_at(class, row)
             .map_or(&[][..], |(_, method)| &method.function.name.0)
     }
 
     /// The method a row of `class`'s function table is, beside the class
     /// that declared it.
-    fn row_method(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &MethodDecl)> {
+    fn row_method_at(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &MethodDecl)> {
         let holder = row.holder_in(class);
         let decl = self.class_decl(holder)?;
         Some((holder, decl.methods.get(usize::try_from(row.at).ok()?)?))
@@ -138,7 +191,7 @@ impl Request {
             .methods
             .rows()
             .iter()
-            .filter_map(|row| self.row_method(class, *row))
+            .filter_map(|row| self.row_method_at(class, *row))
             .collect()
     }
 

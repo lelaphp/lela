@@ -571,6 +571,9 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::MethodRow
+request::MethodRow::class
+request::MethodRow::scope
 request::Notification
 request::NotifyCode
 request::ObserveAllocations
@@ -744,6 +747,8 @@ request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
 request::Request::method_named
+request::Request::method_row
+request::Request::method_rows
 request::Request::multibyte_provider
 request::Request::named_arguments
 request::Request::native_trampoline
@@ -786,6 +791,7 @@ request::Request::response_headers
 request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used
+request::Request::row_method
 request::Request::running_handler_flags
 request::Request::sapi_name
 request::Request::scope
