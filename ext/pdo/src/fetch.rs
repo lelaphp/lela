@@ -385,9 +385,15 @@ fn common(
 }
 
 /// A symbol-table key for a column's name, `zend_symtable_update`'s: a
-/// canonical decimal is the integer.
+/// canonical decimal is the integer, and the string made for it given
+/// up, which #1996 moves into `Key::from_string` itself.
 fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
-    Ok(Key::from_string(PhpString::new(req, name)?))
+    let made = PhpString::new(req, name)?;
+    let key = Key::from_string(made);
+    if matches!(key, Key::Int(_)) {
+        req.release(Value::string(made));
+    }
+    Ok(key)
 }
 
 /// `do_fetch`: the next row shaped as `how` asks, with the group key

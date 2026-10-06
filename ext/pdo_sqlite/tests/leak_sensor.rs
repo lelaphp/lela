@@ -49,3 +49,17 @@ $r = $db->query("SELECT 'ab' AS id", PDO::FETCH_LAZY); foreach ($r as $v) var_du
         "object(PDORow)#4 (2) {\n  [\"queryString\"]=>\n  string(17) \"SELECT 'ab' AS id\"\n  [\"id\"]=>\n  string(2) \"ab\"\n}\n"
     );
 }
+
+/// A column named by a canonical decimal is keyed by the integer,
+/// `zend_symtable_update`, and the string made for its name is given up
+/// (#2117, `ext/pdo/tests/bug_79106.phpt`).
+#[test]
+fn a_numeric_column_name_keeps_no_string() {
+    let stdout = armed(
+        r#"<?php
+$db = new PDO('sqlite::memory:');
+$row = $db->query('SELECT 0 AS "2007", 1 AS "2020"')->fetch(); echo $row[2007], $row[2020], "\n";
+"#,
+    );
+    assert_eq!(stdout, "01\n");
+}
