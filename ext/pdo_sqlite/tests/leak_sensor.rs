@@ -32,3 +32,20 @@ var_dump($db->query('SELECT twice(a) FROM t')->fetchColumn(), $db->query('SELECT
     );
     assert_eq!(stdout, "string(2) \"xx\"\nstring(4) \"xy/3\"\n");
 }
+
+/// What `var_dump` shows of a `PDORow`, `row_get_properties_for`'s
+/// table of the statement's properties and each column fetched, is the
+/// dumper's to give up with every value fetched for it (#2117).
+#[test]
+fn a_dumped_lazy_row_s_values_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+$db = new PDO('sqlite::memory:');
+$r = $db->query("SELECT 'ab' AS id", PDO::FETCH_LAZY); foreach ($r as $v) var_dump($v);
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "object(PDORow)#4 (2) {\n  [\"queryString\"]=>\n  string(17) \"SELECT 'ab' AS id\"\n  [\"id\"]=>\n  string(2) \"ab\"\n}\n"
+    );
+}
