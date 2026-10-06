@@ -180,3 +180,22 @@ $v = $get->call(new K); echo $v, "\n";
     assert_eq!(stdout, "42\nv\n");
     assert_eq!(exit, 0);
 }
+
+/// An extra argument a frame gives up is a possible root, so a cycle a
+/// collection in the callee found reachable through it is collected at
+/// the request's end (#2074).
+#[test]
+fn an_extra_argument_given_up_is_a_possible_root() {
+    let (stdout, exit) = armed(
+        r#"<?php
+function &foo() { $a = []; $a[] =& $a; return $a; }
+function bar() { gc_collect_cycles(); }
+bar(foo());
+function baz() { gc_collect_cycles(); }
+$o = new stdClass; $o->self = $o; baz($o); unset($o);
+echo "ok\n";
+"#,
+    );
+    assert_eq!(stdout, "ok\n");
+    assert_eq!(exit, 0);
+}
