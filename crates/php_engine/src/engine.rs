@@ -689,10 +689,10 @@ pub(crate) struct Shared {
     /// ([`EngineBuilder::trace_natives_to`]).
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
-    /// Whether a debug build's request leak sensor is armed
-    /// ([`EngineBuilder::sense_leaks`]).
+    /// Whether a debug build's request leak sensor is armed, and whether
+    /// it traces allocations ([`EngineBuilder::sense_leaks`]).
     #[cfg(debug_assertions)]
-    pub(crate) sense_leaks: bool,
+    pub(crate) sense_leaks: LeakSensor,
     pub(crate) entry: Loop,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
@@ -2448,22 +2448,48 @@ pub struct EngineBuilder {
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
     #[cfg(debug_assertions)]
-    sense_leaks: bool,
+    sense_leaks: LeakSensor,
+}
+
+/// A debug build's request leak sensor (#1992, #1993), as a host sets it
+/// for every request of its engine ([`EngineBuilder::sense_leaks`]).
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeakSensor {
+    /// Unarmed: a debug request ends as a release one does.
+    #[default]
+    Off,
+    /// Armed: each request ends in php's debug shutdown, every block of
+    /// the request's lifetime freed by name, and in the `InternalError`
+    /// naming what the heap still held and the extension whose native or
+    /// lifecycle hook allocated the first of it; silent after a fatal.
+    Armed,
+    /// Armed, and every allocation keeps the backtrace that made it, so
+    /// the `InternalError` names the frames that allocated the first
+    /// block too: for digging locally, since each allocation then pays a
+    /// backtrace's capture, which costs many times the allocation.
+    Traced,
+}
+
+#[cfg(debug_assertions)]
+impl LeakSensor {
+    /// Whether a request ends in php's debug shutdown and its walk.
+    pub(crate) fn armed(self) -> bool {
+        self != LeakSensor::Off
+    }
 }
 
 impl EngineBuilder {
-    /// A debug build's request leak sensor armed for every request of the
-    /// engine (#1992): each ends in php's debug shutdown, every block of
-    /// the request's lifetime freed by name, and in the `InternalError`
-    /// naming what the heap still held, silent after a fatal. Unarmed, a debug request ends as a
-    /// release one does. The hosts arm it from `PHP_SENSE_LEAKS=1`, read
-    /// once as they build their engine (`php_sapi::prepare`). It is off by
-    /// default until the leaks the corpus has are fixed (#2057); turning
-    /// it on by default is #1992's last step.
+    /// A debug build's request leak sensor, for every request of the
+    /// engine ([`LeakSensor`]). The hosts arm it from `PHP_SENSE_LEAKS=1`
+    /// and trace allocations under it from `PHP_SENSE_LEAKS_BACKTRACE=1`,
+    /// read once as they build their engine (`php_sapi::prepare`). It is
+    /// off by default until the leaks the corpus has are fixed (#2057);
+    /// turning it on by default is #1992's last step.
     #[cfg(debug_assertions)]
     #[must_use]
-    pub fn sense_leaks(mut self, armed: bool) -> EngineBuilder {
-        self.sense_leaks = armed;
+    pub fn sense_leaks(mut self, sensor: LeakSensor) -> EngineBuilder {
+        self.sense_leaks = sensor;
         self
     }
 
@@ -3283,7 +3309,7 @@ impl Engine {
             #[cfg(feature = "witness-trace")]
             trace_to: None,
             #[cfg(debug_assertions)]
-            sense_leaks: false,
+            sense_leaks: LeakSensor::Off,
         }
     }
 
@@ -4267,7 +4293,7 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         #[cfg(debug_assertions)]
-        if self.shared.sense_leaks {
+        if self.shared.sense_leaks.armed() {
             req.free_executor_values();
             req.shutdown_collect();
         }
@@ -4287,7 +4313,7 @@ impl Engine {
         // leak sensor recorded as it raises every other sensor's defect.
         #[cfg(debug_assertions)]
         {
-            if self.shared.sense_leaks {
+            if self.shared.sense_leaks.armed() {
                 req.sense_leaks(report_memleaks);
             }
             req.end_in_sensed();
@@ -4358,8 +4384,11 @@ fn end_phase(
     req: &mut Request,
     hook: fn(&Extension) -> Option<EndFunction>,
 ) {
-    for serve in extensions.iter().rev().filter_map(hook) {
-        serve(req);
+    for (at, extension) in extensions.iter().enumerate().rev() {
+        let Some(serve) = hook(extension) else {
+            continue;
+        };
+        req.serve_for(ExtensionId::at(at), serve);
         req.catch_bailout();
     }
 }
@@ -4738,11 +4767,11 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Thrown> {
     let mut served = Ok(());
-    for extension in extensions {
+    for (at, extension) in extensions.iter().enumerate() {
         let Some(rinit) = extension.rinit else {
             continue;
         };
-        served = rinit(req);
+        served = req.serve_for(ExtensionId::at(at), rinit);
         if served.is_err() {
             break;
         }

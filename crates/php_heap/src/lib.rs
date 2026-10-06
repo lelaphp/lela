@@ -79,7 +79,7 @@ pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 #[cfg(debug_assertions)]
-pub use sensed::Sensor;
+pub use sensed::{Origin, Sensor};
 pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
@@ -445,11 +445,14 @@ impl Heap {
     /// then every block still held named, `zend_mm_check_leaks`. What it
     /// finds is recorded as the sensors record and raised by
     /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
-    /// first of them. The heap serves no allocation after it but the one
-    /// that renders that fatal. A release build has none of it and keeps
-    /// php's fast teardown, the chunks given back whole.
+    /// first of them, with what `name` calls the [`Origin`] that block was
+    /// allocated for, and the frames that allocated it where allocations
+    /// are traced ([`Heap::trace_allocations`]). The heap serves no
+    /// allocation after it but the one that renders that fatal. A release
+    /// build has none of it and keeps php's fast teardown, the chunks
+    /// given back whole.
     #[cfg(debug_assertions)]
-    pub fn sense_leaks(&mut self) {
+    pub fn sense_leaks(&mut self, name: &dyn Fn(Origin) -> String) {
         for a in std::mem::take(&mut self.constant_arrays) {
             array::free_table_data(&mut self.mm, a);
             // SAFETY: the header came from this heap's `mm`, and the
@@ -459,7 +462,27 @@ impl Heap {
         self.resources.destroy(&mut self.mm);
         self.store.destroy(&mut self.mm);
         self.interned.destroy(&mut self.mm);
-        self.mm.sense_leaks();
+        self.mm.sense_leaks(name);
+    }
+
+    /// What a debug build allocates from here on is for `origin`, the
+    /// extension whose native or lifecycle hook the engine is about to
+    /// serve, and the origin it replaces, which the engine puts back
+    /// where that code returns ([`Origin`]). A block keeps the origin it
+    /// was handed out under, and a leak names it.
+    #[cfg(debug_assertions)]
+    pub fn set_origin(&mut self, origin: Origin) -> Origin {
+        self.mm.set_origin(origin)
+    }
+
+    /// A debug build's opt-in tracing: every allocation from here
+    /// on keeps the backtrace that made it, and a leak names the frames
+    /// that allocated its first block. Each allocation then pays a
+    /// `Backtrace::force_capture`, which costs many times the allocation,
+    /// so it is for digging locally and never on by default.
+    #[cfg(debug_assertions)]
+    pub fn trace_allocations(&mut self) {
+        self.mm.trace_allocations();
     }
 
     /// One more owner of `z`: a refcount increment for a refcounted

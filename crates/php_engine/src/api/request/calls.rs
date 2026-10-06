@@ -19,7 +19,7 @@ use crate::engine::{MethodAt, NativeMethod};
 use crate::exec::{self, CallStage, CallState};
 use crate::observer::OnThrow;
 
-use super::{Link, Request, UserFunction};
+use super::{ExtensionId, Link, Request, UserFunction};
 
 /// The trampolines, the natives' defaults, the functions `name(...)`
 /// found and the natives entered, whose fields no file but this one
@@ -997,7 +997,15 @@ impl Request {
             ));
         };
         let begun = crate::observer::native_call(self, function);
+        #[cfg(debug_assertions)]
+        let outer = self
+            .function_origin(function)
+            .map(|extension| self.heap.set_origin(extension.origin()));
         let served = entry(self);
+        #[cfg(debug_assertions)]
+        if let Some(outer) = outer {
+            self.heap.set_origin(outer);
+        }
         let deferred = self.stream_thrown.take();
         crate::observer::native_returned(self, begun, &served, deferred.as_ref(), on_throw);
         match (served, deferred) {
@@ -1013,6 +1021,39 @@ impl Request {
             }
             (served, None) => served,
         }
+    }
+
+    /// `serve` served as code of `extension`, one of its lifecycle hooks:
+    /// in a debug build, what the heap allocates meanwhile is tagged
+    /// with the extension ([`php_heap::Heap::set_origin`]), so a leak it
+    /// leaves names it, and the origin standing before is put back after.
+    pub(crate) fn serve_for<T>(
+        &mut self,
+        extension: ExtensionId,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        #[cfg(debug_assertions)]
+        let outer = self.heap.set_origin(extension.origin());
+        #[cfg(not(debug_assertions))]
+        let _ = extension;
+        let served = serve(self);
+        #[cfg(debug_assertions)]
+        self.heap.set_origin(outer);
+        served
+    }
+
+    /// The extension whose code a native is, for a debug build's heap to
+    /// tag what it allocates while the native runs: the extension that
+    /// declared the function, php's `internal_function.module`, or the
+    /// class of the method; none for a closure's or a trampoline's entry
+    /// that no extension declares, which allocates as its caller.
+    #[cfg(debug_assertions)]
+    fn function_origin(&self, function: Function) -> Option<ExtensionId> {
+        self.function_extension(function).or_else(|| {
+            self.native_method(function)
+                .and_then(|method| method.at.class())
+                .and_then(|class| self.class_extension(class))
+        })
     }
 
     /// Record the natives this request enters from here on, for the

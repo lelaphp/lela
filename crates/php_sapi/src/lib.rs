@@ -32,6 +32,9 @@ pub mod ini;
 use std::io::Write;
 use std::process::ExitCode;
 
+#[cfg(debug_assertions)]
+use php_engine::LeakSensor;
+
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
     FileHandles, Forked, HostValue, IniEvent, IniFile, IniFiles, IniOrigin, IniValue, Method,
@@ -118,7 +121,8 @@ impl OutputSink for Starting {
 }
 
 /// [`start`]'s builder before it is built: the witness lane's trace, a
-/// debug build's request leak sensor where `PHP_SENSE_LEAKS` arms it, and
+/// debug build's request leak sensor where `PHP_SENSE_LEAKS` arms it or
+/// `PHP_SENSE_LEAKS_BACKTRACE` arms it with a backtrace per allocation, and
 /// the line's `-d` entries; for a host that builds more than one engine
 /// and writes the startup errors once, as php-fpm's children build theirs
 /// after the master has started.
@@ -131,7 +135,14 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
     }
     #[cfg(debug_assertions)]
     {
-        builder = builder.sense_leaks(std::env::var_os(SENSE_LEAKS).is_some_and(|v| v == "1"));
+        let set = |name| std::env::var_os(name).is_some_and(|v| v == "1");
+        builder = builder.sense_leaks(if set(SENSE_LEAKS_BACKTRACE) {
+            LeakSensor::Traced
+        } else if set(SENSE_LEAKS) {
+            LeakSensor::Armed
+        } else {
+            LeakSensor::Off
+        });
     }
     for (name, value) in ini {
         builder = builder.ini(name, value);
@@ -153,6 +164,18 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 /// reads nothing.
 #[cfg(debug_assertions)]
 const SENSE_LEAKS: &str = "PHP_SENSE_LEAKS";
+
+/// The variable that arms a debug build's request leak sensor with a
+/// backtrace kept per allocation (#1993, `LeakSensor::Traced`) when it is
+/// `1`, with or without [`SENSE_LEAKS`]: the leak then names the frames
+/// that allocated its first block, each with its line in a build that
+/// carries line tables, as the dev profile does, and by its function
+/// alone in a `release-da` one. Read once, as [`SENSE_LEAKS`] is, and
+/// for digging locally only, since every allocation pays a backtrace's
+/// capture, which costs many times the allocation:
+/// `PHP_SENSE_LEAKS_BACKTRACE=1 target/debug/php leaking.php`.
+#[cfg(debug_assertions)]
+const SENSE_LEAKS_BACKTRACE: &str = "PHP_SENSE_LEAKS_BACKTRACE";
 
 /// `print_modules` and `print_extensions`, which php's CLI and CGI each
 /// write for `-m`: the loaded extensions sorted as `module_name_cmp` sorts
