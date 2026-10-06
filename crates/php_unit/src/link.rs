@@ -1400,13 +1400,6 @@ enum Check {
     TraitAbstract,
 }
 
-/// The constant table of the chain above a class, the way php's table
-/// holds it after `zend_do_inheritance`: each class's own constants,
-/// then what it inherited that it does not redeclare.
-struct Tables<'a> {
-    constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
-}
-
 /// The function table a class holds as it links, each method with the
 /// class that put it there, none for the class's own, indexed by name.
 type Methods<'a> = Rows<(Option<&'a ClassDecl>, &'a MethodDecl), Folded>;
@@ -1420,6 +1413,25 @@ fn method_name<'a>(row: &(Option<&'a ClassDecl>, &'a MethodDecl)) -> &'a [u8] {
 /// `methods` under its name, unless one of its name stands already.
 fn put<'a>(methods: &mut Methods<'a>, by: Option<&'a ClassDecl>, method: &'a MethodDecl) {
     methods.add((by, method), &method.function.name.0, method_name);
+}
+
+/// The constant table a class holds as it links, each constant with the
+/// class that put it there, none for the class's own, indexed by name.
+type Constants<'a> = Rows<(Option<&'a ClassDecl>, &'a ClassConstDecl), Exact>;
+
+/// `constant`, which `by` put there, into `constants` under its name,
+/// unless one of its name stands already.
+fn put_constant<'a>(
+    constants: &mut Constants<'a>,
+    by: Option<&'a ClassDecl>,
+    constant: &'a ClassConstDecl,
+) {
+    constants.add((by, constant), &constant.name.0, constant_name);
+}
+
+/// A constant of [`Constants`] by its name.
+fn constant_name<'a>(row: &(Option<&'a ClassDecl>, &'a ClassConstDecl)) -> &'a [u8] {
+    &row.1.name.0
 }
 
 /// `properties_info` as a class's link reads it, each property beside
@@ -1664,32 +1676,6 @@ impl<'a, H: Copy> Linker<'a, H> {
             .any(|up| self.instance_of_at(up, of, depth + 1))
     }
 
-    /// The constants `class` has with what it inherited, its own first.
-    fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
-        let mut tables = Tables {
-            constants: Vec::new(),
-        };
-        let mut at = Some(class);
-        let mut depth = 0;
-        while let Some(here) = at {
-            for constant in &here.constants {
-                if !tables
-                    .constants
-                    .iter()
-                    .any(|(_, c)| c.name == constant.name)
-                {
-                    tables.constants.push((here, constant));
-                }
-            }
-            depth += 1;
-            if depth > 64 {
-                break;
-            }
-            at = self.class_parent(here);
-        }
-        tables
-    }
-
     /// `class`'s function table as php holds it once linked, each method
     /// beside the class that declared it: read off its record where the
     /// table holds one, and otherwise, for a class under way or one the
@@ -1749,6 +1735,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
         Some(LinkedClass {
             methods: self.method_rows(child, abstracts)?,
+            constants: self.constant_rows(child)?,
             properties: self.property_rows(child)?,
         })
     }
@@ -1822,6 +1809,111 @@ impl<'a, H: Copy> Linker<'a, H> {
     ) -> Option<(&'a ClassDecl, &'a MethodDecl)> {
         let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
         Some((by, by.methods.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `CE_CONSTANTS_TABLE` as `zend_do_link_class` leaves it, in its
+    /// order: the class's own constants, a trait's among them; each of
+    /// the parent's table it does not declare, but the parent's private
+    /// ones (`do_inherit_class_constant`); then each of its interfaces',
+    /// in `zend_do_implement_interfaces`' order, that nothing above put
+    /// there (`do_inherit_iface_constant`). None where the parent or an
+    /// interface is held with no record.
+    fn constant_rows(&self, child: &'a ClassDecl) -> Option<Rows<Row<H>, Exact>> {
+        let named = |row: &Row<H>| self.row_constant_name(child, row);
+        let mut rows = Rows::default();
+        for (at, constant) in (0u32..).zip(&child.constants) {
+            rows.add(Row { holder: None, at }, &constant.name.0, named);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        for name in child
+            .parent
+            .iter()
+            .chain(interfaces.iter().map(|i| &i.name))
+        {
+            let Some(held) = (self.lookup)(&name.0) else {
+                continue;
+            };
+            let (handle, record) = held.record?;
+            rows.inherit(
+                &record.constants,
+                |row| {
+                    let (_, constant) = self.row_constant(held.decl, row)?;
+                    (constant.visibility != Visibility::Private).then(|| Row {
+                        holder: Some(row.holder_in(handle)),
+                        at: row.at,
+                    })
+                },
+                named,
+                |row| self.row_constant_name(held.decl, row),
+            );
+        }
+        Some(rows)
+    }
+
+    /// The name of the constant a row of `class`'s record stands for.
+    fn row_constant_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
+        self.row_constant(class, row)
+            .map_or(&[][..], |(_, constant)| &constant.name.0)
+    }
+
+    /// The constant a row of `class`'s record stands for, beside the
+    /// class that declared it.
+    fn row_constant(
+        &self,
+        class: &'a ClassDecl,
+        row: &Row<H>,
+    ) -> Option<(&'a ClassDecl, &'a ClassConstDecl)> {
+        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
+        Some((by, by.constants.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `class`'s constant table as php holds it once linked, into
+    /// `table`, each constant beside the class that declared it: read
+    /// off its record where the table holds one, and otherwise, for a
+    /// class under way or one the caller keeps no record of, its own
+    /// constants, then its parent's table, then the constants of the
+    /// interfaces it names. An ancestor's private constant, `depth`
+    /// above the class asked, is in no table below it:
+    ///
+    /// ```php
+    /// interface I { final const F = 1; }
+    /// class G { private const X = 1; }
+    /// class P extends G implements I {}
+    /// class C extends P { private const X = 2; }
+    /// class D extends P { const F = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: D::F cannot override final constant I::F in %s on line 6
+    /// ```
+    fn constants_into(&self, class: &'a ClassDecl, table: &mut Constants<'a>, depth: u32) {
+        let inherited = |c: &ClassConstDecl| depth == 0 || c.visibility != Visibility::Private;
+        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
+        if let Some((_, record)) = held.and_then(|held| held.record) {
+            for row in record.constants.rows() {
+                if let Some((by, constant)) = self.row_constant(class, row)
+                    && inherited(constant)
+                {
+                    put_constant(table, Some(by), constant);
+                }
+            }
+            return;
+        }
+        for constant in class.constants.iter().filter(|c| inherited(c)) {
+            put_constant(table, Some(class), constant);
+        }
+        if depth < 64
+            && let Some(parent) = self.class_parent(class)
+        {
+            self.constants_into(parent, table, depth + 1);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
+            for constant in &interface.constants {
+                put_constant(table, Some(interface), constant);
+            }
+        }
     }
 
     /// `ce->properties_info` as `zend_do_link_class` leaves it, in its
@@ -2744,8 +2836,10 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn link_refused(&mut self, child: &'a ClassDecl, abstracts: &'a [traits::Copy]) -> Settled {
         // What the child's table holds as the checks go, each with the
         // class that put it there, none for the child's own.
-        let mut constants: Table<'a, ClassConstDecl> =
-            child.constants.iter().map(|c| (None, c)).collect();
+        let mut constants: Constants<'a> = Rows::default();
+        for constant in &child.constants {
+            put_constant(&mut constants, None, constant);
+        }
         let mut methods: Methods<'a> = Rows::default();
         for method in &child.methods {
             put(&mut methods, None, method);
@@ -3144,13 +3238,12 @@ impl<'a, H: Copy> Linker<'a, H> {
         &mut self,
         child: &'a ClassDecl,
         parent: &'a ClassDecl,
-        constants: &mut Table<'a, ClassConstDecl>,
+        constants: &mut Constants<'a>,
         methods: &mut Methods<'a>,
     ) -> Option<Linked> {
         if let Some(refusal) = Self::parent_refused(child, parent) {
             return Some(Linked::Refused(at_class(child, refusal)));
         }
-        let tables = self.tables(parent);
         let inherited = self.methods_above(parent);
         for &(declaring, property) in self.properties_above(parent).rows() {
             if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
@@ -3163,17 +3256,20 @@ impl<'a, H: Copy> Linker<'a, H> {
         if let Some(linked) = self.hooked_properties_refused(child) {
             return Some(linked);
         }
-        for &(declaring, constant) in &tables.constants {
-            match constants.iter().find(|(_, c)| c.name == constant.name) {
+        let mut above: Constants<'a> = Rows::default();
+        self.constants_into(parent, &mut above, 0);
+        for &(declaring, constant) in above.rows() {
+            let declaring = declaring.unwrap_or(parent);
+            match constants.find(&constant.name.0, constant_name).copied() {
                 Some((held_by, held)) => {
                     if let Some(linked) =
-                        self.constant_refused(child, held, *held_by, constant, declaring)
+                        self.constant_refused(child, held, held_by, constant, declaring)
                     {
                         return Some(linked);
                     }
                 }
                 None if constant.visibility != Visibility::Private => {
-                    constants.push((Some(declaring), constant));
+                    put_constant(constants, Some(declaring), constant);
                 }
                 None => {}
             }
@@ -3265,7 +3361,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn implement(
         &mut self,
         child: &'a ClassDecl,
-        constants: &mut Table<'a, ClassConstDecl>,
+        constants: &mut Constants<'a>,
         methods: &mut Methods<'a>,
     ) -> Option<Linked> {
         let mut named: Vec<&ClassDecl> = Vec::new();
@@ -3303,16 +3399,16 @@ impl<'a, H: Copy> Linker<'a, H> {
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
             for constant in &interface.constants {
-                match constants.iter().find(|(_, c)| c.name == constant.name) {
+                match constants.find(&constant.name.0, constant_name).copied() {
                     Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
                     Some((held_by, held)) => {
                         if let Some(linked) =
-                            self.constant_refused(child, held, *held_by, constant, interface)
+                            self.constant_refused(child, held, held_by, constant, interface)
                         {
                             return Some(linked);
                         }
                     }
-                    None => constants.push((Some(interface), constant)),
+                    None => put_constant(constants, Some(interface), constant),
                 }
             }
             for method in &interface.methods {
@@ -3633,10 +3729,6 @@ impl<'a, H: Copy> Linker<'a, H> {
             .then_some(Refusal::EnumSerializable { class })
     }
 }
-
-/// The constants or the methods a class holds as it links, each with
-/// the class that put it there, none for the class's own.
-type Table<'a, T> = Vec<(Option<&'a ClassDecl>, &'a T)>;
 
 /// A refusal at the class's own line, where php raises what is not
 /// about one method.

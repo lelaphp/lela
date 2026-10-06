@@ -10,6 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, argument_error, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{Owner, PhpArray, Value, ValueRef};
 
 use crate::addr::{addr4_to_if_index, if_index_named, if_index_to_addr4, inet46_addr};
@@ -187,19 +188,30 @@ fn socket_get_option(
 }
 
 /// The table an option's array or object reads, `Z_ARRVAL_P` or
-/// `Z_OBJPROP_P`, and php's `TypeError` for anything else.
+/// `Z_OBJPROP_P`, and php's `TypeError` for anything else. An object's
+/// table is laid down as php's `Z_OBJPROP_P` lays it, and kept, which
+/// `memory_get_usage()` counts:
+///
+/// ```php
+/// class Lg { public $l_onoff = 1; public $l_linger = 1; }
+/// $s = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+/// $o = new Lg; $o2 = new Lg; socket_set_option($s, SOL_SOCKET, SO_LINGER, $o2);
+/// $m = memory_get_usage(); socket_set_option($s, SOL_SOCKET, SO_LINGER, $o); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); socket_set_option($s, SOL_SOCKET, SO_LINGER, $o); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 376
+/// 0
+/// ```
 fn table(req: &mut Request, value: &Value, option: &str) -> Result<Owner<PhpArray>, Thrown> {
     match value.as_ref() {
         ValueRef::Array(array) => Ok(Owner::take(req, *array)),
         ValueRef::Object(object) => {
+            // The rows read under the borrowed request first, then laid
+            // into the table the option reads.
+            let table = object.property_table(req)?;
+            let entries: Vec<_> = walk::rows(req, table).collect();
             let mut out = PhpArray::new(req)?;
-            let entries = match object.entries(req) {
-                Ok(entries) => entries,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
-            };
             for (key, element) in entries {
                 req.addref(&element);
                 if let php_ext::values::Key::Str(s) = &key {
