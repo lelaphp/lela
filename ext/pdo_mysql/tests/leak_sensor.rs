@@ -47,3 +47,18 @@ $s->execute([16, str_repeat('x', 3)]); echo implode(',', $s->fetch(PDO::FETCH_NU
     };
     assert_eq!(stdout, "15,abc\n16,xxx\n");
 }
+
+/// A fetch into a class whose constructor takes no arguments calls it
+/// with none, and the empty array that stood for them is given up
+/// (#2117).
+#[test]
+fn a_constructor_called_without_arguments_keeps_no_array() {
+    let Some(stdout) = armed(
+        r#"class R { public $a; function __construct() { echo "made\n"; } }
+$o = $db->query('SELECT 1 AS a')->fetchObject('R'); echo $o->a, "\n";
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(stdout, "made\n1\n");
+}

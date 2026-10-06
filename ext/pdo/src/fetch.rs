@@ -854,12 +854,15 @@ fn construct(req: &mut Request, made: PhpObject, args: Option<PhpArray>) -> Resu
     let Some(callable) = known_method(req, made.class(), &constructor, Some(made)) else {
         return Ok(());
     };
-    let args = match args {
-        Some(args) => args,
-        None => PhpArray::new(req)?,
+    let (args, made_args) = match args {
+        Some(args) => (args, false),
+        None => (PhpArray::new(req)?, true),
     };
-    let answered = call_array(req, &callable, args)?;
-    req.release(answered);
+    let answered = call_array(req, &callable, args);
+    if made_args {
+        req.release(Value::array(args));
+    }
+    req.release(answered?);
     Ok(())
 }
 
