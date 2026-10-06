@@ -518,7 +518,7 @@ impl Request {
     /// A class as the face shows it.
     fn class_face(&self, id: ClassId) -> Option<Class> {
         let decl = self.class_decl(id)?;
-        let user = usize::try_from(id.0).is_ok_and(|at| at >= self.shared.classes.len());
+        let user = self.native_class_at(id).is_none();
         let shape = match decl.kind {
             ClassKind::Interface => Shape::Interface,
             _ if decl.flags.is_abstract => Shape::AbstractClass,
@@ -567,14 +567,11 @@ impl Request {
 
     /// [`crate::tier::user_functions`].
     pub(crate) fn user_function_views(&self) -> Vec<Code> {
-        (0..self.user_functions.len())
-            .filter_map(|at| {
-                let user = self.user_functions.get(at)?;
-                if user.member.is_some() || !matches!(user.body, exec::Body::Function(_)) {
-                    return None;
-                }
-                self.code_view(self.user_function_id(at)?)
+        self.function_table()
+            .filter(|(_, user)| {
+                user.member.is_none() && matches!(user.body, exec::Body::Function(_))
             })
+            .filter_map(|(function, _)| self.code_view(function))
             .collect()
     }
 
@@ -601,11 +598,10 @@ impl Request {
     /// [`crate::tier::table_sizes`].
     pub(crate) fn table_sizes(&self) -> [usize; 4] {
         let functions = self.shared.functions.len()
-            + (0..self.user_functions.len())
-                .filter(|at| {
-                    self.user_functions.get(*at).is_some_and(|user| {
-                        user.member.is_none() && matches!(user.body, exec::Body::Function(_))
-                    })
+            + self
+                .function_table()
+                .filter(|(_, user)| {
+                    user.member.is_none() && matches!(user.body, exec::Body::Function(_))
                 })
                 .count();
         // `EG(class_table)`'s keys: each class under its name and each

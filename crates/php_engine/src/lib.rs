@@ -21,6 +21,7 @@
 )]
 
 pub mod api;
+mod arena;
 mod attributes;
 mod classes;
 mod command_line;

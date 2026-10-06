@@ -311,6 +311,7 @@ attr::php_class
 attr::php_const
 attr::php_function
 call::Function
+call::Function::is_published
 call::Iter
 call::Iter::as_value
 call::Iter::invalidate
@@ -1076,6 +1077,7 @@ values::ArrayIter::advance
 values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
+values::ClassId::is_published
 values::ClosureInfo
 values::DeclaredRows
 values::Emalloc
