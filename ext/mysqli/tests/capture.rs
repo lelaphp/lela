@@ -274,3 +274,36 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
         "int(1365)\nstring(13) \"Division by 0\"\n"
     );
 }
+
+/// A user the server does not know is answered over a plain socket by
+/// `caching_sha2_password`'s full authentication, the password encrypted
+/// under the server's public key through openssl's natives, and the
+/// lookup of the key's size in `openssl_pkey_get_details()`'s answer
+/// allocates nothing of its own, so an armed request whose connect is
+/// refused leaves no block of its heap held (#2092). Against the server
+/// of `ci/mysql/compose.yaml`; with none listening the test says so and
+/// passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_refused_by_the_server_leaves_none_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_openssl::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        var_dump(@mysqli_connect('127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(false)\nint(1045)\n"
+    );
+}

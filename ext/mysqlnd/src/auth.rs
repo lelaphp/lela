@@ -687,12 +687,10 @@ fn rsa_size(req: &mut Request, pem: &[u8]) -> Result<Option<usize>, Thrown> {
     req.release(key);
     let got = got?;
     let bits = match got.as_ref() {
-        ValueRef::Array(a) => a
-            .get(&php_ext::values::Key::Str(PhpString::new(req, b"bits")?))
-            .and_then(|v| match v.as_ref() {
-                ValueRef::Int(n) => usize::try_from(n).ok(),
-                _ => None,
-            }),
+        ValueRef::Array(a) => a.find(b"bits").and_then(|v| match v.as_ref() {
+            ValueRef::Int(n) => usize::try_from(n).ok(),
+            _ => None,
+        }),
         _ => None,
     };
     req.release(got);

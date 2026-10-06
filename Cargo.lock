@@ -983,6 +983,7 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_mysqlnd",
+ "php_ext_openssl",
  "php_ext_session",
  "php_ext_standard",
 ]
