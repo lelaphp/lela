@@ -355,6 +355,34 @@ impl RegularList {
     }
 }
 
+impl RegularList {
+    /// `zend_destroy_rsrc_list` (`Z/Zend/zend_list.c:217`) in a debug
+    /// build's teardown before the request leak sensor: every resource the
+    /// list still holds freed by `list_entry_destructor`, its payload
+    /// dropped and given back, then the list's data, then its header.
+    /// The resources were closed before, by `zend_close_rsrc_list`, so no
+    /// per-type destructor is left to serve.
+    #[cfg(debug_assertions)]
+    pub(crate) fn destroy(&mut self, mm: &mut Mm) {
+        let Some(arr) = self.arr.take() else {
+            return;
+        };
+        for (_, z) in &arr {
+            let Some(r) = z.as_resource() else { continue };
+            if let Some(payload) = r.drop_payload() {
+                // SAFETY: the payload was laid down out of `mm` and is
+                // dropped, so nothing names it.
+                unsafe { mm.free(payload.cast()) };
+            }
+            // SAFETY: the list was the resource's last name php frees it
+            // through, and its thirty-two bytes came from `mm`.
+            unsafe { mm.free(r.address()) };
+        }
+        crate::array::free_table_data(mm, arr);
+        free_table_header(arr);
+    }
+}
+
 impl Drop for RegularList {
     /// `zend_destroy_rsrc_list` after the loop is gone: every
     /// payload still on a resource is dropped, so a payload's own

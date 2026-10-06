@@ -120,7 +120,8 @@ impl OutputSink for Starting {
     }
 }
 
-/// [`start`]'s builder before it is built: the witness lane's trace and
+/// [`start`]'s builder before it is built: the witness lane's trace, a
+/// debug build's request leak sensor where `PHP_SENSE_LEAKS` arms it, and
 /// the line's `-d` entries; for a host that builds more than one engine
 /// and writes the startup errors once, as php-fpm's children build theirs
 /// after the master has started.
@@ -130,6 +131,10 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
     #[cfg(feature = "witness-trace")]
     if let Some(path) = std::env::var_os(TRACE) {
         builder = builder.trace_natives_to(path.into());
+    }
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.sense_leaks(std::env::var_os(SENSE_LEAKS).is_some_and(|v| v == "1"));
     }
     for (name, value) in ini {
         builder = builder.ini(name, value);
@@ -142,6 +147,15 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
 /// it serves through a host's binary (harness §8, revision 61).
 #[cfg(feature = "witness-trace")]
 const TRACE: &str = "PHP_WITNESS_TRACE";
+
+/// The variable that arms a debug build's request leak sensor (#1992,
+/// `EngineBuilder::sense_leaks`) when it is `1`: read once, as the host
+/// builds its engine, and never per request. A lane or a builder runs a
+/// debug binary under it, `PHP_SENSE_LEAKS=1 cargo xtask phpt --engine
+/// target/debug/php`, to hold a subset to the sensor; a release build
+/// reads nothing.
+#[cfg(debug_assertions)]
+const SENSE_LEAKS: &str = "PHP_SENSE_LEAKS";
 
 /// `print_modules` and `print_extensions`, which php's CLI and CGI each
 /// write for `-m`: the loaded extensions sorted as `module_name_cmp` sorts

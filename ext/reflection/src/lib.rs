@@ -5519,8 +5519,12 @@ fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
 /// at startup carries and one a running program defined does not,
 /// which is `get_defined_constants()`'s own list here.
 fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
-    let defined = req.constants().map(|table| table.find(name).is_some());
-    !defined.unwrap_or(false)
+    let Ok(table) = req.constants() else {
+        return true;
+    };
+    let defined = table.find(name).is_some();
+    req.release(table.to_value());
+    !defined
 }
 
 /// `CONST_DEPRECATED`: the bit `gen_stub` raises from a `#[\Deprecated]`
@@ -5560,10 +5564,14 @@ fn value_string(req: &mut Request, value: &Value) -> String {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
         ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
-        _ => php_ext::coerce::to_string(req, value).map_or_else(
-            |_| String::new(),
-            |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
-        ),
+        _ => match php_ext::coerce::to_string(req, value) {
+            Ok(s) => {
+                let shown = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                req.release(Value::string(s));
+                shown
+            }
+            Err(_) => String::new(),
+        },
     }
 }
 
@@ -6019,6 +6027,9 @@ fn class_const_string(
         Some(_) => String::from("Object"),
         None => value_string(req, &value),
     };
+    // `zend_update_class_constant` hands back the table's value; here
+    // one owner of it is this rendering's, given up once it is read.
+    req.release(value);
     writeln!(
         out,
         "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",
@@ -6054,6 +6065,8 @@ fn enum_case_string(
     if backing != EnumBacking::Pure {
         let value = eval_const_expr(req, &case.value, None).unwrap_or_default();
         write!(out, " = {}", value_string(req, &value)).ok();
+        // `eval_const_expr`'s value is the caller's, given up once read.
+        req.release(value);
     }
     out.push('\n');
     out

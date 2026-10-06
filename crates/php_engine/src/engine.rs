@@ -689,6 +689,10 @@ pub(crate) struct Shared {
     /// ([`EngineBuilder::trace_natives_to`]).
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
+    /// Whether a debug build's request leak sensor is armed
+    /// ([`EngineBuilder::sense_leaks`]).
+    #[cfg(debug_assertions)]
+    pub(crate) sense_leaks: bool,
     pub(crate) entry: Loop,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
@@ -2443,9 +2447,26 @@ pub struct EngineBuilder {
     configure: &'static [&'static str],
     #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
+    #[cfg(debug_assertions)]
+    sense_leaks: bool,
 }
 
 impl EngineBuilder {
+    /// A debug build's request leak sensor armed for every request of the
+    /// engine (#1992): each ends in php's debug shutdown, every block of
+    /// the request's lifetime freed by name, and in the `InternalError`
+    /// naming what the heap still held, silent after a fatal. Unarmed, a debug request ends as a
+    /// release one does. The hosts arm it from `PHP_SENSE_LEAKS=1`, read
+    /// once as they build their engine (`php_sapi::prepare`). It is off by
+    /// default until the leaks the corpus has are fixed (#2057); turning
+    /// it on by default is #1992's last step.
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn sense_leaks(mut self, armed: bool) -> EngineBuilder {
+        self.sense_leaks = armed;
+        self
+    }
+
     /// Every request of the engine records the natives it enters and
     /// appends them to `path` as it ends, one line each,
     /// [`Entered::line`](crate::test::Entered::line): what the `php`
@@ -2813,6 +2834,8 @@ impl EngineBuilder {
                 ini_files,
                 #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
+                #[cfg(debug_assertions)]
+                sense_leaks: self.sense_leaks,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -3259,6 +3282,8 @@ impl Engine {
             configure: &[],
             #[cfg(feature = "witness-trace")]
             trace_to: None,
+            #[cfg(debug_assertions)]
+            sense_leaks: false,
         }
     }
 
@@ -4224,6 +4249,12 @@ impl Engine {
         req: &mut Request,
         sink: &mut dyn OutputSink,
     ) -> (Observables, Trace) {
+        // `PG(report_memleaks)` as `php_request_shutdown` reads it first.
+        // The debug teardown below runs where the request leak sensor is
+        // armed ([`EngineBuilder::sense_leaks`]); unarmed, a debug request
+        // ends as a release one does.
+        #[cfg(debug_assertions)]
+        let report_memleaks = req.ini_flag(b"report_memleaks");
         end_phase(&self.shared.extensions, req, |e| e.rshutdown);
         crate::output::deactivate(req);
         req.catch_bailout();
@@ -4238,6 +4269,11 @@ impl Engine {
         req.destroy_symbol_table();
         req.destroy_static_vars();
         req.free_default_arguments();
+        #[cfg(debug_assertions)]
+        if self.shared.sense_leaks {
+            req.free_executor_values();
+            req.shutdown_collect();
+        }
         req.free_object_storage();
         req.free_in_autoload();
         // `zend_deactivate`'s `zend_ini_deactivate`, after
@@ -4249,10 +4285,16 @@ impl Engine {
         // down and the request globals freed (`Z/main/main.c:2026-2029`),
         // and before the host's deactivation hands over what is left.
         end_phase(&self.shared.extensions, req, |e| e.post_deactivate);
-        // A debug build's last sensing point, after the request's last
-        // release.
+        // A debug build's request leak sensor, after the request's last
+        // release, then its last sensing point, which raises what the
+        // leak sensor recorded as it raises every other sensor's defect.
         #[cfg(debug_assertions)]
-        req.end_in_sensed();
+        {
+            if self.shared.sense_leaks {
+                req.sense_leaks(report_memleaks);
+            }
+            req.end_in_sensed();
+        }
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`

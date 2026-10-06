@@ -122,6 +122,12 @@ pub struct Heap {
     /// php's `zend_gc_globals`, the cycle collector's root buffer and
     /// numbers, the request's own (design §5.12).
     gc: collector::Collector,
+    /// The constant arrays of the units this request alone serves, out of
+    /// this heap and immutable, so no release frees them: kept in a
+    /// debug build for its teardown to free by name before the request
+    /// leak sensor, as php's `destroy_op_array` frees a request's literals.
+    #[cfg(debug_assertions)]
+    constant_arrays: Vec<Arr>,
 }
 
 impl Default for Heap {
@@ -147,6 +153,8 @@ impl Heap {
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
+            #[cfg(debug_assertions)]
+            constant_arrays: Vec::new(),
         }
     }
 
@@ -427,6 +435,33 @@ impl Heap {
         self.mm.sensor()
     }
 
+    /// php's debug `zend_mm_shutdown` (`Z/Zend/zend_alloc.c:2434`) once
+    /// the engine has freed what the request held: the blocks the heap
+    /// itself keeps for the request's lifetime freed by name, the
+    /// constant arrays of the units this request alone served, the
+    /// resource list (`zend_destroy_rsrc_list`), the object store's
+    /// buckets (`zend_objects_store_destroy`) and the strings the request
+    /// interned with their table (`zend_interned_strings_deactivate`),
+    /// then every block still held named, `zend_mm_check_leaks`. What it
+    /// finds is recorded as the sensors record and raised by
+    /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
+    /// first of them. The heap serves no allocation after it but the one
+    /// that renders that fatal. A release build has none of it and keeps
+    /// php's fast teardown, the chunks given back whole.
+    #[cfg(debug_assertions)]
+    pub fn sense_leaks(&mut self) {
+        for a in std::mem::take(&mut self.constant_arrays) {
+            array::free_table_data(&mut self.mm, a);
+            // SAFETY: the header came from this heap's `mm`, and the
+            // array is immutable, so no owner gave it up before this.
+            unsafe { self.mm.free(a.address()) };
+        }
+        self.resources.destroy(&mut self.mm);
+        self.store.destroy(&mut self.mm);
+        self.interned.destroy(&mut self.mm);
+        self.mm.sense_leaks();
+    }
+
     /// One more owner of `z`: a refcount increment for a refcounted
     /// value, nothing for a scalar or an immutable value (`ZVAL_COPY`).
     /// A debug build's freed-use guard is the header's, which this
@@ -585,7 +620,12 @@ impl Intern for Heap {
     /// its interned strings are, immutable as the published one is so
     /// that the engine reads one kind of constant array.
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
-        self.array_constant(entries)
+        let a = self.array_constant(entries)?;
+        #[cfg(debug_assertions)]
+        if !entries.is_empty() {
+            self.constant_arrays.push(a);
+        }
+        Ok(a)
     }
 }
 
