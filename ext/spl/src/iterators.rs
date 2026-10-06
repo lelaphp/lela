@@ -3790,11 +3790,17 @@ fn tree_entry(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thr
     };
     let data = level.sub.value(req)?;
     let bare = data.deref();
+    // The string read once and given up, and the element's copy given up
+    // whether the conversion answered or threw.
     let entry = if bare.as_array().is_some() {
-        b"Array".to_vec()
+        Ok(b"Array".to_vec())
     } else {
-        to_string(req, &bare)?.as_bytes().to_vec()
+        to_string(req, &bare).map(|text| {
+            let bytes = text.as_bytes().to_vec();
+            req.release(Value::string(text));
+            bytes
+        })
     };
     req.release(data);
-    Ok(Some(entry))
+    entry.map(Some)
 }

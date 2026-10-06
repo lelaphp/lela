@@ -61,3 +61,20 @@ fn the_default_autoloader_keeps_no_name() {
     );
     assert_eq!(stdout, "spl_autoload\n");
 }
+
+/// `RecursiveTreeIterator` renders an entry from its string,
+/// `spl_recursive_tree_iterator_get_entry`'s `zval_try_get_string`, and
+/// gives up the string and its copy of the element, whether the
+/// conversion answers or throws (#2117, `ext/pdo/tests/pdo_031.phpt`;
+/// #2130).
+#[test]
+fn a_tree_iterator_s_entries_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+class T { function __toString(): string { throw new Exception('no'); } }
+$a = [[str_repeat('a', 3), 12], new T];
+try { foreach (new RecursiveTreeIterator(new RecursiveArrayIterator($a, RecursiveArrayIterator::CHILD_ARRAYS_ONLY), RecursiveTreeIterator::BYPASS_KEY) as $v) echo $v, "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "|-Array\n| |-aaa\n| \\-12\nno\n");
+}
