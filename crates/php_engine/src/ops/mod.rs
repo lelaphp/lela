@@ -1611,7 +1611,7 @@ pub(crate) fn properties_for(
 ) -> Result<Vec<(Key, Value)>, Thrown> {
     match properties_answered(req, object, purpose)? {
         Answered::Own(rows) | Answered::Built(rows) => Ok(rows),
-        Answered::Table(table) => Ok(table.rows().collect()),
+        Answered::Table(table) => Ok(crate::api::values::walk::rows(req, table).collect()),
         // A table of the class's own dies with its one owner, so no view
         // of it outlives this call; the reader that holds it is
         // `PhpObject::props_held`.

@@ -1426,9 +1426,15 @@ impl PhpObject {
                 let count = if self.0.laziness() == php_heap::Laziness::Eager {
                     req.property_count(*self)?
                 } else {
-                    table.held()
+                    walk::rows(req, table.clone()).count()
                 };
-                let owner = Owner::take(req, table.dynamic());
+                let Some(dynamic) = table.dynamic() else {
+                    return Err(crate::api::raising::fatal(
+                        req,
+                        "InternalError: a debug table laid down as rows a class answers",
+                    ));
+                };
+                let owner = Owner::take(req, dynamic);
                 (Held::Table(table, owner), count)
             }
             Answered::Own(rows) if purpose == PropertyPurpose::Debug => {
@@ -1455,20 +1461,32 @@ impl PhpObject {
     }
 
     /// php's `Z_OBJPROP_P`, `zend_std_get_properties`: the object's
-    /// property table laid down for a walk ([`walk::foreach`]), a lazy
-    /// object initialised first and the class's `get_properties` called, as
-    /// the pointer natives read it, so the table is the instance's and a
+    /// property table laid down for a walk ([`walk::foreach`],
+    /// [`walk::rows`]), a lazy object initialised first and the class's
+    /// `get_properties` called, so the table is the instance's and a
     /// class that writes its fields into the table at that call
     /// (`DateInterval`) has written them. A class whose `get_properties`
     /// answers a table of its own making
-    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties))
-    /// is read at the object's own table, as the pointer natives read it.
-    /// The table stays laid down, as php's object keeps the table
-    /// `rebuild_object_properties` built. The `Err` is what the lazy
-    /// initializer threw or the memory limit refusing a name.
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties),
+    /// `sxe_get_properties`) is read as the rows it answers. The table
+    /// stays laid down, as php's object keeps the table
+    /// `rebuild_object_properties` built, and `memory_get_usage()` counts
+    /// it as php's does. The `Err` is what the lazy initializer or the
+    /// class threw, or the memory limit refusing a name.
+    ///
+    /// ```php
+    /// class K { public $d = 1; }
+    /// $k = new K; $m = memory_get_usage(); $q = http_build_query($k); echo memory_get_usage() - $m, "\n";
+    /// echo http_build_query(simplexml_load_string('<a><b>1</b><c>2</c></a>')), "\n";
+    /// echo '[', http_build_query(new DateTime('2020-01-01 UTC')), "]\n";
+    /// ```
+    /// ```expect
+    /// 408
+    /// b=1&c=2
+    /// []
+    /// ```
     pub fn property_table(&self, req: &mut Request) -> Result<walk::ObjectTable, Thrown> {
-        let (owner, _) = req.pointer_table(*self, false)?;
-        req.object_table(owner)
+        req.property_table(*self)
     }
 
     /// The object's property table as `get_properties` holds it,

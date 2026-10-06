@@ -119,9 +119,39 @@ pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
 /// string(1) "y"
 /// int(2)
 /// ```
-pub fn rows(_request: &Request, table: PhpArray) -> Rows<'_> {
+///
+/// An object's property table is walked in two steps: laid down and its
+/// slots named with the request mutably ([`PhpObject::property_table`]),
+/// then its rows read under the borrow, in php's positions, the declared
+/// slots that hold a value and then the dynamic rows, each declared row
+/// under its mangled name. A body that needs the request mutably does
+/// not compile there either:
+///
+/// ```compile_fail,E0502
+/// # use php_engine::api::coerce;
+/// # use php_engine::api::raising::Thrown;
+/// # use php_engine::api::request::Request;
+/// # use php_engine::api::values::{PhpObject, walk};
+/// fn strings(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+///     let table = object.property_table(req)?;
+///     for (_, value) in walk::rows(req, table) {
+///         coerce::to_string(req, &value)?;
+///     }
+///     Ok(())
+/// }
+/// # fn main() {}
+/// ```
+pub fn rows(_request: &Request, table: impl Into<Table>) -> Rows<'_> {
+    let rows = match table.into() {
+        Table::Array(array) => Walked::Array(array.iter()),
+        Table::Object(table) => Walked::Object {
+            end: table.end(),
+            table,
+            pos: 0,
+        },
+    };
     Rows {
-        rows: table.iter(),
+        rows,
         request: PhantomData,
     }
 }
@@ -131,17 +161,36 @@ pub fn rows(_request: &Request, table: PhpArray) -> Rows<'_> {
 #[derive(Debug)]
 #[must_use = "a rows walk reads nothing until it is iterated"]
 pub struct Rows<'r> {
-    rows: ArrayIter,
+    rows: Walked,
     /// The request borrowed for the walk, which is what keeps a body
     /// from running code of the program.
     request: PhantomData<&'r Request>,
+}
+
+/// Where a [`Rows`] walk stands.
+#[derive(Debug)]
+enum Walked {
+    Array(ArrayIter),
+    /// The next position of an object's table to read, and its end.
+    Object {
+        table: ObjectTable,
+        pos: u32,
+        end: u32,
+    },
 }
 
 impl Iterator for Rows<'_> {
     type Item = (Key, Value);
 
     fn next(&mut self) -> Option<(Key, Value)> {
-        self.rows.next()
+        match &mut self.rows {
+            Walked::Array(rows) => rows.next(),
+            Walked::Object { table, pos, end } => {
+                let (found, key, value, _) = table.held_from(*pos, *end)?;
+                *pos = found.saturating_add(1);
+                Some((key, Value::of_zval(value)))
+            }
+        }
     }
 }
 
@@ -274,7 +323,7 @@ pub fn foreach<B>(
 ) -> Result<Option<B>, Thrown> {
     let table = table.into();
     table.pin();
-    let standing = Standing::taken(req, table.heap(), hold);
+    let standing = Standing::taken(req, &table, hold);
     let walked = foreach_steps(req, &table, standing.watch(), &mut body);
     standing.given_up(req);
     table.unpin(req);
@@ -290,7 +339,8 @@ pub fn foreach<B>(
 /// holding nothing is not unmarked, since it is gone, where php's
 /// `GC_TRY_UNPROTECT_RECURSION` writes the freed table. An immutable
 /// table is marked by neither, as php's is not, since nothing can make
-/// one hold itself. Over an object's property table the mark is on its
+/// one hold itself, and neither are rows a class answers in place of its
+/// table, which stand in no table to mark. Over an object's property table the mark is on its
 /// dynamic table, `zobj->properties`, as `php_json_encode_array` marks
 /// the table `zend_get_properties_for` hands it; a reader that guards
 /// the object instead, as `print_r` and `var_dump` do, guards it around
@@ -318,14 +368,18 @@ pub fn foreach_guarded<B>(
 ) -> Result<Guarded<B>, Thrown> {
     let table = table.into();
     let guarded = table.heap();
-    if guarded.is_recursive() {
+    if guarded.is_some_and(|guarded| guarded.is_recursive()) {
         return Ok(Guarded::Recursive);
     }
     table.pin();
-    let standing = Standing::taken(req, guarded, hold);
-    guarded.protect();
+    let standing = Standing::taken(req, &table, hold);
+    if let Some(guarded) = guarded {
+        guarded.protect();
+    }
     let walked = foreach_steps(req, &table, standing.watch(), &mut body);
-    if standing.watch().stands(req, guarded.heap()) {
+    if let Some(guarded) = guarded
+        && standing.watch().stands(req, guarded.heap())
+    {
         guarded.unprotect();
     }
     standing.given_up(req);
@@ -443,9 +497,9 @@ impl From<ObjectTable> for Table {
 impl Table {
     /// The table a hold, a guard and a watch stand on: the array, or the
     /// object's dynamic table, `zobj->properties`.
-    fn heap(&self) -> PhpArray {
+    fn heap(&self) -> Option<PhpArray> {
         match self {
-            Table::Array(array) => *array,
+            Table::Array(array) => Some(*array),
             Table::Object(object) => object.dynamic(),
         }
     }
@@ -455,16 +509,24 @@ impl Table {
     /// and stepped over, never read freed: neither php's `IS_INDIRECT`
     /// nor the dynamic table the walk may hold keeps the object.
     fn pin(&self) {
-        if let Table::Object(object) = self {
-            object.owner.heap().pin();
+        if let Some(owner) = self.owner() {
+            owner.heap().pin();
         }
     }
 
     /// [`Table::pin`] let go, the object's bytes given back where it was
     /// freed under the walk.
     fn unpin(&self, req: &mut Request) {
-        if let Table::Object(object) = self {
-            req.heap_mut().unpin(object.owner.heap());
+        if let Some(owner) = self.owner() {
+            req.heap_mut().unpin(owner.heap());
+        }
+    }
+
+    /// The object whose laid table the walk reads.
+    fn owner(&self) -> Option<PhpObject> {
+        match self {
+            Table::Object(ObjectTable(Laid::Table { owner, .. })) => Some(*owner),
+            Table::Array(_) | Table::Object(_) => None,
         }
     }
 
@@ -472,7 +534,7 @@ impl Table {
     fn end(&self) -> u32 {
         match self {
             Table::Array(array) => array.heap().num_used(),
-            Table::Object(object) => object.table.used(),
+            Table::Object(object) => object.end(),
         }
     }
 
@@ -504,75 +566,103 @@ impl Table {
 /// time as [`foreach`] lends them. A view: it holds no owner of the
 /// object or the table.
 #[derive(Debug, Clone)]
-pub struct ObjectTable {
-    /// The object whose table it is: a lazy object's instance once
-    /// initialised.
-    owner: PhpObject,
-    table: PropertyTable,
-    /// The key of each declared slot, in slot order; none where the
-    /// table holds copies of the declared rows.
-    names: Box<[Str]>,
+pub struct ObjectTable(Laid);
+
+/// What an [`ObjectTable`] reads.
+#[derive(Debug, Clone)]
+enum Laid {
+    /// The object's own table in php's positions.
+    Table {
+        /// The object whose table it is: a lazy object's instance once
+        /// initialised.
+        owner: PhpObject,
+        table: PropertyTable,
+        /// The key of each declared slot, in slot order; none where the
+        /// table holds copies of the declared rows.
+        names: Box<[Str]>,
+    },
+    /// The rows a class's own `get_properties` answers in place of the
+    /// object's table (`sxe_get_properties`), views of what the class
+    /// keeps, which a foreach walk holds one owner of each of.
+    Answered(Box<[(Key, Value)]>),
 }
 
 impl ObjectTable {
     /// `owner`'s table `table`, its declared slots named by `names`,
     /// one per position [`PropertyTable::declared`] gives the slots.
     pub(crate) fn of(owner: PhpObject, table: PropertyTable, names: Box<[Str]>) -> ObjectTable {
-        ObjectTable {
+        ObjectTable(Laid::Table {
             owner,
             table,
             names,
-        }
+        })
+    }
+
+    /// The rows a class's own `get_properties` answers, views.
+    pub(crate) fn answered(rows: Vec<(Key, Value)>) -> ObjectTable {
+        ObjectTable(Laid::Answered(rows.into_boxed_slice()))
     }
 
     /// The object's dynamic table, `zobj->properties`, which a hold
-    /// holds.
-    pub(crate) fn dynamic(&self) -> PhpArray {
-        PhpArray::of(self.table.table())
+    /// holds; `None` for rows a class answers.
+    pub(crate) fn dynamic(&self) -> Option<PhpArray> {
+        match &self.0 {
+            Laid::Table { table, .. } => Some(PhpArray::of(table.table())),
+            Laid::Answered(_) => None,
+        }
+    }
+
+    /// The position past the last.
+    fn end(&self) -> u32 {
+        match &self.0 {
+            Laid::Table { table, .. } => table.used(),
+            Laid::Answered(rows) => u32::try_from(rows.len()).unwrap_or(u32::MAX),
+        }
     }
 
     /// [`Table::held_from`] over the object's positions.
     fn held_from(&self, pos: u32, end: u32) -> Option<(u32, Key, Zval, At)> {
-        let (found, row, value) = held_at(self.table, pos, end)?;
-        let table = self.table.table();
+        let (owner, table, names) = match &self.0 {
+            Laid::Table {
+                owner,
+                table,
+                names,
+            } => (*owner, *table, names),
+            Laid::Answered(rows) => {
+                let (key, value) = rows.get(usize::try_from(pos).ok()?).filter(|_| pos < end)?;
+                return Some((pos, key.clone(), value.to_zval(), At::Lent));
+            }
+        };
+        let (found, row, value) = held_at(table, pos, end)?;
+        let dynamic = table.table();
         Some(match row {
             TableRow::Slot(slot) => {
                 let at = At::Slot {
                     holder: None,
-                    owner: self.owner,
-                    table,
+                    owner,
+                    table: dynamic,
                     slot,
                 };
-                (found, self.slot_key(slot)?, value, at)
+                (found, slot_key(names, slot)?, value, at)
             }
             TableRow::Entry(key) => {
-                let at = At::Bucket(table, found - self.table.declared());
+                let at = At::Bucket(dynamic, found - table.declared());
                 (found, Key::of(key), value, at)
             }
         })
     }
 
-    /// The key declared slot `slot` stands under.
-    fn slot_key(&self, slot: u32) -> Option<Key> {
-        let name = self.names.get(usize::try_from(slot).ok()?)?;
-        Some(Key::Str(PhpString::of(*name)))
-    }
-
-    /// The rows that hold a value, in php's positions: views, no owner
-    /// taken.
-    pub(crate) fn rows(&self) -> impl Iterator<Item = (Key, Value)> + '_ {
-        let end = self.table.used();
-        let mut pos = 0;
-        std::iter::from_fn(move || {
-            let (found, key, value, _) = self.held_from(pos, end)?;
-            pos = found.saturating_add(1);
-            Some((key, Value::of_zval(value)))
-        })
-    }
-
-    /// How many rows hold a value.
-    pub(crate) fn held(&self) -> usize {
-        self.rows().count()
+    /// One owner of each of the rows a class answers, for a walk that
+    /// lends them while code of the program runs; none for the object's
+    /// own table.
+    fn owned(&self, req: &Request) -> Vec<(Owner<Key>, Owner<Value>)> {
+        match &self.0 {
+            Laid::Table { .. } => Vec::new(),
+            Laid::Answered(rows) => rows
+                .iter()
+                .map(|(key, value)| (Owner::take(req, key.clone()), Owner::take(req, *value)))
+                .collect(),
+        }
     }
 
     /// The rows as php's debug dumpers walk them, `ZEND_HASH_FOREACH`
@@ -580,20 +670,34 @@ impl ObjectTable {
     /// where its property is typed (`zend_get_typed_property_info_for_slot`)
     /// and stepped over where it is not. Views, no owner taken.
     pub(crate) fn shown(&self, req: &Request) -> Vec<(Key, HeldRow)> {
-        let placed = req.placed_properties(self.owner.class());
-        (0..self.table.used())
+        let (owner, table, names) = match &self.0 {
+            Laid::Table {
+                owner,
+                table,
+                names,
+            } => (*owner, *table, names),
+            Laid::Answered(rows) => {
+                return rows
+                    .iter()
+                    .map(|(key, value)| (key.clone(), HeldRow::Value(*value)))
+                    .collect();
+            }
+        };
+        let placed = req.placed_properties(owner.class());
+        (0..table.used())
             .filter_map(|pos| {
-                let (row, value) = self.table.row_at(pos)?;
+                let (row, value) = table.row_at(pos)?;
                 match row {
                     TableRow::Slot(slot) if value.is_undef() => {
                         let (_, property) = placed.get(usize::try_from(slot).ok()?)?;
                         let ty = property.ty.as_ref()?;
                         let shown = HeldRow::Uninitialized(crate::natives::type_text(ty));
-                        Some((self.slot_key(slot)?, shown))
+                        Some((slot_key(names, slot)?, shown))
                     }
-                    TableRow::Slot(slot) => {
-                        Some((self.slot_key(slot)?, HeldRow::Value(Value::of_zval(value))))
-                    }
+                    TableRow::Slot(slot) => Some((
+                        slot_key(names, slot)?,
+                        HeldRow::Value(Value::of_zval(value)),
+                    )),
                     TableRow::Entry(key) => {
                         Some((Key::of(key), HeldRow::Value(Value::of_zval(value))))
                     }
@@ -601,6 +705,12 @@ impl ObjectTable {
             })
             .collect()
     }
+}
+
+/// The key declared slot `slot` stands under, of `names`.
+fn slot_key(names: &[Str], slot: u32) -> Option<Key> {
+    let name = names.get(usize::try_from(slot).ok()?)?;
+    Some(Key::Str(PhpString::of(*name)))
 }
 
 /// The reader of an object's table in php's positions that the foreach,
@@ -631,11 +741,21 @@ enum Standing {
     Watched(u32),
     /// [`Hold::None`] over an immutable table, which nothing destroys.
     Immutable,
+    /// Rows a class answers in place of its table: one owner of each,
+    /// whatever the hold, since no table of theirs is there to hold or
+    /// watch.
+    Rows(Vec<(Owner<Key>, Owner<Value>)>),
 }
 
 impl Standing {
     /// What a walk over `table` takes as `hold` says.
-    fn taken(req: &mut Request, table: PhpArray, hold: Hold) -> Standing {
+    fn taken(req: &mut Request, table: &Table, hold: Hold) -> Standing {
+        let Some(table) = table.heap() else {
+            let Table::Object(object) = table else {
+                return Standing::Immutable;
+            };
+            return Standing::Rows(object.owned(req));
+        };
         match hold {
             Hold::Owner => Standing::Held(Owner::take(req, table)),
             Hold::None if table.heap().is_immutable() => Standing::Immutable,
@@ -649,6 +769,7 @@ impl Standing {
             Standing::Held(owner) => Watch::over(**owner),
             Standing::Watched(at) => Watch::Iterator(*at),
             Standing::Immutable => Watch::Immutable,
+            Standing::Rows(_) => Watch::Held,
         }
     }
 
@@ -659,6 +780,12 @@ impl Standing {
             Standing::Held(owner) => owner.give_up(req),
             Standing::Watched(at) => req.heap_mut().iterator_del(at),
             Standing::Immutable => {}
+            Standing::Rows(rows) => {
+                for (key, value) in rows {
+                    value.give_up(req);
+                    key.give_up(req);
+                }
+            }
         }
     }
 }
@@ -672,9 +799,9 @@ fn foreach_steps<B>(
     body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     let end = table.end();
-    let watched = table.heap().heap();
+    let watched = table.heap().map(PhpArray::heap);
     let mut pos = 0;
-    while watch.stands(req, watched) {
+    while watched.is_none_or(|watched| watch.stands(req, watched)) {
         let Some((found, key, value, at)) = table.held_from(pos, end) else {
             break;
         };

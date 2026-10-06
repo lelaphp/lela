@@ -312,6 +312,22 @@ impl Request {
         Ok((object, self.fatal_of(table)?))
     }
 
+    /// [`PhpObject::property_table`]: php's `Z_OBJPROP`, the class's
+    /// `get_properties` over the object a lazy one initialises to; the
+    /// table it lays down, or where the class answers a table of its own
+    /// making ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)),
+    /// the rows it answers.
+    pub(crate) fn property_table(&mut self, object: PhpObject) -> Result<ObjectTable, Thrown> {
+        let handlers = self.object_handlers(object.heap());
+        if handlers.answers_properties() {
+            let object = self.table_owner(object)?;
+            let rows = handlers.get_properties(self, object)?;
+            return Ok(ObjectTable::answered(rows));
+        }
+        let (owner, _) = self.pointer_table(object, false)?;
+        self.object_table(owner)
+    }
+
     /// [`PhpObject::property_table`]'s table once `owner`'s is laid
     /// down: the table in php's positions, each declared slot named by
     /// the key [`Request::slot_names`] interns for it. The `Err` is the
