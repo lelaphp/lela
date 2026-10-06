@@ -961,9 +961,14 @@ impl Ops for UserDir {
         if matches!(value.as_ref(), ValueRef::Bool(_)) {
             return None;
         }
-        let name = crate::api::coerce::to_string(req, &value)
-            .ok()
-            .map(|s| s.as_bytes().to_vec());
+        let name = match crate::api::coerce::to_string(req, &value) {
+            Ok(text) => {
+                let bytes = text.as_bytes().to_vec();
+                text.give_up(req);
+                Some(bytes)
+            }
+            Err(_) => None,
+        };
         req.release(value);
         name
     }

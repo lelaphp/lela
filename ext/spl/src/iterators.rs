@@ -2313,11 +2313,12 @@ impl RecursiveTreeIterator {
         let caching_flags = cachingIteratorFlags.hold(req)?;
         let mode = mode.hold(req)?;
         let source = if crate::is_a(req, given.class(), b"IteratorAggregate") {
-            let answered = call_method(req, &given, b"getIterator", &[])?;
+            // The answer's owner is the iterator's, released with it.
+            let answered = call_method(req, &given, b"getIterator", &[])?.hand_on_unmigrated();
             match answered.as_object().copied() {
                 Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
                 _ => {
-                    answered.give_up(req);
+                    req.release(answered);
                     return Err(throw(
                         req,
                         "LogicException",
@@ -3750,11 +3751,12 @@ fn rec_construct(
     flags: i64,
 ) -> Result<(), Thrown> {
     let root = if crate::is_a(req, given.class(), b"IteratorAggregate") {
-        let answered = call_method(req, &given, b"getIterator", &[])?;
+        // The answer's owner is the level's, released with it.
+        let answered = call_method(req, &given, b"getIterator", &[])?.hand_on_unmigrated();
         match answered.as_object().copied() {
             Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
             _ => {
-                answered.give_up(req);
+                req.release(answered);
                 let name =
                     String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
                 return Err(throw(

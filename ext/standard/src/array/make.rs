@@ -745,7 +745,6 @@ fn double_range(
     step: f64,
     negative: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let mut out = PhpArray::new(req)?;
     #[allow(clippy::cast_precision_loss)]
     let limit = HT_MAX_SIZE as f64;
     let size = |req: &mut Request, high: f64, low: f64| -> Result<u32, Thrown> {
@@ -763,40 +762,39 @@ fn double_range(
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok(math_round(calc, 0, crate::math::PHP_ROUND_HALF_UP) as u32)
     };
-    if start > end {
-        if start - end < step {
-            out.give_up(req);
-            return Err(boundary_error(req));
+    filled(req, |req, out| {
+        if start > end {
+            if start - end < step {
+                return Err(boundary_error(req));
+            }
+            let size = size(req, start, end)?;
+            let mut i = 0u32;
+            let mut element = start;
+            while i < size && element >= end {
+                out.append(req, Value::float(element))?;
+                i += 1;
+                element = start - f64::from(i) * step;
+            }
+        } else if end > start {
+            if negative {
+                return Err(negative_step_error(req));
+            }
+            if end - start < step {
+                return Err(boundary_error(req));
+            }
+            let size = size(req, end, start)?;
+            let mut i = 0u32;
+            let mut element = start;
+            while i < size && element <= end {
+                out.append(req, Value::float(element))?;
+                i += 1;
+                element = start + f64::from(i) * step;
+            }
+        } else {
+            out.append(req, Value::float(start))?;
         }
-        let size = size(req, start, end)?;
-        let mut i = 0u32;
-        let mut element = start;
-        while i < size && element >= end {
-            out.append(req, Value::float(element))?;
-            i += 1;
-            element = start - f64::from(i) * step;
-        }
-    } else if end > start {
-        if negative {
-            out.give_up(req);
-            return Err(negative_step_error(req));
-        }
-        if end - start < step {
-            out.give_up(req);
-            return Err(boundary_error(req));
-        }
-        let size = size(req, end, start)?;
-        let mut i = 0u32;
-        let mut element = start;
-        while i < size && element <= end {
-            out.append(req, Value::float(element))?;
-            i += 1;
-            element = start + f64::from(i) * step;
-        }
-    } else {
-        out.append(req, Value::float(start))?;
-    }
-    Ok(out)
+        Ok(())
+    })
 }
 
 /// `RANGE_CHECK_LONG_INIT_ARRAY` and the fill, over unsigned
@@ -809,7 +807,6 @@ fn long_range(
     step: u64,
     negative: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let mut out = PhpArray::new(req)?;
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
         if calc >= HT_MAX_SIZE - 1 {
@@ -824,38 +821,54 @@ fn long_range(
         }
         Ok(calc + 1)
     };
-    if start > end {
-        if start.wrapping_sub(end).cast_unsigned() < step {
+    filled(req, |req, out| {
+        if start > end {
+            if start.wrapping_sub(end).cast_unsigned() < step {
+                return Err(boundary_error(req));
+            }
+            let size = size(req, start, end)?;
+            for i in 0..size {
+                out.append(
+                    req,
+                    Value::int(start.wrapping_sub(i.wrapping_mul(step).cast_signed())),
+                )?;
+            }
+        } else if end > start {
+            if negative {
+                return Err(negative_step_error(req));
+            }
+            if end.wrapping_sub(start).cast_unsigned() < step {
+                return Err(boundary_error(req));
+            }
+            let size = size(req, end, start)?;
+            for i in 0..size {
+                out.append(
+                    req,
+                    Value::int(start.wrapping_add(i.wrapping_mul(step).cast_signed())),
+                )?;
+            }
+        } else {
+            out.append(req, Value::int(start))?;
+        }
+        Ok(())
+    })
+}
+
+/// A fresh array the fill writes, given up where the fill raises, as
+/// php's `RETURN_THROWS` after `array_init` leaves the return value to
+/// the engine's free.
+fn filled(
+    req: &mut Request,
+    fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    match fill(req, &mut out) {
+        Ok(()) => Ok(out),
+        Err(thrown) => {
             out.give_up(req);
-            return Err(boundary_error(req));
+            Err(thrown)
         }
-        let size = size(req, start, end)?;
-        for i in 0..size {
-            out.append(
-                req,
-                Value::int(start.wrapping_sub(i.wrapping_mul(step).cast_signed())),
-            )?;
-        }
-    } else if end > start {
-        if negative {
-            out.give_up(req);
-            return Err(negative_step_error(req));
-        }
-        if end.wrapping_sub(start).cast_unsigned() < step {
-            out.give_up(req);
-            return Err(boundary_error(req));
-        }
-        let size = size(req, end, start)?;
-        for i in 0..size {
-            out.append(
-                req,
-                Value::int(start.wrapping_add(i.wrapping_mul(step).cast_signed())),
-            )?;
-        }
-    } else {
-        out.append(req, Value::int(start))?;
     }
-    Ok(out)
 }
 
 /// `shuffle(array &$array): true`, php's `php_array_data_shuffle`
@@ -901,7 +914,7 @@ fn shuffle(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
         req.addref(&value);
         shuffled.append(req, value)?;
     }
-    stack.replace(req, shuffled.hand_on_unmigrated())?;
+    stack.replace(req, shuffled)?;
     stack.finish(req);
     Ok(True)
 }

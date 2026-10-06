@@ -1511,7 +1511,9 @@ fn serve(
                     Some(o) => Some(o),
                     None => match php_ext::call::instantiate(req, class, &argv) {
                         Ok(obj) => {
-                            let value = obj.as_value();
+                            // The service's own owner, kept in the session
+                            // or released as `made` when the call is done.
+                            let value = obj.hand_on_unmigrated().as_value();
                             if session && store_session_object(req, value)? {
                                 Some(value)
                             } else {
