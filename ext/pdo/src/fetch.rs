@@ -860,11 +860,23 @@ fn construct(req: &mut Request, made: PhpObject, args: Option<PhpArray>) -> Resu
     let Some(callable) = known_method(req, made.class(), &constructor, Some(made)) else {
         return Ok(());
     };
+    call_constructor(req, &callable, args)
+}
+
+/// A constructor served with `args` as its parameters, or with none, its
+/// return given up: what `pdo_call_fetch_object_constructor` and
+/// `pdo_stmt_construct` hand `zend_call_known_function`. The empty array
+/// that stands for no arguments is given up after the call.
+pub(super) fn call_constructor(
+    req: &mut Request,
+    callable: &Callable,
+    args: Option<PhpArray>,
+) -> Result<(), Thrown> {
     let (args, made_args) = match args {
         Some(args) => (args, false),
         None => (PhpArray::new(req)?, true),
     };
-    let answered = call_array(req, &callable, args);
+    let answered = call_array(req, callable, args);
     if made_args {
         req.release(Value::array(args));
     }

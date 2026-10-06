@@ -63,3 +63,18 @@ $row = $db->query('SELECT 0 AS "2007", 1 AS "2020"')->fetch(); echo $row[2007], 
     );
     assert_eq!(stdout, "01\n");
 }
+
+/// A statement class given by `ATTR_STATEMENT_CLASS` without
+/// constructor arguments is constructed with none, and the empty array
+/// that stood for them is given up (#2117, `ext/pdo/tests/pdo_014.phpt`).
+#[test]
+fn a_statement_class_constructed_without_arguments_keeps_no_array() {
+    let stdout = armed(
+        r#"<?php
+class S extends PDOStatement { protected function __construct() { echo "made\n"; } }
+$db = new PDO('sqlite::memory:'); $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['S']);
+echo get_class($db->query('SELECT 1')), "\n";
+"#,
+    );
+    assert_eq!(stdout, "made\nS\n");
+}
