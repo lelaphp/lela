@@ -1662,23 +1662,29 @@ impl Request {
         table: &'static dyn crate::api::abi::ObjectHandlers,
         properties: PhpArray,
     ) -> Result<(), Thrown> {
-        for (key, value) in properties.snapshot_refs() {
-            let value = match value.as_php_ref() {
-                Some(r) if r.as_value().refcount() > 1 => {
+        use crate::api::values::walk::{self, Hold};
+        // `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
+        // (`Z/Zend/zend_objects.c:301`), no owner of the table taken: the
+        // call's argument holds it while `write_property` runs a hook or a
+        // `__set`.
+        let walked = walk::foreach(self, properties, Hold::None, |req, row| -> walk::Step {
+            let value = match row.value().as_php_ref() {
+                Some(_) if row.refcount() > 1 => {
                     return Err(crate::api::raising::throw_error(
-                        self,
+                        req,
                         "Error",
                         "Cannot assign by reference when cloning with updated properties",
                     ));
                 }
-                Some(_) => value.deref(),
-                None => value,
+                Some(_) => row.value().deref(),
+                None => *row.value(),
             };
-            let name = key.to_prop_name(self)?.hand_on();
-            self.addref(&value);
-            self.write_cloned_property(new, table, name, value)?;
-        }
-        Ok(())
+            let name = row.key().to_prop_name(req)?.hand_on();
+            req.addref(&value);
+            req.write_cloned_property(new, table, name, value)?;
+            Ok(std::ops::ControlFlow::Continue(()))
+        });
+        walked.map(|_| ())
     }
 
     /// `zend_std_write_property` over one property of a `clone with`:
