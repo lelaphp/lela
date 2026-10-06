@@ -305,7 +305,6 @@ fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
     Ok(true)
 }
 
-/// Whether a handler of `name` is on the stack,
 /// `php_zlib_output_compression_start`: with a chunk size and a coding,
 /// the handler started, and `zlib.output_handler`'s after it.
 fn compression_start(req: &mut Request) -> Result<(), Thrown> {
