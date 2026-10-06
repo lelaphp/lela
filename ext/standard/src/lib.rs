@@ -837,10 +837,12 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `PHP_RSHUTDOWN(basic)`'s share here: the syslog closed and
-/// `BG(last_http_headers)` given back.
+/// `PHP_RSHUTDOWN(basic)`'s share here, in its order: the syslog
+/// closed, `ASSERTG(callback)` given up and `BG(last_http_headers)`
+/// given back.
 fn rshutdown(req: &mut Request) {
     syslog::close(req);
+    assert::rshutdown(req);
     http_fopen_wrapper::clear_last_headers(req);
 }
 

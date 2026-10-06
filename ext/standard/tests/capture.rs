@@ -375,3 +375,34 @@ try { array_walk($o, function ($v, $k) { global $o; echo "$k "; $o = null; echo 
         "a dtor after Iterated value is no longer an array or object"
     );
 }
+
+/// `source` served by an engine of this extension alone with the leak
+/// sensor armed (#1992): what it wrote, so an owner one of its natives
+/// kept shows as the `InternalError` the request ends in.
+#[cfg(debug_assertions)]
+fn served_armed(source: &str) -> String {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension()])
+        .sense_leaks(php_ext::test::LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(source, Capture::default());
+    String::from_utf8_lossy(&served.stdout).into_owned()
+}
+
+/// The string `assert.callback` is made into, and the callable
+/// `assert_options()` sets, are given up as the request ends, as
+/// `PHP_RSHUTDOWN(assert)` gives up `ASSERTG(callback)` (#2063).
+#[cfg(debug_assertions)]
+#[test]
+fn the_assert_callback_is_given_up_at_the_request_s_end() {
+    for set in [
+        "@ini_set('assert.callback', 'strlen');",
+        "@ini_set('assert.callback', 'nope');",
+        "class K { function m() {} } @assert_options(ASSERT_CALLBACK, [new K, 'm']);",
+    ] {
+        let stdout = served_armed(&format!(
+            "<?php {set} try {{ assert(false); }} catch (Throwable $e) {{ echo get_class($e), \"\\n\"; }}"
+        ));
+        assert_eq!(stdout, "AssertionError\n", "{set}");
+    }
+}
