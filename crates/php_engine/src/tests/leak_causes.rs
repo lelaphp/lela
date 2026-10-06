@@ -1,6 +1,8 @@
-//! The leaks the request leak sensor found in the handlers and the
-//! constant evaluator (#2057), each a program served with the sensor
-//! armed (`EngineBuilder::sense_leaks`): what the program wrote, and no
+//! The leaks the request leak sensor found in the engine (#2057): in
+//! the constant evaluator, the handlers, the collector's destructor
+//! phase, the symbol tables, `Closure::call` and a frame's release,
+//! each a program served with the sensor armed
+//! (`EngineBuilder::sense_leaks`): what the program wrote, and no
 //! `InternalError` naming a block the heap still held after it.
 
 use crate::engine::{Engine, LeakSensor};
