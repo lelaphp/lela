@@ -302,17 +302,6 @@ fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
 }
 
 /// Whether a handler of `name` is on the stack,
-/// `php_output_handler_started`.
-fn started(req: &mut Request, name: &str) -> Result<bool, Thrown> {
-    let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let ValueRef::Array(list) = list.as_ref() else {
-        return Ok(false);
-    };
-    Ok(list.iter().any(
-        |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
-    ))
-}
-
 /// `php_zlib_output_compression_start`: with a chunk size and a coding,
 /// the handler started, and `zlib.output_handler`'s after it.
 fn compression_start(req: &mut Request) -> Result<(), Thrown> {
@@ -405,7 +394,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         return Ok(false);
     }
     globals(req).compression = compression;
-    if compression != 0 && !started(req, HANDLER_NAME)? {
+    if compression != 0 && !req.buffer_handler_started(HANDLER_NAME.as_bytes()) {
         compression_start(req)?;
     }
     Ok(true)
