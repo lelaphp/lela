@@ -13,6 +13,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -25,7 +26,7 @@ use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
 pub use crate::engine::Standard;
-use crate::engine::{RequestDescription, Shared};
+use crate::engine::{FunctionTable, RequestDescription, Shared};
 use crate::exec::{self, TableId, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
@@ -537,13 +538,30 @@ pub(crate) enum MemberAt {
 /// class composed with them at its link, which is the table's row in
 /// its place (`zend_do_bind_traits`), and the bucket of
 /// `EG(class_table)` it stands in; beside them its placed properties,
-/// once read ([`Request::placed_properties`]).
+/// once read ([`Request::placed_properties`]), and what binding it
+/// settled ([`Bound`]).
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
     composed: Option<Box<php_unit::link::Composed>>,
     place: preload::Bucket,
     placed: OnceLock<Placed>,
+    bound: Bound,
+}
+
+/// What binding a declared class settled once, for every lookup after
+/// to read rather than walk ([`Request::bind_members`]).
+#[derive(Default)]
+pub(crate) struct Bound {
+    /// `ce->function_table`: the class's own methods by lowered name.
+    function_table: FunctionTable,
+    /// The rows of the request's user functions the class's methods and
+    /// hooks took, first to last.
+    members: Range<usize>,
+    /// `ce->parent`, where its name named a class as the class bound;
+    /// none for a class with no parent and for one bound before its
+    /// parent was, whose parent is looked up by name.
+    parent: Option<ClassId>,
 }
 
 /// A class's declared instance properties in slot order, each beside the

@@ -25,6 +25,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_macros::php_function;
 use php_unit::decl::{ClassKind, Type, Visibility};
 
@@ -34,6 +36,7 @@ use crate::api::raising::{
     Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
 };
 use crate::api::request::Request;
+use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
@@ -1493,31 +1496,26 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
         out.extend_from_slice(format!("{common}string({}) \"", s.len()).as_bytes());
         out.extend_from_slice(s.as_bytes());
         out.extend_from_slice(b"\"\n");
-    } else if let Some(array) = value.as_array() {
-        // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
-        // only where the array is refcounted; an immutable one is marked
-        // by neither, here and there, since nothing can make one hold
-        // itself.
-        if array.is_recursive() {
-            out.extend_from_slice(b"*RECURSION*\n");
-            return;
-        }
-        // `GC_ADDREF(myht)` beside the mark (GH-19801): the walk holds an
-        // owner of its own, so an element's `__debugInfo` that gives up
-        // the array's last other owner leaves it standing until the walk
-        // is done, and a write through another name separates rather than
-        // changing the rows under the walk. An immutable array is held by
-        // neither call.
-        let array = *array;
-        req.addref(&Value::array(array));
-        array.protect();
+    } else if let Some(array) = value.as_array().copied() {
+        // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
+        // `GC_PROTECT_RECURSION(myht)` (`Z/ext/standard/var.c:152`,
+        // GH-19801), which php takes only where the array is refcounted:
+        // the walk holds an owner of its own, so an element's
+        // `__debugInfo` that gives up the array's last other owner leaves
+        // it standing until the walk is done, and a write through another
+        // name separates rather than changing the rows under the walk.
+        // The walk's owner is given up as `GC_DTOR_NO_REF(myht)` frees
+        // the array where it was the last. The header is laid down before
+        // the walk and taken back where the walk found the array marked,
+        // since php prints `*RECURSION*` in its place.
+        let opened = out.len();
         out.extend_from_slice(format!("{common}array({}) {{\n", array.len()).as_bytes());
-        for (key, element) in &array {
+        let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
             if too_deep(out, level, req.stack_limit().exhausted()) {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             out.extend(std::iter::repeat_n(b' ', level + 1));
-            match key {
+            match row.key() {
                 Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
                 Key::Str(s) => {
                     out.extend_from_slice(b"[\"");
@@ -1525,12 +1523,20 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
                     out.extend_from_slice(b"\"]=>\n");
                 }
             }
-            dump(req, out, &element, level + 2);
+            // The walk owns the row for the step, which `COMMON` does not
+            // count.
+            dump_held(req, out, row.value(), level + 2, Held::Owned);
+            Ok(ControlFlow::Continue(()))
+        });
+        match walked {
+            Ok(walk::Guarded::Recursive) => {
+                out.truncate(opened);
+                out.extend_from_slice(b"*RECURSION*\n");
+                return;
+            }
+            // The body answers no throwable.
+            Ok(walk::Guarded::Walked(_)) | Err(_) => {}
         }
-        array.unprotect();
-        // `GC_DTOR_NO_REF(myht)`: the walk's owner given up, which frees
-        // the array where it was the last.
-        req.release(Value::array(array));
         if level > 1 {
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
