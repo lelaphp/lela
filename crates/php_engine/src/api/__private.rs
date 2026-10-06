@@ -12,7 +12,7 @@ use php_unit::decl::{
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
 use crate::api::raising::{Thrown, fatal};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Value};
+use crate::api::values::{ClassId, Value, ValueRef};
 
 /// A native's entry: the concrete request, off which it reads its
 /// arguments as `ZEND_FUNCTION` reads them off `execute_data`, and the
@@ -158,7 +158,8 @@ fn linked<E: Class>(req: &mut Request) -> Result<ClassId, Thrown> {
 }
 
 /// The case object of a Rust variant, `zend_enum_get_case`, with an owner
-/// for the caller: the one instance the case has, by identity.
+/// for the caller, the one `RETURN_OBJ_COPY` takes: the one instance the
+/// case has, by identity.
 ///
 /// ```php
 /// var_dump(RoundingMode::cases()[2] === RoundingMode::HalfEven, round(2.5, 0, RoundingMode::HalfEven), round(2.5, 0, RoundingMode::HalfAwayFromZero));
@@ -173,19 +174,32 @@ pub fn case_value<E: Cases>(req: &mut Request, variant: E) -> Result<Value, Thro
     let Some((name, _)) = E::CASES.iter().find(|(_, case)| *case == variant) else {
         return Err(fatal(req, "InternalError: a variant that is no case"));
     };
-    let value = req.class_constant(class, name)?;
-    req.addref(&value);
-    Ok(value)
+    req.enum_case(class, name).map(|case| case.as_value())
 }
 
-/// The Rust variant a case object is, by identity.
+/// The Rust variant a case object of `E` is, read off its `name` as
+/// `zend_enum_fetch_case_name` reads it: a view, no owner taken and no
+/// other case made, so the object a program makes next is numbered as
+/// php numbers it:
+///
+/// ```php
+/// $mode = RoundingMode::HalfOdd;
+/// var_dump(round(2.5, 0, $mode), new stdClass);
+/// ```
+/// ```expect
+/// float(3)
+/// object(stdClass)#2 (0) {
+/// }
+/// ```
 pub fn case_of<E: Cases>(req: &mut Request, value: &Value) -> Result<E, Thrown> {
     let class = linked::<E>(req)?;
-    for (name, variant) in E::CASES {
-        let case = req.class_constant(class, name)?;
-        if case == value.deref() {
-            return Ok(*variant);
-        }
+    if let ValueRef::Object(case) = value.deref().as_ref()
+        && case.class() == class
+        && let Some(name) = case.prop(req, b"name")
+        && let ValueRef::Str(name) = name.as_ref()
+        && let Some((_, variant)) = E::CASES.iter().find(|(held, _)| *held == name.as_bytes())
+    {
+        return Ok(*variant);
     }
     Err(fatal(
         req,
