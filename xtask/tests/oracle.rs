@@ -33,8 +33,21 @@ fn pin() -> Option<Pin> {
         .map(|()| pin)
 }
 
+/// A registry of one accepted row, so these tests hold the comparison's
+/// mechanics and not which rows a person keeps in `docs/divergence.toml`:
+/// a row dropped there breaks nothing here (#2142).
 fn registry() -> Registry {
-    Registry::load(workspace()).unwrap()
+    Registry::parse(
+        r#"
+[[divergence]]
+id = "trace:fixture"
+kind = "trace"
+reason = "A difference a person accepted, for the comparison's tests."
+status = "accepted"
+since = "2026-10-06"
+"#,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -828,14 +841,14 @@ fn compare_is_same_on_equal_bytes() {
 fn compare_is_diverged_for_an_accepted_row() {
     let verdict = oracle::compare(
         &registry(),
-        "trace:nested-entry-return",
+        "trace:fixture",
         b"TRACE stop at 4",
         b"TRACE stop at 3",
     );
     match verdict {
         Verdict::Diverged(row) => {
-            assert_eq!(row.id.as_str(), "trace:nested-entry-return");
-            assert!(row.reason.contains("one opline earlier"));
+            assert_eq!(row.id.as_str(), "trace:fixture");
+            assert!(row.reason.contains("a person accepted"));
         }
         other => panic!("{other:?}"),
     }
@@ -930,13 +943,13 @@ fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
     // answers a pattern as it answers bytes.
     let missed = oracle::verdict(
         &registry,
-        "trace:nested-entry-return",
+        "trace:fixture",
         false,
         b"TRACE stop at %d",
         b"TRACE stop at 3",
     );
     match missed {
-        Verdict::Diverged(row) => assert_eq!(row.id.as_str(), "trace:nested-entry-return"),
+        Verdict::Diverged(row) => assert_eq!(row.id.as_str(), "trace:fixture"),
         other => panic!("{other:?}"),
     }
     let unaccepted = oracle::verdict(&registry, "phpt:php-src/no-row.phpt", false, b"%d", b"x");

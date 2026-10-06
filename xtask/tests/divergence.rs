@@ -96,31 +96,28 @@ fn counts_line(registry: &Registry, kind: Option<Kind>) -> String {
 }
 
 #[test]
-fn the_tracked_registry_loads_with_its_rows() {
+fn the_tracked_registry_loads_and_every_row_answers_for_itself() {
+    // What holds of any registry a person keeps, and nothing about which
+    // rows it keeps: a row dropped or added breaks no test here (#2142).
     let registry = Registry::load(workspace()).unwrap();
-    // The three trace rows the JIT design accepted (jit-design.md §4.1,
-    // design ledger 9); a person adds the rest.
-    for id in [
-        "trace:nested-entry-return",
-        "trace:root-table-full",
-        "trace:entry-counter-typed-recv",
-    ] {
-        let row = registry.row(id).unwrap_or_else(|| panic!("{id}"));
-        assert_eq!(row.kind, Kind::Trace);
-        assert_eq!(row.status, Status::Accepted);
-        assert!(registry.accepted(id).is_some());
+    for row in registry.rows() {
+        let id = row.id.as_str();
+        assert_eq!(registry.row(id).map(|r| &r.id), Some(&row.id), "{id}");
+        assert_eq!(
+            registry.accepted(id).is_some(),
+            row.status == Status::Accepted,
+            "{id}"
+        );
+        if row.status == Status::Accepted {
+            assert!(!row.reason.is_empty(), "{id}: an accepted row has a reason");
+        }
     }
     assert!(registry.accepted("trace:no-such").is_none());
-    assert!(registry.rows().iter().all(|r| !r.reason.is_empty()));
     let counts = registry.counts();
     assert_eq!(
         counts.by_kind.values().sum::<u64>(),
         u64::try_from(registry.rows().len()).unwrap()
     );
-    assert!(counts.by_kind[&Kind::Trace] >= 3);
-    // The row #178 settled, the registry's first witness row.
-    assert!(counts.by_kind[&Kind::Witness] >= 1);
-    assert_eq!(counts.by_status.get(&Status::Open), None);
 }
 
 #[test]
@@ -325,10 +322,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
             "the facts list the open rows alone: {cut}"
         );
     }
-    assert!(md.contains("trace:nested-entry-return"), "{md}");
+    // The kind of a row the registry holds, whichever rows a person keeps.
+    let kind = registry.rows()[0].kind;
     for text in [&md, &cut] {
         assert!(
-            text.contains(&counts_line(&registry, Some(Kind::Trace))),
+            text.contains(&counts_line(&registry, Some(kind))),
             "counts by kind and status:\n{text}"
         );
         assert!(text.contains(&counts_line(&registry, None)), "{text}");
@@ -351,10 +349,18 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     );
     assert_eq!(value["rows"][0]["id"], registry.rows()[0].id.as_str());
     assert_eq!(
-        value["counts"]["trace"]["accepted"],
-        registry.counts().cell(Kind::Trace, Status::Accepted)
+        value["counts"][kind.as_str()]["accepted"],
+        registry.counts().cell(kind, Status::Accepted)
     );
-    assert_eq!(value["counts"]["total"]["open"], 0);
+    assert_eq!(
+        value["counts"]["total"]["open"],
+        registry
+            .counts()
+            .by_status
+            .get(&Status::Open)
+            .copied()
+            .unwrap_or(0)
+    );
 
     // One more accepted row changes the counts and nothing else of what
     // the facts carry: its id and reason are read under `--uncut`.
