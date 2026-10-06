@@ -93,23 +93,37 @@ fn convert_array(
         let value = value.deref();
         let converted = match value.as_ref() {
             ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
-                Some(s) => new_string(req, &s)?.into_value(),
-                None => continue,
+                Some(s) => new_string(req, &s).map(|s| Some(s.into_value())),
+                None => Ok(None),
             },
             ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
-                Owner::take(req, value)
+                Ok(Some(Owner::take(req, value)))
             }
             ValueRef::Array(inner) => {
                 let inner = *inner;
-                match convert_array(req, inner, to, from)? {
-                    Some(array) => array.into_value(),
-                    // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
-                    None => Owner::take(req, Value::array(PhpArray::empty())),
-                }
+                convert_array(req, inner, to, from).map(|array| {
+                    Some(match array {
+                        Some(array) => array.into_value(),
+                        // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
+                        None => Owner::take(req, Value::array(PhpArray::empty())),
+                    })
+                })
             }
             _ => {
                 docref(req, Level::Warning, "Object is not supported");
+                Ok(None)
+            }
+        };
+        // The key made for an element left out is given up with it.
+        let converted = match converted {
+            Ok(Some(converted)) => converted,
+            Ok(None) => {
+                key.give_up(req);
                 continue;
+            }
+            Err(thrown) => {
+                key.give_up(req);
+                return Err(thrown);
             }
         };
         out.set(req, key, converted)?;
