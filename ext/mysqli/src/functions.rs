@@ -484,11 +484,7 @@ fn mysqli_error(req: &mut Request, mysql: Link) -> Answer<PhpString> {
 #[php_function]
 fn mysqli_error_list(req: &mut Request, mysql: Link) -> Answer<PhpArray> {
     let list = link::status(req, on(mysql))?.error_list;
-    let value = crate::props::error_list(req, &list)?;
-    match value.as_array().copied() {
-        Some(array) => Ok(array),
-        None => PhpArray::new(req),
-    }
+    crate::props::error_list(req, &list)
 }
 
 /// `mysqli_stmt_execute(mysqli_stmt $statement, ?array $params = null): bool`.

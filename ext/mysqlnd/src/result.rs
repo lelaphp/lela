@@ -135,7 +135,7 @@ impl Res {
         }
         let native = conn.options.int_and_float_native;
         let (mut row, mut ok, mut last) = (None, true, (0, 0));
-        match read_row(req, conn, true)? {
+        match read_row(req, conn, true) {
             RowPacket::Row(bytes) => {
                 if decode {
                     match self.decode(req, conn, &bytes, native)? {
@@ -143,7 +143,7 @@ impl Res {
                         Err(()) => return Ok(Err(())),
                     }
                 }
-                match read_row(req, conn, true)? {
+                match read_row(req, conn, true) {
                     RowPacket::Eof {
                         warning_count,
                         server_status,
@@ -190,17 +190,13 @@ impl Res {
 
     /// `mysqlnd_res::read_result_metadata` and `mysqlnd_res_meta::read_metadata`:
     /// one field packet per column.
-    pub(crate) fn read_metadata(
-        &mut self,
-        req: &mut Request,
-        conn: &mut ConnData,
-    ) -> Result<bool, Thrown> {
+    pub(crate) fn read_metadata(&mut self, req: &mut Request, conn: &mut ConnData) -> bool {
         self.fields.clear();
         self.current_field = 0;
         for _ in 0..self.field_count {
-            let Some(body) = conn.read_packet(req, Prot::RsetField)? else {
+            let Some(body) = conn.read_packet(req, Prot::RsetField) else {
                 self.fields.clear();
-                return Ok(false);
+                return false;
             };
             match read_field(req, &body) {
                 FieldPacket::Field(field) => {
@@ -214,22 +210,22 @@ impl Res {
                             ),
                         );
                         self.fields.clear();
-                        return Ok(false);
+                        return false;
                     }
                     self.fields.push(field);
                 }
                 FieldPacket::Error(e) => {
                     e.set_on(&mut conn.error);
                     self.fields.clear();
-                    return Ok(false);
+                    return false;
                 }
                 FieldPacket::Fail => {
                     self.fields.clear();
-                    return Ok(false);
+                    return false;
                 }
             }
         }
-        Ok(true)
+        true
     }
 
     /// `mysqlnd_res::use_result`: rows to be read one at a time; a
@@ -251,12 +247,7 @@ impl Res {
     /// `mysqlnd_res::store_result` with `store_result_fetch_data`: every
     /// row read and held; the status of the last EOF taken; the affected
     /// rows the row count, as libmysql documents.
-    pub(crate) fn store(
-        &mut self,
-        req: &mut Request,
-        conn: &mut ConnData,
-        ps: bool,
-    ) -> Result<bool, Thrown> {
+    pub(crate) fn store(&mut self, req: &mut Request, conn: &mut ConnData, ps: bool) -> bool {
         self.kind = if ps {
             ResType::PsBuffered
         } else {
@@ -268,7 +259,7 @@ impl Res {
         let mut error = ErrorInfo::default();
         let mut failed = false;
         loop {
-            match read_row(req, conn, ps)? {
+            match read_row(req, conn, ps) {
                 RowPacket::Row(row) => rows.push(row),
                 RowPacket::Eof {
                     warning_count,
@@ -311,11 +302,11 @@ impl Res {
         if failed {
             conn.error.copy_from(&error);
             self.rows = Rows::Buffered { rows, current: 0 };
-            return Ok(false);
+            return false;
         }
         conn.upsert.affected_rows = count;
         self.rows = Rows::Buffered { rows, current: 0 };
-        Ok(true)
+        true
     }
 
     /// Whether the rows are held whole.
@@ -421,7 +412,7 @@ impl Res {
                     return Ok(Err(()));
                 }
                 let binary = self.binary;
-                match read_row(req, conn, binary)? {
+                match read_row(req, conn, binary) {
                     RowPacket::Row(bytes) => {
                         *row_count += 1;
                         conn.stats.inc(if binary {
@@ -690,25 +681,22 @@ pub(crate) enum RowPacket {
 /// `php_mysqlnd_rowp_read` with `php_mysqlnd_read_row_ex`: a row's
 /// bytes, a payload over several frames joined; an error or an EOF in
 /// their place.
-fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> Result<RowPacket, Thrown> {
+fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> RowPacket {
     let mut data = Vec::new();
     let mut header_size;
     loop {
-        let Some(size) = conn
-            .net
-            .read_header(req, &mut conn.stats, &mut conn.error)?
-        else {
+        let Some(size) = conn.net.read_header(req, &mut conn.stats, &mut conn.error) else {
             conn.state = ConnState::QuitSent;
             conn.error
                 .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
-            return Ok(RowPacket::Fail);
+            return RowPacket::Fail;
         };
         header_size = size;
-        let Some(chunk) = conn.net.receive(req, size, &mut conn.stats)? else {
+        let Some(chunk) = conn.net.receive(req, size, &mut conn.stats) else {
             conn.state = ConnState::QuitSent;
             conn.error
                 .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
-            return Ok(RowPacket::Fail);
+            return RowPacket::Fail;
         };
         data.extend_from_slice(&chunk);
         if size < crate::consts::MAX_PACKET_SIZE {
@@ -721,9 +709,9 @@ fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> Result<RowP
     );
     conn.stats.inc(Stat::PacketsReceivedRsetRow);
     match data.first() {
-        Some(&ERROR_MARKER) => Ok(RowPacket::Error(PacketError::read_from(
-            data.get(1..).unwrap_or_default(),
-        ))),
+        Some(&ERROR_MARKER) => {
+            RowPacket::Error(PacketError::read_from(data.get(1..).unwrap_or_default()))
+        }
         Some(&EODATA_MARKER) if data.len() < 8 => {
             let (mut warning_count, mut server_status) = (0, 0);
             if data.len() > 1 {
@@ -731,10 +719,10 @@ fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> Result<RowP
                 warning_count = u32::from(p.u16());
                 server_status = u32::from(p.u16());
             }
-            Ok(RowPacket::Eof {
+            RowPacket::Eof {
                 warning_count,
                 server_status,
-            })
+            }
         }
         _ => {
             conn.stats.inc(if binary {
@@ -742,7 +730,7 @@ fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> Result<RowP
             } else {
                 Stat::RowsFetchedFromServerNormal
             });
-            Ok(RowPacket::Row(data))
+            RowPacket::Row(data)
         }
     }
 }
