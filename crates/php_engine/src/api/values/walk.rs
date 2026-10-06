@@ -18,6 +18,10 @@
 //!   they stand, up to where they ended as it began, php's
 //!   `ZEND_HASH_FOREACH` over a table nothing holds for the walk:
 //!   `extract` under `EXTR_REFS`.
+//! - [`detached`] works on a private copy of the table and swaps it
+//!   back, as `php_usort` does, so code the body runs neither sees the
+//!   table changing nor changes the one being worked on. The `usort`
+//!   family.
 //!
 //! A walk takes the table and lends the body each row's key and value
 //! for that step. The body answers a [`Step`]: std's `ControlFlow` to go
@@ -32,6 +36,7 @@ use std::ops::ControlFlow;
 
 use php_heap::{Arr, PropertyTable, TableRow};
 
+use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
@@ -611,4 +616,44 @@ fn bucket_steps<B>(
         }
     }
     Ok(None)
+}
+
+/// php's walk over a private copy swapped back, `php_usort`
+/// (`Z/ext/standard/array.c:878`): the array the by-reference argument
+/// `holder` holds copied (`zend_array_dup`, "so the in-place
+/// modifications will not be visible to the callback function"), the
+/// copy lent to `body`, which sorts or walks it, and the copy written
+/// into the caller's variable after, whatever the body answered, the
+/// array the variable held given up (`ZVAL_ARR(array, arr)` and the
+/// `zval_ptr_dtor` of the old one). Code the body runs that writes the
+/// variable writes the original, which the swap gives up: an append a
+/// comparator makes is not in the sorted array. An array with no row is
+/// not copied, and the body not called, as `php_usort` returns before;
+/// the answer is then `None`.
+///
+/// ```php
+/// $a = [3, 1, 2]; usort($a, function ($x, $y) { global $a; $a[] = 9; return $x <=> $y; }); echo json_encode($a), "\n";
+/// $b = ['c' => 3, 'a' => 1]; uksort($b, function ($x, $y) { global $b; unset($b['a']); return $x <=> $y; }); echo json_encode($b), "\n";
+/// ```
+/// ```expect
+/// [1,2,3]
+/// {"a":1,"c":3}
+/// ```
+pub fn detached<T>(
+    req: &mut Request,
+    holder: &Ref<PhpArray>,
+    body: impl FnOnce(&mut Request, &mut PhpArray) -> Result<T, Thrown>,
+) -> Result<Option<T>, Thrown> {
+    let Some(held) = holder.get().copied() else {
+        return Ok(None);
+    };
+    if held.is_empty() {
+        return Ok(None);
+    }
+    let mut copy = held.copy(req)?;
+    let answered = body(req, &mut copy);
+    let written = holder.set(req, copy);
+    let answered = answered?;
+    written?;
+    Ok(Some(answered))
 }
