@@ -73,3 +73,24 @@ echo implode(',', array_intersect(stream_get_wrappers(), ['php', 'file'])), ' ',
     );
     assert_eq!(stdout, "php,file y aaa,aaac aaa\n");
 }
+
+/// An include through `php://filter` keeps neither the path its
+/// resource opened at nor, where a filter refuses the read, anything of
+/// the open; the included file is named as the file it read, as php
+/// names it (#2067).
+#[test]
+fn an_include_through_a_filter_gives_up_the_path_it_opened() {
+    let stdout = armed(
+        r#"<?php
+$f = sys_get_temp_dir() . '/leak-sensor-include-' . getmypid() . '.php';
+file_put_contents($f, '<?php echo "in ", __FILE__ === realpath($GLOBALS["f"]) ? "file" : __FILE__, "\n";');
+class F extends php_user_filter { }
+stream_filter_register('f.fatal', F::class);
+var_dump(@include 'php://filter/read=f.fatal/resource=' . $f);
+include 'php://filter/read=string.rot13|string.rot13/resource=' . $f;
+echo in_array(realpath($f), get_included_files(), true) ? 'named' : implode(',', get_included_files()), "\n";
+unlink($f);
+"#,
+    );
+    assert_eq!(stdout, "bool(false)\nin file\nnamed\n");
+}

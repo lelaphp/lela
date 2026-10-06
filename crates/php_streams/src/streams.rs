@@ -3251,9 +3251,19 @@ fn filter_open(
     let Some(at) = path.windows(10).position(|w| w == b"/resource=") else {
         return Err(throw_error(req, "Error", "No URL resource specified"));
     };
-    let Some(stream) = req.open_wrapper_ex(&path[at + 10..], mode, options)? else {
+    // `php_stream_open_wrapper_ex(p + 10, mode, options, opened_path,
+    // context)`: the resource's opened path is the filter's own, so an
+    // include through the filter is named as the file it read. The
+    // string the open made of it is given up here, and the name set as
+    // this opener's once the filters stand.
+    let Some((stream, named)) = req.open_wrapper_named(&path[at + 10..], mode, options)? else {
         return Ok(Err(String::from("operation failed")));
     };
+    let named = named.map(|name| {
+        let bytes = name.as_bytes().to_vec();
+        req.release(Value::string(name));
+        bytes
+    });
     let read = mode.contains(&b'r') || mode.contains(&b'+');
     let write = mode.iter().any(|b| matches!(b, b'w' | b'+' | b'a'));
     for part in path[..at].split(|b| *b == b'/').filter(|p| !p.is_empty()) {
@@ -3272,6 +3282,9 @@ fn filter_open(
                 return Err(thrown);
             }
         }
+    }
+    if named.is_some() {
+        req.streams().opened_path = named;
     }
     Ok(Ok(stream))
 }
