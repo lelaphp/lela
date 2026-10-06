@@ -1,6 +1,7 @@
 //! A debug build's origin of every block the heap hands out
 //! ([`crate::sensed::Origin`]), which the request leak sensor's walk
-//! ([`super::leaks`]) names a block still held by.
+//! ([`super::leaks`]) names a block still held by, and the backtrace of
+//! every block where allocations are traced.
 //!
 //! The origin is kept per block and not per `run` or page, because a bin
 //! `run` serves every extension whose blocks fall in its bin, and the
@@ -15,6 +16,11 @@
 //! only blocks still held. The table is zeroed by the system's allocator
 //! and so is touched only where blocks stand, and a huge block, which has
 //! no chunk, keeps its origin in its own record.
+//!
+//! Tracing is opt-in and costs what `Backtrace::force_capture`
+//! costs, on every allocation: a map from each block the heap has out to
+//! the frames that allocated it, kept from the entry that hands it out
+//! and dropped at the entry that frees it.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ptr::NonNull;
@@ -83,4 +89,58 @@ impl Mm {
     pub(crate) fn set_origin(&mut self, origin: Origin) -> Origin {
         std::mem::replace(&mut self.origin, origin)
     }
+
+    /// Every allocation from here on keeps the backtrace that made it.
+    pub(crate) fn trace_allocations(&mut self) {
+        self.traces.get_or_insert_default();
+    }
+
+    /// The block at `to` handed out by an entry, in place of the one at
+    /// `from` where it was a reallocation, traced where allocations are.
+    pub(super) fn trace(&mut self, from: Option<NonNull<u8>>, to: NonNull<u8>) {
+        if let Some(traces) = &mut self.traces {
+            if let Some(from) = from {
+                traces.remove(&from.as_ptr().addr());
+            }
+            traces.insert(
+                to.as_ptr().addr(),
+                std::backtrace::Backtrace::force_capture(),
+            );
+        }
+    }
+
+    /// The frames that allocated the block at `at`, where allocations
+    /// are traced, from the heap's entry that handed it out: the capture's
+    /// own frames are std's and say nothing.
+    pub(super) fn trace_of(&self, at: usize) -> Option<String> {
+        let trace = self.traces.as_ref()?.get(&at)?.to_string();
+        Some(past_the_capture(&trace))
+    }
+}
+
+/// A rendered backtrace from its first frame outside `std::backtrace`'s
+/// own. A frame is its numbered line and the `at` lines under it.
+fn past_the_capture(trace: &str) -> String {
+    let mut frames: Vec<String> = Vec::new();
+    for line in trace.lines() {
+        let numbered = line
+            .trim_start()
+            .split_once(": ")
+            .is_some_and(|(number, _)| number.bytes().all(|b| b.is_ascii_digit()));
+        match frames.last_mut() {
+            Some(frame) if !numbered => {
+                frame.push('\n');
+                frame.push_str(line);
+            }
+            _ => frames.push(line.to_owned()),
+        }
+    }
+    let capture = |frame: &String| {
+        frame
+            .lines()
+            .next()
+            .is_some_and(|symbol| symbol.contains("std::backtrace"))
+    };
+    let past = frames.iter().position(|frame| !capture(frame)).unwrap_or(0);
+    frames.into_iter().skip(past).collect::<Vec<_>>().join("\n")
 }

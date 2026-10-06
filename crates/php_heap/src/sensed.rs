@@ -57,13 +57,15 @@ pub(crate) enum Sensed {
     /// Blocks the heap still held where the request ended, once every
     /// block of the request's lifetime was freed by name: how many, the
     /// bytes its accounting counted in them, the first its walk met
-    /// (`zend_mm_check_leaks`), and the name of the [`Origin`] it was
-    /// allocated for, what `zend_leak_info`'s `filename` names.
+    /// (`zend_mm_check_leaks`), the name of the [`Origin`] it was
+    /// allocated for, and where allocations are traced, the frames that
+    /// allocated it (`zend_leak_info`'s `filename` and `lineno`).
     Leak {
         bytes: usize,
         blocks: usize,
         first: Held,
         by: String,
+        trace: Option<String>,
     },
 }
 
@@ -130,11 +132,15 @@ impl Sensed {
                 blocks,
                 first,
                 by,
+                trace,
             } => Fatal::Error(format!(
-                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {by}",
+                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {by}{}",
                 if blocks == 1 { "block" } else { "blocks" },
                 first.size,
                 first.at,
+                trace
+                    .map(|trace| format!(" at:\n{trace}"))
+                    .unwrap_or_default()
             )),
         }
     }

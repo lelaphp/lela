@@ -35,7 +35,8 @@ impl Mm {
     /// as one [`Sensed::Leak`] naming how many there are, the bytes the
     /// accounting counts in them and the first the walk met, in php's
     /// order: the huge blocks, then each chunk from its first page up;
-    /// the first with what `name` calls the origin it was allocated for.
+    /// the first with what `name` calls the origin it was allocated for
+    /// and, where allocations are traced, the frames that allocated it.
     /// Nothing is recorded for a heap that holds nothing.
     pub(crate) fn sense_leaks(&mut self, name: &dyn Fn(Origin) -> String) {
         self.gc_heap();
@@ -96,6 +97,7 @@ impl Mm {
                 blocks,
                 first,
                 by: name(first.origin),
+                trace: self.trace_of(first.at),
             });
         }
     }
@@ -144,5 +146,24 @@ mod tests {
                 "{size}: {message}"
             );
         }
+    }
+
+    /// With allocations traced, the leak names the line that allocated the
+    /// block, past the heap's own frames.
+    #[test]
+    fn a_traced_leak_names_the_line_that_allocated_it() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.trace_allocations();
+        let line = line!() + 1;
+        let leaked = heap.string(b"leaked");
+        assert!(leaked.is_ok());
+        heap.sense_leaks(&named);
+        let message = sensed(&mut heap);
+        assert!(
+            message.contains(&format!("leaks.rs:{line}:")),
+            "line {line}: {message}"
+        );
+        assert!(message.contains(", allocated by ext0 at:\n"), "{message}");
     }
 }

@@ -446,9 +446,11 @@ impl Heap {
     /// finds is recorded as the sensors record and raised by
     /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
     /// first of them, with what `name` calls the [`Origin`] that block was
-    /// allocated for. The heap serves no allocation after it but the one
-    /// that renders that fatal. A release build has none of it and keeps
-    /// php's fast teardown, the chunks given back whole.
+    /// allocated for, and the frames that allocated it where allocations
+    /// are traced ([`Heap::trace_allocations`]). The heap serves no
+    /// allocation after it but the one that renders that fatal. A release
+    /// build has none of it and keeps php's fast teardown, the chunks
+    /// given back whole.
     #[cfg(debug_assertions)]
     pub fn sense_leaks(&mut self, name: &dyn Fn(Origin) -> String) {
         for a in std::mem::take(&mut self.constant_arrays) {
@@ -471,6 +473,16 @@ impl Heap {
     #[cfg(debug_assertions)]
     pub fn set_origin(&mut self, origin: Origin) -> Origin {
         self.mm.set_origin(origin)
+    }
+
+    /// A debug build's opt-in tracing: every allocation from here
+    /// on keeps the backtrace that made it, and a leak names the frames
+    /// that allocated its first block. Each allocation then pays a
+    /// `Backtrace::force_capture`, which costs many times the allocation,
+    /// so it is for digging locally and never on by default.
+    #[cfg(debug_assertions)]
+    pub fn trace_allocations(&mut self) {
+        self.mm.trace_allocations();
     }
 
     /// One more owner of `z`: a refcount increment for a refcounted

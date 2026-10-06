@@ -269,6 +269,10 @@ pub(crate) struct Mm {
     /// ([`Mm::set_origin`]).
     #[cfg(debug_assertions)]
     origin: crate::sensed::Origin,
+    /// A debug build's backtrace of every block it has out, where
+    /// allocations are traced ([`Mm::trace_allocations`]).
+    #[cfg(debug_assertions)]
+    traces: Option<std::collections::HashMap<usize, std::backtrace::Backtrace>>,
 }
 
 impl Mm {
@@ -300,6 +304,8 @@ impl Mm {
             quarantine: [Quarantine::EMPTY; BINS],
             #[cfg(debug_assertions)]
             origin: crate::sensed::Origin::default(),
+            #[cfg(debug_assertions)]
+            traces: None,
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             mm.chunk_init(chunk, 0);
@@ -391,6 +397,8 @@ impl Mm {
     #[inline]
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let at = self.alloc_heap(size)?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Allocated {
                 at: at.as_ptr().addr(),
@@ -415,6 +423,8 @@ impl Mm {
     ) -> Result<NonNull<u8>, Fatal> {
         // SAFETY: the caller's contract, handed on.
         let to = unsafe { self.realloc_heap(at, copy, size) }?;
+        #[cfg(debug_assertions)]
+        self.trace(Some(at), to);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Reallocated {
                 from: at.as_ptr().addr(),
@@ -435,6 +445,10 @@ impl Mm {
     pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
         // SAFETY: the caller's contract, handed on.
         unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Freed {
                 at: at.as_ptr().addr(),

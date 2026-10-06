@@ -605,6 +605,10 @@ impl Request {
         // The main chunk holds it, so nothing refuses it; a heap that
         // did would refuse the first push again, with php's fatal.
         let mut heap = Heap::new();
+        #[cfg(debug_assertions)]
+        if shared.sense_leaks == crate::engine::LeakSensor::Traced {
+            heap.trace_allocations();
+        }
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());

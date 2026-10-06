@@ -169,6 +169,7 @@ Heap::string_safe_alloc
 Heap::string_truncate
 Heap::string_with
 Heap::take_sensed
+Heap::trace_allocations
 Heap::unobserve_allocations
 Heap::unpin
 HeapHooks

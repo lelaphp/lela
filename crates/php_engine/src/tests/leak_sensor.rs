@@ -4,7 +4,8 @@
 //! `InternalError` naming what the heap still held, and a request that
 //! ended in a fatal reports nothing, as php's debug heap reports nothing
 //! after an unclean shutdown. The leak names the extension whose native
-//! or lifecycle hook allocated it (#1993). Each engine here arms the sensor
+//! or lifecycle hook allocated it (#1993), and with allocations traced
+//! the line that did. Each engine here arms the sensor
 //! (`EngineBuilder::sense_leaks`), which is off by default until the
 //! leaks the corpus has are fixed (#2057).
 
@@ -13,7 +14,7 @@ use php_macros::php_function;
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::request::Request;
 use crate::api::values::PhpString;
-use crate::engine::Engine;
+use crate::engine::{Engine, LeakSensor};
 use crate::test::Capture;
 
 /// `dropped_owner(): void`, faulty on purpose: a string made, its one
@@ -58,7 +59,7 @@ const BY_LEAK_SENSOR: &str = ", allocated by leak_sensor in Unknown on line 0\n"
 fn after_a_clean_request_the_debug_heap_is_empty() {
     let engine = Engine::cli_builder()
         .extensions(&[faulty()])
-        .sense_leaks(true)
+        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         r#"<?php
@@ -92,7 +93,7 @@ echo "done\n";
 fn a_dropped_owner_fails_the_request_as_an_internal_error() {
     let engine = Engine::cli_builder()
         .extensions(&[faulty()])
-        .sense_leaks(true)
+        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
         "<?php echo 'a';\ndropped_owner();\necho 'went on';\n",
@@ -113,7 +114,7 @@ fn a_dropped_owner_fails_the_request_as_an_internal_error() {
 fn a_leak_from_a_lifecycle_hook_names_its_extension() {
     let engine = Engine::cli_builder()
         .extensions(&[faulty(), faulty_at_rshutdown()])
-        .sense_leaks(true)
+        .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture("<?php echo strlen('a');\n", Capture::default());
     let stdout = String::from_utf8_lossy(&served.stdout);
@@ -124,6 +125,32 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
     );
 }
 
+/// With allocations traced the leak names the line of the faulty native
+/// that allocated the block, beside its extension.
+#[test]
+fn the_backtrace_mode_names_the_leaking_line() {
+    let engine = Engine::cli_builder()
+        .extensions(&[faulty()])
+        .sense_leaks(LeakSensor::Traced)
+        .build();
+    let served = engine.serve_capture("<?php dropped_owner();\n", Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    let source = include_str!("leak_sensor.rs");
+    let line = source
+        .lines()
+        .position(|line| line.contains("let _dropped = PhpString::new(req, b\"dropped\");"))
+        .map_or(0, |at| at + 1);
+    assert!(
+        stdout.contains(&format!("leak_sensor.rs:{line}:")),
+        "line {line}: {stdout}"
+    );
+    assert!(
+        stdout.contains(", allocated by leak_sensor at:\n"),
+        "{stdout}"
+    );
+    assert_eq!(served.exit_code, 255);
+}
+
 /// The same dropped owner in a request that then ends in a fatal: the
 /// fatal is rendered and the sensor stays silent, since the frames
 /// `zend_bailout` left were never unwound.
@@ -131,7 +158,7 @@ fn a_leak_from_a_lifecycle_hook_names_its_extension() {
 fn a_request_ending_in_a_fatal_reports_nothing() {
     let engine = Engine::cli_builder()
         .extensions(&[faulty()])
-        .sense_leaks(true)
+        .sense_leaks(LeakSensor::Armed)
         .build();
     for (fatal, rendered) in [
         ("undefined_function();", "Call to undefined function"),

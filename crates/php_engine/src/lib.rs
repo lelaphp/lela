@@ -69,6 +69,8 @@ pub use command_line::{CommandLine, EachLine};
 pub use constants::{
     PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR,
 };
+#[cfg(debug_assertions)]
+pub use engine::LeakSensor;
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
     Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
