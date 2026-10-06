@@ -25,6 +25,7 @@
 pub(crate) mod expect;
 pub(crate) mod hosts;
 pub(crate) mod linked;
+pub(crate) mod profile;
 mod variant;
 
 pub use variant::{Build, Oracles, Platform, Variant};
@@ -1292,17 +1293,22 @@ impl<'a> Oracle<'a> {
 /// ADR-0008): [`hosts::CLI`]'s.
 pub const ENGINE: &str = hosts::CLI.binary;
 
-/// The cargo line that builds every host of [`hosts::HOSTS`]: their crates
-/// by package, so the build turns on the features those crates declare and
-/// no others. A line naming the binaries alone builds them with every
-/// workspace member's features unified, the harness's extensions among
-/// them, which is not the binary the lane measures.
+/// The cargo line that builds every host of [`hosts::HOSTS`] in the
+/// correctness lanes' profile ([`profile::LANE`], revision 82): their
+/// crates by package, so the build turns on the features those crates
+/// declare and no others. A line naming the binaries alone builds them
+/// with every workspace member's features unified, the harness's
+/// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
     let packages: Vec<String> = hosts::HOSTS
         .iter()
         .map(|host| format!("-p {}", host.package()))
         .collect();
-    format!("cargo build {}", packages.join(" "))
+    format!(
+        "cargo build --profile {} {}",
+        profile::LANE.name(),
+        packages.join(" ")
+    )
 }
 
 /// The extensions php names otherwise than their crates, the module's
@@ -1363,12 +1369,14 @@ impl Runner {
     /// it. A binary whose digest is the pin's is the lane's control, and
     /// the engine's own is held to the tree by [`against_the_tree`].
     ///
-    /// A binary the tree has moved past is passed over for one it has not,
-    /// so `release` is preferred among the binaries that are the tree's
-    /// and not over them: before this, a release binary built once and
-    /// never again was the lane's engine for every run after, however far
-    /// the tree moved, and a debug build could not displace it (#475). Where every binary found is behind the tree, the first is
-    /// the one the skip names.
+    /// The profiles are tried in [`profile::PREFERRED`]'s order, the
+    /// lanes' own first (revision 82). A binary the tree has moved past is
+    /// passed over for one it has not, so a profile is preferred among the
+    /// binaries that are the tree's and not over them: before this, a
+    /// release binary built once and never again was the lane's engine for
+    /// every run after, however far the tree moved, and a debug build could
+    /// not displace it (#475). Where every binary found is behind the tree,
+    /// the first is the one the skip names.
     pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
@@ -1384,8 +1392,9 @@ impl Runner {
             });
         }
         let mut behind = None;
-        for profile in ["release", "debug"] {
-            let built = root.join("target").join(profile).join(ENGINE);
+        let target = root.join("target");
+        for profile in profile::PREFERRED {
+            let built = profile.binary(&target, ENGINE);
             if !built.is_file() {
                 continue;
             }
@@ -1399,8 +1408,19 @@ impl Runner {
         if let Some(behind) = behind {
             return Ok(behind);
         }
+        let looked: Vec<String> = profile::PREFERRED
+            .iter()
+            .map(|profile| {
+                profile
+                    .binary(Path::new("target"), ENGINE)
+                    .display()
+                    .to_string()
+            })
+            .collect();
         Ok(Runner::Absent(format!(
-            "the engine's binary is not built: no target/release/{ENGINE} and no target/debug/{ENGINE}; a CLI request reaches `serve` with php_engine (design §5)"
+            "the engine's binary is not built: none of {}; a CLI request reaches `serve` with php_engine (design §5), and `{}` builds the lanes'",
+            looked.join(", "),
+            engine_build()
         )))
     }
 
@@ -1555,7 +1575,7 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
     Runner::Stale(format!(
         "the engine's binary at {} was built before {} was last written, so a lane running it \
          would measure an engine this tree no longer describes while stamping the reading with \
-         the tree. Rebuild it: `{}`, or with `--release` for the release binary a lane prefers.",
+         the tree. Rebuild it: `{}`, the build every correctness lane runs.",
         path.display(),
         source.display(),
         engine_build()

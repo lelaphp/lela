@@ -26,6 +26,23 @@ lto = "thin"
 codegen-units = 1
 panic = "unwind"
 
+# The correctness lanes' build (harness-design.md §7, revision 82; #1994):
+# release's optimisation with debug assertions and overflow checks on, so
+# what `cfg(debug_assertions)` guards runs over the whole corpus at about
+# release's cost. Cargo applies a profile to every crate of the graph, so
+# the dependencies take both checks as well, and std's inlined `ub_checks`
+# preconditions follow the crate that inlines them; std's own compiled code
+# is the toolchain's release build either way. Thin LTO and a single
+# codegen unit are left to release: they buy the bench lane and the shipped
+# binaries speed a lane does not read, at the cost of the build. The
+# harness names the profile once, as `LANE` in xtask/src/oracle/profile.rs.
+[profile.release-da]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+lto = false
+codegen-units = 16
+
 [workspace.package]
 edition = "2024"
 license = "MIT"

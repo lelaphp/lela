@@ -780,7 +780,7 @@ fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
     assert!(
         reading
             .message
-            .contains("cargo build -p php_sapi_cli -p php_sapi_cgi"),
+            .contains("cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi"),
         "{}",
         reading.message
     );
