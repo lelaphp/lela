@@ -1020,7 +1020,7 @@ pub fn write_raw_property(
     name: Owner<PhpString>,
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name.hand_on(), value.hand_on())
+    req.write_raw(*object, name, value)
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the

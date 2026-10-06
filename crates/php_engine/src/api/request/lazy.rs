@@ -978,6 +978,8 @@ impl Request {
                         req.release(Value::string(key));
                         return Err(thrown);
                     }
+                    // The handler layer's two owners, named for the write.
+                    let (key, value) = (Owner::adopt(req, key), Owner::adopt(req, value));
                     req.write_std_property(object, key, value)
                 });
                 if written.is_err()

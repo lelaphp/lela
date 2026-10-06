@@ -2214,7 +2214,7 @@ pub trait ObjectHandlers: Send + Sync {
         name: Owner<PhpString>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.write_property(object, name.hand_on(), value.hand_on())
+        req.write_property(object, name, value)
     }
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:
