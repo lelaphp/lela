@@ -133,3 +133,18 @@ unlink("$d/a"); unlink("$d/b"); unlink("$d/i.gif"); rmdir($d);
         "bool(true)\nint(10)\nint(0)\nwidth=\"2\" height=\"3\" 10\nbbb\n"
     );
 }
+
+/// `range()` raising its `ValueError` makes no array first, as php's
+/// checks stand before `array_init_size` (#2091).
+#[test]
+fn a_range_refused_makes_no_array() {
+    let stdout = armed(
+        r#"<?php
+foreach ([[1, 5, 0], [1, 3, 5], [1, 5, -2], [1.0, 3.0, 5.0], ['a', 'c', 5], ['a', 'e', -1]] as [$a, $b, $s]) {
+    try { range($a, $b, $s); } catch (ValueError $e) { echo strlen($e->getMessage()) > 0 ? 'e' : '-'; }
+}
+echo count(range(1, 3)), count(range(3.0, 1.0)), count(range('a', 'c')), "\n";
+"#,
+    );
+    assert_eq!(stdout, "eeeeee333\n");
+}
