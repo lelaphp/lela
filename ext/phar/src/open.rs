@@ -417,7 +417,7 @@ fn parse_pharfile(
         entry.is_crc_checked = manifest_flags & HDR_SIGNATURE != 0;
         entry.set_inode(fname, 1, false);
         let name = entry.filename.clone();
-        let _ = data.manifest.add(&name, entry);
+        data.manifest.add(&name, entry).ok();
     }
     data.version = format!(
         "{}.{}.{}",
@@ -444,12 +444,12 @@ fn parse_pharfile(
             return fail("Cannot open archive \"%s\", alias is already in use by existing archive");
         }
         let id = archives(req).insert(data);
-        let _ = archives(req).alias_map.add(&alias, id);
-        let _ = archives(req).fname_map.add(fname, id);
+        archives(req).alias_map.add(&alias, id).ok();
+        archives(req).fname_map.add(fname, id).ok();
         return Ok(Ok(id));
     }
     let id = archives(req).insert(data);
-    let _ = archives(req).fname_map.add(fname, id);
+    archives(req).fname_map.add(fname, id).ok();
     Ok(Ok(id))
 }
 
@@ -560,7 +560,7 @@ pub(crate) fn create_or_parse(
         data.alias = Some(alias.map_or_else(|| expanded.clone(), <[u8]>::to_vec));
     }
     let id = archives(req).insert(data);
-    let _ = archives(req).fname_map.add(&expanded, id);
+    archives(req).fname_map.add(&expanded, id).ok();
     if let Some(alias) = alias.filter(|a| !a.is_empty()) {
         if let Some(holder) = archives(req).by_alias(alias)
             && !archive::free_alias(req, holder)

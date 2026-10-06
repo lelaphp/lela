@@ -394,11 +394,12 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         .collect();
     assert!(names.contains(&"port-map"), "{names:?}");
     for name in names {
-        let _ = write!(
+        write!(
             facts,
             "\n\n## {name}\n\n<!-- computed -->\n{}\n<!-- /computed -->\n",
             section(name)
-        );
+        )
+        .ok();
     }
     // What `session()` appends after the local file: the rules this
     // session fired, each with its count, and the unreadable-log note,
@@ -411,13 +412,13 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         let [rule, _, _, _, denials, ..] = cells[..] else {
             break;
         };
-        let _ = writeln!(this_session, "{rule} | {denials} |");
+        writeln!(this_session, "{rule} | {denials} |").ok();
     }
     assert!(
         this_session.contains("| harness.self | "),
         "the bound lists the permits rows: {this_session}"
     );
-    let _ = write!(facts, "\n## permits this session\n\n{this_session}\n");
+    write!(facts, "\n## permits this session\n\n{this_session}\n").ok();
     if let Some(why) = over("facts", &facts, cap) {
         panic!("{why}");
     }

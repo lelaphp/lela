@@ -215,9 +215,10 @@ fn open_key(req: &mut Request, key: &[u8]) {
     // The mode as php's process has it: `open(2)` takes the process's own
     // umask off, and `umask()` sets the request's.
     if !existed {
-        let _ = file.set_permissions(Permissions::from_mode(mode & !req.umask()));
+        file.set_permissions(Permissions::from_mode(mode & !req.umask()))
+            .ok();
     }
-    let _ = file.lock();
+    file.lock().ok();
     if let Some(files) = data(req) {
         files.fd = Some(file);
     }
@@ -259,7 +260,7 @@ fn write_key(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> 
         return Ok(false);
     };
     if i64::try_from(val.len()).unwrap_or(i64::MAX) < files.st_size {
-        let _ = file.set_len(0);
+        file.set_len(0).ok();
     }
     let written = file.write_at(val, 0);
     match written {

@@ -154,8 +154,8 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
 /// newline on stdout.
 fn log_message(entry: &[u8]) {
     let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(entry);
-    let _ = stdout.write_all(b"\n");
+    stdout.write_all(entry).ok();
+    stdout.write_all(b"\n").ok();
 }
 
 /// The host's `main`.

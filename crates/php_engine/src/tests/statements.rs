@@ -144,7 +144,7 @@ fn stepped(name: &str, builder: EngineBuilder, main: &str) -> (Vec<Event>, Strin
         .extensions(&[TestExt::<0>::stepping(), TestExt::<1>::stepping()])
         .build();
     let dir = scratch(&format!("statements_{name}"));
-    let _ = std::fs::write(dir.join("inc.php"), INC);
+    std::fs::write(dir.join("inc.php"), INC).ok();
     rec.mark("built");
     let served = serve_main(&engine, &dir, main);
     rec.mark("served");
@@ -319,8 +319,8 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
         .extensions(&[TestExt::<0>::stepping()])
         .build();
     let dir = scratch("statements_host_string");
-    let _ = std::fs::write(dir.join("inc.php"), INC);
-    let _ = std::fs::write(dir.join("down.php"), "<?php\necho g(3), \"\\n\";\n");
+    std::fs::write(dir.join("inc.php"), INC).ok();
+    std::fs::write(dir.join("down.php"), "<?php\necho g(3), \"\\n\";\n").ok();
     let inc = dir.join("inc.php");
     let down = dir.join("down.php");
     let shutdown = format!(

@@ -1152,7 +1152,7 @@ impl ConnData {
     /// `mysqlnd_conn_data::free_contents`.
     pub(crate) fn free_contents(&mut self, req: &mut Request) {
         if let Some(mut result) = self.current_result.take() {
-            let _ = result.free(req, self, true);
+            result.free(req, self, true).ok();
         }
         self.net.close(req);
         self.scheme = None;

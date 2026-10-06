@@ -68,7 +68,8 @@ impl Poller {
     /// `fpm_event_kqueue_remove`.
     pub(crate) fn remove(&self, fd: BorrowedFd<'_>) {
         use std::os::fd::AsRawFd;
-        let _ = self.change(fd.as_raw_fd(), nix::sys::event::EvFlags::EV_DELETE);
+        self.change(fd.as_raw_fd(), nix::sys::event::EvFlags::EV_DELETE)
+            .ok();
     }
 
     /// `fpm_event_kqueue_wait`: the descriptors ready within `timeout_ms`,

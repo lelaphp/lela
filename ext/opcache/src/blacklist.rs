@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn an_entry_under_a_link_is_expanded_where_the_link_leads() {
         let dir = std::env::temp_dir().join(format!("t1710-blacklist-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         let real = dir.join("a/real");
         assert!(std::fs::create_dir_all(&real).is_ok());
         assert!(std::os::unix::fs::symlink(&real, dir.join("link")).is_ok());
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(resolved(b"link/../y"), Some(b"/a/y".to_vec()));
         assert_eq!(resolved(b"link/"), Some(b"/a/real/".to_vec()));
         assert_eq!(expand(b"link/f/g", Some(&base)), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

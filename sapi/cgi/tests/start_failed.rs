@@ -29,7 +29,7 @@ fn tree(name: &str) -> PathBuf {
         "sapi-cgi-start-failed-{name}-{}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("t.php"), "<?php echo \"ran\\n\";").unwrap();
     std::fs::write(dir.join("sess_t1879"), DATA).unwrap();
@@ -59,7 +59,7 @@ fn a_failed_start_ends_php_cgi_before_the_program() {
     let out = served(&dir, &[]);
     let file_left = dir.join("sess_t1879").exists();
     let others = std::fs::read_dir(&dir).unwrap().count();
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         format!("{HEAD}{FAILED}")
@@ -78,7 +78,7 @@ fn the_head_is_committed_under_q_and_l_since_the_start_never_returned() {
     for flag in ["-q", "-l"] {
         let dir = tree(&flag[1..]);
         let out = served(&dir, &[flag]);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!("{HEAD}{FAILED}"),
@@ -95,7 +95,7 @@ fn the_head_is_committed_under_q_and_l_since_the_start_never_returned() {
 fn a_buffered_failure_writes_nothing() {
     let dir = tree("buffered");
     let out = served(&dir, &["-d", "output_buffering=4096"]);
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert_eq!(out.status.code(), Some(255));
 }

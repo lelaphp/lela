@@ -2860,7 +2860,8 @@ mod tests {
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
         fn dtor(req: &mut Request, r: Resource) {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
-            let _ = req.define_constant(b"dtor", Value::int(i64::from(seen)));
+            req.define_constant(b"dtor", Value::int(i64::from(seen)))
+                .ok();
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

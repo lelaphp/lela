@@ -63,7 +63,7 @@ fn each_user_ini_from_the_document_root_down_is_set_per_dir() {
     let sub = served(&dir, "www/sub/t.php");
     let top = served(&dir, "www/t.php");
     let out = served(&dir, "out/t.php");
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     let plain = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/plain; charset=UTF-8\r\n\r\n";
     let html = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n";
     assert_eq!(

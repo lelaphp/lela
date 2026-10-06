@@ -116,7 +116,7 @@ pub(crate) fn redirect_stderr_to_error_log(fpm: &Fpm) {
         .as_deref()
         .is_some_and(|l| l.eq_ignore_ascii_case(b"syslog"))
     {
-        let _ = nix::unistd::dup2_stderr(std::io::stdout());
+        nix::unistd::dup2_stderr(std::io::stdout()).ok();
     }
 }
 
@@ -156,11 +156,12 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
     if reopen {
         crate::zlog::with_file(|old| {
             if let Some(old) = old {
-                let _ = nix::unistd::dup2(file.as_fd(), old);
-                let _ = nix::fcntl::fcntl(
+                nix::unistd::dup2(file.as_fd(), old).ok();
+                nix::fcntl::fcntl(
                     old.as_fd(),
                     nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-                );
+                )
+                .ok();
             }
         });
         return true;
@@ -182,11 +183,12 @@ pub(crate) fn open_error_log(fpm: &mut Fpm, reopen: bool) -> bool {
 fn openlog(ident: &'static CStr, facility: nix::syslog::Facility) {
     #[cfg(not(target_os = "linux"))]
     let ident = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(ident.to_bytes());
-    let _ = nix::syslog::openlog(
+    nix::syslog::openlog(
         Some(ident),
         nix::syslog::LogFlags::LOG_PID | nix::syslog::LogFlags::LOG_CONS,
         facility,
-    );
+    )
+    .ok();
 }
 
 /// `fpm_global_config.syslog_ident` as syslog holds it: the master's ident,
@@ -258,11 +260,11 @@ pub(crate) fn reopen_logs(fpm: &mut Fpm) {
 pub(crate) fn child_use_pipes(pipes: Option<[(OwnedFd, OwnedFd); 2]>) {
     match pipes {
         Some([(_, out), (_, err)]) => {
-            let _ = nix::unistd::dup2_stdout(&out);
-            let _ = nix::unistd::dup2_stderr(&err);
+            nix::unistd::dup2_stdout(&out).ok();
+            nix::unistd::dup2_stderr(&err).ok();
         }
         None => {
-            let _ = nix::unistd::dup2_stderr(std::io::stdout());
+            nix::unistd::dup2_stderr(std::io::stdout()).ok();
         }
     }
 }
@@ -276,7 +278,7 @@ pub(crate) fn init_child() {
 /// `fpm_stdio_flush_child`: the command that ends the line the master is
 /// reading from this child.
 pub(crate) fn flush_child() {
-    let _ = std::io::stderr().write_all(CMD_FLUSH);
+    std::io::stderr().write_all(CMD_FLUSH).ok();
 }
 
 /// `fpm_stdio_child_said`: what child `pid` wrote to one of its pipes,

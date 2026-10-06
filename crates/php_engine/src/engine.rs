@@ -322,7 +322,7 @@ impl Drop for Fds {
     fn drop(&mut self) {
         if self.process {
             for fd in self.fds.iter_mut().filter_map(Option::take) {
-                let _ = std::os::fd::IntoRawFd::into_raw_fd(fd);
+                let _left_open = std::os::fd::IntoRawFd::into_raw_fd(fd);
             }
         }
     }
@@ -2996,7 +2996,7 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     for function in declared {
         for parameter in &function.parameters {
             if let ParameterDefault::Expr(ConstExpr::Str(written)) = &parameter.default {
-                let _ = strings.intern(written);
+                strings.intern(written).ok();
             }
         }
     }
@@ -3010,7 +3010,7 @@ fn permanent_names(
 ) -> Strings {
     let mut names = Strings::new();
     for known in KNOWN_STRINGS {
-        let _ = names.intern(known.as_bytes());
+        names.intern(known.as_bytes()).ok();
     }
     let declared = functions
         .iter()
@@ -3022,7 +3022,7 @@ fn permanent_names(
                 .chain(decl.constants.iter().map(|constant| &constant.name))
         }));
     for name in declared {
-        let _ = names.intern(&name.0);
+        names.intern(&name.0).ok();
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
     // of each string a native's `#[\Deprecated]` is written with, so a
@@ -3044,7 +3044,7 @@ fn permanent_names(
         .chain(constants.iter().flat_map(|decl| &decl.attributes));
     for argument in attributed.flat_map(|attribute| &attribute.arguments) {
         if let ConstExpr::Str(written) = &argument.value {
-            let _ = names.intern(written);
+            names.intern(written).ok();
         }
     }
     names
@@ -3224,7 +3224,7 @@ impl EngineEnd {
     /// From here the drop of the engine's last clone ends `shared`, on a
     /// request under the host's name `sapi_name`.
     fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
-        let _ = self.0.set((Arc::clone(shared), sapi_name));
+        self.0.set((Arc::clone(shared), sapi_name)).ok();
     }
 }
 
@@ -3649,11 +3649,12 @@ impl Engine {
             .iter()
             .filter_map(|e| e.zend.as_ref())
         {
-            let _ = writeln!(
+            writeln!(
                 text,
                 "    with {} v{}, {}, by {}",
                 row.name, row.version, row.copyright, row.author
-            );
+            )
+            .ok();
         }
         text
     }
@@ -3833,7 +3834,7 @@ impl Engine {
     fn arm_preloaded(&self, req: &mut Request) {
         if let Some(preloaded) = self.shared.units.preloaded() {
             for global in &preloaded.arms {
-                let _ = req.arm(*global);
+                req.arm(*global).ok();
             }
         }
     }
@@ -3964,8 +3965,8 @@ impl Engine {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
             let _ = req.header_add(line.as_bytes(), true, 0);
         }
-        let _ = crate::output::start_at_request(&mut req);
-        let _ = req.hash_environment();
+        crate::output::start_at_request(&mut req).ok();
+        req.hash_environment().ok();
         // Displayed past the `php_output` layer, as php displays what
         // `MINIT` raised before `php_output_activate`, so no header is
         // sent by it and a session may still start; and once, as php
@@ -3995,7 +3996,9 @@ impl Engine {
             // as the uncaught fatal, and `zend_bailout` to the `zend_catch`
             // of `php_request_startup`, which answers `FAILURE`; a fatal
             // the `rinit` met was rendered where it was raised.
-            let _ = req.thrown_without_frame(&thrown);
+            if let Ok(undef) = req.thrown_without_frame(&thrown) {
+                req.release(undef);
+            }
             return Begun::Failed(req);
         }
         self.arm_preloaded(&mut req);
@@ -4007,9 +4010,9 @@ impl Engine {
         // (`Z/sapi/cli/php_cli.c:941`), and the standard handles
         // registered.
         if !web {
-            let _ = req.arm(php_unit::AutoGlobal::Server);
+            req.arm(php_unit::AutoGlobal::Server).ok();
         }
-        let _ = req.register_file_handles(false);
+        req.register_file_handles(false).ok();
         req.enter_phase(crate::api::request::Phase::Running);
         Begun::Started(req)
     }
@@ -4578,13 +4581,13 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
     if let Some(offset) = unit.halt_offset {
         let key = crate::api::request::halt_offset_key(&unit.main.filename.0);
         if req.constant_named(&key).is_none() {
-            let _ = req.define_constant(&key, Value::int(offset));
+            req.define_constant(&key, Value::int(offset)).ok();
         }
     }
     for global in &unit.arms {
         // What a callback can raise is the memory limit, which the
         // loop meets again at its first allocation.
-        let _ = req.arm(*global);
+        req.arm(*global).ok();
     }
     // `compile_file` records what it raises and emits it once the
     // compile has declared the file's functions and early-bound its
@@ -5144,15 +5147,16 @@ mod tests {
     #[test]
     fn a_preloaded_script_runs_once_and_its_declarations_stand_in_every_request() {
         let dir = std::env::temp_dir().join(format!("engine-preload-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let script = dir.join("preload.inc");
-        let _ = std::fs::write(
+        std::fs::write(
             &script,
             "<?php\necho \"preloading\\n\";\nfunction pre_f() { return 'f'; }\n\
              class PreA { function m() { return 'm'; } }\nclass PreB extends PreA {}\n\
              interface PreI {}\nclass PreC implements PreI {}\nreturn;\n\
              class Late extends Missing {}\n",
-        );
+        )
+        .ok();
         let engine = Engine::cli_builder()
             .extensions(&[preloading(&script)])
             .ini("t.preload", script.as_os_str().as_encoded_bytes())
@@ -5165,7 +5169,7 @@ mod tests {
         let first = engine.serve_capture(&program, crate::test::Capture::default());
         let second = engine.serve_capture(&program, crate::test::Capture::default());
         let resolved = script.canonicalize().unwrap_or_default();
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(
             String::from_utf8_lossy(&first.stdout),
             format!(
@@ -5217,9 +5221,9 @@ mod tests {
     fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
         let dir = std::env::temp_dir().join(format!("engine-file-cache-{}", std::process::id()));
         let cache = dir.join("cache");
-        let _ = std::fs::create_dir_all(&cache);
+        std::fs::create_dir_all(&cache).ok();
         let script = dir.join("kept.inc");
-        let _ = std::fs::write(&script, "<?php return 'kept';");
+        std::fs::write(&script, "<?php return 'kept';").ok();
         let script = script.canonicalize().unwrap_or_default();
         let engine = || {
             Engine::cli_builder()
@@ -5229,7 +5233,7 @@ mod tests {
         };
         let program = format!("<?php echo include '{}';", script.display());
         let first = engine().serve_capture(&program, crate::test::Capture::default());
-        let _ = std::fs::write(&script, "<?php return 'compiled';");
+        std::fs::write(&script, "<?php return 'compiled';").ok();
         let second = engine().serve_capture(&program, crate::test::Capture::default());
         let kept = engine();
         let kept_at = crate::unit_cache::Disk {
@@ -5242,9 +5246,9 @@ mod tests {
         if let Some(byte) = stale.get_mut(8) {
             *byte ^= 1;
         }
-        let _ = std::fs::write(&kept_at, &stale);
+        std::fs::write(&kept_at, &stale).ok();
         let third = kept.serve_capture(&program, crate::test::Capture::default());
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(String::from_utf8_lossy(&first.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&second.stdout), "kept");
         assert_eq!(String::from_utf8_lossy(&third.stdout), "compiled");
@@ -6098,7 +6102,7 @@ mod tests {
         assert_eq!(first.bytes(), b"shared");
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// A tree of files for one test, under the system's temporary
@@ -6111,7 +6115,7 @@ mod tests {
     impl Files {
         fn new(name: &str, files: &[(&str, &str)]) -> Files {
             let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::remove_dir_all(&dir).ok();
             assert!(std::fs::create_dir_all(&dir).is_ok());
             for (file, text) in files {
                 assert!(std::fs::write(dir.join(file), text).is_ok());
@@ -6142,7 +6146,7 @@ mod tests {
 
     impl Drop for Files {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
+            std::fs::remove_dir_all(&self.dir).ok();
         }
     }
 
@@ -6358,7 +6362,7 @@ mod tests {
             .build()
             .serve(described(), &mut masked);
         assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
-        let _ = std::fs::remove_file(&path);
+        std::fs::remove_file(&path).ok();
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request

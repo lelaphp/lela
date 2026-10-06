@@ -209,7 +209,7 @@ impl Request {
                     break;
                 };
                 spilled = true;
-                let _ = std::fs::remove_file(path);
+                std::fs::remove_file(path).ok();
             }
             body.extend_from_slice(&block);
             if post_max_size > 0
@@ -385,7 +385,7 @@ impl Request {
     /// `move_uploaded_file()` moved, removed.
     pub(crate) fn destroy_uploaded_files(&mut self) {
         for file in std::mem::take(&mut self.post.uploaded) {
-            let _ = std::fs::remove_file(file);
+            std::fs::remove_file(file).ok();
         }
     }
 

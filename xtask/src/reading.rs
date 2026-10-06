@@ -793,7 +793,7 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
                 .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
         });
     if written.is_err() {
-        let _ = fs::remove_file(&beside);
+        fs::remove_file(&beside).ok();
     }
     written
 }

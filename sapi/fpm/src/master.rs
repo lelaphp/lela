@@ -224,7 +224,7 @@ pub(crate) fn block_set(child: bool) -> SigSet {
 
 /// `fpm_signals_unblock`: every signal unblocked.
 pub(crate) fn unblock_all() {
-    let _ = sigprocmask(SigmaskHow::SIG_UNBLOCK, Some(&SigSet::all()), None);
+    sigprocmask(SigmaskHow::SIG_UNBLOCK, Some(&SigSet::all()), None).ok();
 }
 
 impl Fpm {
@@ -492,7 +492,7 @@ impl Fpm {
         if self.global.daemonize && !self.daemonize() {
             return false;
         }
-        let _ = nix::unistd::setsid();
+        nix::unistd::setsid().ok();
         if self.global.process_priority != 64 {
             if nix::unistd::Uid::effective().is_root() {
                 if !crate::ffi::set_priority(self.global.process_priority) {
@@ -750,7 +750,7 @@ impl Fpm {
             return true;
         };
         let path = conf::path(pid_file);
-        let _ = std::fs::remove_file(path);
+        std::fs::remove_file(path).ok();
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -1073,6 +1073,10 @@ impl Fpm {
         if cfg!(target_os = "linux") {
             drop(poller);
         } else {
+            #[expect(
+                clippy::mem_forget,
+                reason = "a kqueue is not inherited across `fork`, so its number is no descriptor of the child's and is left unclosed"
+            )]
             std::mem::forget(poller);
         }
     }

@@ -242,10 +242,11 @@ impl Stmt {
         }
         bind.ty = Some(ty);
         stmt.send_types_to_server = true;
-        let _ = self.call(req, |_, _, conn| {
+        self.call(req, |_, _, conn| {
             conn.error.reset();
             Ok(())
-        });
+        })
+        .ok();
         true
     }
 

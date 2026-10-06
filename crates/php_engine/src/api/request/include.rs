@@ -76,7 +76,7 @@ impl Request {
     pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
         if let Some(real) = self.realpath(script) {
             // The memory limit's fatal is recorded and ends the request.
-            let _ = self.note_included(real.as_os_str().as_encoded_bytes());
+            self.note_included(real.as_os_str().as_encoded_bytes()).ok();
         }
     }
 
@@ -105,14 +105,14 @@ impl Request {
             if let Some(script) = script.filter(|name| name != b"Standard input code")
                 && let Some(expanded) = self.expand_filepath(&script)
             {
-                let _ = self.note_included(&expanded);
+                self.note_included(&expanded).ok();
                 self.description.script_name = Some(expanded);
             }
             return;
         }
         let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        let _ = self.note_included(&expanded);
+        self.note_included(&expanded).ok();
         self.description.script_name = Some(expanded);
     }
 

@@ -302,10 +302,11 @@ fn apply_umask(req: &Request, path: &std::path::Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         let have = meta.permissions().mode();
         if have & 0o777 != want {
-            let _ = std::fs::set_permissions(
+            std::fs::set_permissions(
                 path,
                 std::fs::Permissions::from_mode((have & 0o7000) | want),
-            );
+            )
+            .ok();
         }
     }
 }

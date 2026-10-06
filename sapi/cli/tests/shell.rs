@@ -25,12 +25,12 @@ fn shell(stdin: &str, words: &[&str]) -> (String, i32) {
         .spawn()
         .unwrap_or_else(|e| panic!("running php: {e}"));
     if let Some(mut pipe) = child.stdin.take() {
-        let _ = pipe.write_all(stdin.as_bytes());
+        pipe.write_all(stdin.as_bytes()).ok();
     }
     let out = child
         .wait_with_output()
         .unwrap_or_else(|e| panic!("waiting for php: {e}"));
-    let _ = std::fs::remove_file(&history);
+    std::fs::remove_file(&history).ok();
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.code().unwrap_or(-1))

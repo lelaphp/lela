@@ -316,7 +316,7 @@ pub(crate) fn sodium_crypto_box_publickey_from_secretkey(
     sized(req, sk, BOX_KEY, 1, "SODIUM_CRYPTO_BOX_SECRETKEYBYTES")?;
     let mut pk = [0u8; BOX_KEY];
     // php ignores `crypto_scalarmult_base`'s status here.
-    let _ = ffi::scalarmult_base(&mut pk, sk.as_bytes());
+    ffi::scalarmult_base(&mut pk, sk.as_bytes()).ok();
     made(req, &pk)
 }
 

@@ -56,7 +56,7 @@ fn two_requests_at_once_never_read_each_other_s_locale() {
     let dir = std::env::temp_dir().join(format!("php-locale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("the rendezvous directory");
     for marker in ["german", "c", "german-done"] {
-        let _ = std::fs::remove_file(dir.join(marker));
+        std::fs::remove_file(dir.join(marker)).ok();
     }
     let german = source(
         &dir,
@@ -84,7 +84,7 @@ fn two_requests_at_once_never_read_each_other_s_locale() {
         let (german, after) = german.join().expect("the de_DE request's thread");
         (german, c.join().expect("the C request's thread"), after)
     });
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(german, "3,14|de_DE|a<B");
     assert_eq!(c, "3.14|C/C.UTF-8/C/C/C/C|B<a|3.14");
     assert_eq!(after, "3.14|C/C.UTF-8/C/C/C/C");

@@ -240,7 +240,7 @@ fn accept(site: &Site, listener: &TcpListener, clients: &mut BTreeMap<RawFd, Con
 /// A line on stderr before the server starts, and exit 1.
 fn refuse(line: &str) -> i32 {
     use std::io::Write;
-    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+    std::io::stderr().lock().write_all(line.as_bytes()).ok();
     1
 }
 

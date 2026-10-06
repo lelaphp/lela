@@ -301,7 +301,7 @@ impl Request {
             self.raised = None;
             return Evaluated::Rendered;
         }
-        let _ = self.exception_error(Level::Error);
+        self.exception_error(Level::Error).ok();
         self.catch_bailout();
         Evaluated::Rendered
     }
@@ -322,7 +322,7 @@ impl Request {
             }
             Err(thrown) => {
                 self.leave_pending(&thrown);
-                let _ = self.exception_error(Level::Error);
+                self.exception_error(Level::Error).ok();
                 self.catch_bailout();
                 Vec::new()
             }
@@ -368,7 +368,7 @@ impl Request {
                 let ending = req.ending.take();
                 let mut called = req.call_by_name_here(name, arguments);
                 if called == Called::Threw {
-                    let _ = req.exception_error(Level::Error);
+                    req.exception_error(Level::Error).ok();
                     called = Called::Rendered;
                 }
                 let rendered = req.ending.is_some();
@@ -490,7 +490,7 @@ impl Request {
                 continue;
             };
             let nested_name = String::from_utf8_lossy(&decl.name.0).into_owned();
-            let _ = write!(dump, "\ndynamic def: {i}, function name: {nested_name}\n");
+            write!(dump, "\ndynamic def: {i}, function name: {nested_name}\n").ok();
             let nested_args = decl.parameters.iter().filter(|p| !p.variadic).count();
             dump.push_str(&nested.dump_lines(&nested_name, nested_args, &frameless));
         }
@@ -741,7 +741,7 @@ impl Request {
             AutoGlobal::Request,
             AutoGlobal::Files,
         ] {
-            let _ = self.arm(global);
+            self.arm(global).ok();
         }
         let entries = self.globals().clone();
         entries

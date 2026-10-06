@@ -41,22 +41,24 @@ pub fn parse_fixture(src: &str) -> String {
     // rendered into the snapshot so a person reads it rather than a
     // panic.
     for missing in &parsed.missing {
-        let _ = writeln!(
+        writeln!(
             out,
             "REQUIRED-VIOLATION: {} on {}..{}",
             missing.field,
             missing.range.start,
             missing.range.end()
-        );
+        )
+        .ok();
     }
     for d in &parsed.diagnostics {
-        let _ = writeln!(
+        writeln!(
             out,
             "error@{}..{} {}",
             d.span.start,
             d.span.end(),
             d.message
-        );
+        )
+        .ok();
     }
     out
 }

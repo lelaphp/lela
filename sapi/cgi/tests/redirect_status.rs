@@ -47,7 +47,7 @@ fn an_empty_redirect_status_env_refuses_and_an_unset_one_falls_back() {
     let from_ini = served(&dir, &["-c", &ini]);
     let from_d = served(&dir, &["-n", "-d", "cgi.redirect_status_env="]);
     let unset = served(&dir, &["-n"]);
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(from_ini, (Some(255), ALERT.to_string()));
     assert_eq!(from_d, (Some(255), ALERT.to_string()));
     let head = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n";

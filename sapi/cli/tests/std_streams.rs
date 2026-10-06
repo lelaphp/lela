@@ -10,9 +10,9 @@ use std::process::{Command, Stdio};
 
 fn scratch(name: &str, source: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("php-std-streams-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
     let path = dir.join(name);
-    let _ = std::fs::write(&path, source);
+    std::fs::write(&path, source).ok();
     path
 }
 

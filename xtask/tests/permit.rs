@@ -740,11 +740,12 @@ fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build
     // The checkout's dependency build, seeded the way `worktree add` seeds
     // it; where the volume cannot clone, the build there starts cold.
     std::fs::create_dir_all(beside.join("target")).unwrap();
-    let _ = Command::new("cp")
+    Command::new("cp")
         .args(["-c", "-R"])
         .arg(workspace().join("target/debug"))
         .arg(beside.join("target/debug"))
-        .output();
+        .output()
+        .ok();
 
     let write = |file: &Path| {
         hook_stdin(

@@ -235,7 +235,7 @@ fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
 
 /// `text` on stdout.
 fn print(text: &str) {
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    std::io::stdout().lock().write_all(text.as_bytes()).ok();
 }
 
 /// php-fpm's `main`.
@@ -321,7 +321,7 @@ fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
                     "Sending \"0\" (error) to parent via fd={}",
                     pipe.as_raw_fd()
                 );
-                let _ = nix::unistd::write(&pipe, &0i32.to_ne_bytes());
+                nix::unistd::write(&pipe, &0i32.to_ne_bytes()).ok();
             }
             return EXIT_CONFIG;
         }
@@ -332,7 +332,7 @@ fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
             "Sending \"1\" (OK) to parent via fd={}",
             pipe.as_raw_fd()
         );
-        let _ = nix::unistd::write(&pipe, &1i32.to_ne_bytes());
+        nix::unistd::write(&pipe, &1i32.to_ne_bytes()).ok();
     }
     let started = engine.startup_errors().to_owned();
     fpm.engine = Some(engine);
@@ -342,6 +342,10 @@ fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
             // on an engine of its own, built for its pool, and ends that
             // one, so the copy is let go of without ending it, which
             // would end the master's engine once more in every child.
+            #[expect(
+                clippy::mem_forget,
+                reason = "a child serves on an engine of its own, and ending the master's copy would end the master's engine once more in every child"
+            )]
             std::mem::forget(fpm.engine.take());
             let worker = worker::init(&mut fpm, pool, slot, (ini, startup), &started);
             drop(fpm);
@@ -356,23 +360,23 @@ struct Stdout;
 
 impl php_sapi::OutputSink for Stdout {
     fn write(&mut self, bytes: &[u8]) -> Result<(), php_sapi::Aborted> {
-        let _ = std::io::stdout().lock().write_all(bytes);
+        std::io::stdout().lock().write_all(bytes).ok();
         Ok(())
     }
 
     fn flush(&mut self) {
-        let _ = std::io::stdout().lock().flush();
+        std::io::stdout().lock().flush().ok();
     }
 
     fn send_headers(&mut self, _head: &php_sapi::ResponseHead) {}
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(entry);
-        let _ = stderr.write_all(b"\n");
+        stderr.write_all(entry).ok();
+        stderr.write_all(b"\n").ok();
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        let _ = std::io::stderr().lock().write_all(bytes);
+        std::io::stderr().lock().write_all(bytes).ok();
     }
 }

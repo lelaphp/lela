@@ -81,7 +81,7 @@ pub(crate) fn check_timed_out(
             "[pool {name}] child {pid}, script '{script}' (request: {request}) executing too slow ({secs}.{micros:06} sec), logging"
         );
     } else if terminate != 0 && secs >= i64::from(terminate) {
-        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
+        kill(Pid::from_raw(pid), Signal::SIGTERM).ok();
         zlog!(
             Warning @ fpm_request_check_timed_out:279,
             "[pool {name}] child {pid}, script '{script}' (request: {request}) execution timed out ({secs}.{micros:06} sec), terminating"
@@ -116,7 +116,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     match opened {
         Ok(mut file) => {
             if crate::ffi::trace::ready(pid) {
-                let _ = std::io::Write::write_all(&mut file, &dump(fpm, p, c));
+                std::io::Write::write_all(&mut file, &dump(fpm, p, c)).ok();
                 crate::ffi::trace::close(pid);
             }
         }

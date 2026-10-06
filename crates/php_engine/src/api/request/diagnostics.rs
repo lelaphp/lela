@@ -289,7 +289,7 @@ impl Request {
         line.extend_from_slice(b"] ");
         line.extend_from_slice(entry);
         line.push(b'\n');
-        let _ = file.write_all(&line);
+        file.write_all(&line).ok();
         false
     }
 
@@ -587,7 +587,7 @@ impl Request {
                 .class_named(b"Throwable")
                 .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
             if throwable && fatal_errors(level) {
-                let _ = self.exception_error(Level::Warning);
+                self.exception_error(Level::Warning).ok();
             }
         } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
