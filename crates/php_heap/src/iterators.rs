@@ -431,6 +431,15 @@ impl Heap {
         Ok((pos, held))
     }
 
+    /// Whether iterator `idx` still names `a`: the table it was
+    /// registered at or moved onto stands, neither destroyed under it
+    /// (`HT_POISONED_PTR`) nor left for another. The test reads the
+    /// iterator alone, never `a`, so it is sound where `a` was freed.
+    #[must_use]
+    pub fn iterator_on(&self, idx: u32, a: Arr) -> bool {
+        self.iterators.get(idx).is_some_and(|iter| iter.ht.is(a))
+    }
+
     /// `EG(ht_iterators)[idx].pos = pos`: where the fetch leaves the
     /// walk.
     pub fn iterator_set_pos(&mut self, idx: u32, pos: u32) {

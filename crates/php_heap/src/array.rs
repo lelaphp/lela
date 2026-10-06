@@ -765,8 +765,10 @@ impl Arr {
     // ------------------------------------------------------ the data
 
     /// `nNumUsed`: the positions written, tombstones included, which
-    /// is where `zend_close_rsrc_list` starts its walk down.
-    pub(crate) fn num_used(self) -> u32 {
+    /// is where `zend_close_rsrc_list` starts its walk down and where
+    /// `ZEND_HASH_FOREACH` fixes its end.
+    #[must_use]
+    pub fn num_used(self) -> u32 {
         self.header().num_used.get()
     }
 
