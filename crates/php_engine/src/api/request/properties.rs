@@ -2962,25 +2962,41 @@ impl Request {
         checked
     }
 
-    /// `object_and_properties_init` over `zend_symtable_to_proptable`,
-    /// the `(object)` cast of an array: each element laid into the new
-    /// object's dynamic table under its key as a property name, one
-    /// owner of it taken and a reference kept as the reference, with no
-    /// handler in the way, so a key a handler would refuse, a mangled
-    /// one that opens with a NUL byte, is laid down as it is.
+    /// `zend_cast_zval_to_object`'s array arm
+    /// (`Z/Zend/zend_execute.h:225`), the `(object)` cast of an array:
+    /// [`Request::symtable_to_proptable`] over it laid down as the new
+    /// object's table, which is the array itself, one more owner of it,
+    /// where its keys are all strings, and a copy of an immutable one,
+    /// with no handler in the way, so a key a handler would refuse, a
+    /// mangled one that opens with a NUL byte, is laid down as it is.
+    /// The cast of an array that is kept costs the object's forty bytes,
+    /// as php's does, and a write to either holder separates the two:
+    ///
+    /// ```php
+    /// $a = []; foreach (['x', 'y', 'z'] as $k) { $a[$k] = str_repeat($k, 40); }
+    /// $m = memory_get_usage(); $o = (object) $a; echo memory_get_usage() - $m, "\n";
+    /// $o->x = 1; $a['y'] = 2; echo $a['x'][0], $o->y[0], "\n";
+    /// ```
+    /// ```expect
+    /// 40
+    /// xy
+    /// ```
     pub(crate) fn properties_from_array(
         &mut self,
         object: PhpObject,
         array: PhpArray,
     ) -> Result<(), Thrown> {
-        for (key, entry) in array.snapshot_refs() {
-            let name = key.to_prop_name(self)?;
-            self.addref(&entry);
-            let o = object.heap();
-            let table = self.separated_properties(o)?;
-            self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
-            self.release(Value::string(name));
+        let table = self.symtable_to_proptable(array.heap())?;
+        let table = if table.is_immutable() {
+            self.array_dup(table)?
+        } else {
+            table
+        };
+        let o = object.heap();
+        if let Some(old) = self.heap.object_take_properties(o) {
+            self.release(Value::array(PhpArray::of(old)));
         }
+        self.heap.object_set_properties(o, table);
         Ok(())
     }
 

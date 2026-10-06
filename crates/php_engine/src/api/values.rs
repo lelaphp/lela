@@ -1413,6 +1413,26 @@ impl PhpObject {
         req.fatal_of(table).map(|_| ())
     }
 
+    /// `zobj->properties != NULL && GC_REFCOUNT(zobj->properties) > 1`:
+    /// whether the object's property table has a holder beside the
+    /// object, as the `(array)` cast or `get_object_vars()` leaves one
+    /// that hands the table on, so a reader that counts on one owner
+    /// reaching a value asks whether a second can.
+    ///
+    /// ```php
+    /// $t = new stdClass; $t->y = $t; $y = (array) $t; unset($t);
+    /// echo serialize($y), "\n";
+    /// ```
+    /// ```expect
+    /// a:1:{s:1:"y";O:8:"stdClass":1:{s:1:"y";r:2;}}
+    /// ```
+    #[must_use]
+    pub fn properties_shared(&self) -> bool {
+        self.heap()
+            .properties()
+            .is_some_and(|table| table.refcount() > 1)
+    }
+
     /// `zend_hash_extend(Z_OBJPROP_P(obj), count + extra, ...)`: the
     /// property table built as [`PhpObject::rebuild_properties`] builds
     /// it and grown at once to hold `extra` rows past the declared and

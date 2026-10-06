@@ -1177,6 +1177,7 @@ values::PhpObject::native_mut_or_fatal
 values::PhpObject::pointer_move
 values::PhpObject::pointer_row
 values::PhpObject::prop
+values::PhpObject::properties_shared
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::props_held
