@@ -8,7 +8,7 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, numeric_string, to_double, to_long};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Value, ValueRef};
 use php_ext_pcre::Regex;
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
@@ -759,22 +759,17 @@ fn parse_url(req: &mut Request, s: &[u8]) -> Result<Option<UriStruct>, Thrown> {
         req.release(parts);
         return Ok(None);
     };
-    let entries = array.snapshot();
     let part = |name: &[u8]| {
-        entries.iter().find_map(|(key, value)| match key {
-            Key::Str(k) if k.as_bytes() == name => value.as_str_bytes().map(<[u8]>::to_vec),
-            _ => None,
-        })
+        array
+            .find(name)
+            .and_then(|value| value.deref().as_str_bytes().map(<[u8]>::to_vec))
     };
     let uri = UriStruct {
         scheme: part(b"scheme"),
         user: part(b"user"),
         password: part(b"pass"),
         host: part(b"host"),
-        port: entries.iter().find_map(|(key, value)| match key {
-            Key::Str(k) if k.as_bytes() == b"port" => value.as_int(),
-            _ => None,
-        }),
+        port: array.find(b"port").and_then(|value| value.deref().as_int()),
         path: part(b"path"),
         query: part(b"query"),
         fragment: part(b"fragment"),

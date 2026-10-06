@@ -1280,10 +1280,12 @@ values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
 values::walk::Row::value
+values::walk::Rows
 values::walk::Step
 values::walk::buckets
 values::walk::detached
 values::walk::held
 values::walk::held_guarded
 values::walk::live
+values::walk::rows
 values::zend_sort

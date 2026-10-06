@@ -21,7 +21,7 @@ use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
+use php_ext::values::{Key, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
 use super::{copied, key_copy, user_compare};
@@ -674,8 +674,12 @@ fn array_diff(
         check_rest(req)?;
         return Ok(PhpArray::empty());
     }
-    if first.len() == 1 {
-        let (_, value) = first.snapshot_refs()[0].clone();
+    let only = if first.len() == 1 {
+        walk::rows(req, first).next()
+    } else {
+        None
+    };
+    if let Some((_, value)) = only {
         let search = to_string(req, &value.deref())?.as_bytes().to_vec();
         let mut found = false;
         for (at, other) in values.iter().enumerate().skip(1) {

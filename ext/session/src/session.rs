@@ -487,13 +487,7 @@ fn find_id(req: &mut Request) {
     let name = ini(req, b"session.name");
     let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
         let array = req.superglobal(global)?;
-        let found = array
-            .snapshot()
-            .into_iter()
-            .find_map(|(key, value)| match key {
-                php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice() => Some(value),
-                _ => None,
-            })?;
+        let found = array.find(&name)?.deref();
         Some(found.as_str_bytes().map(<[u8]>::to_vec))
     };
     if ini_bool(req, b"session.use_cookies")
@@ -855,11 +849,9 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     if ini_bool(req, b"session.use_trans_sid") && !ini_bool(req, b"session.use_only_cookies") {
         let name = ini(req, b"session.name");
         let cookie_carries_it = ini_bool(req, b"session.use_cookies")
-            && req.superglobal(b"_COOKIE").is_some_and(|cookies| {
-                cookies.snapshot().into_iter().any(|(key, _)| {
-                    matches!(key, php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice())
-                })
-            });
+            && req
+                .superglobal(b"_COOKIE")
+                .is_some_and(|cookies| cookies.find(&name).is_some());
         if !cookie_carries_it {
             php_ext_standard::php_url_scanner_reset_session_var(req, &name, true);
             php_ext_standard::php_url_scanner_add_session_var(req, &name, &id, true)?;

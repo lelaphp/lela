@@ -13,7 +13,7 @@ use php_ext::coerce::{
 };
 use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
@@ -821,10 +821,14 @@ fn is_callable(
         match value.as_ref() {
             ValueRef::Str(_) => true,
             ValueRef::Array(array) => {
-                let rows = array.snapshot();
-                rows.len() == 2
-                    && matches!(rows[0].1.as_ref(), ValueRef::Str(_) | ValueRef::Object(_))
-                    && matches!(rows[1].1.as_ref(), ValueRef::Str(_))
+                let mut rows = walk::rows(req, *array).map(|(_, value)| value.deref());
+                array.len() == 2
+                    && rows.next().is_some_and(|v| {
+                        matches!(v.as_ref(), ValueRef::Str(_) | ValueRef::Object(_))
+                    })
+                    && rows
+                        .next()
+                        .is_some_and(|v| matches!(v.as_ref(), ValueRef::Str(_)))
             }
             ValueRef::Object(_) => callable(req, &value),
             _ => false,
